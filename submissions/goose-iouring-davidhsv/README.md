@@ -144,7 +144,21 @@ Five rings (`ulimit -n 8192`, so the 40,000 connections spread over five rings, 
 | | goose-iouring-ahmadsh2007 | 45,552 | 77.4 % | 16.99 | 172–180 ms | 213–221 ms |
 | | **this entry** | **53,047** | 91.7 % | 17.29 | 14–16 ms | 26–29 ms |
 
-The last three rows are about this runner's kernel (7.0), not the box's (6.8, where none of this was run): newer kernels run only a small batch of a ring's deferred receives in an `io_uring_enter` that asks to wait for nothing (rust-iouring-kensac's README notes the limit too), so a ring that is never waited on falls behind at high rates while its server still has CPU to spare. This entry looks at the ring's task-work flag after such an enter and, when work is left, enters once more asking for up to 4,096 completions with a zero timeout. Where the first enter runs everything, the flag is down and the second never happens.
+The last three rows are about this runner's kernel (7.0), not the box's (6.8, measured below): newer kernels run only a small batch of a ring's deferred receives in an `io_uring_enter` that asks to wait for nothing (rust-iouring-kensac's README notes the limit too), so a ring that is never waited on falls behind at high rates while its server still has CPU to spare. This entry looks at the ring's task-work flag after such an enter and, when work is left, enters once more asking for up to 4,096 completions with a zero timeout. Where the first enter runs everything, the flag is down and the second never happens.
+
+The same harness on kernel 6.8.0-1070-azure, the box's kernel series (a GitHub `ubuntu-22.04` runner, AMD EPYC 9V74, the servers built and run in an Ubuntu 24.04 container), 2 rounds, in the order kensac / ahmadsh2007 / this entry:
+
+| | µs/request | Notes |
+|---|---:|---|
+| one ring, 33,600 req/s | 18.83 / 17.82 / **17.43** | |
+| five rings, 33,600 req/s | 18.95 / 18.08 / **17.53** | |
+| five rings, 54,000 req/s offered | 19.82 / 19.30 / **18.82** | all at 97 % CPU; served 48,989 / 50,129 / **51,687** req/s |
+| 300,000 connections at the load test's own think times (31,060 req/s), 1 round | 20.57 / 19.04 / **18.85** | CPU 63.9 / 59.2 / 58.5 %, no errors, p99 15 / 9 / 14 ms |
+| 400,000 connections (41,300 req/s), 1 round | 20.90 / – / **19.23** | CPU 86.3 / – / 79.5 % |
+
+On this kernel all three use their whole CPU with five rings, so the gap in the last rows of the previous table is indeed the newer kernel's. With 300,000 connections open, the kernel held 3,456 bytes of slab per socket (TCP 2,368, its inode 832, its file 256) and this server's own memory was 150 to 165 MB, about 1.2 GB together.
+
+Tried on that kernel with 300,000 connections and left out, because the whole-process CPU per request did not improve: a page cache of its own behind `SQLITE_CONFIG_PCACHE2` (a table indexed by page number and no LRU list: 2.6 % fewer instructions and 4 % less user time, but 24.04 against 24.14 µs/request, and 22.77 against 22.62 at 40,000 connections), transparent huge pages for it (5 % worse), reading the feed's authors in id order (no change), and the newest Goose compiler (commit `f4637bfb`: 27,838 against 27,831 instructions per request, on arm64). Checkpoint cycles of 32,768 frames were 0.5 % cheaper and are not used: that is inside the noise, for a log twice as large.
 
 Behaviour, request for request against rust-iouring-kensac on fresh seed copies: 214 raw-request cases (routing, every token failure, 80 JSON bodies with escapes, surrogate pairs, Unicode trimming, multi-byte 500-character limits, duplicate keys, nesting and invalid UTF-8, pipelining, requests split byte by byte, half-closed connections, malformed framing) give the same status and body in all but four, by intent: this entry closes after `Connection: close` and HTTP/1.0 (three cases), and answers 400 to a 17 KB request head.
 

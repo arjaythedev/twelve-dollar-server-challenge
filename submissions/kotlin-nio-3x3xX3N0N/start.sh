@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Runs the server in the foreground. Config: SQLITE_PATH, JWT_SECRET, HOST, PORT (+ optional WORKERS, default 2).
-# WORKERS processes share the port via SO_REUSEPORT. RLIMIT_NOFILE is per process, so 2 workers can hold
-# ~130k connections instead of the 65,535 that one process is capped at.
+# Runs the server in the foreground. Config: SQLITE_PATH, JWT_SECRET, HOST, PORT (+ optional WORKERS, default 3).
+# WORKERS processes share the port via SO_REUSEPORT. RLIMIT_NOFILE is per process, so 3 workers can hold
+# ~195k connections instead of the 65,535 that one process is capped at. (Measured LOCAL at 192k users:
+# 3 workers 42.2 us/req, 4 workers 46.2 us/req; every extra JVM costs CPU and ~70 MB idle.)
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 JAVA=java
 [ -x /opt/jdk-25/bin/java ] && JAVA=/opt/jdk-25/bin/java
-WORKERS="${WORKERS:-2}"
+WORKERS="${WORKERS:-3}"
 
 pids=()
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT INT TERM

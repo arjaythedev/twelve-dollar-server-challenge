@@ -124,10 +124,13 @@ final class Out {
         if (java.nio.ByteOrder.nativeOrder() != java.nio.ByteOrder.LITTLE_ENDIAN) throw new IllegalStateException("big-endian");
     }
     private static final boolean WORDS = !Boolean.getBoolean("feed.plainpost");
+    private static final boolean VECTOR = Boolean.getBoolean("feed.vector");
+    private static final int VECTOR_MIN = VECTOR ? Vec.width() : Integer.MAX_VALUE;
 
     /** Copies the n bytes at from to to, eight at a time, and says whether any of them needs
      * escaping in a JSON string: nonzero if one does. One pass reads each byte once for both. */
     private static long copyCheck(long from, long to, long n) {
+        if (n >= VECTOR_MIN) return Vec.copyCheck(from, to, n);
         if (n >= 8) {
             long found = 0;
             long last = n - 8;

@@ -18,7 +18,7 @@ if [[ ! -f .deps/sqlite3.c ]]; then
 fi
 
 rm -rf .build/classes
-"$java_home/bin/javac" --release 27 -proc:none -Xlint:all,-restricted -Werror -d .build/classes src/*.java
+"$java_home/bin/javac" --release 27 -proc:none -Xlint:all,-restricted,-incubating -Werror --add-modules jdk.incubator.vector -d .build/classes src/*.java
 "$java_home/bin/jar" --create --file bin/server.jar -C .build/classes .
 ln -sfn "$java_home/bin/java" bin/server
 

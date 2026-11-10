@@ -8,5 +8,5 @@ exec "$dir/bin/server" \
   -XX:MaxMetaspaceSize=32m -XX:ReservedCodeCacheSize=48m -XX:MaxDirectMemorySize=16m \
   -XX:-UsePerfData -XX:+DisableAttachMechanism \
   ${FEED_JVM_FLAGS:-} \
-  --enable-native-access=ALL-UNNAMED -Dfeed.lib="$dir/bin/libfeed.so" \
+  --add-modules jdk.incubator.vector --enable-native-access=ALL-UNNAMED -Dfeed.lib="$dir/bin/libfeed.so" \
   -cp "$dir/bin/server.jar" Server

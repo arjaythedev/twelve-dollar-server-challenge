@@ -77,7 +77,6 @@ The C transport keeps debug symbols and frame pointers for local profiles.
 - **524,280 fixed slots.** One thread owns eight sparse tables with 65,535 slots each.
   Direct accepts never install client sockets in the process descriptor table.
   The listener supplies `TCP_NODELAY` to accepted sockets.
-  It also caps receive and send buffers at 4 KiB and 8 KiB before Linux doubles them for accounting.
   Each slot has at most one outstanding accept, send or close and a generation-tagged completion.
   The allocator cannot reuse a slot until the server consumes its direct-close completion.
 - **One multishot receive per connection.** A request costs no receive submission or poll re-arm.
@@ -86,7 +85,7 @@ The C transport keeps debug symbols and frame pointers for local profiles.
   A server close cancels the armed receive first, then closes the direct descriptor.
   A reset also notifies V while application work is deferred, so dead sockets do not wait for a checkpoint.
   A client that only closes its write side can still receive its response.
-- **Shared receive buffers.** Each ring has 1,024 buffers of 2,048 bytes.
+- **Shared receive buffers.** Each ring has 4,096 buffers of 512 bytes.
   Idle connections have no input or output allocation.
   Partial requests use bounded input buffers. Pending sends retain exact-size storage until completion.
   A delayed checkpoint can release many short replies at once; they must not each reserve a full feed-sized block.

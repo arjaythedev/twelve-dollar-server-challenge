@@ -17,8 +17,8 @@
 
 #define RINGS 8
 #define SLOTS 65535
-#define BUFFERS 1024 /* per ring; 256 ran dry when the loop fell behind (12 M ENOBUFS re-arms in 2 min at 200k) */
-#define BUFFER_SIZE 2048
+#define BUFFERS 4096 /* per ring; 256 ran dry when the loop fell behind (12 M ENOBUFS re-arms in 2 min at 200k) */
+#define BUFFER_SIZE 512 /* most requests fit; a small buffer drains more sockets per MB than a 2 KB one */
 #define ACCEPT_DEPTH 64
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192

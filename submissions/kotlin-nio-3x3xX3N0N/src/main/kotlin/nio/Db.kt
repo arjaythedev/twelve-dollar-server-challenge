@@ -49,9 +49,12 @@ class Db(path: String) {
             setTempStore(SQLiteConfig.TempStore.MEMORY)
         }
 
-        private fun tune(c: Connection, cacheKb: Int) = c.createStatement().use { st ->
-            st.execute("PRAGMA mmap_size=536870912")     // reads go through the OS page cache
-            st.execute("PRAGMA cache_size=-$cacheKb")
+        private fun tune(c: Connection) = c.createStatement().use { st ->
+            // No mmap: pages come through SQLite's own page cache (pread on a miss). Measured LOCAL at 112k users,
+            // two interleaved pairs: 50.3/48.9 -> 43.9/45.0 us/req vs mmap_size=512 MB + an 8 MB cache.
+            // (Same direction as mojo/pavlyhalim/le0nvfx on the leaderboard; ~64 MiB is their sweet spot.)
+            st.execute("PRAGMA mmap_size=0")
+            st.execute("PRAGMA cache_size=-65536")       // 64 MiB, only as much as gets touched is allocated
             st.execute("PRAGMA wal_autocheckpoint=0")     // checkpoints run on the Checkpointer thread
             st.execute("PRAGMA journal_size_limit=67108864") // truncate the WAL file back to 64 MB after a reset
         }
@@ -59,9 +62,9 @@ class Db(path: String) {
 
     init {
         conn = DriverManager.getConnection("jdbc:sqlite:$path", config().toProperties())
-        tune(conn, 8000)
+        tune(conn)
         wconn = DriverManager.getConnection("jdbc:sqlite:$path", config(busyMs = 0).toProperties())
-        tune(wconn, 2000)
+        tune(wconn)
         health = conn.prepareStatement("SELECT 1")
         feed = conn.prepareStatement(
             "SELECT '{\"posts\":['||coalesce(group_concat(j,',' ORDER BY ca DESC,id DESC),'')||']}' FROM (" +

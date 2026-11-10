@@ -184,23 +184,3 @@ class Db(path: String) {
     fun commit() { commit.executeUpdate() }
     fun rollback() { try { rollback.executeUpdate() } catch (_: Exception) {} }
 }
-
-/** Runs WAL checkpoints off the response path, on its own connection. */
-class Checkpointer(private val path: String) : Thread("checkpointer") {
-    init { isDaemon = true; priority = MIN_PRIORITY }
-
-    override fun run() {
-        val c = DriverManager.getConnection("jdbc:sqlite:$path", Db.config().toProperties())
-        val st = c.createStatement()
-        while (true) {
-            try {
-                sleep(1000)
-                st.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            } catch (e: InterruptedException) {
-                return
-            } catch (e: Exception) {
-                System.err.println("checkpoint: $e")
-            }
-        }
-    }
-}

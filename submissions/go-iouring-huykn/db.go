@@ -3,6 +3,7 @@ package main
 /*
 #cgo CFLAGS: -O3 -march=native -fno-plt -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0
 #cgo CFLAGS: -DSQLITE_DQS=0 -DSQLITE_OMIT_LOAD_EXTENSION -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1
+#cgo CFLAGS: -DHAVE_POSIX_FALLOCATE=1
 #cgo CFLAGS: -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_AUTOINIT
 #cgo LDFLAGS: -lm -lpthread
 #cgo nocallback hkn_read_handle
@@ -10,6 +11,7 @@ package main
 #cgo nocallback hkn_vote_handle
 #cgo nocallback hkn_finish_handle
 #cgo nocallback hkn_probe_handle
+#cgo nocallback hkn_tick_handle
 #include <stdlib.h>
 #include "bridge.h"
 */
@@ -128,3 +130,7 @@ func dbHealth() (bool, []byte) {
 }
 
 func dbCommit() bool { return C.hkn_finish_handle(storage.handle) == 0 }
+
+func dbCheckpoint(now int64) int { return int(C.hkn_tick_handle(storage.handle, C.int64_t(now))) }
+
+func dbError() string { return C.GoString(C.hkn_error_handle(storage.handle)) }

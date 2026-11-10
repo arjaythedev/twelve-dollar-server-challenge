@@ -54,6 +54,7 @@ const (
 	fInBatch       // touched in this pass
 	fAnswered      // produced a response in this pass
 	fMultiAnswered // produced multiple responses in this pass
+	fHeld          // a POST and following bytes wait for the checkpoint tail
 )
 
 // conn is one direct-descriptor slot. It holds no Go pointers: buffers are pool indexes
@@ -125,11 +126,13 @@ type server struct {
 	touched    []ref
 	rq         fifo // connections to read, first in first out
 	ready      fifo // connections with bytes read but not answered, oldest first
+	held       fifo // connections whose first unanswered request is a held POST
 	answers    int
 	req        request
 	spillAfter time.Time
 	slots      uint32
 	needRing   bool
+	holding    bool
 }
 
 // ---- buffers ------------------------------------------------------------------------------------
@@ -277,7 +280,7 @@ func (s *server) queueRead(ri int, slot uint32, c *conn) {
 
 // finish: the client is done sending. Owed answers go out first, then it closes.
 func (s *server) finish(ri int, slot uint32, c *conn) {
-	if c.flags&(fReady) != 0 {
+	if c.flags&(fReady|fHeld) != 0 {
 		c.flags |= fEOF
 	} else {
 		c.flags |= fCloseAfter
@@ -296,6 +299,10 @@ func (s *server) stash(c *conn, data []byte) {
 // received: answered now if this pass has answers left and nothing older waits, else kept.
 func (s *server) received(ri int, slot uint32, c *conn, data []byte) {
 	if c.flags&fCloseAfter != 0 {
+		return
+	}
+	if c.flags&fHeld != 0 {
+		s.stash(c, data)
 		return
 	}
 	if c.flags&(fReady) != 0 || s.answers == 0 || s.ready.len() > 0 {
@@ -329,6 +336,13 @@ func (s *server) parseRequests(ri int, slot uint32, c *conn, buf []byte) {
 		if st == parsedPartial {
 			break
 		}
+		if st == parsedDone && s.holding && string(s.req.method) == "POST" {
+			if c.flags&fHeld == 0 {
+				c.flags |= fHeld
+				s.held.push(mkref(ri, slot, c.gen))
+			}
+			break
+		}
 		s.answers--
 		if st == parsedBad {
 			s.mark(ri, slot, c)
@@ -349,7 +363,7 @@ func (s *server) parseRequests(ri int, slot uint32, c *conn, buf []byte) {
 		off += used
 	}
 	s.retainRest(c, buf[off:], off)
-	if off < len(buf) && s.answers == 0 && c.flags&fReady == 0 {
+	if off < len(buf) && s.answers == 0 && c.flags&(fReady|fHeld) == 0 {
 		c.flags |= fReady
 		s.ready.push(mkref(ri, slot, c.gen))
 	}
@@ -639,7 +653,27 @@ func (s *server) runReady() {
 		}
 		c.flags &^= fReady
 		s.serve(t.ring(), t.slot(), c, nil)
-		if c.flags&fEOF != 0 && c.flags&fReady == 0 {
+		if c.flags&fEOF != 0 && c.flags&(fReady|fHeld) == 0 {
+			c.flags |= fCloseAfter
+			s.mark(t.ring(), t.slot(), c)
+		}
+	}
+}
+
+// runHeld resumes writes before new completions, within the normal pass budget.
+func (s *server) runHeld() {
+	if s.holding {
+		return
+	}
+	for s.answers > 0 && s.held.len() > 0 {
+		t := s.held.pop()
+		c := &s.rings[t.ring()].conns[t.slot()]
+		if c.gen != t.gen() || c.flags&fOpen == 0 || c.flags&fClosing != 0 {
+			continue
+		}
+		c.flags &^= fHeld
+		s.serve(t.ring(), t.slot(), c, nil)
+		if c.flags&fEOF != 0 && c.flags&(fReady|fHeld) == 0 {
 			c.flags |= fCloseAfter
 			s.mark(t.ring(), t.slot(), c)
 		}
@@ -693,8 +727,9 @@ func (s *server) readRounds() {
 
 func (s *server) run() error {
 	ts := timespec{nsec: waitNs}
+	started := time.Now()
 	for {
-		busy := s.rq.len() > 0 || s.ready.len() > 0
+		busy := s.rq.len() > 0 || s.ready.len() > 0 || (!s.holding && s.held.len() > 0)
 		for ri := len(s.rings) - 1; ri >= 0; ri-- {
 			u := s.rings[ri].u
 			if ri == 0 && !busy {
@@ -703,8 +738,16 @@ func (s *server) run() error {
 				u.poll()
 			}
 		}
+		// The previous pass's committed sends are submitted before checkpoint
+		// housekeeping. The existing 1 ms wait also bounds completion polling.
+		hold := dbCheckpoint(time.Since(started).Nanoseconds())
+		if hold < 0 {
+			return fmt.Errorf("checkpoint: %s", dbError())
+		}
+		s.holding = hold != 0
 		s.app.now = time.Now().Unix()
 		s.answers = answersPerPass
+		s.runHeld()
 		for ri := range s.rings {
 			if err := s.rings[ri].u.err; err != nil {
 				return err

@@ -28,6 +28,9 @@ static inline int hkn_finish_handle(hkn_handle handle) {
 static inline int hkn_probe_handle(hkn_handle handle) {
   return hkn_probe((hkn_store *)handle);
 }
+static inline int hkn_tick_handle(hkn_handle handle, int64_t now) {
+  return hkn_tick((hkn_store *)handle, now);
+}
 static inline const char *hkn_error_handle(hkn_handle handle) {
   return hkn_error((hkn_store *)handle);
 }

@@ -1,7 +1,14 @@
 // White-box contract checks: compile with sqlite_engine.c, never into the server.
 #include "../store.c"
 #include <assert.h>
+#include <fcntl.h>
 #include <time.h>
+
+static int allocation_calls;
+static int count_allocation(int fd, off_t offset, off_t length) {
+  ++allocation_calls;
+  return posix_fallocate(fd, offset, length);
+}
 
 static int reject_commit(void *unused, int action, const char *arg,
                          const char *b, const char *c, const char *d) {
@@ -29,6 +36,17 @@ int main(int argc, char **argv) {
   assert(sqlite3_open_v2(argv[1], &observer, SQLITE_OPEN_READONLY, getenv("HKN_VFS") ? getenv("HKN_VFS") : "unix-excl") == SQLITE_OK);
   assert(scalar(s->connection, "PRAGMA synchronous") == 1);
   assert(scalar(s->connection, "PRAGMA wal_autocheckpoint") == (s->checkpoint ? 0 : 8192));
+  // Exercise SQLite's VFS syscall slot: chunk growth must use real allocation,
+  // not the fallback that writes one byte per filesystem block.
+  sqlite3_vfs *vfs = sqlite3_vfs_find(getenv("HKN_VFS") ? getenv("HKN_VFS") : "unix-excl");
+  sqlite3_syscall_ptr allocate = vfs->xGetSystemCall(vfs, "fallocate");
+  assert(allocate);
+  assert(vfs->xSetSystemCall(vfs, "fallocate", (sqlite3_syscall_ptr)count_allocation) == SQLITE_OK);
+  sqlite3_int64 hint = ((sqlite3_int64)scalar(s->connection, "PRAGMA page_count") + 16384) *
+                       scalar(s->connection, "PRAGMA page_size");
+  assert(sqlite3_file_control(s->connection, "main", SQLITE_FCNTL_SIZE_HINT, &hint) == SQLITE_OK);
+  assert(allocation_calls > 0);
+  assert(vfs->xSetSystemCall(vfs, "fallocate", allocate) == SQLITE_OK);
   const hkn_result *initial_feed = hkn_read(s, 0, 0);
   assert(initial_feed && initial_feed->length == 20);
   if (s->reader) assert(sqlite3_stmt_status(s->statement[RECENT], SQLITE_STMTSTATUS_VM_STEP, 0) == 0);
@@ -94,12 +112,45 @@ int main(int argc, char **argv) {
     assert(hkn_checkpoint_interval(s->checkpoint) == 2048);
     assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
     assert(hkn_checkpoint_interval(s->checkpoint) >= 8192);
+    s->checkpoint_phase = 1;
+    assert(hkn_tick(s, 1000000000) == 1);
+    assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
+    assert(hkn_checkpoint_result(s->checkpoint) == 1);
+    assert(hkn_tick(s, 1000000001) == 0);
+    assert(s->wal_frames > 0); // Incomplete PASSIVE must not claim a reset.
     assert(scalar(observer, "SELECT count(*) FROM posts") == snapshot);
     assert(sqlite3_exec(observer, "COMMIT", NULL, NULL, NULL) == SQLITE_OK);
+    // A complete tail releases the hold; SQLite rewinds on its next write.
+    assert(hkn_checkpoint_request(s->checkpoint) == SQLITE_OK);
+    s->checkpoint_phase = 1;
+    assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
+    assert(hkn_tick(s, 2000000000) == 1);
+    assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
+    assert(hkn_tick(s, 2000000001) == 0 && s->wal_frames == 0);
+    // An uncompleted worker result exercises the deadline deterministically.
+    hkn_checkpoint *original = s->checkpoint;
+    s->checkpoint = hkn_checkpoint_new(argv[1], getenv("HKN_VFS") ? getenv("HKN_VFS") : "unix-excl");
+    assert(s->checkpoint);
+    s->checkpoint_phase = 2;
+    s->holding = 1;
+    s->hold_started = 3000000000;
+    s->tail_written = s->wal_written;
+    assert(hkn_tick(s, 3249999999) == 1);
+    assert(hkn_tick(s, 3250000000) == 0 && s->checkpoint_phase == 2);
+    assert(hkn_create(s, 1, "after timeout", 13));
+    assert(hkn_finish(s) == 0 && s->wal_written > s->tail_written);
+    assert(hkn_checkpoint_tail(s->checkpoint) == SQLITE_OK);
+    assert(hkn_checkpoint_wait(s->checkpoint) == SQLITE_OK);
+    assert(hkn_tick(s, 3250000001) == 0 && s->wal_frames > 0);
+    hkn_checkpoint_free(s->checkpoint);
+    s->checkpoint = original;
     // Drive the growth-barrier branch without writing 256 MiB in a unit test.
     assert(begin_batch(s) == 0);
+    s->checkpoint_sent = s->wal_written;
     s->wal_frames = 65536;
     assert(hkn_finish(s) == 0);
+    assert(s->wal_frames == 65536); // COMMIT never waits for a checkpoint.
+    assert(hkn_tick(s, 4000000000) == 0);
     assert(s->wal_frames == 0 && s->checkpoint_sent == s->wal_written);
     // WAL rewinds must not erase observed write pressure or underflow budgets.
     for (int cycle = 0; cycle < 3; ++cycle) {

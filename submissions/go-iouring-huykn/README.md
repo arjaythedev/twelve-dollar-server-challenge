@@ -73,12 +73,16 @@ adapts between 8,192 and 16,384 in steps of 2,048. The worker samples smoothed
 page-write traffic once per second; growth requires checkpoint progress, three
 agreeing samples, and five seconds between changes. Incomplete checkpoints
 retry after 2,048 further page writes. WAL rewinds preserve traffic accounting.
-Timer wakeups only sample; database commits request checkpoint work.
-At 65,536 frames the
-request thread waits for the worker, then attempts a WAL restart outside any
-transaction. Long-lived readers may defer a restart; the normal server has no
-cross-batch read cursors. Worker startup failure retains SQLite's automatic
-checkpoint fallback at 8,192 pages.
+Timer wakeups only sample; database commits request checkpoint work. The worker
+runs at nice 5, copies the bulk while writes continue, and pre-syncs dirty database
+pages. It then copies the tail while POST requests wait for at most 250 ms;
+reads on other connections continue. Held pipelines preserve order, EOF and the
+normal response budget. Completion is checked between transactions using the
+existing bounded 1 ms loop wait. At 65,536 frames, an idle worker permits a
+request-thread restart attempt after committed sends have been submitted.
+Long-lived readers may defer a restart. Worker startup failure retains SQLite's
+automatic checkpoint fallback at 8,192 pages. Both connections use 64 MiB growth
+chunks with native `posix_fallocate` enabled.
 
 The default is SQLite's built-in `unix-excl` VFS: one process owns the database
 and SQLite keeps the WAL index in heap memory. Other processes cannot open the
@@ -146,7 +150,7 @@ isolation, the WAL growth barrier, and schema-cookie fallback:
 
 ```sh
 cc -O1 -DSQLITE_DEBUG -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
-  -DSQLITE_OMIT_LOAD_EXTENSION -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1 \
+  -DSQLITE_OMIT_LOAD_EXTENSION -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1 -DHAVE_POSIX_FALLOCATE=1 \
   -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_AUTOINIT \
   testdata/store_contract.c sqlite_engine.c checkpoint.c -lm -lpthread -o /tmp/huykn-store-test
 cp ../../seed/feed.db /tmp/huykn-contract.db

@@ -82,8 +82,9 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   If it fails, every response the pass produced is replaced by a 500 and the connection is closed.
 - **Checkpoints off the request path.** Automatic checkpoints are off. Once the WAL holds 4,096
   frames, a helper thread (nice 19, own connection) copies it back with PASSIVE checkpoints: the
-  cycle's frames first, then rounds of "copy what was written meanwhile, sync the database file"
-  until at most 128 frames were written during a round. Then writes are briefly held: the next
+  cycle's frames first, then, while the log is still under 8,192 frames, rounds of "sync the
+  database file, copy what was written meanwhile" until at most 128 frames were written during a
+  round or a round stops gaining. Then writes are briefly held: the next
   POST on each connection stays unread while a second helper thread copies the last frames, so the
   next write can restart the log from the top. Reads go on during a hold, and a hold lasts at
   most 250 ms. Past 65,536 frames the loop checkpoints by itself.
@@ -94,11 +95,20 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
     `fsync` taking 5 ms plus its unsynced bytes at that rate) and 240,000 users of the k6 model,
     hold-phase latency went from p99 89–91 ms and a 290–300 ms maximum (every hold ran its full
     250 ms) to p99 23–24 ms and a 90–116 ms maximum, with no hold running out (two runs each).
+  - *Why the rounds are bounded:* they only pay off while the helper keeps up. On a busy vCPU a
+    nice-19 thread gets little, each round takes longer than the one before, and no hold can
+    start while rounds run, so the log grows instead of restarting. On a 1 vCPU / 2 GB droplet
+    with 260,000 users the log reached 32,625 and 41,550 frames with unbounded rounds (two
+    droplets), and 141,927 at 320,000; without any rounds it never passed 9,811 at any level.
+    Bounded, it stayed under 14,100 in 2-minute probes up to 280,000 users, and write holds
+    added up to 0.1–0.6 s a minute, against 1–2 s a minute without rounds.
   - *Why two threads:* the second one runs at normal priority because writes wait for it; at
     nice 19 it got ~1.5% of a busy CPU and holds ran out. After the rounds it has a handful of
     frames to copy and sync.
-  - The log has a line a minute: holds, holds that ran out, copies the loop made itself, and the
-    most frames the WAL held.
+  - The log has a line a minute: holds (the longest, their sum, the extra rounds), holds that ran
+    out, copies the loop made itself, the most frames the WAL held; and for the loop its longest
+    pass with the CPU time that pass used, the passes over 100 ms and the longest commit. A long
+    pass with little CPU time means the loop was blocked or kept off the CPU.
 - **Page cache after a split.** When a write splits a B-tree page, SQLite renumbers the new pages
   through a temporary page number far past the end of the file, and its page cache keeps the
   largest number it has seen. Every later commit truncates the cache to the file size, and from
@@ -116,10 +126,14 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   kernel ever refuses a ring for that limit, the lock is dropped and the ring retried.
 - **A crash leaves a line in the log** (signal, faulting address, instruction pointer) before the
   signal takes its default course.
-- **Batch size.** Each pass waits on ring 0 for 256 completions or 4 ms, whichever comes first
-  (never while reads or answers are queued). Bigger passes share one `COMMIT` and fewer WAL frame
-  writes. At ~18k req/s over 18,000 connections, 4 ms instead of 1 ms cut server CPU from 17.8 to
-  16.0 µs per request, for about 2–3 ms more median latency.
+- **Batch size.** Each pass waits on ring 0 for 256 completions or 1 ms, whichever comes first
+  (never while reads or answers are queued). It was 4 ms: in the sandbox, at ~18k req/s over
+  18,000 connections, that cut server CPU from 17.8 to 16.0 µs per request for 2–3 ms more median
+  latency. Near a full vCPU it works the other way. A pass and its wait last about
+  wait / (1 − load), so at 85% load the 4 ms wait became 25 ms of median latency. On a droplet
+  with 260,000 users the 1 ms build ran at 76% CPU with a 5 ms median, the 4 ms build at 84% with
+  25 ms (one probe each), and at 280,000 the three 1 ms builds passed the 2-minute probe where
+  both 4 ms builds failed (below).
 
 ## Connections
 
@@ -189,8 +203,8 @@ benchmark droplet.
 | 200 busy connections, closed loop | 94–97k req/s | 88–94k req/s |
 | two 2 s `SIGSTOP` stalls under load: worst request | 2,010 ms | 2,010 ms |
 
-The latency difference is the 4 ms batching wait (see above); both are far inside the
-500 ms / 1 s limits. About two thirds of the CPU per request is the kernel's (TCP and io_uring), which is the same for
+The latency difference is the 4 ms batching wait this server had when these were measured (it now
+waits 1 ms, see above); both are far inside the 500 ms / 1 s limits. About two thirds of the CPU per request is the kernel's (TCP and io_uring), which is the same for
 both servers.
 
 The normal-priority checkpoint tail, the page-cache fix (then a reset of the cache's largest key
@@ -212,6 +226,12 @@ PR #373 at `9f80f1f` (before the checkpoint rounds, the page-cache wrapper and t
 **230,000 users** held for 5 minutes (22,362 req/s, p95 21.9 ms, p99 103.5 ms, 0 errors, 58% CPU,
 24 µs per request, 581 MB peak). 2-minute probes: 200,000, 220,000 and 230,000 passed; 320,000
 failed on latency (p99 1.14 s, 0 errors); 240,000 failed with refused connections.
+
+PR #373 at `e1bee48` (as merged: unbounded checkpoint rounds, 4 ms wait): **260,000 users** held
+for 5 minutes (24,997 req/s, p95 27.6 ms, p99 59.3 ms, 0 errors, 72% CPU, 26 µs per request,
+650 MB peak). 270,000 and 280,000 failed their 2-minute probes on latency (1.4 s and 1.3 s, 0
+errors); 320,000 reached a 3 s p99 at 96% CPU. The bounded rounds and the 1 ms wait are the
+answer to that step from 59 ms to over a second.
 
 ### On DigitalOcean droplets (not the benchmark box)
 
@@ -243,6 +263,27 @@ each limit somewhere between its last pass and its first fail, so this is one sa
 The first run, on another droplet and before the checkpoint and page-cache changes above, held
 125,000 users (p99 643 ms), and kensac passed 100,000 and failed 120,000 in 2-minute probes.
 
+**The bounded rounds and the 1 ms wait**, on a Premium Intel droplet (s-1vcpu-2gb-intel, same
+kernel), six 4-vCPU load generators, every simulated user on its own source port. The merged
+build was first run with 200,000 users and k6's think times; it used 66% CPU against about 55%
+on the benchmark box, so think times and ramps were stretched 1.2 times. The merged build then
+passed 260,000 at 72% CPU and failed 280,000, as on the box. 2-minute probes, p95 / p99 in ms:
+
+| users | as merged | merged, no rounds | this version | this, no rounds | this, 16,384-frame cycle |
+|---|---|---|---|---|---|
+| 220,000 | 24 / 168 | 23 / 100 | 23 / **1,037** | 49 / **1,277** | 22 / 652 |
+| 240,000 | **602 / 1,464** | 49 / 197 | 16 / 224 | 30 / 537 | 26 / 184 |
+| 260,000 | 393 / 834 | 61 / 260 | 124 / 457 | **668 / 3,781** | **915 / 1,790** |
+| 280,000 | **904 / 1,762** | **1,003 / 1,981** | 376 / 659 | 101 / 390 | 410 / 798 |
+
+Bold fails. Median latency was 10–18 ms with the 4 ms wait and 3–5 ms with 1 ms. No build held
+280,000 for 5 minutes here (this version: p99 2.5 s at 81% CPU, slow from its first minute where
+the 2-minute probe at the same level was not), so this is a noisy box near its limit and each
+cell is one sample. What the log lines add: in this version's probes no commit took over 10 ms
+and no write hold over 129 ms; the passes over 100 ms sit in the minute where the ramp ends,
+and in them the loop got about half the CPU. About a fifth of the vCPU was user code (this
+server and SQLite); the kernel's TCP and io_uring work took the rest of what was used.
+
 Correctness checks beyond `test/test.sh` (42/42):
 
 - `/feed` and 3,000 random `/posts/:id` compared byte-for-byte with the reference SQL query (via
@@ -253,7 +294,8 @@ Correctness checks beyond `test/test.sh` (42/42):
 - Every acknowledged write is in the database, and nothing else: with the checkpoint threshold
   lowered to 64 frames (500 write holds in 10 s, pipelined POSTs), after `kill -9` mid-load
   (three trials; three more on the slow-disk model with the checkpoint rounds, 31,841–42,121
-  posts and as many likes each), and on a full disk (writes then get 500, never 201; reads and
+  posts and as many likes each; three more with the bounded rounds, 7,584–19,733 each), and on a
+  full disk (writes then get 500, never 201; reads and
   `/health` go on).
 - After 2.3 million requests of mixed load with the page-cache wrapper: `integrity_check` ok, and
   all 522,289 posts (with their like counts) and the feed match the reference query.

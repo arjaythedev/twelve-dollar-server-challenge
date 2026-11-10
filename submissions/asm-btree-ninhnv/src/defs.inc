@@ -88,7 +88,7 @@ default rel
 %define ACCEPT_DEPTH 512
 %define MAX_RINGS    16
 %define WAIT_MIN     256
-%define WAIT_NS      4000000
+%define WAIT_NS      1000000
 %define READS_PER_PASS 16384
 %define ANSWERS_PER_PASS 2048
 %define LIST_CAP     (1 << 21)     ; entries in each connection list (ring buffers, u64 each)

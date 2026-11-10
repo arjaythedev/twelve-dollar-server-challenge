@@ -246,7 +246,7 @@ int hkn_finish(hkn_store *s) {
   // WAL growth is observed only after durable commit, with all read cursors
   // closed. Signal at coarse frame intervals rather than on every request.
   if (s->wal_frames < s->checkpoint_sent) s->checkpoint_sent = 0;
-  if (s->wal_frames >= 8192 &&
+  if (s->wal_frames >= 4096 &&
       (!s->checkpoint_sent || s->wal_frames - s->checkpoint_sent >= 2048)) {
     s->checkpoint_sent = s->wal_frames;
     int code = hkn_checkpoint_request(s->checkpoint);

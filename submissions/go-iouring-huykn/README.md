@@ -68,7 +68,7 @@ all staged responses into errors. Implicit SQLite rollback is tracked so lost
 writes cannot be acknowledged as successful.
 
 WAL uses `synchronous=NORMAL`. A new per-handle worker runs passive checkpoints
-on its own connection. Notifications coalesce and start at 8,192 WAL frames,
+on its own connection. Notifications coalesce and start at 4,096 WAL frames,
 with further notifications at coarse growth intervals. At 65,536 frames the
 request thread waits for the worker, then attempts a WAL restart outside any
 transaction. Long-lived readers may defer a restart; the normal server has no

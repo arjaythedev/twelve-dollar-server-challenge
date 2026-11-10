@@ -14,7 +14,7 @@ A port of the ideas in [rust-iouring-kensac](../rust-iouring-kensac) (#264) to [
 
 ## What is Goose and what is C
 
-| `server.goose` (1,800 lines) | `net.c`, `db.c` (1,050 lines) |
+| `server.goose` (1,800 lines) | `net.c`, `db.c` (1,100 lines) |
 |---|---|
 | the loop: waiting, draining every ring's completions, flushing after COMMIT, re-arming receives | `io_uring_setup`/`enter`/`register`, queueing operations, copying completions into a Goose array |
 | the connection table: generations, flags, what a connection is waiting for | the bytes the kernel reads or writes after a call returns: receive buffers, pending output, the send in flight, input kept for later |
@@ -85,7 +85,7 @@ Writes are SQL: `INSERT … RETURNING id, created_at` and `INSERT … ON CONFLIC
 - **The language.** Everything that decides is Goose. Where Rust holds a slice of SQLite's page or of the receive buffer, Goose gets a copy (the FFI rule above), so this entry copies more and still executes fewer instructions per request (below).
 - **Writes wait in a queue** and commit together every 5 ms; kensac commits each pass (about every millisecond).
 - **Larger receive-buffer rings** (16,384 buffers a ring, the count [goose-iouring-ahmadsh2007](../goose-iouring-ahmadsh2007) measured for #291) and re-arming at the end of the pass, instead of 1,024 buffers and bounded single-shot reads after a burst.
-- **No private SQLite state is written**: kensac's `td_count_likes` sets `BtCursor.ix` to leave a leaf; here the cursor is only moved through `sqlite3BtreeNext`.
+- **Like counts step the cursor** with `sqlite3BtreeNext`, entry by entry, so no field of a cursor is set from outside (ruling 8). Counting a leaf at a time, as the Rust entry does, costs less per entry; under the load test there is almost nothing to count: at 310,000 users it writes about 270 posts a second (2 % of 29,284 requests/s ÷ 2.17 requests per loop), so the feed's 20 posts are under a tenth of a second old and not liked yet.
 - **One write per commit** through a VFS (above); kensac writes each frame as SQLite does.
 - **Profile-guided and link-time optimized**, SQLite included (kensac builds SQLite at `-O3`).
 - No crates and no liburing: the ring is set up through system calls.

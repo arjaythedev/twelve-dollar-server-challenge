@@ -62,9 +62,13 @@ if [[ ${PGO:-1} == 1 ]]; then
   "$cc" "${common[@]}" -c train/pgo_exit.c -o .build/pgo_exit.o
   extra=(.build/pgo_exit.o)
   build -fprofile-generate="$profile" -fprofile-update=prefer-atomic
-  python3 train/train.py bin/server
   extra=()
-  build -fprofile-use="$profile" -fprofile-correction -fprofile-partial-training -Wno-missing-profile
+  if python3 train/train.py bin/server; then
+    build -fprofile-use="$profile" -fprofile-correction -fprofile-partial-training -Wno-missing-profile
+  else
+    echo 'profile training failed: building without a profile' >&2
+    build
+  fi
 else
   build
 fi

@@ -166,31 +166,34 @@ nonisolated extension HTTP {
             let lineStart = pos
             pos = lineEnd + 2
             guard let colon = Bytes.find(line, 0x3A) else { return .reject(400) }
+            // Only the headers read here are looked at: the others' names and values pass unchecked, as most servers
+            // let them (a check of every name, byte by byte, and a trim of every value cost more than the rest of the
+            // parse).
             let name = line.extracting(0..<colon)
-            guard isTokenName(name) else { return .reject(400) }
-            let value = trimOWS(line.extracting((colon + 1)..<line.count))
             switch name.count {
             case 13 where equalsIgnoringCase(name, "authorization"):
-                // The value's place in `buf` (after the leading whitespace trimOWS skipped), so the request borrows it.
+                // The value's place in `buf` (after the leading whitespace trimOWS skips), so the request borrows it.
+                let value = trimOWS(line.extracting((colon + 1)..<line.count))
                 var a = colon + 1
                 while a < line.count && (line[a] == 0x20 || line[a] == 0x09) { a += 1 }
                 let valueStart = lineStart + a
                 authRange = valueStart..<(valueStart + value.count)
             case 14 where equalsIgnoringCase(name, "content-length"):
-                guard let n = parseUsize(value) else { return .reject(400) }
+                guard let n = parseUsize(trimOWS(line.extracting((colon + 1)..<line.count))) else { return .reject(400) }
                 if let prev = contentLength, prev != n { return .reject(400) }
                 contentLength = n
             case 10 where equalsIgnoringCase(name, "connection"):
+                let value = trimOWS(line.extracting((colon + 1)..<line.count))
                 if equalsIgnoringCase(value, "close") {
                     keepAlive = false
                 } else if equalsIgnoringCase(value, "keep-alive") {
                     keepAlive = true
                 }
             case 17 where equalsIgnoringCase(name, "transfer-encoding"):
-                isChunked = equalsIgnoringCase(value, "chunked")
+                isChunked = equalsIgnoringCase(trimOWS(line.extracting((colon + 1)..<line.count)), "chunked")
                 if !isChunked { return .reject(400) }
             case 6 where equalsIgnoringCase(name, "expect"):
-                expect100 = equalsIgnoringCase(value, "100-continue")
+                expect100 = equalsIgnoringCase(trimOWS(line.extracting((colon + 1)..<line.count)), "100-continue")
             default:
                 break
             }

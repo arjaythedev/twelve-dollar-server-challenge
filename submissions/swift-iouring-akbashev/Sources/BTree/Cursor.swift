@@ -155,6 +155,20 @@ public struct Cursor: ~Copyable, ~Sendable {
         return rc == SQLITE_OK ? .entry : rc == SQLITE_DONE ? .none : .failed
     }
 
+    @inlinable public mutating func last() -> Move {
+        var empty: Int32 = 1
+        guard sqlite3BtreeLast(raw, &empty) == SQLITE_OK else { return .failed }
+        return empty == 0 ? .entry : .none
+    }
+
+    @inlinable public mutating func previous() -> Move {
+        let rc = sqlite3BtreePrevious(raw, 0)
+        return rc == SQLITE_OK ? .entry : rc == SQLITE_DONE ? .none : .failed
+    }
+
+    /// The table row's rowid, on an entry.
+    @inlinable public var rowid: Int64 { sqlite3BtreeIntegerKey(raw) }
+
     /// `counts[key - lo]` += the entries of this index (on one integer column) with each key in `lo...hi`.
     @inlinable public mutating func count(_ lo: Int64, _ hi: Int64, into counts: inout MutableSpan<UInt32>) -> Count {
         precondition(lo <= hi && hi - lo < Int64(counts.count))

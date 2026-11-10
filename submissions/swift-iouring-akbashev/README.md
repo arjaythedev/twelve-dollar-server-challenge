@@ -80,10 +80,16 @@
   B-tree layer isn't part of its API, so the amalgamation is compiled with `SQLITE_PRIVATE` defined empty (it would be
   `static`): its internal functions link like any other, and `Sources/BTree` declares the ones it uses with
   `@_extern(c)`. `Cursor` moves are `mutating` and a record is a `Span` borrowed from the cursor, so the compiler
-  rules out reading a row after its cursor moved on; `Record` decodes SQLite's row format in place. The feed takes its
-  20 entries off `posts_created_at_id_idx`, reads the posts in ascending id order (so SQLite's seek from one post to
-  the next is a step along the leaf), then their authors, counts their likes in one walk of `likes_post_id_idx`, and
-  writes the response in one reservation, escaping 32 bytes at a time. That walk steps SQLite's cursor entry by entry
+  rules out reading a row after its cursor moved on; `Record` decodes SQLite's row format in place. The feed is the
+  posts table's last 20 rows, read backwards along its leaf, while post ids run from 1 with no gaps and `created_at`
+  never goes down as the id goes up: then `ORDER BY created_at DESC, id DESC` is descending rowid order. At startup
+  one walk of `posts_created_at_id_idx` checks it (the ids must come out n, n - 1, ..., 1), and after each insert the
+  previous post is read back from SQLite and its `created_at` compared with the new one's; if either check fails, the
+  feed takes its 20 entries off `posts_created_at_id_idx` from then on (the log says so) and reads the posts in
+  ascending id order (so SQLite's seek from one post to the next is a step along the leaf). The only thing kept
+  between requests is that one boolean, which plan to use; every row served is read on the request that serves it.
+  Then the authors, the likes counted in one walk of `likes_post_id_idx`, and the response written in one
+  reservation, escaping 32 bytes at a time. The likes walk steps SQLite's cursor entry by entry
   (`sqlite3BtreeNext`), and its seek key is a one-column one: an `UnpackedRecord` and its `Mem`, built in the
   server's own memory at offsets for the pinned 3.54.1. At startup the server checks that seeks with it count what the
   two-column key does, and keeps the two-column key if they don't, saying so in the log. The
@@ -93,7 +99,9 @@
   every read when the schema differs. Locally the answers matched SQL's byte for byte, on the seed and on databases
   edited to reach each fallback.
 - **Requests parsed in place** in the kernel's receive buffers; a connection keeps bytes only when a request is
-  split across receives. **Responses written in place:** the body goes straight into a send buffer taken from a
+  split across receives. The request line is checked whole; of the headers, only those the server reads (`Authorization`,
+  `Content-Length`, `Connection`, `Transfer-Encoding`, `Expect`) are, and the others pass unchecked, as most servers
+  let them. **Responses written in place:** the body goes straight into a send buffer taken from a
   pool, after room for the head, which is written once the body's length is known. The buffer is the connection's
   while its one send is in flight, and goes back to the pool, its capacity kept, when the send completes, so in
   steady state no response allocates. Error answers are static strings written the same way.

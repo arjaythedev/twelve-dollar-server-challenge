@@ -27,6 +27,12 @@ func sqlite3BtreeIndexMoveto(_ cursor: UnsafeMutableRawPointer, _ key: OpaquePoi
 func sqlite3BtreeFirst(_ cursor: UnsafeMutableRawPointer, _ empty: UnsafeMutablePointer<Int32>) -> Int32
 @usableFromInline @_extern(c, "sqlite3BtreeNext")
 func sqlite3BtreeNext(_ cursor: UnsafeMutableRawPointer, _ flags: Int32) -> Int32
+@usableFromInline @_extern(c, "sqlite3BtreeLast")
+func sqlite3BtreeLast(_ cursor: UnsafeMutableRawPointer, _ empty: UnsafeMutablePointer<Int32>) -> Int32
+@usableFromInline @_extern(c, "sqlite3BtreePrevious")
+func sqlite3BtreePrevious(_ cursor: UnsafeMutableRawPointer, _ flags: Int32) -> Int32
+@usableFromInline @_extern(c, "sqlite3BtreeIntegerKey")
+func sqlite3BtreeIntegerKey(_ cursor: UnsafeMutableRawPointer) -> Int64
 @usableFromInline @_extern(c, "sqlite3BtreeEof")
 func sqlite3BtreeEof(_ cursor: UnsafeMutableRawPointer) -> Int32
 @usableFromInline @_extern(c, "sqlite3BtreePayloadFetch")

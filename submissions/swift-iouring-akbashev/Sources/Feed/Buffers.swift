@@ -64,6 +64,13 @@ nonisolated struct ByteBuffer: ~Copyable, ~Sendable {
         other.withUnsafeBytes { append($0) }
     }
 
+    /// Room for `n` bytes the caller fills in before they're read (a response's head, written once its body is),
+    /// counted now and left as it is.
+    @inline(__always) mutating func appendRoom(_ n: Int) {
+        _ = reserve(n)
+        count += n
+    }
+
     @inline(__always) mutating func append(repeating byte: UInt8, count n: Int) {
         guard n > 0 else { return }
         reserve(n).update(repeating: byte, count: n)

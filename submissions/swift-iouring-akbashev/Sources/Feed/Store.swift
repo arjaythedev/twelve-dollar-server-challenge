@@ -81,6 +81,9 @@ nonisolated struct Store: ~Copyable, ~Sendable {
             if let mismatch = reads.checkOneColumnSeeks() {
                 Sys.logLine("like counts seek with the two-column key: SQLite's structs aren't as expected (\(mismatch))")
             }
+            if let reason = reads.checkFeedFromTail() {
+                Sys.logLine("feed through posts_created_at_id_idx: \(reason)")
+            }
             sqlite3_exec(db, "COMMIT", nil, nil, nil)
         }
     }
@@ -142,6 +145,8 @@ nonisolated struct Store: ~Copyable, ~Sendable {
     var directReads: Bool { reads.available }
     /// The like counts seek with the one-column key.
     var oneColumnSeeks: Bool { reads.oneColumnSeeks }
+    /// The feed is the posts table's last rows.
+    var feedFromTail: Bool { reads.feedFromTail }
 
     /// The whole WAL is copied and writes waited for it: the next write starts it over, and its commit reports what's
     /// in it.
@@ -252,8 +257,17 @@ nonisolated struct Store: ~Copyable, ~Sendable {
                 sqlite3_bind_text(insertPost, 2, raw.baseAddress?.assumingMemoryBound(to: CChar.self), Int32(raw.count), nil)
             }
             guard bound == SQLITE_OK, sqlite3_step(insertPost) == SQLITE_ROW else { return failed(&body, mark) }
+            let id = sqlite3_column_int64(insertPost, 0)
+            // created_at, copied for the feed plan's check once the statement is done.
+            var created = InlineArray<64, UInt8>(repeating: 0)
+            var createdCount = Int(sqlite3_column_bytes(insertPost, 1))
+            if createdCount <= 64, let chars = sqlite3_column_text(insertPost, 1) {
+                for i in 0..<createdCount { created[i] = chars[i] }
+            } else {
+                createdCount = 0
+            }
             body.append("{\"post\":{\"id\":")
-            JSON.writeInt(&body, sqlite3_column_int64(insertPost, 0))
+            JSON.writeInt(&body, id)
             body.append(",\"body\":")
             JSON.writeString(&body, text)
             body.append(",\"created_at\":")
@@ -262,6 +276,8 @@ nonisolated struct Store: ~Copyable, ~Sendable {
             JSON.writeString(&body, author)
             body.append(",\"like_count\":0}}")
             guard sqlite3_step(insertPost) == SQLITE_DONE else { return failed(&body, mark) }
+            // An empty created_at (none, or too long to copy) sorts first, which turns the plan off.
+            reads.checkInsertedPost(id, createdAt: created.span.extracting(0..<createdCount))
             return 201
 
         case .like(let userID, let postID):

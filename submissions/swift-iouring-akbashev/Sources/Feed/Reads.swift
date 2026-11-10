@@ -40,6 +40,12 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
     /// Like counts seek with the one-column key (`checkOneColumnSeeks`).
     var oneColumnSeeks: Bool { likes.oneColumnSeeks }
 
+    /// The feed is the posts table's last rows: post ids run from 1 with no gaps and created_at never goes down as the
+    /// id goes up, so `ORDER BY created_at DESC, id DESC` is descending rowid order. Checked at start
+    /// (`checkFeedFromTail`) and after every insert (`checkInsertedPost`); once false, false for good. It says which
+    /// plan to use and nothing about any row: every row served is read on the request that serves it.
+    private(set) var feedFromTail = false
+
     init(_ db: OpaquePointer, enabled: Bool) throws(StoreError) {
         let roots = enabled && Self.schemaMatches(db)
             ? (Self.root(db, "posts"), Self.root(db, "users"), Self.root(db, "posts_created_at_id_idx"), Self.root(db, "likes_post_id_idx"))
@@ -88,62 +94,16 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
 
     // ---------- the queries ----------
 
-    /// `{"posts":[...]}`: the newest (created_at, id) entries off the index; then the posts in ascending id order, so each
-    /// seek from the one before is a step along the leaf; their authors; their likes in one walk of the likes index;
-    /// then the response in one reservation. The rows' texts are copied aside (`text`) as each cursor moves on.
+    /// `{"posts":[...]}`: the newest posts (`newestByTail` or `newestByIndex`), their authors, their likes in one walk
+    /// of the likes index, then the response in one reservation. The rows' texts are copied aside (`text`) as each
+    /// cursor moves on.
     mutating func feed(into body: inout ByteBuffer) -> Answer {
         guard openIfNeeded() else { return .failed }
         text.removeAll()
         var rows = InlineArray<20, Row>(repeating: Row())
         var n = 0
-        var move = newest.first()
-        while move == .entry && n < rows.count {
-            do {
-                // The entry is borrowed from the cursor until the end of this block, before the cursor moves on.
-                let entry = newest.record
-                guard let columns: InlineArray<2, Record.Column> = Record.columns(entry), columns[0].isText,
-                      let id = Record.integer(entry, columns[1]) else { return .unexpected }
-                rows[n].id = id
-                let from = text.count
-                text.append(entry.extracting(columns[0].range))
-                rows[n].created = from..<text.count
-            }
-            n += 1
-            move = newest.next()
-        }
-        if move == .failed { return .failed }
-
-        // Newest first is normally descending ids, so ascending is the reverse; otherwise sorted.
-        var order = InlineArray<20, Int>(repeating: 0)
-        for k in 0..<n { order[k] = n - 1 - k }
-        var ascending = true
-        for k in 0..<max(n - 1, 0) where rows[order[k]].id >= rows[order[k + 1]].id { ascending = false }
-        if !ascending {
-            for k in 1..<max(n, 1) {
-                let i = order[k]
-                var j = k
-                while j > 0 && rows[order[j - 1]].id > rows[i].id {
-                    order[j] = order[j - 1]
-                    j -= 1
-                }
-                order[j] = i
-            }
-        }
-        for k in 0..<n {
-            let i = order[k]
-            switch posts.seek(rows[i].id) {
-            case .entry: break
-            case .none: return .unexpected // the index and the table disagree
-            case .failed: return .failed
-            }
-            let row = posts.record
-            guard let columns: InlineArray<3, Record.Column> = Record.columns(row),
-                  let userID = Record.integer(row, columns[1]), columns[2].isText else { return .unexpected }
-            rows[i].userID = userID
-            let from = text.count
-            text.append(row.extracting(columns[2].range))
-            rows[i].body = from..<text.count
-        }
+        let found = feedFromTail ? newestByTail(&rows, &n) : newestByIndex(&rows, &n)
+        guard found == .done else { return found }
         // A post without its user is no row of the join: SQL answers.
         for i in 0..<n {
             switch users.seek(rows[i].userID) {
@@ -207,6 +167,131 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
             out.append("]}")
         }
         return .done
+    }
+
+    /// The newest posts while `feedFromTail` holds: the posts table's last 20 rows, read backwards along its leaf.
+    private mutating func newestByTail(_ rows: inout InlineArray<20, Row>, _ n: inout Int) -> Answer {
+        var move = posts.last()
+        while move == .entry && n < rows.count {
+            rows[n].id = posts.rowid
+            do {
+                // The row is borrowed from the cursor until the end of this block, before the cursor moves on.
+                let row = posts.record
+                guard let columns: InlineArray<4, Record.Column> = Record.columns(row),
+                      let userID = Record.integer(row, columns[1]), columns[2].isText, columns[3].isText else { return .unexpected }
+                rows[n].userID = userID
+                var from = text.count
+                text.append(row.extracting(columns[2].range))
+                rows[n].body = from..<text.count
+                from = text.count
+                text.append(row.extracting(columns[3].range))
+                rows[n].created = from..<text.count
+            }
+            n += 1
+            move = posts.previous()
+        }
+        return move == .failed ? .failed : .done
+    }
+
+    /// The newest posts in general: the newest (created_at, id) entries off the index, then the posts in ascending id
+    /// order, so each seek from the one before is a step along the leaf.
+    private mutating func newestByIndex(_ rows: inout InlineArray<20, Row>, _ n: inout Int) -> Answer {
+        var move = newest.first()
+        while move == .entry && n < rows.count {
+            do {
+                // The entry is borrowed from the cursor until the end of this block, before the cursor moves on.
+                let entry = newest.record
+                guard let columns: InlineArray<2, Record.Column> = Record.columns(entry), columns[0].isText,
+                      let id = Record.integer(entry, columns[1]) else { return .unexpected }
+                rows[n].id = id
+                let from = text.count
+                text.append(entry.extracting(columns[0].range))
+                rows[n].created = from..<text.count
+            }
+            n += 1
+            move = newest.next()
+        }
+        if move == .failed { return .failed }
+
+        // Newest first is normally descending ids, so ascending is the reverse; otherwise sorted.
+        var order = InlineArray<20, Int>(repeating: 0)
+        for k in 0..<n { order[k] = n - 1 - k }
+        var ascending = true
+        for k in 0..<max(n - 1, 0) where rows[order[k]].id >= rows[order[k + 1]].id { ascending = false }
+        if !ascending {
+            for k in 1..<max(n, 1) {
+                let i = order[k]
+                var j = k
+                while j > 0 && rows[order[j - 1]].id > rows[i].id {
+                    order[j] = order[j - 1]
+                    j -= 1
+                }
+                order[j] = i
+            }
+        }
+        for k in 0..<n {
+            let i = order[k]
+            switch posts.seek(rows[i].id) {
+            case .entry: break
+            case .none: return .unexpected // the index and the table disagree
+            case .failed: return .failed
+            }
+            let row = posts.record
+            guard let columns: InlineArray<3, Record.Column> = Record.columns(row),
+                  let userID = Record.integer(row, columns[1]), columns[2].isText else { return .unexpected }
+            rows[i].userID = userID
+            let from = text.count
+            text.append(row.extracting(columns[2].range))
+            rows[i].body = from..<text.count
+        }
+        return .done
+    }
+
+    /// Turns `feedFromTail` on if walking posts_created_at_id_idx (created_at, id descending) meets the ids n, n - 1,
+    /// ..., 1 in turn: then the ids have no gaps and created_at never goes down as the id goes up. Run once, inside a
+    /// transaction; returns what didn't hold, if anything.
+    mutating func checkFeedFromTail() -> String? {
+        guard available, openIfNeeded() else { return "no cursors" }
+        defer { close() }
+        var due: Int64? = nil
+        var move = newest.first()
+        while move == .entry {
+            do {
+                let entry = newest.record
+                guard let columns: InlineArray<2, Record.Column> = Record.columns(entry),
+                      let id = Record.integer(entry, columns[1]) else { return "an index entry not in the form expected" }
+                if let due, id != due { return "post \(id) where post \(due) was due" }
+                due = id - 1
+            }
+            move = newest.next()
+        }
+        if move == .failed { return "walking the index failed" }
+        if let due, due != 0 { return "the ids end at \(due + 1), not 1" }
+        feedFromTail = true
+        return nil
+    }
+
+    /// After post `id` is inserted with `createdAt`: `feedFromTail` stays on only if post `id - 1` is there, read back
+    /// from SQLite, and wasn't created later.
+    mutating func checkInsertedPost(_ id: Int64, createdAt: Span<UInt8>) {
+        guard feedFromTail, id > 1 else { return }
+        var holds = false
+        if openIfNeeded(), posts.seek(id - 1) == .entry {
+            let row = posts.record
+            if let columns: InlineArray<4, Record.Column> = Record.columns(row), columns[3].isText {
+                holds = !Self.precedes(createdAt, row.extracting(columns[3].range))
+            }
+        }
+        if !holds {
+            feedFromTail = false
+            Sys.logLine("feed through posts_created_at_id_idx from now on: post \(id) doesn't follow post \(id - 1)")
+        }
+    }
+
+    /// Whether `a` sorts before `b` byte by byte, as SQLite's BINARY collation compares text.
+    private static func precedes(_ a: Span<UInt8>, _ b: Span<UInt8>) -> Bool {
+        for i in 0..<min(a.count, b.count) where a[i] != b[i] { return a[i] < b[i] }
+        return a.count < b.count
     }
 
     /// Turns the likes cursor's one-column seeks on if they count what the two-column key does, over the newest posts

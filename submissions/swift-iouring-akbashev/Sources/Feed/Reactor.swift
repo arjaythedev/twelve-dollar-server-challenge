@@ -26,6 +26,7 @@ final class Reactor {
     /// The reads walk SQLite's B-trees (else SQL answers them).
     var directReads: Bool { store.directReads }
     var oneColumnSeeks: Bool { store.oneColumnSeeks }
+    var feedFromTail: Bool { store.feedFromTail }
 
     /// `SO_REUSEPORT` listeners on the port: each has its own accept queue (capped at `somaxconn`, 4,096 on the box), so
     /// together they hold a ramp's or a stall's new connections instead of refusing them.
@@ -571,7 +572,7 @@ final class Reactor {
         let s = Int(slot)
         provideBuffer(ring: r, slot: slot)
         let start = rings[r].conns[s].out.count
-        rings[r].conns[s].out.append(repeating: 0, count: Self.headRoom)
+        rings[r].conns[s].out.appendRoom(Self.headRoom)
         return start
     }
 

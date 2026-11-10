@@ -555,7 +555,9 @@ p95/p99 (1.03 / 6.50 s at 93 % CPU).
 numeric `exp`, two-step /feed, checkpointer thread through `PRAGMA wal_checkpoint`, 2 ms group-commit window, 3 workers;
 held, not merged: it didn't beat the merged row) scored **110,000** (10,812 req/s, p95 85.7 / p99 331.6 ms, 0 err, 95 %
 CPU, 82 µs/req, 636 MB, 2026-11-10). CPU-bound: 115,000 and 120,000 failed the 2-minute probe on p95/p99 (627 / 1,041 ms
-and 591 / 1,221 ms at 97–98 % CPU, 0 errors).
+and 591 / 1,221 ms at 97–98 % CPU, 0 errors). Its next commit `c0f58b9` (faster header parser) scored **115,000**
+(11,292 req/s, p95 165.2 / p99 539.9 ms, 0 err, 96 % CPU, 79 µs/req, 996 MB, 2026-11-10); still below the merged row,
+so not merged. 120,000 failed the 2-minute probe on p95/p99 (943 / 1,662 ms at 99 % CPU, 0 errors).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

@@ -615,7 +615,10 @@ serializer on amd64, smaller non-feed buffers, queued requests first) held **271
 269 ms, 0 errors; 300k passed the 2-minute probe but 300k and 285k failed the 5-minute hold on p99, 12.8 s / 1.46 s).
 Still below 276,000, so the row stays at #369. Re-run at `7fb41dd` (2026-11-10: background WAL checkpoints start at
 4,096 frames instead of 8,192) held **260,000** at 88 % CPU (24,946 req/s, p99 621 ms, 0 errors; 270k and 280k failed
-the 2-minute probe on p99, 3.72 s / 1.36 s). Still below 276,000, so the row stays at #369.
+the 2-minute probe on p99, 3.72 s / 1.36 s). Still below 276,000, so the row stays at #369. Re-run at `1ca0c03`
+(2026-11-10: adaptive passive-checkpoint budget of 8,192–16,384 pages) held **266,000** at 90 % CPU (25,444 req/s, p99
+608 ms, 0 errors; 280k passed the 2-minute probe but failed the 5-minute hold on p99, 11.2 s; 290k failed the 2-minute
+probe). Still below 276,000, so the row stays at #369.
 go-gnet-kaikegm is now scored at its follow-up #180 (`372538d`, was 65,000 at #48): it closes the oldest idle
 connections past 55k open, so it no longer hits the limit at 80–93k (88,000 held at 77 % CPU, CPU-bound: 93k failed the
 5-minute hold on p99), but a fast ramp to 120k/160k still fills the fd table and the process exits the same way (89–94 %

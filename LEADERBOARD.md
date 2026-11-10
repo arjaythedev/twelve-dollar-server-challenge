@@ -540,6 +540,10 @@ Follow-up **#381** (`43b79c7`, 30 ms group-commit window by default): **219,000*
 0 err, 78 % CPU, 34 µs/req, 1,385 MB, 2026-11-10); 230,000 passed the 2-minute probe but failed the 5-minute hold on
 p99 (10.5 s, writes stalled ~12–14 s at 81 % CPU, 0 errors), 240,000 failed the 2-minute probe on p95/p99 (214 /
 2,378 ms at 84 % CPU) and 320,000 on connection refused (74 % errors). Not merged (below the merged row).
+Follow-up **#385** (`390df4e`, writer `wal_autocheckpoint=0` plus a passive `wal_checkpoint` after each pass once the WAL
+passes 64 MiB): **250,000** (24,064 req/s, p95 224.9 / p99 803.8 ms, 0 err, 95 % CPU, 36 µs/req, 962 MB, 2026-11-10);
+260,000 failed the 2-minute probe on p95/p99 (524 / 1,139 ms at 98 % CPU, 0 errors), 280,000 on p95/p99 (3,989 /
+8,932 ms at 94 % CPU) and 320,000 on connection refused (74 % errors). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

@@ -101,11 +101,7 @@ final class Out {
         out.len = w - out.base;
     }
 
-    private static final byte[] P_ID = ascii("{\"id\":");
-    private static final byte[] P_BODY = ascii(",\"body\":\"");
     private static final byte[] P_CREATED = ascii("\",\"created_at\":\"");
-    private static final byte[] P_AUTHOR = ascii("\",\"author\":\"");
-    private static final byte[] P_LIKES = ascii("\",\"like_count\":");
 
     // The same constants as words in memory order (the machine is little-endian), written with
     // whole 8-byte stores: the bytes a store writes past a constant are overwritten by what
@@ -123,9 +119,10 @@ final class Out {
     static {
         if (java.nio.ByteOrder.nativeOrder() != java.nio.ByteOrder.LITTLE_ENDIAN) throw new IllegalStateException("big-endian");
     }
-    private static final boolean WORDS = !Boolean.getBoolean("feed.plainpost");
-    private static final boolean VECTOR = Boolean.getBoolean("feed.vector");
-    private static final int VECTOR_MIN = VECTOR ? Vec.width() : Integer.MAX_VALUE;
+    // Strings of a vector's width and more are copied and checked a vector at a time (1-3 % less
+    // CPU per request than eight bytes at a time, measured on x86-64); -Dfeed.scalar=true (a test
+    // knob) keeps to eight bytes.
+    private static final int VECTOR_MIN = Boolean.getBoolean("feed.scalar") ? Integer.MAX_VALUE : Vec.width();
 
     /** Copies the n bytes at from to to, eight at a time, and says whether any of them needs
      * escaping in a JSON string: nonzero if one does. One pass reads each byte once for both. */
@@ -155,7 +152,6 @@ final class Out {
     /** One post object. */
     static void post(Buf out, long id, long body, long bodyLen, long created, long createdLen, long author,
                      long authorLen, long likes) {
-        if (!WORDS) { postBytes(out, id, body, bodyLen, created, createdLen, author, authorLen, likes); return; }
         // the constants (59 bytes), two numbers and the three strings unescaped, and a word of slack
         out.ensure(59 + 40 + bodyLen + createdLen + authorLen + 8);
         long p = out.base + out.len;
@@ -199,31 +195,6 @@ final class Out {
         p += digits(p, likes);
         N.put(p++, '}');
         out.len = p - out.base;
-    }
-
-    /** One post object, a piece at a time. When created_at lies right after the body, as in a
-     * posts record, one scan clears both. */
-    static void postBytes(Buf out, long id, long body, long bodyLen, long created, long createdLen, long author,
-                          long authorLen, long likes) {
-        out.put(P_ID);
-        out.num(id);
-        out.put(P_BODY);
-        boolean plain = created == body + bodyLen ? isPlain(body, bodyLen + createdLen)
-                : isPlain(body, bodyLen) && isPlain(created, createdLen);
-        if (plain) {
-            out.put(body, bodyLen);
-            out.put(P_CREATED);
-            out.put(created, createdLen);
-        } else {
-            text(out, body, bodyLen);
-            out.put(P_CREATED);
-            text(out, created, createdLen);
-        }
-        out.put(P_AUTHOR);
-        text(out, author, authorLen);
-        out.put(P_LIKES);
-        out.num(likes);
-        out.put('}');
     }
 
     static byte[] ascii(String s) { return s.getBytes(java.nio.charset.StandardCharsets.UTF_8); }

@@ -97,11 +97,18 @@ public final class Server {
     // Checkpoints: db.c's thread copies the log back when asked; the policy is here. Past ckStart
     // log frames, ask for a copy. When it is done, hold the write queue (reads go on) and ask
     // again: that copy takes the frames written meanwhile, and once the whole log is copied the
-    // next write starts the log over. Past ckHigh the queue is held too, so the log stays bounded
-    // when the loop leaves the thread no idle time. A hold lasts at most gateUs.
-    static long ckStart = 16384;  // FEED_CK_FRAMES overrides it
-    static long ckHigh = 40960;   // FEED_CK_HIGH overrides it
-    static long gateUs = 200000;  // FEED_GATE_US overrides it
+    // next write starts the log over. Past ckHigh the queue is held too. A hold lasts at most
+    // gateUs, and then writes go on and a later round tries again.
+    //
+    // Measured over five-minute holds with the database on slow devices (device-mapper delay,
+    // 3-10 ms writes, 10-30 ms flushes, 20-40 MB/s): with 4,096-frame cycles (16 MB) and holds of
+    // at most 50 ms the writes' p99 was 53-111 ms, against 188-360 ms with 16,384 frames and
+    // 200 ms, and 246-459 ms with 4,096 frames and 250 ms. A short hold lets the log grow when the
+    // disk cannot keep up (a gigabyte or more after five minutes on the slowest device), which
+    // costs disk space, not latency.
+    static long ckStart = 4096;     // FEED_CK_FRAMES overrides it
+    static long ckHigh = 65536;     // FEED_CK_HIGH overrides it
+    static long gateUs = 50000;     // FEED_GATE_US overrides it
     static int ckPhase;           // 0 idle, 1 copying, 2 copying the tail with writes held
     static boolean gate;
     static long gateSince;
@@ -196,7 +203,7 @@ public final class Server {
         // Test knobs; none is set on the benchmark box.
         writeWindow = envInt("FEED_WRITE_US", 0, 1000000, writeWindow);
         ckStart = envInt("FEED_CK_FRAMES", 64, 1000000, ckStart);
-        ckHigh = envInt("FEED_CK_HIGH", 64, 10000000, ckStart + 24576);
+        ckHigh = envInt("FEED_CK_HIGH", 64, 10000000, Math.max(ckHigh, ckStart * 4));
         gateUs = envInt("FEED_GATE_US", 0, 10000000, gateUs);
         waitNs = envInt("FEED_WAIT_US", 50, 100000, waitNs / 1000) * 1000;
         statsOn = env("FEED_STATS") != null;

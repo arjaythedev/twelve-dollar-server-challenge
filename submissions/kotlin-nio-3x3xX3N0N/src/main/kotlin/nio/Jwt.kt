@@ -78,8 +78,9 @@ class Jwt(secret: String) {
         }
         if (header !is Map<*, *> || header["alg"] != "HS256") return INVALID
         if (payload !is Map<*, *>) return INVALID
+        // SPEC: verify `exp`. A token without a numeric `exp` is rejected, not treated as non-expiring.
         val exp = payload["exp"]
-        if (exp != null && (exp !is Double || exp <= nowSec.toDouble())) return INVALID
+        if (exp !is Double || exp <= nowSec.toDouble()) return INVALID
         val nbf = payload["nbf"]
         if (nbf is Double && nbf > nowSec.toDouble()) return INVALID
 

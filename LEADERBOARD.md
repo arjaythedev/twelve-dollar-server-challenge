@@ -548,6 +548,10 @@ Follow-up **#386** (`6d929d2`, the database opened through SQLite's `unix-excl` 
 140.9 / p99 412.7 ms, 0 err, 96 % CPU, 32 µs/req, 756 MB, 2026-11-10); 290,000 failed the 2-minute probe on p95/p99
 (1,782 / 3,505 ms at 97 % CPU, 0 errors), 300,000 on connection refused (74 % errors) and 320,000 on p95/p99 (1,197 /
 2,285 ms at 99 % CPU). Not merged (below the merged row).
+Follow-up **#387** (`5ae3b71`, writes held up to 5 ms so they share a commit): **260,000** (25,006 req/s, p95 47.2 / p99
+216.1 ms, 0 err, 91 % CPU, 33 µs/req, 877 MB, 2026-11-10); 270,000 failed the 2-minute probe on p95/p99 (545 / 1,270 ms
+at 91 % CPU, 0 errors), 280,000 on p95/p99 (971 / 4,868 ms at 92 % CPU) and 320,000 on connection refused (75 % errors).
+Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

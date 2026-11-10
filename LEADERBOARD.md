@@ -626,7 +626,9 @@ the 2-minute probe on p99, 3.72 s / 1.36 s). Still below 276,000, so the row sta
 probe). Still below 276,000, so the row stays at #369. Re-run at `a898775` (2026-11-10: bulk/tail checkpoint split with
 POSTs held up to 250 ms during the tail, checkpoint worker at nice 5, 64 MiB WAL chunk size) held **260,000** at 91 % CPU
 (24,999 req/s, p99 316 ms, 0 errors; 270k and 280k failed the 2-minute probe on p99, 812 ms / 1.22 s). Still below
-276,000, so the row stays at #369.
+276,000, so the row stays at #369. Re-run at `9b938fb` (2026-11-10: #369's code plus the `a898775` checkpoint change)
+held **270,000** at 92 % CPU (25,867 req/s, p99 118 ms, 0 errors; 280k failed the 2-minute probe on p99, 2.99 s).
+Still below 276,000, so the row stays at #369.
 go-gnet-kaikegm is now scored at its follow-up #180 (`372538d`, was 65,000 at #48): it closes the oldest idle
 connections past 55k open, so it no longer hits the limit at 80–93k (88,000 held at 77 % CPU, CPU-bound: 93k failed the
 5-minute hold on p99), but a fast ramp to 120k/160k still fills the fd table and the process exits the same way (89–94 %

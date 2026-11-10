@@ -279,6 +279,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
 | — | d-arsd-threadedcgi-cyrusmsk | #161 | D (arsd threaded cgi) | **failed** (0: timeouts at 500 users) | | | | | | | | 2026-10-31 |
+| — | typescript-tinyjs-animuni-express | #382 | TypeScript (TinyJS on Bun) | **failed** (0: ~3 % EOF on POSTs at 500 users) | | | | | | | | 2026-11-10 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -771,6 +772,11 @@ committed in this repo.
   probe passed. From 20,000 down to the 500-user floor the app sat at 1–2 % CPU while 75–99 % of requests timed out
   (500 users: 5 req/s, p50 60 s, 11 MB RAM): its fixed worker-thread pool is held by idle keep-alive connections, as
   its README warns. Its sibling #160 (hybrid cgi) is the one scored above.
+- **TypeScript #382 — scored 0** (`a70aa8a`, TinyJS 0.1.1 on Bun, direct): installed, built and passed 42/42, but no
+  probe passed. From 20,000 down to the 500-user floor a flat ~2.8–3.3 % of requests failed with `EOF` (connection
+  closed with no response) at 5–65 % CPU, p99 ≤ 80 ms: ~40 % of `POST /posts/:id/like` and ~35 % of `POST /posts`, 0
+  reads. Each user sends about one request every 11 s, just past Bun's default 10 s `idleTimeout`, so the POSTs likely
+  land on keep-alive sockets the server has just closed (reads are retried by the client, POSTs aren't), as with Go #277.
 - **Go #277 — scored 0 at `26d1785`, then 45,000 at `d9d93f3`, 60,000 at `70145d4`, now 62,000 at `a1d2732`** (net/http, direct): the first run passed 42/42,
   but no probe passed. From 20,000 down to the 500-user floor ~7 % of requests failed with `EOF` (connection closed with
   no response) at 4–45 % CPU: every `POST /posts/:id/like` and ~75–86 % of `POST /posts`, 0 reads. It closed keep-alive

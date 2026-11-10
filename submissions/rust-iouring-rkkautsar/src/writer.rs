@@ -86,10 +86,16 @@ pub fn spawn(
         };
         let mut cache = BatchCache::new(&db);
         let _ = ready.send(());
+        // A commit is a fixed cost, and so is the set of leaf pages it dirties:
+        // measured, a commit writes ~4.3 WAL frames whether it carries 1 row or
+        // 20. Batches averaged 1.3 writes, so the log was being written once
+        // per write instead of once per page. Holding arriving writes briefly
+        // shares a commit between them -- rule 6 allows this as long as each
+        // response waits for its commit, which it does.
         let window_us = std::env::var("WRITE_COALESCE_US")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
-            .unwrap_or(0);
+            .unwrap_or(5_000);
         loop {
             let first = match rx.recv() {
                 Ok(job) => job,

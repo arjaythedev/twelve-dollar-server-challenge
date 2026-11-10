@@ -89,6 +89,7 @@ Writes are SQL: `INSERT … RETURNING id, created_at` and `INSERT … ON CONFLIC
 - **Like counts step the cursor** with `sqlite3BtreeNext`, entry by entry, so no field of a cursor is set from outside (ruling 8). Counting a leaf at a time, as the Rust entry does, costs less per entry; under the load test there is almost nothing to count: at 310,000 users it writes about 270 posts a second (2 % of 29,284 requests/s ÷ 2.17 requests per loop), so the feed's 20 posts are under a tenth of a second old and not liked yet.
 - **One write per commit** through a VFS (above); kensac writes each frame as SQLite does.
 - **Profile-guided and link-time optimized**, SQLite included (kensac builds SQLite at `-O3`).
+- **Rings that are not waited on** are entered only when they have something queued or the kernel flags deferred work, and entered a second time when a newer kernel stopped early (see the five-ring measurements).
 - No crates and no liburing: the ring is set up through system calls.
 
 ## Build
@@ -112,7 +113,38 @@ SQLite options: `THREADSAFE=2` (each connection used by one thread), `DEFAULT_ME
 
 ## Local measurements (not a score)
 
-MEASUREMENTS
+Not the organizer's box: a GitHub-hosted runner (AMD EPYC 9V45, 4 vCPUs, Ubuntu 24.04, kernel 7.0), where this folder is also built and tested on x86-64. Each server is built from its folder by its own `build.sh` and pinned to one vCPU on a fresh seed copy. The load is a native replay of `bench/load.js`'s user model (one keep-alive connection per user, the same request mix) with 40,000 connections whose think times are divided to reach the rate, on the other three vCPUs over loopback: 15 s ramp, 30 s hold, the three servers in turn, round after round. CPU is the server process's user plus system time over the hold, divided by the requests it answered. Loopback puts the client's receive path on the server's vCPU and there is no network card, so read these as a comparison between entries, not as the box's numbers.
+
+One ring (`ulimit -n 65535`), averages over the rounds:
+
+| Offered | Server | Served req/s | CPU | µs/request (user + system) | p95 | p99 |
+|---|---|---:|---:|---:|---:|---:|
+| 33,600 req/s, 3 rounds | rust-iouring-kensac (#264) | 33,605 | 54.3 % | 16.15 (3.34 + 12.80) | 2.3–2.7 ms | 3.5–4.4 ms |
+| | goose-iouring-ahmadsh2007 | 33,610 | 51.8 % | 15.42 (3.28 + 12.14) | 3.3–3.6 ms | 5.9 ms |
+| | **this entry** | 33,601 | 52.1 % | **15.51** (3.21 + 12.29) | 4.4–5.1 ms | 7.9–8.7 ms |
+| 45,800 req/s, 2 rounds | rust-iouring-kensac | 45,832 | 76.3 % | 16.65 | 4.1–7.7 ms | 16–32 ms |
+| | goose-iouring-ahmadsh2007 | 45,862 | 71.8 % | 15.65 | 4.9–6.4 ms | 8–25 ms |
+| | **this entry** | 45,844 | 72.0 % | **15.71** | 5.9–8.7 ms | 10–43 ms |
+| 54,000 req/s, 2 rounds | rust-iouring-kensac | 53,453 | 91.1 % | 17.04 | 37–49 ms | 55–86 ms |
+| | goose-iouring-ahmadsh2007 | 53,836 | 89.5 % | 16.62 | 18–33 ms | 45–47 ms |
+| | **this entry** | 53,918 | 85.8 % | **15.90** | 15–22 ms | 25–45 ms |
+
+The same comparison at 33,600 req/s ran on two other runner CPUs with earlier commits of this folder: 22.18 / 21.39 / 20.81 µs/request (EPYC 7763) and 17.31 / 16.72 / 16.18 (EPYC 9V74), in the table's order. So this entry needs 4 to 6.5 % less CPU per request than the Rust entry it ports, and about what the other Goose entry needs (from 3 % less to 1 % more). Its p95 is higher at low load because 8 % of the requests are writes, and a write waits up to 5 ms for its commit.
+
+Instructions executed per request (callgrind, the same 4,678 requests against fresh seed copies, with the feed in its load-test state: new posts on top, not yet liked): rust-iouring-kensac 32,093, this entry 29,376 (8.5 % fewer). That is all of the difference the language and its compiler can account for, and it is a difference in a quarter of the bill: every server here spends about 79 % of its CPU time in the kernel (system time above). The rest of this entry's gain is the kernel work it avoids: 0.04 file writes per request against 0.36.
+
+Five rings (`ulimit -n 8192`, so the 40,000 connections spread over five rings, as 310,000 do on the box), 2 rounds:
+
+| Offered | Server | Served req/s | CPU | µs/request | p50 | p95 |
+|---|---|---:|---:|---:|---:|---:|
+| 33,600 req/s | rust-iouring-kensac | 33,576 | 54.8 % | 16.32 | 2.9–3.1 ms | 4.4–4.6 ms |
+| | goose-iouring-ahmadsh2007 | 33,578 | 52.3 % | 15.57 | 2.8–2.9 ms | 4.9–5.1 ms |
+| | **this entry** | 33,553 | 51.6 % | **15.38** | 2.8 ms | 5.9–6.1 ms |
+| 54,000 req/s | rust-iouring-kensac | 46,214 | 78.6 % | 17.00 | 156 ms | 197–229 ms |
+| | goose-iouring-ahmadsh2007 | 45,552 | 77.4 % | 16.99 | 172–180 ms | 213–221 ms |
+| | **this entry** | **53,047** | 91.7 % | 17.29 | 14–16 ms | 26–29 ms |
+
+The last three rows are about this runner's kernel (7.0), not the box's (6.8, where none of this was run): newer kernels run only a small batch of a ring's deferred receives in an `io_uring_enter` that asks to wait for nothing (rust-iouring-kensac's README notes the limit too), so a ring that is never waited on falls behind at high rates while its server still has CPU to spare. This entry looks at the ring's task-work flag after such an enter and, when work is left, enters once more asking for up to 4,096 completions with a zero timeout. Where the first enter runs everything, the flag is down and the second never happens.
 
 Behaviour, request for request against rust-iouring-kensac on fresh seed copies: 214 raw-request cases (routing, every token failure, 80 JSON bodies with escapes, surrogate pairs, Unicode trimming, multi-byte 500-character limits, duplicate keys, nesting and invalid UTF-8, pipelining, requests split byte by byte, half-closed connections, malformed framing) give the same status and body in all but four, by intent: this entry closes after `Connection: close` and HTTP/1.0 (three cases), and answers 400 to a 17 KB request head.
 

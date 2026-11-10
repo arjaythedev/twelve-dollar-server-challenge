@@ -254,10 +254,10 @@ void net_enter(int32_t ri, int32_t wait, int64_t ns) {
 
 /* A ring that is not waited on: submits what is queued and runs the completions that are due,
  * without sleeping. The kernel says in the ring's flags whether deferred work is pending, so a
- * ring with nothing queued and nothing pending costs no system call. Newer kernels (6.13 on) run
- * only about 20 deferred receives in an enter that asks to wait for none; when the flag is still
- * up afterwards, a second enter asks for many completions with a zero timeout, which lets the
- * kernel run them all and returns at once. */
+ * ring with nothing queued and nothing pending costs no system call. Newer kernels run only a
+ * small batch of deferred receives in an enter that asks to wait for none; when the flag is
+ * still up afterwards, a second enter asks for many completions with a zero timeout, which lets
+ * the kernel run them all and returns at once. */
 #define SWEEP_MAX 4096
 void net_sweep(int32_t ri) {
   ring_t *r = &rings[ri];

@@ -33,20 +33,47 @@ final class N {
     static void put(long a, int v) { M.set(ValueLayout.JAVA_BYTE, a, (byte) v); }
     static long getLong(long a) { return M.get(JAVA_LONG, a); }
     static int getInt(long a) { return M.get(JAVA_INT, a); }
-    static void copy(long from, long to, long n) { MemorySegment.copy(M, from, M, to, n); }
+    // Most copies here are a few to a few hundred bytes (a header, a constant, a username, a
+    // post's body): those are moved eight bytes at a time in place, the last word overlapping the
+    // one before it, instead of going through the JDK's copy stubs. The ranges never overlap.
+    private static final int SMALL = Boolean.getBoolean("feed.stubcopy") ? -1 : 256;
+    private static final java.lang.invoke.VarHandle BYTES_AS_LONG =
+            java.lang.invoke.MethodHandles.byteArrayViewVarHandle(long[].class, java.nio.ByteOrder.nativeOrder());
+
+    static void copy(long from, long to, long n) {
+        if (SMALL < 0) { MemorySegment.copy(M, from, M, to, n); return; }
+        if (n >= 8 && n <= SMALL) {
+            long last = n - 8;
+            for (long i = 0; i < last; i += 8) M.set(LONG_U, to + i, M.get(LONG_U, from + i));
+            M.set(LONG_U, to + last, M.get(LONG_U, from + last));
+        } else if (n < 8) {
+            for (long i = 0; i < n; i++) M.set(ValueLayout.JAVA_BYTE, to + i, M.get(ValueLayout.JAVA_BYTE, from + i));
+        } else {
+            MemorySegment.copy(M, from, M, to, n);
+        }
+    }
+
     static void copy(byte[] from, int at, long to, int n) {
-        MemorySegment.copy(from, at, M, ValueLayout.JAVA_BYTE, to, n);
+        if (SMALL < 0) { MemorySegment.copy(from, at, M, ValueLayout.JAVA_BYTE, to, n); return; }
+        if (n >= 8 && n <= SMALL) {
+            int last = n - 8;
+            for (int i = 0; i < last; i += 8) M.set(LONG_U, to + i, (long) BYTES_AS_LONG.get(from, at + i));
+            M.set(LONG_U, to + last, (long) BYTES_AS_LONG.get(from, at + last));
+        } else if (n < 8) {
+            for (int i = 0; i < n; i++) M.set(ValueLayout.JAVA_BYTE, to + i, from[at + i]);
+        } else {
+            MemorySegment.copy(from, at, M, ValueLayout.JAVA_BYTE, to, n);
+        }
     }
 
     private static final Linker LINKER = Linker.nativeLinker();
-    private static final SymbolLookup LIB = SymbolLookup.libraryLookup(
-            Path.of(System.getProperty("feed.lib", "bin/libfeed.so")), Arena.global());
     private static final Linker.Option[] CRITICAL = { Linker.Option.critical(false) };
     private static final Linker.Option[] PLAIN = {};
 
-    private static MethodHandle fn(String name, boolean critical, FunctionDescriptor d) {
-        MemorySegment at = LIB.find(name).orElseThrow(() -> new IllegalStateException("libfeed.so has no " + name));
-        return LINKER.downcallHandle(at, d, critical ? CRITICAL : PLAIN);
+    /** A downcall handle that takes the function's address as its first argument. The handles
+     * depend on nothing loaded at run time, so a native image can build them in advance. */
+    private static MethodHandle fn(boolean critical, FunctionDescriptor d) {
+        return LINKER.downcallHandle(d, critical ? CRITICAL : PLAIN);
     }
 
     private static FunctionDescriptor v(java.lang.foreign.MemoryLayout... args) { return FunctionDescriptor.ofVoid(args); }
@@ -57,104 +84,158 @@ final class N {
 
     // ---- net.c
 
-    private static final MethodHandle RING_ADD = fn("net_ring_add", false, i(JAVA_LONG));
-    private static final MethodHandle RX_BASE = fn("net_rx_base", true, l(JAVA_INT));
-    private static final MethodHandle ENTER = fn("net_enter", false, v(JAVA_INT, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle SWEEP = fn("net_sweep", true, v(JAVA_INT));
-    private static final MethodHandle REAP = fn("net_reap", true, l(JAVA_INT, JAVA_LONG));
-    private static final MethodHandle ACCEPT = fn("net_accept", true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle RECV = fn("net_recv", true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle SEND = fn("net_send", true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle SENT = fn("net_sent", true, i(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle CLOSE = fn("net_close", true, v(JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
-    private static final MethodHandle RX_DROP = fn("net_rx_drop", true, v(JAVA_INT, JAVA_INT));
-    private static final MethodHandle RX_KEEP = fn("net_rx_keep", true, l(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
-    private static final MethodHandle KEEP = fn("net_keep", true, v(JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
-    private static final MethodHandle KEPT_TAKE = fn("net_kept_take", true, l(JAVA_INT, JAVA_INT));
-    private static final MethodHandle CHUNK_FREE = fn("net_chunk_free", true, v(JAVA_LONG));
-    private static final MethodHandle OUT_RESERVE = fn("net_out_reserve", true, l(JAVA_INT, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle OUT_LEN = fn("net_out_len", true, l(JAVA_INT, JAVA_INT));
-    private static final MethodHandle OUT_CUT = fn("net_out_cut", true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
-    private static final MethodHandle FREE = fn("net_free", true, v(JAVA_INT, JAVA_INT));
-    private static final MethodHandle DROP_OUTPUT = fn("net_drop_output", true, v(JAVA_INT, JAVA_INT));
-    private static final MethodHandle DROP_KEPT = fn("net_drop_kept", true, v(JAVA_INT, JAVA_INT));
-    private static final MethodHandle LISTEN = fn("net_listen", false, i(JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
-    private static final MethodHandle SLOT_LIMIT = fn("net_slot_limit", false, l());
-    private static final MethodHandle LOCK_CODE = fn("net_lock_code", false, l());
-    private static final MethodHandle TIME_NS = fn("net_time_ns", true, l());
+    private static final MethodHandle RING_ADD = fn(false, i(JAVA_LONG));
+    private static final MethodHandle RX_BASE = fn(true, l(JAVA_INT));
+    private static final MethodHandle ENTER = fn(false, v(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle SWEEP = fn(true, v(JAVA_INT));
+    private static final MethodHandle REAP = fn(true, l(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle ACCEPT = fn(true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle RECV = fn(true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle SEND = fn(true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle SENT = fn(true, i(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle CLOSE = fn(true, v(JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle RX_DROP = fn(true, v(JAVA_INT, JAVA_INT));
+    private static final MethodHandle RX_KEEP = fn(true, l(JAVA_INT, JAVA_INT, JAVA_INT, JAVA_INT));
+    private static final MethodHandle KEEP = fn(true, v(JAVA_INT, JAVA_INT, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle KEPT_TAKE = fn(true, l(JAVA_INT, JAVA_INT));
+    private static final MethodHandle CHUNK_FREE = fn(true, v(JAVA_LONG));
+    private static final MethodHandle OUT_RESERVE = fn(true, l(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle OUT_LEN = fn(true, l(JAVA_INT, JAVA_INT));
+    private static final MethodHandle OUT_CUT = fn(true, v(JAVA_INT, JAVA_INT, JAVA_LONG));
+    private static final MethodHandle FREE = fn(true, v(JAVA_INT, JAVA_INT));
+    private static final MethodHandle DROP_OUTPUT = fn(true, v(JAVA_INT, JAVA_INT));
+    private static final MethodHandle DROP_KEPT = fn(true, v(JAVA_INT, JAVA_INT));
+    private static final MethodHandle LISTEN = fn(false, i(JAVA_LONG, JAVA_LONG, JAVA_LONG, JAVA_INT));
+    private static final MethodHandle SLOT_LIMIT = fn(false, l());
+    private static final MethodHandle LOCK_CODE = fn(false, l());
+    private static final MethodHandle TIME_NS = fn(true, l());
 
-    static int ringAdd(long slots) { try { return (int) RING_ADD.invokeExact(slots); } catch (Throwable t) { throw fail(t); } }
-    static long rxBase(int r) { try { return (long) RX_BASE.invokeExact(r); } catch (Throwable t) { throw fail(t); } }
-    static void enter(int r, int wait, long ns) { try { ENTER.invokeExact(r, wait, ns); } catch (Throwable t) { throw fail(t); } }
-    static void sweep(int r) { try { SWEEP.invokeExact(r); } catch (Throwable t) { throw fail(t); } }
-    static long reap(int r, long out) { try { return (long) REAP.invokeExact(r, out); } catch (Throwable t) { throw fail(t); } }
-    static void accept(int r, int listener, long ud) { try { ACCEPT.invokeExact(r, listener, ud); } catch (Throwable t) { throw fail(t); } }
-    static void recv(int r, int slot, long ud) { try { RECV.invokeExact(r, slot, ud); } catch (Throwable t) { throw fail(t); } }
-    static void send(int r, int slot, long ud) { try { SEND.invokeExact(r, slot, ud); } catch (Throwable t) { throw fail(t); } }
-    static int sent(int r, int slot, int n, long ud) { try { return (int) SENT.invokeExact(r, slot, n, ud); } catch (Throwable t) { throw fail(t); } }
-    static void close(int r, int slot, long udShut, long udClose) { try { CLOSE.invokeExact(r, slot, udShut, udClose); } catch (Throwable t) { throw fail(t); } }
-    static void rxDrop(int r, int bid) { try { RX_DROP.invokeExact(r, bid); } catch (Throwable t) { throw fail(t); } }
-    static long rxKeep(int r, int slot, int bid, int len) { try { return (long) RX_KEEP.invokeExact(r, slot, bid, len); } catch (Throwable t) { throw fail(t); } }
-    static void keep(int r, int slot, long p, long n) { try { KEEP.invokeExact(r, slot, p, n); } catch (Throwable t) { throw fail(t); } }
-    static long keptTake(int r, int slot) { try { return (long) KEPT_TAKE.invokeExact(r, slot); } catch (Throwable t) { throw fail(t); } }
-    static void chunkFree(long c) { try { CHUNK_FREE.invokeExact(c); } catch (Throwable t) { throw fail(t); } }
-    static long outReserve(int r, int slot, long n) { try { return (long) OUT_RESERVE.invokeExact(r, slot, n); } catch (Throwable t) { throw fail(t); } }
-    static long outLen(int r, int slot) { try { return (long) OUT_LEN.invokeExact(r, slot); } catch (Throwable t) { throw fail(t); } }
-    static void outCut(int r, int slot, long len) { try { OUT_CUT.invokeExact(r, slot, len); } catch (Throwable t) { throw fail(t); } }
-    static void free(int r, int slot) { try { FREE.invokeExact(r, slot); } catch (Throwable t) { throw fail(t); } }
-    static void dropOutput(int r, int slot) { try { DROP_OUTPUT.invokeExact(r, slot); } catch (Throwable t) { throw fail(t); } }
-    static void dropKept(int r, int slot) { try { DROP_KEPT.invokeExact(r, slot); } catch (Throwable t) { throw fail(t); } }
-    static int listen(long host, long len, long port, int n) { try { return (int) LISTEN.invokeExact(host, len, port, n); } catch (Throwable t) { throw fail(t); } }
-    static long slotLimit() { try { return (long) SLOT_LIMIT.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static long lockCode() { try { return (long) LOCK_CODE.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static long timeNs() { try { return (long) TIME_NS.invokeExact(); } catch (Throwable t) { throw fail(t); } }
+    static int ringAdd(long slots) { try { return (int) RING_ADD.invokeExact(A.RING_ADD, slots); } catch (Throwable t) { throw fail(t); } }
+    static long rxBase(int r) { try { return (long) RX_BASE.invokeExact(A.RX_BASE, r); } catch (Throwable t) { throw fail(t); } }
+    static void enter(int r, int wait, long ns) { try { ENTER.invokeExact(A.ENTER, r, wait, ns); } catch (Throwable t) { throw fail(t); } }
+    static void sweep(int r) { try { SWEEP.invokeExact(A.SWEEP, r); } catch (Throwable t) { throw fail(t); } }
+    static long reap(int r, long out) { try { return (long) REAP.invokeExact(A.REAP, r, out); } catch (Throwable t) { throw fail(t); } }
+    static void accept(int r, int listener, long ud) { try { ACCEPT.invokeExact(A.ACCEPT, r, listener, ud); } catch (Throwable t) { throw fail(t); } }
+    static void recv(int r, int slot, long ud) { try { RECV.invokeExact(A.RECV, r, slot, ud); } catch (Throwable t) { throw fail(t); } }
+    static void send(int r, int slot, long ud) { try { SEND.invokeExact(A.SEND, r, slot, ud); } catch (Throwable t) { throw fail(t); } }
+    static int sent(int r, int slot, int n, long ud) { try { return (int) SENT.invokeExact(A.SENT, r, slot, n, ud); } catch (Throwable t) { throw fail(t); } }
+    static void close(int r, int slot, long udShut, long udClose) { try { CLOSE.invokeExact(A.CLOSE, r, slot, udShut, udClose); } catch (Throwable t) { throw fail(t); } }
+    static void rxDrop(int r, int bid) { try { RX_DROP.invokeExact(A.RX_DROP, r, bid); } catch (Throwable t) { throw fail(t); } }
+    static long rxKeep(int r, int slot, int bid, int len) { try { return (long) RX_KEEP.invokeExact(A.RX_KEEP, r, slot, bid, len); } catch (Throwable t) { throw fail(t); } }
+    static void keep(int r, int slot, long p, long n) { try { KEEP.invokeExact(A.KEEP, r, slot, p, n); } catch (Throwable t) { throw fail(t); } }
+    static long keptTake(int r, int slot) { try { return (long) KEPT_TAKE.invokeExact(A.KEPT_TAKE, r, slot); } catch (Throwable t) { throw fail(t); } }
+    static void chunkFree(long c) { try { CHUNK_FREE.invokeExact(A.CHUNK_FREE, c); } catch (Throwable t) { throw fail(t); } }
+    static long outReserve(int r, int slot, long n) { try { return (long) OUT_RESERVE.invokeExact(A.OUT_RESERVE, r, slot, n); } catch (Throwable t) { throw fail(t); } }
+    static long outLen(int r, int slot) { try { return (long) OUT_LEN.invokeExact(A.OUT_LEN, r, slot); } catch (Throwable t) { throw fail(t); } }
+    static void outCut(int r, int slot, long len) { try { OUT_CUT.invokeExact(A.OUT_CUT, r, slot, len); } catch (Throwable t) { throw fail(t); } }
+    static void free(int r, int slot) { try { FREE.invokeExact(A.FREE, r, slot); } catch (Throwable t) { throw fail(t); } }
+    static void dropOutput(int r, int slot) { try { DROP_OUTPUT.invokeExact(A.DROP_OUTPUT, r, slot); } catch (Throwable t) { throw fail(t); } }
+    static void dropKept(int r, int slot) { try { DROP_KEPT.invokeExact(A.DROP_KEPT, r, slot); } catch (Throwable t) { throw fail(t); } }
+    static int listen(long host, long len, long port, int n) { try { return (int) LISTEN.invokeExact(A.LISTEN, host, len, port, n); } catch (Throwable t) { throw fail(t); } }
+    static long slotLimit() { try { return (long) SLOT_LIMIT.invokeExact(A.SLOT_LIMIT); } catch (Throwable t) { throw fail(t); } }
+    static long lockCode() { try { return (long) LOCK_CODE.invokeExact(A.LOCK_CODE); } catch (Throwable t) { throw fail(t); } }
+    static long timeNs() { try { return (long) TIME_NS.invokeExact(A.TIME_NS); } catch (Throwable t) { throw fail(t); } }
 
     // ---- db.c
 
-    private static final MethodHandle IO = fn("db_io", false, l());
-    private static final MethodHandle ERROR = fn("db_error", false, l());
-    private static final MethodHandle OPEN = fn("db_open", false, i(JAVA_LONG, JAVA_LONG));
-    private static final MethodHandle BEGIN = fn("db_begin", true, i());
-    private static final MethodHandle COMMIT = fn("db_commit", false, i());
-    private static final MethodHandle SEEK = fn("db_seek", true, i(JAVA_INT, JAVA_LONG));
-    private static final MethodHandle SEEK_GE = fn("db_seek_ge", true, i(JAVA_INT, JAVA_LONG));
-    private static final MethodHandle FIRST = fn("db_first", true, i(JAVA_INT));
-    private static final MethodHandle NEXT = fn("db_next", true, i(JAVA_INT));
-    private static final MethodHandle REC = fn("db_rec", true, l(JAVA_INT));
-    private static final MethodHandle ADD_POST = fn("db_add_post", false, i(JAVA_LONG, JAVA_LONG, JAVA_LONG));
-    private static final MethodHandle ADD_LIKE = fn("db_add_like", false, i(JAVA_LONG, JAVA_LONG));
-    private static final MethodHandle PING = fn("db_ping", true, i());
-    private static final MethodHandle FEED_STEP = fn("db_feed_step", false, i());
-    private static final MethodHandle FEED_RESET = fn("db_feed_reset", false, v());
-    private static final MethodHandle CK_ASK = fn("db_ck_ask", false, v());
-    private static final MethodHandle CK_POLL = fn("db_ck_poll", true, i());
-    private static final MethodHandle WAL_FRAMES = fn("db_wal_frames", true, l());
-    private static final MethodHandle WAL_RESTARTS = fn("db_wal_restarts", true, v());
+    private static final MethodHandle IO = fn(false, l());
+    private static final MethodHandle ERROR = fn(false, l());
+    private static final MethodHandle OPEN = fn(false, i(JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle BEGIN = fn(true, i());
+    private static final MethodHandle COMMIT = fn(false, i());
+    private static final MethodHandle SEEK = fn(true, i(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle SEEK_GE = fn(true, i(JAVA_INT, JAVA_LONG));
+    private static final MethodHandle FIRST = fn(true, i(JAVA_INT));
+    private static final MethodHandle NEXT = fn(true, i(JAVA_INT));
+    private static final MethodHandle REC = fn(true, l(JAVA_INT));
+    private static final MethodHandle ADD_POST = fn(false, i(JAVA_LONG, JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle ADD_LIKE = fn(false, i(JAVA_LONG, JAVA_LONG));
+    private static final MethodHandle PING = fn(true, i());
+    private static final MethodHandle FEED_STEP = fn(false, i());
+    private static final MethodHandle FEED_RESET = fn(false, v());
+    private static final MethodHandle CK_ASK = fn(false, v());
+    private static final MethodHandle CK_POLL = fn(true, i());
+    private static final MethodHandle WAL_FRAMES = fn(true, l());
+    private static final MethodHandle WAL_RESTARTS = fn(true, v());
 
-    /** db.c's feed_io_t, at fixed offsets (see feed.h). */
-    static final long IO_ADDR = dbIo();
-    static final long IO_LEN = IO_ADDR, IO_ID = IO_ADDR + 8, IO_LIKES = IO_ADDR + 16, IO_TEXT = IO_ADDR + 24,
-            IO_TEXT_LEN = IO_ADDR + 48;
+    /** The functions' addresses, found when the library is loaded at run time, and where db.c's
+     * feed_io_t is, with its fields at fixed offsets (see feed.h). */
+    static final class A {
+        private static final SymbolLookup LIB = SymbolLookup.libraryLookup(
+                Path.of(System.getProperty("feed.lib", "bin/libfeed.so")), Arena.global());
 
-    private static long dbIo() { try { return (long) IO.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static long dbError() { try { return (long) ERROR.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static int open(long path, long len) { try { return (int) OPEN.invokeExact(path, len); } catch (Throwable t) { throw fail(t); } }
-    static int begin() { try { return (int) BEGIN.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static int commit() { try { return (int) COMMIT.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static int seek(int tree, long key) { try { return (int) SEEK.invokeExact(tree, key); } catch (Throwable t) { throw fail(t); } }
-    static int seekGe(int tree, long key) { try { return (int) SEEK_GE.invokeExact(tree, key); } catch (Throwable t) { throw fail(t); } }
-    static int first(int tree) { try { return (int) FIRST.invokeExact(tree); } catch (Throwable t) { throw fail(t); } }
-    static int next(int tree) { try { return (int) NEXT.invokeExact(tree); } catch (Throwable t) { throw fail(t); } }
-    static long rec(int tree) { try { return (long) REC.invokeExact(tree); } catch (Throwable t) { throw fail(t); } }
-    static int addPost(long uid, long body, long len) { try { return (int) ADD_POST.invokeExact(uid, body, len); } catch (Throwable t) { throw fail(t); } }
-    static int addLike(long uid, long postId) { try { return (int) ADD_LIKE.invokeExact(uid, postId); } catch (Throwable t) { throw fail(t); } }
-    static int ping() { try { return (int) PING.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static int feedStep() { try { return (int) FEED_STEP.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static void feedReset() { try { FEED_RESET.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static void ckAsk() { try { CK_ASK.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static int ckPoll() { try { return (int) CK_POLL.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static long walFrames() { try { return (long) WAL_FRAMES.invokeExact(); } catch (Throwable t) { throw fail(t); } }
-    static void walRestarts() { try { WAL_RESTARTS.invokeExact(); } catch (Throwable t) { throw fail(t); } }
+        private static MemorySegment sym(String name) {
+            return LIB.find(name).orElseThrow(() -> new IllegalStateException("libfeed.so has no " + name));
+        }
+
+        static final MemorySegment RING_ADD = sym("net_ring_add");
+        static final MemorySegment RX_BASE = sym("net_rx_base");
+        static final MemorySegment ENTER = sym("net_enter");
+        static final MemorySegment SWEEP = sym("net_sweep");
+        static final MemorySegment REAP = sym("net_reap");
+        static final MemorySegment ACCEPT = sym("net_accept");
+        static final MemorySegment RECV = sym("net_recv");
+        static final MemorySegment SEND = sym("net_send");
+        static final MemorySegment SENT = sym("net_sent");
+        static final MemorySegment CLOSE = sym("net_close");
+        static final MemorySegment RX_DROP = sym("net_rx_drop");
+        static final MemorySegment RX_KEEP = sym("net_rx_keep");
+        static final MemorySegment KEEP = sym("net_keep");
+        static final MemorySegment KEPT_TAKE = sym("net_kept_take");
+        static final MemorySegment CHUNK_FREE = sym("net_chunk_free");
+        static final MemorySegment OUT_RESERVE = sym("net_out_reserve");
+        static final MemorySegment OUT_LEN = sym("net_out_len");
+        static final MemorySegment OUT_CUT = sym("net_out_cut");
+        static final MemorySegment FREE = sym("net_free");
+        static final MemorySegment DROP_OUTPUT = sym("net_drop_output");
+        static final MemorySegment DROP_KEPT = sym("net_drop_kept");
+        static final MemorySegment LISTEN = sym("net_listen");
+        static final MemorySegment SLOT_LIMIT = sym("net_slot_limit");
+        static final MemorySegment LOCK_CODE = sym("net_lock_code");
+        static final MemorySegment TIME_NS = sym("net_time_ns");
+        static final MemorySegment IO = sym("db_io");
+        static final MemorySegment ERROR = sym("db_error");
+        static final MemorySegment OPEN = sym("db_open");
+        static final MemorySegment BEGIN = sym("db_begin");
+        static final MemorySegment COMMIT = sym("db_commit");
+        static final MemorySegment SEEK = sym("db_seek");
+        static final MemorySegment SEEK_GE = sym("db_seek_ge");
+        static final MemorySegment FIRST = sym("db_first");
+        static final MemorySegment NEXT = sym("db_next");
+        static final MemorySegment REC = sym("db_rec");
+        static final MemorySegment ADD_POST = sym("db_add_post");
+        static final MemorySegment ADD_LIKE = sym("db_add_like");
+        static final MemorySegment PING = sym("db_ping");
+        static final MemorySegment FEED_STEP = sym("db_feed_step");
+        static final MemorySegment FEED_RESET = sym("db_feed_reset");
+        static final MemorySegment CK_ASK = sym("db_ck_ask");
+        static final MemorySegment CK_POLL = sym("db_ck_poll");
+        static final MemorySegment WAL_FRAMES = sym("db_wal_frames");
+        static final MemorySegment WAL_RESTARTS = sym("db_wal_restarts");
+
+        static final long IO_LEN = dbIo(), IO_ID = IO_LEN + 8, IO_LIKES = IO_LEN + 16, IO_TEXT = IO_LEN + 24,
+                IO_TEXT_LEN = IO_LEN + 48;
+    }
+
+    private static long dbIo() { try { return (long) IO.invokeExact(A.IO); } catch (Throwable t) { throw fail(t); } }
+    static long dbError() { try { return (long) ERROR.invokeExact(A.ERROR); } catch (Throwable t) { throw fail(t); } }
+    static int open(long path, long len) { try { return (int) OPEN.invokeExact(A.OPEN, path, len); } catch (Throwable t) { throw fail(t); } }
+    static int begin() { try { return (int) BEGIN.invokeExact(A.BEGIN); } catch (Throwable t) { throw fail(t); } }
+    static int commit() { try { return (int) COMMIT.invokeExact(A.COMMIT); } catch (Throwable t) { throw fail(t); } }
+    static int seek(int tree, long key) { try { return (int) SEEK.invokeExact(A.SEEK, tree, key); } catch (Throwable t) { throw fail(t); } }
+    static int seekGe(int tree, long key) { try { return (int) SEEK_GE.invokeExact(A.SEEK_GE, tree, key); } catch (Throwable t) { throw fail(t); } }
+    static int first(int tree) { try { return (int) FIRST.invokeExact(A.FIRST, tree); } catch (Throwable t) { throw fail(t); } }
+    static int next(int tree) { try { return (int) NEXT.invokeExact(A.NEXT, tree); } catch (Throwable t) { throw fail(t); } }
+    static long rec(int tree) { try { return (long) REC.invokeExact(A.REC, tree); } catch (Throwable t) { throw fail(t); } }
+    static int addPost(long uid, long body, long len) { try { return (int) ADD_POST.invokeExact(A.ADD_POST, uid, body, len); } catch (Throwable t) { throw fail(t); } }
+    static int addLike(long uid, long postId) { try { return (int) ADD_LIKE.invokeExact(A.ADD_LIKE, uid, postId); } catch (Throwable t) { throw fail(t); } }
+    static int ping() { try { return (int) PING.invokeExact(A.PING); } catch (Throwable t) { throw fail(t); } }
+    static int feedStep() { try { return (int) FEED_STEP.invokeExact(A.FEED_STEP); } catch (Throwable t) { throw fail(t); } }
+    static void feedReset() { try { FEED_RESET.invokeExact(A.FEED_RESET); } catch (Throwable t) { throw fail(t); } }
+    static void ckAsk() { try { CK_ASK.invokeExact(A.CK_ASK); } catch (Throwable t) { throw fail(t); } }
+    static int ckPoll() { try { return (int) CK_POLL.invokeExact(A.CK_POLL); } catch (Throwable t) { throw fail(t); } }
+    static long walFrames() { try { return (long) WAL_FRAMES.invokeExact(A.WAL_FRAMES); } catch (Throwable t) { throw fail(t); } }
+    static void walRestarts() { try { WAL_RESTARTS.invokeExact(A.WAL_RESTARTS); } catch (Throwable t) { throw fail(t); } }
 
     /** The length of a NUL-terminated C string. */
     static int cstrlen(long p) {

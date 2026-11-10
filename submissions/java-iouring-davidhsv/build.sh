@@ -17,8 +17,9 @@ if [[ ! -f .deps/sqlite3.c ]]; then
   unzip -o -j -q .deps/$SQ.zip -d .deps "$SQ/sqlite3.c" "$SQ/sqlite3.h"
 fi
 
-rm -rf .build/classes
+rm -rf .build/classes bin/server.aot
 "$java_home/bin/javac" --release 27 -proc:none -Xlint:all,-restricted -Werror -d .build/classes src/*.java
+"$java_home/bin/jar" --create --file bin/server.jar -C .build/classes .
 ln -sfn "$java_home/bin/java" bin/server
 
 cc=${CC:-gcc}
@@ -58,7 +59,9 @@ if [[ ${PGO:-1} == 1 ]]; then
   profile=$PWD/.build/profile
   rm -rf "$profile"
   build -fprofile-generate="$profile" -fprofile-update=prefer-atomic
-  if JAVA_HOME=$java_home python3 train/train.py ./start.sh; then
+  aot=()
+  if [[ ${AOT:-0} == 1 ]]; then aot=(FEED_JVM_FLAGS="-XX:AOTCacheOutput=$PWD/bin/server.aot"); fi
+  if env "${aot[@]}" JAVA_HOME=$java_home python3 train/train.py ./start.sh; then
     build -fprofile-use="$profile" -fprofile-correction -fprofile-partial-training -Wno-missing-profile
   else
     echo 'profile training failed: building without a profile' >&2

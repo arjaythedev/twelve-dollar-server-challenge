@@ -223,7 +223,7 @@ final class Api {
     static long indexKey(int tree) {
         long r = N.rec(tree);
         if (r == 0) { intOk = false; return 0; }
-        long len = N.getLong(N.IO_LEN);
+        long len = N.getLong(N.A.IO_LEN);
         if (len >= 3 && len <= 24) {
             int at = N.u(r), t = N.u(r + 1);
             if (at >= 2 && at <= 16 && t <= 9) {
@@ -261,7 +261,7 @@ final class Api {
         int at = N.seek(USERS, uid);
         if (at != 1) return at;
         long r = N.rec(USERS);
-        if (r == 0 || !columns(r, N.getLong(N.IO_LEN), 2) || !isText(ct[1])) return -1;
+        if (r == 0 || !columns(r, N.getLong(N.A.IO_LEN), 2) || !isText(ct[1])) return -1;
         authorAt = cs[1];
         authorLen = ce[1] - cs[1];
         return 1;
@@ -277,7 +277,7 @@ final class Api {
         // The post's record stays on its page while the other cursors move.
         long r = N.rec(POSTS);
         // posts: id (the rowid, stored as NULL), user_id, body, created_at
-        if (r == 0 || !columns(r, N.getLong(N.IO_LEN), 4) || !isText(ct[2]) || !isText(ct[3])) { fixed(ci, R_500); return; }
+        if (r == 0 || !columns(r, N.getLong(N.A.IO_LEN), 4) || !isText(ct[2]) || !isText(ct[3])) { fixed(ci, R_500); return; }
         long b0 = cs[2], b1 = ce[2], c1 = ce[3];
         long uid = intColumn(ct[1], cs[1]);
         if (!intOk) { fixed(ci, R_500); return; }
@@ -313,7 +313,7 @@ final class Api {
         while (at == 1 && nrows < FEED_LEN) {
             long r = N.rec(FEED);
             // the index: created_at, id, rowid
-            if (r == 0 || !columns(r, N.getLong(N.IO_LEN), 2)) return -1;
+            if (r == 0 || !columns(r, N.getLong(N.A.IO_LEN), 2)) return -1;
             long id = intColumn(ct[1], cs[1]);
             if (!intOk) return -1;
             rId[nrows] = id;
@@ -336,7 +336,7 @@ final class Api {
             if (found < 0) return -1;
             if (found == 0) return 0;  // the index and the table disagree
             long r = N.rec(POSTS);
-            if (r == 0 || !columns(r, N.getLong(N.IO_LEN), 4) || !isText(ct[2]) || !isText(ct[3])) return -1;
+            if (r == 0 || !columns(r, N.getLong(N.A.IO_LEN), 4) || !isText(ct[2]) || !isText(ct[3])) return -1;
             long uid = intColumn(ct[1], cs[1]);
             if (!intOk) return -1;
             rUid[row] = uid;
@@ -414,9 +414,9 @@ final class Api {
             if (st < 0) return false;
             if (!first) body.put(',');
             first = false;
-            long tx = N.IO_TEXT, tl = N.IO_TEXT_LEN;
-            Out.post(body, N.getLong(N.IO_ID), N.getLong(tx), N.getLong(tl), N.getLong(tx + 8), N.getLong(tl + 8),
-                    N.getLong(tx + 16), N.getLong(tl + 16), N.getLong(N.IO_LIKES));
+            long tx = N.A.IO_TEXT, tl = N.A.IO_TEXT_LEN;
+            Out.post(body, N.getLong(N.A.IO_ID), N.getLong(tx), N.getLong(tl), N.getLong(tx + 8), N.getLong(tl + 8),
+                    N.getLong(tx + 16), N.getLong(tl + 16), N.getLong(N.A.IO_LIKES));
         }
     }
 
@@ -499,7 +499,7 @@ final class Api {
         if (N.addPost(uid, txt, txtLen) != 0) { fixed(ci, R_500); return; }
         body.clear();
         body.put(J_POST);
-        Out.post(body, N.getLong(N.IO_ID), txt, txtLen, N.getLong(N.IO_TEXT), N.getLong(N.IO_TEXT_LEN), author,
+        Out.post(body, N.getLong(N.A.IO_ID), txt, txtLen, N.getLong(N.A.IO_TEXT), N.getLong(N.A.IO_TEXT_LEN), author,
                 authorLen, 0);
         body.put('}');
         answer(ci, H_201);

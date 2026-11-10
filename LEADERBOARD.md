@@ -163,9 +163,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 96 | zig-usockets-tbsvttr | #25 | Zig (uSockets) | **110,000** | 10,442 | 335 | 721 | 0.00 | 90 | 80 | 188 | 2026-10-26 |
 | 97 | c-epoll-TheFirstIstari | #64 | C (epoll) | **107,000** | 10,493 | 212 | 409 | 0.94 | 78 | 69 | 169 | 2026-10-21 |
 | 98 | java-nio-stohirov | #88 | Java (FFM epoll) | **102,000** | 10,023 | 86 | 128 | 0.85 | 66 | 61 | 555 | 2026-10-21 |
-| 99 | d-eventcore-cyrusmsk | #165 | D (eventcore) | **98,000** | 9,610 | 109 | 750 | 0.00 | 85 | 82 | 475 | 2026-11-01 |
-| 100 | node-uwebsockets-zahidcakici | #102 | Node (uWebSockets) | **97,000** | 9,471 | 264 | 484 | 0.00 | 92 | 90 | 336 | 2026-10-21 |
-| 101 | saad-web-jakobsaadbye | #375 | Saad (native via LLVM, 4 SO_REUSEPORT processes) | **93,000** | 9,114 | 218.3 | 590.5 | 0.00 | 95 | 97 | 1,434 | 2026-11-09 |
+| 99 | saad-web-jakobsaadbye | #389 | Saad (native via LLVM, 4 SO_REUSEPORT processes) | **100,000** ᴶ | 9,838 | 35.0 | 160.4 | 0.00 | 93 | 88 | 703 | 2026-11-10 |
+| 100 | d-eventcore-cyrusmsk | #165 | D (eventcore) | **98,000** | 9,610 | 109 | 750 | 0.00 | 85 | 82 | 475 | 2026-11-01 |
+| 101 | node-uwebsockets-zahidcakici | #102 | Node (uWebSockets) | **97,000** | 9,471 | 264 | 484 | 0.00 | 92 | 90 | 336 | 2026-10-21 |
 | 102 | typescript-bun-xxmohamed012 | #3 | Bun | **90,000** | 8,826 | 140 | 359 | 0.00 | 83 | 87 | 301 | 2026-10-21 |
 | 102 | scala-netty-jacksonhoran | #107 | Scala (Netty) | **90,000** ʸ | 8,801 | 484 | 757 | 0.00 | 87 | 92 | 825 | 2026-10-21 |
 | 102 | python-pypy-epoll-pranavds-codes | #84 | PyPy (epoll) | **90,000** | 8,801 | 280 | 474 | 0.00 | 89 | 94 | 270 | 2026-10-21 |
@@ -729,6 +729,11 @@ reopened as #361), couldn't be scored: the box ran out of disk unpacking the Swi
 while the WAL is short and still gaining, 1 ms loop wait instead of 4 ms): 280,000 held at 82 % CPU, 0 errors;
 290,000 failed the 2-minute probe on p99 (735 ms), 300,000 on p99 (1.78 s). Its merged #373 code held **260,000**
 (24,997 req/s, p95 27.6 / p99 59.3 ms, 72 % CPU, 2026-11-10).
+
+ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
+to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed
+the 5-minute hold on p99 (2.15 s), 110,000 failed the 2-minute probe on p99 (933 ms). Its merged #375 code held
+**93,000** (9,114 req/s, p95 218.3 / p99 590.5 ms, 95 % CPU, 2026-11-09).
 
 ᵒ **wat-wasmedge-delneg** is scored at its follow-up **#288** (`a5c516a`, shim VFS + checkpointer through public
 SQLite APIs; merged 2026-11-04): 220,000 held at 72 % CPU (31 µs/req, 913 MB); 230,000 and 240,000 failed the 2-minute

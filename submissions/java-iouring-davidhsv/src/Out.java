@@ -107,10 +107,101 @@ final class Out {
     private static final byte[] P_AUTHOR = ascii("\",\"author\":\"");
     private static final byte[] P_LIKES = ascii("\",\"like_count\":");
 
-    /** One post object. When created_at lies right after the body, as in a posts record, one
-     * scan clears both. */
+    // The same constants as words in memory order (the machine is little-endian), written with
+    // whole 8-byte stores: the bytes a store writes past a constant are overwritten by what
+    // follows it, and post() has reserved room for them.
+    private static long word(String s, int at) {
+        long v = 0;
+        for (int i = 0; i < 8 && at + i < s.length(); i++) v |= (long) (s.charAt(at + i) & 0xff) << (8 * i);
+        return v;
+    }
+    private static final long ID0 = word("{\"id\":", 0);
+    private static final long BODY0 = word(",\"body\":\"", 0), BODY1 = word(",\"body\":\"", 8);
+    private static final long CREATED0 = word("\",\"created_at\":\"", 0), CREATED1 = word("\",\"created_at\":\"", 8);
+    private static final long AUTHOR0 = word("\",\"author\":\"", 0), AUTHOR1 = word("\",\"author\":\"", 8);
+    private static final long LIKES0 = word("\",\"like_count\":", 0), LIKES1 = word("\",\"like_count\":", 8);
+    static {
+        if (java.nio.ByteOrder.nativeOrder() != java.nio.ByteOrder.LITTLE_ENDIAN) throw new IllegalStateException("big-endian");
+    }
+    private static final boolean WORDS = !Boolean.getBoolean("feed.plainpost");
+
+    /** Copies the n bytes at from to to, eight at a time, and says whether any of them needs
+     * escaping in a JSON string: nonzero if one does. One pass reads each byte once for both. */
+    private static long copyCheck(long from, long to, long n) {
+        if (n >= 8) {
+            long found = 0;
+            long last = n - 8;
+            for (long i = 0; i < last; i += 8) {
+                long x = load64(from + i);
+                N.M.set(N.LONG_U, to + i, x);
+                found |= special8(x);
+            }
+            long x = load64(from + last);
+            N.M.set(N.LONG_U, to + last, x);
+            return found | special8(x);
+        }
+        long found = 0;
+        for (long i = 0; i < n; i++) {
+            int c = N.u(from + i);
+            N.put(to + i, c);
+            if (c < 0x20 || c == '"' || c == '\\') found = 1;
+        }
+        return found;
+    }
+
+    /** One post object. */
     static void post(Buf out, long id, long body, long bodyLen, long created, long createdLen, long author,
                      long authorLen, long likes) {
+        if (!WORDS) { postBytes(out, id, body, bodyLen, created, createdLen, author, authorLen, likes); return; }
+        // the constants (59 bytes), two numbers and the three strings unescaped, and a word of slack
+        out.ensure(59 + 40 + bodyLen + createdLen + authorLen + 8);
+        long p = out.base + out.len;
+        N.M.set(N.LONG_U, p, ID0);
+        p += 6;
+        p += digits(p, id);
+        N.M.set(N.LONG_U, p, BODY0);
+        N.M.set(N.LONG_U, p + 8, BODY1);
+        p += 9;
+        long mark = p;
+        long bad = copyCheck(body, p, bodyLen);
+        p += bodyLen;
+        N.M.set(N.LONG_U, p, CREATED0);
+        N.M.set(N.LONG_U, p + 8, CREATED1);
+        p += 16;
+        bad |= copyCheck(created, p, createdLen);
+        p += createdLen;
+        if (bad != 0) {
+            out.len = mark - out.base;
+            text(out, body, bodyLen);
+            out.put(P_CREATED);
+            text(out, created, createdLen);
+            out.ensure(12 + authorLen + 15 + 20 + 1 + 8);
+            p = out.base + out.len;
+        }
+        N.M.set(N.LONG_U, p, AUTHOR0);
+        N.M.set(N.LONG_U, p + 8, AUTHOR1);
+        p += 12;
+        mark = p;
+        if (copyCheck(author, p, authorLen) != 0) {
+            out.len = mark - out.base;
+            text(out, author, authorLen);
+            out.ensure(15 + 20 + 1 + 8);
+            p = out.base + out.len;
+        } else {
+            p += authorLen;
+        }
+        N.M.set(N.LONG_U, p, LIKES0);
+        N.M.set(N.LONG_U, p + 8, LIKES1);
+        p += 15;
+        p += digits(p, likes);
+        N.put(p++, '}');
+        out.len = p - out.base;
+    }
+
+    /** One post object, a piece at a time. When created_at lies right after the body, as in a
+     * posts record, one scan clears both. */
+    static void postBytes(Buf out, long id, long body, long bodyLen, long created, long createdLen, long author,
+                          long authorLen, long likes) {
         out.put(P_ID);
         out.num(id);
         out.put(P_BODY);

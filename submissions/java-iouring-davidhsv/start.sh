@@ -7,6 +7,6 @@ exec "$dir/bin/server" \
   -XX:+UseSerialGC -Xms64m -Xmx64m -Xss1m \
   -XX:MaxMetaspaceSize=32m -XX:ReservedCodeCacheSize=48m -XX:MaxDirectMemorySize=16m \
   -XX:-UsePerfData -XX:+DisableAttachMechanism \
-  $([[ -f $dir/bin/server.aot ]] && echo "-XX:AOTCache=$dir/bin/server.aot") ${FEED_JVM_FLAGS:-} \
+  ${FEED_JVM_FLAGS:-} \
   --enable-native-access=ALL-UNNAMED -Dfeed.lib="$dir/bin/libfeed.so" \
   -cp "$dir/bin/server.jar" Server

@@ -33,37 +33,9 @@ final class N {
     static void put(long a, int v) { M.set(ValueLayout.JAVA_BYTE, a, (byte) v); }
     static long getLong(long a) { return M.get(JAVA_LONG, a); }
     static int getInt(long a) { return M.get(JAVA_INT, a); }
-    // Most copies here are a few to a few hundred bytes (a header, a constant, a username, a
-    // post's body): those are moved eight bytes at a time in place, the last word overlapping the
-    // one before it, instead of going through the JDK's copy stubs. The ranges never overlap.
-    private static final int SMALL = Boolean.getBoolean("feed.stubcopy") ? -1 : 256;
-    private static final java.lang.invoke.VarHandle BYTES_AS_LONG =
-            java.lang.invoke.MethodHandles.byteArrayViewVarHandle(long[].class, java.nio.ByteOrder.nativeOrder());
-
-    static void copy(long from, long to, long n) {
-        if (SMALL < 0) { MemorySegment.copy(M, from, M, to, n); return; }
-        if (n >= 8 && n <= SMALL) {
-            long last = n - 8;
-            for (long i = 0; i < last; i += 8) M.set(LONG_U, to + i, M.get(LONG_U, from + i));
-            M.set(LONG_U, to + last, M.get(LONG_U, from + last));
-        } else if (n < 8) {
-            for (long i = 0; i < n; i++) M.set(ValueLayout.JAVA_BYTE, to + i, M.get(ValueLayout.JAVA_BYTE, from + i));
-        } else {
-            MemorySegment.copy(M, from, M, to, n);
-        }
-    }
-
+    static void copy(long from, long to, long n) { MemorySegment.copy(M, from, M, to, n); }
     static void copy(byte[] from, int at, long to, int n) {
-        if (SMALL < 0) { MemorySegment.copy(from, at, M, ValueLayout.JAVA_BYTE, to, n); return; }
-        if (n >= 8 && n <= SMALL) {
-            int last = n - 8;
-            for (int i = 0; i < last; i += 8) M.set(LONG_U, to + i, (long) BYTES_AS_LONG.get(from, at + i));
-            M.set(LONG_U, to + last, (long) BYTES_AS_LONG.get(from, at + last));
-        } else if (n < 8) {
-            for (int i = 0; i < n; i++) M.set(ValueLayout.JAVA_BYTE, to + i, from[at + i]);
-        } else {
-            MemorySegment.copy(from, at, M, ValueLayout.JAVA_BYTE, to, n);
-        }
+        MemorySegment.copy(from, at, M, ValueLayout.JAVA_BYTE, to, n);
     }
 
     private static final Linker LINKER = Linker.nativeLinker();

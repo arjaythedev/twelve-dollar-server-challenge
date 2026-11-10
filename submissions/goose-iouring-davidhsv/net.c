@@ -59,7 +59,7 @@ typedef struct {
 typedef struct {
   int fd;
   unsigned sq_mask, cq_mask, sq_tail;
-  unsigned *sq_khead, *sq_ktail, *cq_khead, *cq_ktail;
+  unsigned *sq_khead, *sq_ktail, *sq_kflags, *cq_khead, *cq_ktail;
   struct io_uring_sqe *sqes;
   struct io_uring_cqe *cqes;
   struct io_uring_buf_ring *br;
@@ -178,7 +178,8 @@ int32_t net_ring_add(int64_t nslots) {
   memset(r, 0, sizeof *r);
   struct io_uring_params p;
   memset(&p, 0, sizeof p);
-  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG |
+            IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
   p.cq_entries = CQ_ENTRIES;
   int fd = (int)syscall(SYS_io_uring_setup, SQ_ENTRIES, &p);
   if (fd < 0) { perror("io_uring_setup"); return -1; }
@@ -198,6 +199,7 @@ int32_t net_ring_add(int64_t nslots) {
     r->fd = fd;
     r->sq_khead = (unsigned *)(sq + p.sq_off.head);
     r->sq_ktail = (unsigned *)(sq + p.sq_off.tail);
+    r->sq_kflags = (unsigned *)(sq + p.sq_off.flags);
     r->sq_mask = *(unsigned *)(sq + p.sq_off.ring_mask);
     r->cq_khead = (unsigned *)(sq + p.cq_off.head);
     r->cq_ktail = (unsigned *)(sq + p.cq_off.tail);
@@ -248,6 +250,22 @@ void net_enter(int32_t ri, int32_t wait, int64_t ns) {
     rc = sys_enter(r->fd, pending, 0, IORING_ENTER_GETEVENTS, 0, 0);
   }
   if (rc < 0 && errno != ETIME && errno != EINTR && errno != EBUSY && errno != EAGAIN) perror("io_uring_enter");
+}
+
+/* A ring that is not waited on: submits what is queued and runs the completions that are due,
+ * without sleeping. The kernel says in the ring's flags whether deferred work is pending, so a
+ * ring with nothing queued and nothing pending costs no system call. Newer kernels (6.13 on) run
+ * only about 20 deferred receives in an enter that asks to wait for none; when the flag is still
+ * up afterwards, a second enter asks for many completions with a zero timeout, which lets the
+ * kernel run them all and returns at once. */
+#define SWEEP_MAX 4096
+void net_sweep(int32_t ri) {
+  ring_t *r = &rings[ri];
+  unsigned pending = r->sq_tail - __atomic_load_n(r->sq_khead, __ATOMIC_ACQUIRE);
+  unsigned busy = IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW;
+  if (pending == 0 && !(__atomic_load_n(r->sq_kflags, __ATOMIC_RELAXED) & busy)) return;
+  net_enter(ri, 0, 0);
+  if (__atomic_load_n(r->sq_kflags, __ATOMIC_RELAXED) & IORING_SQ_TASKRUN) net_enter(ri, SWEEP_MAX, 0);
 }
 
 /* Appends the ring's completions to a Goose array of Cqe { ud: u64, res: i32, flags: u32 }

@@ -21,6 +21,7 @@ extern fn net_listen(host: const u8[:], port: i64, n: i32) -> i32;
 extern fn net_slot_limit() -> i64;
 extern fn net_ring_add(slots: i64) -> i32;
 extern fn net_enter(ring: i32, wait: i32, ns: i64);
+extern fn net_sweep(ring: i32);
 extern fn net_reap(ring: i32, out: Cqe[>..]&) -> i64;
 extern fn net_accept(ring: i32, listener: i32, ud: u64);
 extern fn net_recv(ring: i32, slot: i32, ud: u64);
@@ -133,10 +134,6 @@ var err500: u8[>..];
 // busy pass shares one transaction across many requests.
 var wait_min: i32 = 256;
 var wait_ns = 1000000;
-// The other rings are asked for up to this many completions with no time to wait. Newer kernels
-// run only as much deferred work in one enter as it asks to wait for (20 receives if it asks for
-// none), which would starve a busy ring that is never waited on.
-let SWEEP: i32 = 4096;
 
 // ---------------------------------------------------------------------------------------------
 // The write queue. A write is validated when it arrives and then waits here, with everything it
@@ -225,7 +222,7 @@ fn main() {
     loop {
         // Every other ring submits and collects without waiting; ring 0 goes last and waits.
         var r = nrings - 1;
-        while r > 0 { net_enter(r as! i32, SWEEP, 0); r--; }
+        while r > 0 { net_sweep(r as! i32); r--; }
         net_enter(0, wait_min, wait_ns);
         now_us = clock_ns() / 1000;
         for k in nrings { drain(k); }

@@ -31,7 +31,7 @@ A Goose `extern fn` may not keep a borrowed argument after the call returns, so 
 
 ## A pass
 
-1. Every other ring submits and collects without waiting. Ring 0 goes last and waits for 256 completions or 1 ms, so a busy pass shares one transaction across many requests.
+1. Every other ring submits and collects without waiting, and a ring with nothing queued and no deferred work pending (the kernel says so in the ring's flags) costs no system call. Ring 0 goes last and waits for 256 completions or 1 ms, so a busy pass shares one transaction across many requests.
 2. Each ring's completions are copied into a Goose array and handled in order. A receive is served at once: every complete request in the message is parsed and answered into the connection's pending output; an incomplete one is kept with the connection.
 3. Reads run right away, inside the pass's SQLite transaction (begun by the first request that needs the database). Writes are validated and queued (below).
 4. If the write queue is due, it runs.

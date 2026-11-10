@@ -4,7 +4,7 @@
 # instead, e.g a checkout of your own
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-SAAD_COMMIT="${SAAD_COMMIT:-68b89f2555329ae49fd5f310d0c80def1cac51d1}"
+SAAD_COMMIT="${SAAD_COMMIT:-4e4439f811080d92babf82a3ecabb7de9a468299}"
 SAAD="${SAAD_SOURCE:-$HERE/build/saad}"
 
 if [ -z "${SAAD_SOURCE:-}" ]; then
@@ -17,7 +17,7 @@ if [ -z "${SAAD_SOURCE:-}" ]; then
 fi
 
 bash "$SAAD/build.sh"
-"$SAAD/bin/saad" build "$HERE/main.sd" --elf --llvm
+"$SAAD/bin/saad" build "$HERE/main.sd" --elf --llvm -O3
 mkdir -p "$HERE/bin"
 bash "$SAAD/tools/linux/link.sh" "$HERE/build/out.o" "$HERE/bin/server"
 echo "Built $HERE/bin/server"

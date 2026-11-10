@@ -7,14 +7,14 @@ A port of the ideas in [rust-iouring-kensac](../rust-iouring-kensac) (#264) to [
 | Language | Goose, compiler pinned at commit `369c7a2c` (runtime `3025e5810379`), built from source by `install.sh` (sha256-checked) |
 | Framework | none: the event loop, HTTP/1.1, JSON and HS256 (SHA-256 and HMAC included) are written in Goose here |
 | io_uring | raw system calls against the kernel's `<linux/io_uring.h>`; no liburing |
-| SQLite | 3.54.1 amalgamation (sha256-checked), unmodified, compiled into `db.c` |
+| SQLite | 3.54.1 amalgamation (sha256-checked), unmodified, compiled into `db.c`; opened through a small VFS of its own over `unix-excl` |
 | C compiler | gcc 13 (Ubuntu 24.04 `build-essential`), `-O3`, link-time and profile-guided optimization, static |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ (io_uring with `DEFER_TASKRUN`, multishot receive, provided-buffer rings, direct descriptors). No epoll fallback, so it does not start where io_uring is blocked (Docker's default seccomp profile) |
 
 ## What is Goose and what is C
 
-| `server.goose` (1,800 lines) | `net.c`, `db.c` (900 lines) |
+| `server.goose` (1,800 lines) | `net.c`, `db.c` (1,050 lines) |
 |---|---|
 | the loop: waiting, draining every ring's completions, flushing after COMMIT, re-arming receives | `io_uring_setup`/`enter`/`register`, queueing operations, copying completions into a Goose array |
 | the connection table: generations, flags, what a connection is waiting for | the bytes the kernel reads or writes after a call returns: receive buffers, pending output, the send in flight, input kept for later |
@@ -42,7 +42,7 @@ A Goose `extern fn` may not keep a borrowed argument after the call returns, so 
 
 A `POST` is checked when it arrives: the token's signature, `alg`, `exp` and claims, the id, the JSON body, the trim and the length. A request that fails is answered in that pass. One that passes becomes a record in a Goose array of variable-size records (`Job[>..]`: the connection, the user id, the post id or the username and trimmed body, stored inline one after another), and its connection reads no further request until that write is answered, so responses keep their order.
 
-The queue runs when the window that opened with its first write ends, 5 ms later: all queued writes run in arrival order in one transaction and share its COMMIT (group commit, rule 6: each response waits for the commit of its own write). The pages several writes touch (the tail of `posts`, of `likes` and of their indexes) then reach the log once instead of once per pass. Measured here at 2,700 writes/s, that is 1.5 log frames per write.
+The queue runs when the window that opened with its first write ends, 5 ms later: all queued writes run in arrival order in one transaction and share its COMMIT (group commit, rule 6: each response waits for the commit of its own write). The pages several writes touch (the tail of `posts`, of `likes` and of their indexes) then reach the log once instead of once per pass. Measured here at 2,700 writes/s: 1.4 log frames per write with the 5 ms window, 1.65 with a 1 ms one.
 
 The 404 check of a like (does the post exist) and both INSERTs happen when the queue runs, in that transaction. Nothing about the benchmark is detected: every write takes this path.
 
@@ -61,8 +61,9 @@ Writes are SQL: `INSERT … RETURNING id, created_at` and `INSERT … ON CONFLIC
 ## Durability and checkpoints
 
 - WAL with `synchronous=NORMAL`, opened through SQLite's `unix-excl` VFS: the process locks the file once and keeps it, and the WAL index is heap memory shared by its two connections (no `-shm` file, no file locks per transaction). 64 MB page cache, no mmap, `wal_autocheckpoint=0`.
-- A second thread on its own connection, at nice 19, runs one PASSIVE checkpoint each time `server.goose` asks, so the loop never waits for a checkpoint's fsyncs. The policy is in Goose: past 8,192 log frames ask for a copy; when it finishes, hold the write queue (reads go on) and ask again, which copies the frames written meanwhile; when the whole log is copied the next write starts the log over. A hold lasts at most 200 ms. Past 32,768 frames the queue is held as well, so the log stays bounded if the loop leaves the thread no idle time.
-- A `kill -9` test (16 writers, the server killed at a random moment, six rounds on one database, a checkpoint every 1,500 frames): 14,615 acknowledged posts and 14,850 acknowledged likes were all in the database afterwards, and `integrity_check` said ok each time.
+- A second thread on its own connection, at nice 19, runs one PASSIVE checkpoint each time `server.goose` asks, so the loop never waits for a checkpoint's fsyncs. The policy is in Goose: past 16,384 log frames (64 MB) ask for a copy; when it finishes, hold the write queue (reads go on) and ask again, which copies the frames written meanwhile; when the whole log is copied the next write starts the log over. A hold lasts at most 200 ms. Past 40,960 frames the queue is held as well, so the log stays bounded if the loop leaves the thread no idle time.
+- **One write per commit.** SQLite appends each log frame with two writes (a 24-byte header, then the page), so a commit of forty frames is eighty system calls. The connections open through "feed", a VFS over unix-excl made with SQLite's public VFS interface (the idea is goose-iouring-ahmadsh2007's). On the log file it gathers the headers and pages of frames appended at the log's end and writes them all the moment the page of a commit frame arrives: inside SQLite's own write call, so before the frames enter the WAL index and before COMMIT returns, the point by which SQLite would have written them itself. Only appends are held back: frames SQLite rewrites in place (a page written twice in a transaction that spilled, then the checksums after it) go straight through, and every read, sync, truncate, size query, file control and close first writes out what is gathered. The database file never passes through it. Under the load test's mix this takes file writes from 0.25 to 0.03 per request.
+- `kill -9` tests, each on one database across all its rounds, the server killed at a random moment: with 16 writers and a checkpoint every 1,500 frames, six kills, 13,065 acknowledged posts and 13,175 acknowledged likes; with 64 writers and a 10-page cache, so that every transaction spills and rewrites frames, eight kills, 24,177 posts and 23,856 likes. Every acknowledged row was in the database afterwards and `integrity_check` said ok each time. (The second test is how a first version of the VFS, which also held back rewritten headers, was caught losing commits.)
 
 ## Connections
 
@@ -85,6 +86,7 @@ Writes are SQL: `INSERT … RETURNING id, created_at` and `INSERT … ON CONFLIC
 - **Writes wait in a queue** and commit together every 5 ms; kensac commits each pass (about every millisecond).
 - **Larger receive-buffer rings** (16,384 buffers a ring, the count [goose-iouring-ahmadsh2007](../goose-iouring-ahmadsh2007) measured for #291) and re-arming at the end of the pass, instead of 1,024 buffers and bounded single-shot reads after a burst.
 - **No private SQLite state is written**: kensac's `td_count_likes` sets `BtCursor.ix` to leave a leaf; here the cursor is only moved through `sqlite3BtreeNext`.
+- **One write per commit** through a VFS (above); kensac writes each frame as SQLite does.
 - **Profile-guided and link-time optimized**, SQLite included (kensac builds SQLite at `-O3`).
 - No crates and no liburing: the ring is set up through system calls.
 
@@ -113,11 +115,11 @@ MEASUREMENTS
 
 Behaviour, request for request against rust-iouring-kensac on fresh seed copies: 214 raw-request cases (routing, every token failure, 80 JSON bodies with escapes, surrogate pairs, Unicode trimming, multi-byte 500-character limits, duplicate keys, nesting and invalid UTF-8, pipelining, requests split byte by byte, half-closed connections, malformed framing) give the same status and body in all but four, by intent: this entry closes after `Connection: close` and HTTP/1.0 (three cases), and answers 400 to a 17 KB request head.
 
-Test-only knobs, never set on the box: `FEED_SLOTS` (a ring's table size; 2,000-slot tables served 10,000 users across six rings with no errors), `FEED_WRITE_US`, `FEED_CK_FRAMES`, `FEED_WAIT_US`, and `FEED_STATS` (a line a second: requests, passes, completions, writes per write pass, the longest pass split into serving, writes and commit, receives ended and re-armed, the log, holds and restarts).
+Test-only knobs, never set on the box: `FEED_SLOTS` (a ring's table size; 2,000-slot tables served 10,000 users across six rings with no errors), `FEED_WRITE_US`, `FEED_CK_FRAMES`, `FEED_WAIT_US`, `FEED_PLAIN_LOG` (plain unix-excl, without the VFS), `FEED_CACHE_PAGES`, and `FEED_STATS` (a line a second: requests, passes, completions, writes per write pass, the longest pass split into serving, writes and commit, receives ended and re-armed, the log, holds and restarts).
 
 ## Credit
 
-The design is rust-iouring-kensac's (#264, MIT): direct descriptors in several rings, single-shot accepts kept in flight over `SO_REUSEPORT` listeners, multishot receives into provided buffers, the buffer-ring retry for Ubuntu's kernels, one transaction per pass with responses held until COMMIT, B-tree cursor reads with a SQL fallback and a schema check, and the checkpoint thread with writes held while the log's tail is copied. From goose-iouring-ahmadsh2007 (#291, MIT), which did this port first: the receive-buffer count, and the idea of letting writes wait a few milliseconds so that they share a commit (there the request waits unparsed; here it is validated first and queued as a record). Locking the code in memory, the hardening-off flags and PGO on a synthetic database come from c-iouring-pavlyhalim (#245) and mojo-iouring-oh-meh (#257); reading through SQLite's B-tree cursors from lean-derive-hargup (#153). All code here was written for this entry.
+The design is rust-iouring-kensac's (#264, MIT): direct descriptors in several rings, single-shot accepts kept in flight over `SO_REUSEPORT` listeners, multishot receives into provided buffers, the buffer-ring retry for Ubuntu's kernels, one transaction per pass with responses held until COMMIT, B-tree cursor reads with a SQL fallback and a schema check, and the checkpoint thread with writes held while the log's tail is copied. From goose-iouring-ahmadsh2007 (#291, MIT), which did this port first: the receive-buffer count, the idea of letting writes wait a few milliseconds so that they share a commit (there the request waits unparsed; here it is validated first and queued as a record), and the idea of a VFS that writes a commit's frames at once. Locking the code in memory, the hardening-off flags and PGO on a synthetic database come from c-iouring-pavlyhalim (#245) and mojo-iouring-oh-meh (#257); reading through SQLite's B-tree cursors from lean-derive-hargup (#153). All code here was written for this entry.
 
 ## Files
 
@@ -125,7 +127,7 @@ The design is rust-iouring-kensac's (#264, MIT): direct descriptors in several r
 |---|---|
 | `server.goose` | the server |
 | `net.c` | the kernel: rings, queued operations, completions, receive buffers, per-connection byte chunks, listeners |
-| `db.c` | SQLite: the amalgamation, cursor moves and row copies, the pass's transaction, the INSERTs, the checkpoint thread |
+| `db.c` | SQLite: the amalgamation, cursor moves and row copies, the pass's transaction, the INSERTs, the checkpoint thread, the log VFS |
 | `ffi.h` | the two Goose shapes that cross into C |
 | `train/train.py`, `train/pgo_exit.c` | profile training (build time only) |
 | `install.sh`, `build.sh`, `start.sh` | |

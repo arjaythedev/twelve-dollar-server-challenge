@@ -85,6 +85,206 @@ static int on_commit_frames(void *arg, sqlite3 *d, const char *name, int frames)
   return SQLITE_OK;
 }
 
+/* ---- the log's writes: one per commit ---- */
+
+/* SQLite appends each frame to the log with two writes (a 24-byte header, then the page), so a
+ * commit of forty frames is eighty system calls. "feed" is a VFS over unix-excl, made with
+ * SQLite's public VFS interface, that changes one thing: on the log file, the headers and pages
+ * of frames appended at the log's end are gathered in memory, and all of it is written out,
+ * inside SQLite's own write call, the moment the page of a commit frame arrives (the idea of
+ * goose-iouring-ahmadsh2007 #291). That is before the frames enter the WAL index and before
+ * COMMIT returns, the point by which SQLite itself would have written them, so a commit is
+ * exactly as durable as without it. Gathered frames of a transaction that has not committed
+ * are not on disk yet, and need not be.
+ *
+ * Only an append is ever held back. SQLite also rewrites frames in place (a page written twice
+ * in a transaction that spilled, and then the checksums in the headers after it): those writes
+ * are not at the log's end, so they go straight through, like every write that is not a frame.
+ * And every read, sync, truncate, size query, file control and close first writes out what is
+ * gathered. The database file is opened by unix-excl itself and never passes through here. */
+#define GATHER_MAX (1 << 20)
+/* unix-excl writes at most 0x1ffff bytes per call. */
+#define GATHER_STEP 0x1f000
+
+typedef struct {
+  sqlite3_file base;
+  sqlite3_file *real; /* unix-excl's file, in the memory after this struct */
+  u8 *buf;
+  i64 at;     /* where the gathered bytes start in the file */
+  i64 tail;   /* where the log ends, as far as this file's writes show it; -1 not known yet */
+  i64 lone;   /* a frame header that was written through on its own: where, else -1 */
+  int n;      /* bytes gathered */
+  int header; /* the last gathered piece is a frame header: only its page may follow */
+  int commit; /* ... of a commit frame */
+} log_file;
+
+static sqlite3_vfs feed_vfs;
+static sqlite3_vfs *excl_vfs;
+
+static int log_flush(log_file *f) {
+  int rc = SQLITE_OK;
+  for (int done = 0; done < f->n && rc == SQLITE_OK;) {
+    int step = f->n - done < GATHER_STEP ? f->n - done : GATHER_STEP;
+    rc = f->real->pMethods->xWrite(f->real, f->buf + done, step, f->at + done);
+    done += step;
+  }
+  f->n = 0;
+  f->header = 0;
+  f->commit = 0;
+  return rc;
+}
+
+static int log_write(sqlite3_file *file, const void *data, int amt, sqlite3_int64 off) {
+  log_file *f = (log_file *)file;
+  if (f->header) {
+    if (off == f->at + f->n && amt >= 512 && amt <= 65536) {
+      /* the page of the header that is held: the frame is whole */
+      memcpy(f->buf + f->n, data, (size_t)amt);
+      f->n += amt;
+      f->header = 0;
+      f->tail = off + amt;
+      return f->commit ? log_flush(f) : SQLITE_OK;
+    }
+    int rc = log_flush(f);
+    if (rc != SQLITE_OK) return rc;
+  }
+  if (amt == WAL_FRAME_HDRSIZE && off == f->tail && (f->n == 0 || off == f->at + f->n)) {
+    /* a new frame at the log's end: hold its header until its page comes */
+    if (f->n + WAL_FRAME_HDRSIZE + 65536 > GATHER_MAX) {
+      int rc = log_flush(f);
+      if (rc != SQLITE_OK) return rc;
+    }
+    if (f->n == 0) f->at = off;
+    memcpy(f->buf + f->n, data, WAL_FRAME_HDRSIZE);
+    f->n += WAL_FRAME_HDRSIZE;
+    f->header = 1;
+    /* bytes 4-7: the database size after the commit, zero for a frame that does not commit */
+    f->commit = sqlite3Get4byte((const u8 *)data + 4) != 0;
+    return SQLITE_OK;
+  }
+  /* Anything else is written now, after what was gathered before it. */
+  int rc = log_flush(f);
+  if (rc != SQLITE_OK) return rc;
+  rc = f->real->pMethods->xWrite(f->real, data, amt, off);
+  /* Where the log ends: after its own header when the log starts over, and after a frame that
+   * was written through whole (the header, then its page). */
+  if (off == 0) {
+    f->tail = amt;
+    f->lone = -1;
+  } else if (amt == WAL_FRAME_HDRSIZE) {
+    f->lone = off;
+  } else {
+    if (f->lone >= 0 && off == f->lone + WAL_FRAME_HDRSIZE) f->tail = off + amt;
+    f->lone = -1;
+  }
+  return rc;
+}
+
+static int log_read(sqlite3_file *file, void *data, int amt, sqlite3_int64 off) {
+  log_file *f = (log_file *)file;
+  int rc = log_flush(f);
+  return rc != SQLITE_OK ? rc : f->real->pMethods->xRead(f->real, data, amt, off);
+}
+
+static int log_truncate(sqlite3_file *file, sqlite3_int64 size) {
+  log_file *f = (log_file *)file;
+  int rc = log_flush(f);
+  return rc != SQLITE_OK ? rc : f->real->pMethods->xTruncate(f->real, size);
+}
+
+static int log_sync(sqlite3_file *file, int flags) {
+  log_file *f = (log_file *)file;
+  int rc = log_flush(f);
+  return rc != SQLITE_OK ? rc : f->real->pMethods->xSync(f->real, flags);
+}
+
+static int log_size(sqlite3_file *file, sqlite3_int64 *size) {
+  log_file *f = (log_file *)file;
+  int rc = log_flush(f);
+  return rc != SQLITE_OK ? rc : f->real->pMethods->xFileSize(f->real, size);
+}
+
+static int log_control(sqlite3_file *file, int op, void *arg) {
+  log_file *f = (log_file *)file;
+  int rc = log_flush(f);
+  return rc != SQLITE_OK ? rc : f->real->pMethods->xFileControl(f->real, op, arg);
+}
+
+static int log_close(sqlite3_file *file) {
+  log_file *f = (log_file *)file;
+  int rc = log_flush(f);
+  int rc2 = f->real->pMethods->xClose(f->real);
+  sqlite3_free(f->buf);
+  f->buf = 0;
+  return rc != SQLITE_OK ? rc : rc2;
+}
+
+static int log_lock(sqlite3_file *file, int level) {
+  log_file *f = (log_file *)file;
+  return f->real->pMethods->xLock(f->real, level);
+}
+
+static int log_unlock(sqlite3_file *file, int level) {
+  log_file *f = (log_file *)file;
+  return f->real->pMethods->xUnlock(f->real, level);
+}
+
+static int log_reserved(sqlite3_file *file, int *out) {
+  log_file *f = (log_file *)file;
+  return f->real->pMethods->xCheckReservedLock(f->real, out);
+}
+
+static int log_sector(sqlite3_file *file) {
+  log_file *f = (log_file *)file;
+  return f->real->pMethods->xSectorSize(f->real);
+}
+
+static int log_traits(sqlite3_file *file) {
+  log_file *f = (log_file *)file;
+  return f->real->pMethods->xDeviceCharacteristics(f->real);
+}
+
+static const sqlite3_io_methods log_methods = {
+  1, log_close, log_read, log_write, log_truncate, log_sync, log_size, log_lock, log_unlock, log_reserved,
+  log_control, log_sector, log_traits,
+};
+
+static int feed_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *file, int flags, int *out_flags) {
+  (void)vfs;
+  if (!(flags & SQLITE_OPEN_WAL)) return excl_vfs->xOpen(excl_vfs, name, file, flags, out_flags);
+  log_file *f = (log_file *)file;
+  memset(f, 0, sizeof *f);
+  f->tail = -1;
+  f->lone = -1;
+  f->real = (sqlite3_file *)(f + 1);
+  f->buf = sqlite3_malloc(GATHER_MAX);
+  if (!f->buf) return SQLITE_NOMEM;
+  int rc = excl_vfs->xOpen(excl_vfs, name, f->real, flags, out_flags);
+  if (rc != SQLITE_OK) {
+    sqlite3_free(f->buf);
+    f->buf = 0;
+    return rc; /* base.pMethods stays null, so SQLite does not call xClose */
+  }
+  f->base.pMethods = &log_methods;
+  return SQLITE_OK;
+}
+
+/* Registers "feed". With FEED_PLAIN_LOG set (a test knob), connections use unix-excl as it is. */
+static const char *vfs_name(void) {
+  if (getenv("FEED_PLAIN_LOG")) return "unix-excl";
+  if (!excl_vfs) {
+    excl_vfs = sqlite3_vfs_find("unix-excl");
+    if (!excl_vfs) return "unix-excl";
+    feed_vfs = *excl_vfs;
+    feed_vfs.zName = "feed";
+    feed_vfs.pNext = 0;
+    feed_vfs.szOsFile = (int)sizeof(log_file) + excl_vfs->szOsFile;
+    feed_vfs.xOpen = feed_open;
+    if (sqlite3_vfs_register(&feed_vfs, 0) != SQLITE_OK) return "unix-excl";
+  }
+  return "feed";
+}
+
 /* ---- opening ---- */
 
 static void explain(gs_rref err, const char *what, sqlite3 *d) {
@@ -149,10 +349,10 @@ int32_t db_open(bytes_t path_b, gs_rref err) {
   memcpy(path, path_b.data, (size_t)path_b.len);
   path[path_b.len] = 0;
   if (sqlite3_initialize() != SQLITE_OK) { gs_bld_append(err, "sqlite3_initialize", 18); return -1; }
-  /* unix-excl: this process locks the file once and keeps it, so no other process can open it,
-   * and the WAL index is heap memory shared by the process's two connections (no -shm file, no
-   * file locks per transaction). */
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl") != SQLITE_OK) {
+  /* unix-excl (under "feed", above): this process locks the file once and keeps it, so no other
+   * process can open it, and the WAL index is heap memory shared by the process's two
+   * connections (no -shm file, no file locks per transaction). */
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, vfs_name()) != SQLITE_OK) {
     explain(err, "open", db);
     return -1;
   }
@@ -165,6 +365,13 @@ int32_t db_open(bytes_t path_b, gs_rref err) {
                    0, 0, 0) != SQLITE_OK) {
     explain(err, "pragmas", db);
     return -1;
+  }
+  /* FEED_CACHE_PAGES (a test knob): a small page cache, so that a large transaction spills
+   * frames to the log before it commits. */
+  if (getenv("FEED_CACHE_PAGES")) {
+    char sql[64];
+    snprintf(sql, sizeof sql, "PRAGMA cache_size = %d", atoi(getenv("FEED_CACHE_PAGES")));
+    sqlite3_exec(db, sql, 0, 0, 0);
   }
   sqlite3_wal_hook(db, on_commit_frames, 0);
   /* server.goose decodes records by position: refuse any other column order. */
@@ -211,7 +418,7 @@ int32_t db_open(bytes_t path_b, gs_rref err) {
     return -1;
   }
   /* The checkpoint connection copies frames from the log; it reads no tables. */
-  if (sqlite3_open_v2(path, &ck_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl") != SQLITE_OK ||
+  if (sqlite3_open_v2(path, &ck_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, vfs_name()) != SQLITE_OK ||
       sqlite3_exec(ck_db, "PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0; PRAGMA cache_size = 16", 0, 0, 0) !=
         SQLITE_OK) {
     explain(err, "checkpoint connection", ck_db);

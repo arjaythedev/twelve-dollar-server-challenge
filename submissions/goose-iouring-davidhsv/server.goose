@@ -163,8 +163,8 @@ var now_us = 0;            // the pass's clock
 // again: that copy takes the frames written meanwhile, and once the whole log is copied the
 // next write starts the log over. Past ck_high the queue is held too, so the log stays bounded
 // when the loop leaves the thread no idle time. A hold lasts at most GATE_US.
-var ck_start = 8192;       // FEED_CK_FRAMES overrides it
-var ck_high = 32768;
+var ck_start = 16384;      // FEED_CK_FRAMES overrides it
+var ck_high = 40960;
 let GATE_US = 200000;
 var ck_phase = 0;          // 0 idle, 1 copying, 2 copying the tail with writes held
 var gate = false;
@@ -678,7 +678,9 @@ fn trim_blanks(b: const u8[:], s: i64, e: i64) -> i64, i64 {
 fn is_name(b: const u8[:], lower: const u8[:]) -> bool {
     if b.len != lower.len { return false; }
     for k in lower.len {
-        if (b[k] | 0x20) != lower[k] && b[k] != lower[k] { return false; }
+        var c = b[k];
+        if c >= 'A' && c <= 'Z' { c += 32; }
+        if c != lower[k] { return false; }
     }
     return true;
 }
@@ -854,13 +856,19 @@ inline fn special1(c: u8) -> u8 {
 fn is_plain(s: const u8[:]) -> bool {
     let n = s.len;
     if n >= 32 {
+        // One accumulator per byte position, so that it stays in a vector register from block
+        // to block and is folded only once.
+        var seen: u8[32] = [0; 32];
         var rest = s;
-        var wide: u8 = 0;
         while rest.len >= 32 {
-            for c in rest[..32] { wide |= special1(c); }
+            let part = rest[..32];
+            for k in 32 { seen[k] |= special1(part[k]); }
             rest = rest[32..];
         }
-        for c in s[n - 32..] { wide |= special1(c); }
+        let last = s[n - 32..];
+        assert(last.len == 32);
+        var wide: u8 = 0;
+        for k in 32 { wide |= seen[k] | special1(last[k]); }
         return (wide & 0x80) == 0;
     }
     if n >= 8 {

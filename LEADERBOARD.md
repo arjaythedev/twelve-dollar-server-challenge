@@ -544,6 +544,10 @@ Follow-up **#385** (`390df4e`, writer `wal_autocheckpoint=0` plus a passive `wal
 passes 64 MiB): **250,000** (24,064 req/s, p95 224.9 / p99 803.8 ms, 0 err, 95 % CPU, 36 µs/req, 962 MB, 2026-11-10);
 260,000 failed the 2-minute probe on p95/p99 (524 / 1,139 ms at 98 % CPU, 0 errors), 280,000 on p95/p99 (3,989 /
 8,932 ms at 94 % CPU) and 320,000 on connection refused (74 % errors). Not merged (below the merged row).
+Follow-up **#386** (`6d929d2`, the database opened through SQLite's `unix-excl` VFS): **280,000** (26,703 req/s, p95
+140.9 / p99 412.7 ms, 0 err, 96 % CPU, 32 µs/req, 756 MB, 2026-11-10); 290,000 failed the 2-minute probe on p95/p99
+(1,782 / 3,505 ms at 97 % CPU, 0 errors), 300,000 on connection refused (74 % errors) and 320,000 on p95/p99 (1,197 /
+2,285 ms at 99 % CPU). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

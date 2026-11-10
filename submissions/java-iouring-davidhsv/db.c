@@ -74,6 +74,10 @@ API void db_stats_take(int64_t *out) {
 enum { CK_IDLE, CK_ASKED, CK_DONE_ALL, CK_DONE_SOME };
 static sqlite3 *ck_db;
 static int ck_state;
+/* The log's restart left its new header unsynced (below, "the loop never syncs"): the checkpoint
+ * thread syncs it first thing. */
+static int header_unsynced;
+static int wal_fd = -1;
 static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
 
@@ -84,6 +88,7 @@ static void *ck_main(void *arg) {
     pthread_mutex_lock(&ck_mu);
     while (ck_state != CK_ASKED) pthread_cond_wait(&ck_cv, &ck_mu);
     pthread_mutex_unlock(&ck_mu);
+    if (__atomic_exchange_n(&header_unsynced, 0, __ATOMIC_ACQ_REL) && wal_fd >= 0) fdatasync(wal_fd);
     /* PASSIVE never waits on the loop's locks, and the loop never waits for this thread. */
     int in_log = -1, copied = -2;
     int64_t t0 = mono_us();
@@ -152,6 +157,7 @@ typedef struct {
   int n;      /* bytes gathered */
   int header; /* the last gathered piece is a frame header: only its page may follow */
   int commit; /* ... of a commit frame */
+  int fresh;  /* the last write was a new log header: the next sync is the restart's */
 } log_file;
 
 static sqlite3_vfs feed_vfs;
@@ -179,6 +185,7 @@ static int real_sync(log_file *f, int flags) {
 static int log_flush(log_file *f) {
   int rc = SQLITE_OK;
   f->lone = -1;
+  if (f->n > 0) f->fresh = 0;
   for (int done = 0; done < f->n && rc == SQLITE_OK;) {
     int step = f->n - done < GATHER_STEP ? f->n - done : GATHER_STEP;
     rc = real_write(f, f->buf + done, step, f->at + done);
@@ -233,6 +240,7 @@ static int log_write(sqlite3_file *file, const void *data, int amt, sqlite3_int6
   if (off == 0) f->tail = amt;
   else if (amt == WAL_FRAME_HDRSIZE) f->lone = off;
   else if (lone >= 0 && off == lone + WAL_FRAME_HDRSIZE) f->tail = off + amt;
+  f->fresh = off == 0 && amt == WAL_HDRSIZE;
   return rc;
 }
 
@@ -248,10 +256,28 @@ static int log_truncate(sqlite3_file *file, sqlite3_int64 size) {
   return rc != SQLITE_OK ? rc : f->real->pMethods->xTruncate(f->real, size);
 }
 
+/* The loop never syncs. With synchronous=NORMAL a commit does not sync, so the one sync SQLite
+ * asks of the loop's connection is the log header's, when a write starts the log over after a
+ * complete checkpoint. That sync orders the new header before any later write to the database
+ * file (SQLite's ticket ff5be73dee: otherwise a power loss could leave the old header to replay
+ * old frames over newer pages). The database file is only ever written by a checkpoint, on the
+ * checkpoint thread, and that thread syncs the header first (ck_main), and SQLite's checkpoint
+ * itself syncs the log before it copies a frame. So the header is synced in time, by the thread
+ * that waits for the disk anyway, and a slow fsync never holds up the loop: on a slow disk it
+ * took hundreds of milliseconds there. FEED_LOOP_SYNC (a test knob) syncs on the loop as SQLite
+ * would. */
+static int loop_sync;
+
 static int log_sync(sqlite3_file *file, int flags) {
   log_file *f = (log_file *)file;
   int rc = log_flush(f);
-  return rc != SQLITE_OK ? rc : real_sync(f, flags);
+  if (rc != SQLITE_OK) return rc;
+  if (f->fresh && !loop_sync && pthread_equal(pthread_self(), loop_thread)) {
+    f->fresh = 0;
+    __atomic_store_n(&header_unsynced, 1, __ATOMIC_RELEASE);
+    return SQLITE_OK;
+  }
+  return real_sync(f, flags);
 }
 
 static int log_size(sqlite3_file *file, sqlite3_int64 *size) {
@@ -305,8 +331,64 @@ static const sqlite3_io_methods log_methods = {
   log_control, log_sector, log_traits,
 };
 
+/* FEED_WRITEBACK_KB (a test knob, off unless set): the database file is wrapped too, and after
+ * every that many KB the checkpoint thread writes to it, it starts the kernel's writeback of what
+ * it wrote (sync_file_range, which does not wait), so that the checkpoint's final fsync finds less
+ * to write and the disk is used evenly. Everything else passes straight through. */
+typedef struct {
+  sqlite3_file base;
+  sqlite3_file *real; /* unix-excl's file, in the memory after this struct */
+  i64 pending;        /* bytes written since writeback was last started */
+} main_file;
+
+static i64 writeback_bytes;
+
+#define REAL(file) (((main_file *)(file))->real)
+static int mf_close(sqlite3_file *f) { return REAL(f)->pMethods->xClose(REAL(f)); }
+static int mf_read(sqlite3_file *f, void *p, int n, sqlite3_int64 off) { return REAL(f)->pMethods->xRead(REAL(f), p, n, off); }
+static int mf_write(sqlite3_file *file, const void *p, int n, sqlite3_int64 off) {
+  main_file *f = (main_file *)file;
+  int rc = f->real->pMethods->xWrite(f->real, p, n, off);
+  if (rc == SQLITE_OK && !pthread_equal(pthread_self(), loop_thread) && (f->pending += n) >= writeback_bytes) {
+    sync_file_range(((unixFile *)f->real)->h, 0, 0, SYNC_FILE_RANGE_WRITE);
+    f->pending = 0;
+  }
+  return rc;
+}
+static int mf_truncate(sqlite3_file *f, sqlite3_int64 size) { return REAL(f)->pMethods->xTruncate(REAL(f), size); }
+static int mf_sync(sqlite3_file *f, int flags) { ((main_file *)f)->pending = 0; return REAL(f)->pMethods->xSync(REAL(f), flags); }
+static int mf_size(sqlite3_file *f, sqlite3_int64 *size) { return REAL(f)->pMethods->xFileSize(REAL(f), size); }
+static int mf_lock(sqlite3_file *f, int level) { return REAL(f)->pMethods->xLock(REAL(f), level); }
+static int mf_unlock(sqlite3_file *f, int level) { return REAL(f)->pMethods->xUnlock(REAL(f), level); }
+static int mf_reserved(sqlite3_file *f, int *out) { return REAL(f)->pMethods->xCheckReservedLock(REAL(f), out); }
+static int mf_control(sqlite3_file *f, int op, void *arg) { return REAL(f)->pMethods->xFileControl(REAL(f), op, arg); }
+static int mf_sector(sqlite3_file *f) { return REAL(f)->pMethods->xSectorSize(REAL(f)); }
+static int mf_traits(sqlite3_file *f) { return REAL(f)->pMethods->xDeviceCharacteristics(REAL(f)); }
+static int mf_shm_map(sqlite3_file *f, int pg, int sz, int ext, void volatile **pp) { return REAL(f)->pMethods->xShmMap(REAL(f), pg, sz, ext, pp); }
+static int mf_shm_lock(sqlite3_file *f, int off, int n, int flags) { return REAL(f)->pMethods->xShmLock(REAL(f), off, n, flags); }
+static void mf_shm_barrier(sqlite3_file *f) { REAL(f)->pMethods->xShmBarrier(REAL(f)); }
+static int mf_shm_unmap(sqlite3_file *f, int del) { return REAL(f)->pMethods->xShmUnmap(REAL(f), del); }
+static int mf_fetch(sqlite3_file *f, sqlite3_int64 off, int n, void **pp) { return REAL(f)->pMethods->xFetch(REAL(f), off, n, pp); }
+static int mf_unfetch(sqlite3_file *f, sqlite3_int64 off, void *p) { return REAL(f)->pMethods->xUnfetch(REAL(f), off, p); }
+#undef REAL
+
+static const sqlite3_io_methods main_methods = {
+  3, mf_close, mf_read, mf_write, mf_truncate, mf_sync, mf_size, mf_lock, mf_unlock, mf_reserved, mf_control,
+  mf_sector, mf_traits, mf_shm_map, mf_shm_lock, mf_shm_barrier, mf_shm_unmap, mf_fetch, mf_unfetch,
+};
+
 static int feed_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *file, int flags, int *out_flags) {
   (void)vfs;
+  if ((flags & SQLITE_OPEN_MAIN_DB) && writeback_bytes > 0) {
+    main_file *m = (main_file *)file;
+    memset(m, 0, sizeof *m);
+    m->real = (sqlite3_file *)(m + 1);
+    int rc = excl_vfs->xOpen(excl_vfs, name, m->real, flags, out_flags);
+    if (rc != SQLITE_OK) return rc;
+    if (m->real->pMethods->iVersion < 3) { m->real->pMethods->xClose(m->real); return SQLITE_CANTOPEN; }
+    m->base.pMethods = &main_methods;
+    return SQLITE_OK;
+  }
   if (!(flags & SQLITE_OPEN_WAL)) return excl_vfs->xOpen(excl_vfs, name, file, flags, out_flags);
   log_file *f = (log_file *)file;
   memset(f, 0, sizeof *f);
@@ -322,6 +404,7 @@ static int feed_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *file
     return rc; /* base.pMethods stays null, so SQLite does not call xClose */
   }
   f->base.pMethods = &log_methods;
+  if (pthread_equal(pthread_self(), loop_thread)) wal_fd = ((unixFile *)f->real)->h;
   return SQLITE_OK;
 }
 
@@ -334,7 +417,9 @@ static const char *vfs_name(void) {
     feed_vfs = *excl_vfs;
     feed_vfs.zName = "feed";
     feed_vfs.pNext = 0;
-    feed_vfs.szOsFile = (int)sizeof(log_file) + excl_vfs->szOsFile;
+    feed_vfs.szOsFile = (int)(sizeof(log_file) > sizeof(main_file) ? sizeof(log_file) : sizeof(main_file)) + excl_vfs->szOsFile;
+    loop_sync = getenv("FEED_LOOP_SYNC") != 0;
+    if (getenv("FEED_WRITEBACK_KB")) writeback_bytes = (i64)atoi(getenv("FEED_WRITEBACK_KB")) * 1024;
     feed_vfs.xOpen = feed_open;
     if (sqlite3_vfs_register(&feed_vfs, 0) != SQLITE_OK) return "unix-excl";
   }

@@ -26,6 +26,7 @@
 #define BATCH_NS 4000000 /* Bound completion coalescing before one SQLite transaction. */
 #define PENDING_LIMIT (1u << 20) /* Input held while the application is busy; more closes the client. */
 #define TD_CANCEL (UINT64_MAX - 1)
+#define QUICKACK_MS 20 /* half the 40 ms minimum delayed-ACK timeout (TCP_ATO_MIN) */
 static const int td_zero = 0;
 
 enum { FREE, ACCEPT, RECV, SEND, CLOSE, APPLICATION };
@@ -37,6 +38,7 @@ struct td_client {
     unsigned char *output, *pending;
     unsigned output_len, sent, pending_len;
     unsigned generation;
+    uint32_t recv_ms; /* ring clock when the current request reached the application */
     int next;
     unsigned char operation, queued, busy, close_after, notify_drain;
     unsigned char armed, cancelling, eof;
@@ -50,7 +52,7 @@ struct td_ring {
     int *free_slots;
     int free_count, accepting;
     int ready_head, ready_tail, retry_head, retry_tail, deliver_head, deliver_tail;
-    uint64_t retry_at, accept_at;
+    uint64_t retry_at, accept_at, now;
 };
 
 struct td_net {
@@ -144,6 +146,7 @@ static void td_prep_cancel(struct io_uring_sqe *sqe, int slot)
 
 static void td_schedule(struct td_ring *r, uint64_t now)
 {
+    r->now = now;
     if (r->retry_head >= 0 && now >= r->retry_at) {
         if (r->ready_tail < 0) r->ready_head = r->retry_head;
         else r->clients[r->ready_tail].next = r->retry_head;
@@ -176,7 +179,10 @@ static void td_submit(struct td_net *net, struct td_ring *r)
         int slot = r->ready_head;
         struct td_client *c = &r->clients[slot];
         /* A close cancels the armed receive first; the hard link runs the close if nothing matched. */
-        unsigned need = (c->operation == CLOSE && c->armed) || c->operation == SEND ? 2 : 1;
+        /* A reply within the delayed-ACK timeout keeps the socket in pingpong mode by itself
+         * (tcp_event_data_sent), so only a slow reply needs the TCP_QUICKACK 0 command. */
+        unsigned rearm = c->operation == SEND && (uint32_t)r->now - c->recv_ms >= QUICKACK_MS;
+        unsigned need = (c->operation == CLOSE && c->armed) || rearm ? 2 : 1;
         if (io_uring_sq_space_left(&r->ring) < need) break;
         struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
         if (c->operation == CLOSE && need == 2) {
@@ -202,14 +208,16 @@ static void td_submit(struct td_net *net, struct td_ring *r)
             break;
         case SEND:
             assert(c->sent < c->output_len);
-            /* TCP_QUICKACK 0 puts the socket back in delayed-ACK (pingpong) mode, which a reply
-             * later than the delayed-ACK timer ends; then the next request would get its own ACK
-             * packet instead of riding on the reply. Errors (kernels before 6.7) are ignored. */
-            io_uring_prep_cmd_sock(sqe, SOCKET_URING_OP_SETSOCKOPT, slot, IPPROTO_TCP, TCP_QUICKACK,
-                                   (void *)&td_zero, sizeof(td_zero));
-            sqe->flags |= IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
-            sqe->user_data = TD_CANCEL;
-            sqe = io_uring_get_sqe(&r->ring);
+            if (rearm) {
+                /* TCP_QUICKACK 0 puts the socket back in delayed-ACK (pingpong) mode, which the
+                 * delayed-ACK timer ends; then the next request would get its own ACK packet
+                 * instead of riding on the reply. Errors (kernels before 6.7) are ignored. */
+                io_uring_prep_cmd_sock(sqe, SOCKET_URING_OP_SETSOCKOPT, slot, IPPROTO_TCP,
+                                       TCP_QUICKACK, (void *)&td_zero, sizeof(td_zero));
+                sqe->flags |= IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
+                sqe->user_data = TD_CANCEL;
+                sqe = io_uring_get_sqe(&r->ring);
+            }
             io_uring_prep_send(sqe, slot, c->output + c->sent,
                                c->output_len - c->sent, MSG_NOSIGNAL);
             sqe->flags |= IOSQE_FIXED_FILE;
@@ -314,6 +322,7 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
             td_fail("invalid receive buffer", EOVERFLOW);
         if (waiting) {
             c->operation = APPLICATION;
+            c->recv_ms = (uint32_t)r->now;
             *event = (struct td_event){ .kind = 2, .id = ring_index * SLOTS + slot,
                                         .data = r->memory + buffer * BUFFER_SIZE,
                                         .len = result, .buffer = buffer };

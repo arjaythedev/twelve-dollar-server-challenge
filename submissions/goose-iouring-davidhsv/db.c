@@ -112,7 +112,7 @@ typedef struct {
   u8 *buf;
   i64 at;     /* where the gathered bytes start in the file */
   i64 tail;   /* where the log ends, as far as this file's writes show it; -1 not known yet */
-  i64 lone;   /* a frame header that was written through on its own: where, else -1 */
+  i64 lone;   /* the previous operation wrote a frame header through on its own: where, else -1 */
   int n;      /* bytes gathered */
   int header; /* the last gathered piece is a frame header: only its page may follow */
   int commit; /* ... of a commit frame */
@@ -121,8 +121,11 @@ typedef struct {
 static sqlite3_vfs feed_vfs;
 static sqlite3_vfs *excl_vfs;
 
+/* Writes out what is gathered. Every operation but a write that is held back comes through
+ * here first. */
 static int log_flush(log_file *f) {
   int rc = SQLITE_OK;
+  f->lone = -1;
   for (int done = 0; done < f->n && rc == SQLITE_OK;) {
     int step = f->n - done < GATHER_STEP ? f->n - done : GATHER_STEP;
     rc = f->real->pMethods->xWrite(f->real, f->buf + done, step, f->at + done);
@@ -142,6 +145,7 @@ static int log_write(sqlite3_file *file, const void *data, int amt, sqlite3_int6
       memcpy(f->buf + f->n, data, (size_t)amt);
       f->n += amt;
       f->header = 0;
+      f->lone = -1;
       f->tail = off + amt;
       return f->commit ? log_flush(f) : SQLITE_OK;
     }
@@ -158,25 +162,24 @@ static int log_write(sqlite3_file *file, const void *data, int amt, sqlite3_int6
     memcpy(f->buf + f->n, data, WAL_FRAME_HDRSIZE);
     f->n += WAL_FRAME_HDRSIZE;
     f->header = 1;
+    f->lone = -1;
     /* bytes 4-7: the database size after the commit, zero for a frame that does not commit */
     f->commit = sqlite3Get4byte((const u8 *)data + 4) != 0;
     return SQLITE_OK;
   }
   /* Anything else is written now, after what was gathered before it. */
+  i64 lone = f->lone;
   int rc = log_flush(f);
   if (rc != SQLITE_OK) return rc;
   rc = f->real->pMethods->xWrite(f->real, data, amt, off);
   /* Where the log ends: after its own header when the log starts over, and after a frame that
-   * was written through whole (the header, then its page). */
-  if (off == 0) {
-    f->tail = amt;
-    f->lone = -1;
-  } else if (amt == WAL_FRAME_HDRSIZE) {
-    f->lone = off;
-  } else {
-    if (f->lone >= 0 && off == f->lone + WAL_FRAME_HDRSIZE) f->tail = off + amt;
-    f->lone = -1;
-  }
+   * was just written through whole, its header and then, as the very next operation, its page.
+   * That is an append, or the last frame being rewritten; either way the log ends behind it. A
+   * header on its own (a checksum rewrite) says nothing, so `tail` is never short of the end,
+   * and a header held back above is always a new frame whose page comes next. */
+  if (off == 0) f->tail = amt;
+  else if (amt == WAL_FRAME_HDRSIZE) f->lone = off;
+  else if (lone >= 0 && off == lone + WAL_FRAME_HDRSIZE) f->tail = off + amt;
   return rc;
 }
 

@@ -231,9 +231,10 @@ int32_t net_ring_add(int64_t nslots) {
   return nrings++;
 }
 
-/* Submits what is queued and runs the completions that are due; with `wait` > 0 it first waits
- * for that many completions or `ns` nanoseconds. Deferred task work (the receives) only runs
- * inside an enter that asks for events. */
+/* Submits what is queued and runs the completions that are due; with `wait` > 0 it waits for
+ * that many completions or `ns` nanoseconds (0: it does not sleep, it only lets the kernel run
+ * up to `wait` completions). Deferred task work (the receives) only runs inside an enter that
+ * asks for events. */
 void net_enter(int32_t ri, int32_t wait, int64_t ns) {
   ring_t *r = &rings[ri];
   unsigned pending = r->sq_tail - __atomic_load_n(r->sq_khead, __ATOMIC_ACQUIRE);

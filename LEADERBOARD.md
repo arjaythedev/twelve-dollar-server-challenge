@@ -661,7 +661,9 @@ only entered when they have work) held **260,000** at 89 % CPU (24,993 req/s, p9
 failed the 2-minute probe on p99, 1.66 s / 5.88 s). Still below 276,000, so the row stays at #369. Re-run at `9a20ada`
 (2026-11-11: idle ring completions batched, wait target capped by open connections) held **250,000** at 80 % CPU
 (24,094 req/s, p99 291 ms, 0 errors; 260k and 280k failed the 2-minute probe on p99, 19.0 s / 3.27 s). Still below
-276,000, so the row stays at #369.
+276,000, so the row stays at #369. Re-run at `4d2921a` (2026-11-11: server code back to #369's, plus a README note and
+a test file) held **240,000** at 86 % CPU (23,220 req/s, p99 545 ms, 0 errors; 250k, 260k and 280k failed the 2-minute
+probe on p99, 1.80 s / 2.71 s / 25.6 s). Still below 276,000, so the row stays at #369.
 go-gnet-kaikegm is now scored at its follow-up #180 (`372538d`, was 65,000 at #48): it closes the oldest idle
 connections past 55k open, so it no longer hits the limit at 80–93k (88,000 held at 77 % CPU, CPU-bound: 93k failed the
 5-minute hold on p99), but a fast ramp to 120k/160k still fills the fd table and the process exits the same way (89–94 %

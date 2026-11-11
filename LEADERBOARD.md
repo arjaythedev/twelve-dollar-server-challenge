@@ -283,6 +283,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
 | — | d-arsd-threadedcgi-cyrusmsk | #161 | D (arsd threaded cgi) | **failed** (0: timeouts at 500 users) | | | | | | | | 2026-10-31 |
+| — | c-iouring-jowinjestine | #396 | C (io_uring, SQLite B-tree reads) | **failed** (build timeout: PGO training hangs) | | | | | | | | 2026-11-11 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -867,6 +868,10 @@ committed in this repo.
   off. Patch: `export CGO_CFLAGS=…` (held 37,000). The author's `e95e747` fixes it and was re-run unpatched: 45,000;
   the row above is its later `aea8b28` (61,000, unpatched).
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
+- **C #396 — build failed** (`34f1024`, direct): install was fine, but the build's PGO training step (`src/train.sh`)
+  never finished. The instrumented `bin/server.inst` sat in `io_cqring_wait` and `bin/train … 60000` in `wait_woken` on
+  its socket, both at ~0 % CPU for over an hour, so the client was waiting for a reply the server never sent. The build
+  hit the rig's 90-minute timeout (exit 124) and the app never ran (1/42 tests). Not patched.
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
 

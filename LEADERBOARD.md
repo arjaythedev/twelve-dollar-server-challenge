@@ -730,7 +730,10 @@ reopened as #361), couldn't be scored: the box ran out of disk unpacking the Swi
 ᴮ **asm-btree-ninhnv** is scored at its follow-up PR **#388** (`1960322`, merged 2026-11-10: checkpoint rounds only
 while the WAL is short and still gaining, 1 ms loop wait instead of 4 ms): 280,000 held at 82 % CPU, 0 errors;
 290,000 failed the 2-minute probe on p99 (735 ms), 300,000 on p99 (1.78 s). Its merged #373 code held **260,000**
-(24,997 req/s, p95 27.6 / p99 59.3 ms, 72 % CPU, 2026-11-10).
+(24,997 req/s, p95 27.6 / p99 59.3 ms, 72 % CPU, 2026-11-10). Follow-up #390 (`8a8c4e1`, 2026-11-11: bulk-thread
+checkpoint rounds and the explicit WAL sync removed, one passive checkpoint per cycle) held **230,000** at 64 % CPU
+(22,374 req/s, p95 17.3 / p99 155.6 ms, 0 errors; 240k failed the 2-minute probe on p99 1.16 s). That is below #388's
+280,000, so it is not merged and the row stays at #388.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

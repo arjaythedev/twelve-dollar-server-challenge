@@ -81,7 +81,7 @@ fn C.setrlimit(i32, &C.rlimit) i32
 
 const sqlite_row = 100
 const sqlite_done = 101
-const max_events = 4096 // a loop that falls behind takes larger batches, so one commit covers more requests
+const max_events = 16384 // the bridge caps requests at 4096 per pass; accepts, sends and closes fill the rest
 const max_request = 65536
 const header_room = 128 // fits the longest response header (36 + 19 + 48 + 10 + 4 bytes)
 

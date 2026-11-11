@@ -20,6 +20,7 @@
 #define BUFFERS 4096 /* per ring; 256 ran dry when the loop fell behind (12 M ENOBUFS re-arms in 2 min at 200k) */
 #define BUFFER_SIZE 512 /* most requests fit; a small buffer drains more sockets per MB than a 2 KB one */
 #define ACCEPT_DEPTH 512 /* 64 per ring let the accept queues fill (32k) during a 5k conn/s ramp */
+#define REQUESTS_PER_PASS 4096 /* requests handed to V per pass; other completions are not capped */
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
 #define TASKRUN_ROUNDS 64 /* 64 enters of up to 20 items: about 1,280 completions per ring per pass */
@@ -310,8 +311,10 @@ struct td_net *td_net_new(int listener, int checkpoint)
     return net;
 }
 
+/* defer: the batch is full, so a request for a waiting client is copied to held input and its
+ * buffer recycled at once; the client is delivered on the next pass. */
 static int td_received(struct td_ring *r, int ring_index, int slot, const struct io_uring_cqe *cqe,
-                       int buffer, struct td_event *event)
+                       int buffer, struct td_event *event, int defer)
 {
     struct td_client *c = &r->clients[slot];
     int result = cqe->res;
@@ -320,13 +323,23 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
     if (result > 0) {
         if (buffer < 0 || buffer >= BUFFERS || result > BUFFER_SIZE)
             td_fail("invalid receive buffer", EOVERFLOW);
-        if (waiting) {
+        if (waiting && !defer) {
             c->operation = APPLICATION;
             c->recv_ms = (uint32_t)r->now;
             *event = (struct td_event){ .kind = 2, .id = ring_index * SLOTS + slot,
                                         .data = r->memory + buffer * BUFFER_SIZE,
                                         .len = result, .buffer = buffer };
             return 1;
+        }
+        if (waiting) {
+            assert(!c->pending_len);
+            c->pending = malloc(result);
+            if (!c->pending) td_fail("allocate held input", ENOMEM);
+            memcpy(c->pending, r->memory + buffer * BUFFER_SIZE, result);
+            c->pending_len = result;
+            td_recycle(r, buffer);
+            td_want_input(r, slot);
+            return 0;
         }
         if (c->operation != CLOSE && c->operation != FREE && !c->eof) {
             if (c->pending_len + result > PENDING_LIMIT) c->eof = 1;
@@ -365,7 +378,7 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
 }
 
 static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_cqe *cqe,
-                       struct td_event *event)
+                       struct td_event *event, int defer)
 {
     int slot = (cqe->user_data >> 8) & 0xffff;
     int operation = cqe->user_data & 0xff;
@@ -378,7 +391,7 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
         if (buffer >= 0) td_recycle(r, buffer);
         return 0;
     }
-    if (operation == RECV) return td_received(r, ring_index, slot, cqe, buffer, event);
+    if (operation == RECV) return td_received(r, ring_index, slot, cqe, buffer, event, defer);
     assert(c->busy && c->operation == operation);
     c->busy = 0;
     int result = cqe->res;
@@ -464,7 +477,7 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
 {
     assert(capacity > 0);
     uint64_t deadline = timeout_ms < 0 ? UINT64_MAX : td_now() + timeout_ms;
-    int count = 0;
+    int count = 0, requests = 0;
     uint64_t flush_at = 0;
     for (;;) {
         uint64_t now = td_now();
@@ -475,9 +488,10 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             struct td_ring *r = &net->rings[i];
             td_schedule(r, now);
             td_submit(net, r);
-            int budget = count + (capacity / RINGS > 0 ? capacity / RINGS : 1);
-            if (budget > capacity) budget = capacity;
-            while (r->deliver_head >= 0 && count < budget) {
+            /* Only requests are budgeted: accepts, sends and closes are cheap for V, and leaving
+             * them in the CQ lets the accept queues and socket buffers fill. */
+            int quota = requests + REQUESTS_PER_PASS / RINGS;
+            while (r->deliver_head >= 0 && requests < quota && count < capacity) {
                 int slot = r->deliver_head;
                 struct td_client *c = &r->clients[slot];
                 r->deliver_head = c->next;
@@ -485,6 +499,7 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
                 c->queued = 0;
                 c->operation = APPLICATION;
                 /* buffer -2: td_net_release frees the held input */
+                ++requests;
                 events[count++] = (struct td_event){ .kind = 2, .id = i * SLOTS + slot, .data = c->pending,
                                                      .len = (int)c->pending_len, .buffer = -2 };
                 c->pending = NULL;
@@ -493,14 +508,20 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             struct io_uring_cqe *cqe;
             unsigned head, consumed = 0;
             io_uring_for_each_cqe(&r->ring, head, cqe) {
-                if (count == budget || consumed == CQ_SIZE) break;
+                if (consumed == CQ_SIZE || count == capacity) break;
+                /* Past the quota a request is held, so the buffer ring and the kernel socket
+                 * queues drain while the application catches up. */
+                int defer = requests >= quota;
                 if (cqe->user_data == TD_CANCEL) {
                     /* -ENOENT or -EALREADY: the receive already ended or is ending. */
                 } else if (cqe->user_data == UINT64_MAX) {
                     if (cqe->res < 0 || !(cqe->res & POLLIN))
                         td_fail("checkpoint completion", cqe->res < 0 ? cqe->res : EIO);
                     events[count++] = (struct td_event){ .kind = 5, .id = -1, .buffer = -1 };
-                } else count += td_complete(r, i, cqe, &events[count]);
+                } else if (td_complete(r, i, cqe, &events[count], defer)) {
+                    requests += events[count].kind == 2;
+                    ++count;
+                }
                 ++consumed;
             }
             io_uring_cq_advance(&r->ring, consumed);
@@ -518,7 +539,7 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             /* The window runs from the last return, so time the application spent on that batch
              * counts: a saturated loop never sleeps, and no batch period is shorter than BATCH_NS. */
             if (!flush_at) flush_at = net->batch_at + BATCH_NS;
-            if (count == capacity || nanos >= flush_at || td_now() >= deadline) {
+            if (count == capacity || requests >= REQUESTS_PER_PASS || nanos >= flush_at || td_now() >= deadline) {
                 net->batch_at = nanos;
                 return count;
             }

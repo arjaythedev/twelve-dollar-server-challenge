@@ -572,7 +572,9 @@ Follow-up **#397** (`c882e4f`, held read snapshot ended every 20 ms for a passiv
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat
 the merged row, it tied it) also held **280,000** (26,658 req/s, p95 44.9 / p99 749.7 ms, 0 err, 78 % CPU, 26 µs/req,
 710 MB, 2026-11-08). 290,000 and 300,000 failed the 2-minute probe on p99 (1.04 s / 2.79 s, 0 errors) and 320,000 on
-p95/p99 (1.03 / 6.50 s at 93 % CPU).
+p95/p99 (1.03 / 6.50 s at 93 % CPU). Its next commit `34b739a` (parked requests older than 200 ms go first, oldest
+first; held, not merged: below the merged row) held **270,000** (25,845 req/s, p95 37.1 / p99 556.2 ms, 0 err, 77 % CPU,
+27 µs/req, 871 MB, 2026-11-11); 280,000 failed the 2-minute probe on p99 (1.35 s, 0 errors).
 
 ᴷ **kotlin-nio-3x3xX3N0N** stays on its merged #83 row. Its follow-up **#377** (`9ab23cc`, rejects tokens without a
 numeric `exp`, two-step /feed, checkpointer thread through `PRAGMA wal_checkpoint`, 2 ms group-commit window, 3 workers;

@@ -19,7 +19,7 @@
 #define SLOTS 65535
 #define BUFFERS 4096 /* per ring; 256 ran dry when the loop fell behind (12 M ENOBUFS re-arms in 2 min at 200k) */
 #define BUFFER_SIZE 512 /* most requests fit; a small buffer drains more sockets per MB than a 2 KB one */
-#define ACCEPT_DEPTH 64
+#define ACCEPT_DEPTH 512 /* 64 per ring let the accept queues fill (32k) during a 5k conn/s ramp */
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
 #define TASKRUN_ROUNDS 64 /* 64 enters of up to 20 items: about 1,280 completions per ring per pass */

@@ -556,7 +556,10 @@ Follow-up **#391** (`19312b5`, rings set up with `SINGLE_ISSUER|DEFER_TASKRUN|TA
 **247,000** (23,843 req/s, p95 182.5 / p99 460.4 ms, 0 err, 90 % CPU, 34 µs/req, 653 MB, 2026-11-11); 260,000 passed the
 2-minute probe but failed the 5-minute hold on p99 (1,185 ms at 94 % CPU, 0 errors), 270,000 failed the 2-minute probe on
 p95/p99 (728 / 1,185 ms at 96 % CPU), 280,000 on p95/p99 (2,761 / 5,377 ms at 98 % CPU) and 320,000 on connection refused
-(79 % errors). Not merged (below the merged row).
+(79 % errors). Not merged (below the merged row). Re-run at `6cd7a1d` (the `DEFER_TASKRUN` drain moved to idle passes):
+**230,000** (22,366 req/s, p95 28.4 / p99 186.2 ms, 0 err, 88 % CPU, 36 µs/req, 640 MB, 2026-11-11); 240,000 failed the
+2-minute probe on p95/p99 (1,001 / 4,820 ms at 91 % CPU, 0 errors) and 320,000 on connection refused (78 % errors). Not
+merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

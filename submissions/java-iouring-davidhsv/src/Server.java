@@ -77,16 +77,19 @@ public final class Server {
     // and share its COMMIT (group commit, rule 6), and the pages several of them touch reach the
     // log once. Each response still waits for the COMMIT of its own write.
 
-    private static int[] jCi = new int[256];
-    private static char[] jGen = new char[256];
-    private static boolean[] jLike = new boolean[256];
-    private static boolean[] jClose = new boolean[256];  // the request asked to close the connection after its response
-    private static long[] jUid = new long[256];
-    private static long[] jPost = new long[256];
-    private static long[] jWho = new long[256];   // the token's username (a new post's author): offset in jobBytes
-    private static int[] jWhoLen = new int[256];
-    private static long[] jText = new long[256];  // a new post's trimmed body: offset in jobBytes
-    private static int[] jTextLen = new int[256];
+    // Room for this many queued writes before the arrays grow (on slow disks up to about 1,000
+    // waited at once).
+    private static final int JOBS = 4096;
+    private static int[] jCi = new int[JOBS];
+    private static char[] jGen = new char[JOBS];
+    private static boolean[] jLike = new boolean[JOBS];
+    private static boolean[] jClose = new boolean[JOBS];  // the request asked to close the connection after its response
+    private static long[] jUid = new long[JOBS];
+    private static long[] jPost = new long[JOBS];
+    private static long[] jWho = new long[JOBS];   // the token's username (a new post's author): offset in jobBytes
+    private static int[] jWhoLen = new int[JOBS];
+    private static long[] jText = new long[JOBS];  // a new post's trimmed body: offset in jobBytes
+    private static int[] jTextLen = new int[JOBS];
     private static final Buf jobBytes = new Buf(1 << 20);
     static int njobs;
     static long writeWindow = 5000;  // µs a queued write waits for company; FEED_WRITE_US overrides it
@@ -244,6 +247,10 @@ public final class Server {
         flags = Arrays.copyOf(flags, total);
         mark = Arrays.copyOf(mark, total);
         need = Arrays.copyOf(need, total);
+        // A pass can touch or re-arm every connection (all of them closing at once, a burst after
+        // a stall), so these lists hold one entry per slot and never grow while serving.
+        touched = Arrays.copyOf(touched, total);
+        rearm = Arrays.copyOf(rearm, total);
         rxBase[nrings] = N.rxBase(nrings);
         ringOpen[nrings] = 0;
         ringFull[nrings] = false;

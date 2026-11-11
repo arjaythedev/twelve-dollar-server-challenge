@@ -28,6 +28,7 @@ let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
 let private lifoAge = uint32 (env "LIFOAGE" 8000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
+let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 2000
 let private ckHoldAt = env "HOLD" 8192
@@ -282,8 +283,12 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable reqs = Array.zeroCreate<Req> 1024
     let mutable reqHead = 0
     let mutable nreq = 0
-    let mutable hreqs = Array.zeroCreate<Req> 256
-    let mutable treqs = Array.zeroCreate<Req> 256
+    // the held queue: requests waiting out a write hold, wq[wqHead .. wqHead + wqLen), oldest first
+    let mutable wq = Array.zeroCreate<Req> 1024
+    let mutable wqHead = 0
+    let mutable wqLen = 0
+    let mutable warena = GC.AllocateUninitializedArray<byte>(1 <<< 16, pinned = true)
+    let mutable warenaLen = 0
     let dirty = List<int>(1024)
     // request strings (new posts' text, token usernames) for the requests in the batch
     let mutable arena = GC.AllocateUninitializedArray<byte>(1 <<< 20, pinned = true)
@@ -314,6 +319,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable maxBatch = 0
     let mutable stPasses = 0L
     let mutable stAns = 0L
+    let mutable stWalk = 0L
     let mutable lastStats = 0L
     let mutable lastUtc = 0L
 
@@ -721,6 +727,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 500
         | RCreate ->
             let mutable created: byte[] = null
+            let arena = if r.Held then warena else arena // a held post's strings are in the held queue's arena
             let id = Db.create r.Uid (Marshal.UnsafeAddrOfPinnedArrayElement(arena, r.BodyOff)) r.BodyLen &created
             if id < 0L then
                 Json.put o (ReadOnlySpan errBody.[int EInternal])
@@ -781,172 +788,197 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             conns.[cid].Fl <- conns.[cid].Fl ||| DIRTY
             dirty.Add cid
 
-    let addHeld (n: int) (r: byref<Req>) =
-        if n = hreqs.Length then
-            let bigger = Array.zeroCreate<Req> (hreqs.Length * 2)
-            Array.Copy(hreqs, bigger, n)
-            hreqs <- bigger
-        hreqs.[n] <- r
+    /// Moves a request to the held queue: a write waiting out a hold, or a later request on a connection that has one
+    /// there (a connection's requests keep their order). A new post's strings move to the queue's own arena, so the
+    /// batch's arena can be reset while they wait. Each request is moved once; passes never walk the held queue.
+    let toHeld (r: byref<Req>) (cid: int) =
+        if not r.Held then
+            r.Held <- true
+            conns.[cid].Held <- conns.[cid].Held + 1
+            if r.Route = RCreate then
+                let n = r.NameLen + r.BodyLen
+                if warena.Length - warenaLen < n then
+                    let bigger = GC.AllocateUninitializedArray<byte>(max (warena.Length * 2) (warenaLen + n + 4096), pinned = true)
+                    Buffer.BlockCopy(warena, 0, bigger, 0, warenaLen)
+                    warena <- bigger
+                Buffer.BlockCopy(arena, r.NameOff, warena, warenaLen, r.NameLen)
+                r.NameOff <- warenaLen
+                warenaLen <- warenaLen + r.NameLen
+                Buffer.BlockCopy(arena, r.BodyOff, warena, warenaLen, r.BodyLen)
+                r.BodyOff <- warenaLen
+                warenaLen <- warenaLen + r.BodyLen
+        if wqHead + wqLen = wq.Length then
+            if wqHead > 0 then
+                Array.Copy(wq, wqHead, wq, 0, wqLen)
+                wqHead <- 0
+            if wqLen = wq.Length then
+                let bigger = Array.zeroCreate<Req> (wq.Length * 2)
+                Array.Copy(wq, bigger, wqLen)
+                wq <- bigger
+        wq.[wqHead + wqLen] <- r
+        wqLen <- wqLen + 1
 
-    let addTail (n: int) (r: byref<Req>) =
-        if n = treqs.Length then
-            let bigger = Array.zeroCreate<Req> (treqs.Length * 2)
-            Array.Copy(treqs, bigger, n)
-            treqs <- bigger
-        treqs.[n] <- r
-
-    /// Runs the batch in one transaction. While a WAL hold or the write window is on, writes wait: a write, and every
-    /// later request on its connection, stays at the front of the batch for the next pass, while reads are answered.
+    /// Runs one pass in one transaction. While a WAL hold or the write window is on, writes wait in the held queue
+    /// (with every later request on their connections) while reads are answered. When the hold ends, the held queue is
+    /// answered first, oldest first, up to wqMax requests in the pass's one commit.
     let flush () =
         uptime <- now - started
         let isWin = wwin > 0u && passMs - lastWriteMs < wwin
         let mutable hold = ckHold || isWin
         let mutable oneWrite = ckRewind && oneWriteOn && not hold
         let first = reqHead
-        let budget = if answers > 0 then answers else Int32.MaxValue
-        let last = if nreq - first > budget then first + budget else nreq
-        // A request answered more than 40 ms after it arrived costs the kernel a delayed-ACK timer and a bare ACK. In a
-        // backlog, oldest-first makes every newcomer wait that long too. So past one pass of backlog the newest go
-        // first; the old end gets a share of the pass from lifoAge on (all of it at twice that age), so waiting has a
-        // bound. A connection's own requests keep their order.
-        let lifo = lifoOn && nreq - first > budget
-        let mutable oldShare = budget
-        if lifo then
-            let age = passMs - reqs.[first].Ms
-            oldShare <- budget * (if age >= lifoAge * 2u then 8 elif age >= lifoAge then lifoCap else lifoMin) / 8
-        let mutable db = hold || lifo
-        let mutable j = first
-        while not db && j < last do
-            if reqs.[j].Route <> RErr then db <- true
-            j <- j + 1
-        let mutable wrote = false
-        let mutable nheld = 0
-        let mutable ntail = 0
-        let mutable answered = 0
-        let mutable i = first
-        let txn = db && Db.begin' ()
-        let mutable stop = false
-        while not stop && i < nreq && answered < budget do
-            if lifo && answered >= oldShare then stop <- true
-            else
-                let r = &reqs.[i]
-                let cid = r.Cid
-                if conns.[cid].Gen = r.Gen then
-                    if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then conns.[cid].Queued <- conns.[cid].Queued - 1
-                    else
-                        let isWrite = r.Route = RCreate || r.Route = RLike
-                        // the first commit after a rewind still overwrites old WAL pages, each read back from disk
-                        // first when reclaim evicted it: it carries one write, not a batch
-                        if oneWrite && isWrite then
-                            oneWrite <- false
-                            hold <- true
-                            answer &r cid
-                            answered <- answered + 1
-                            wrote <- true
-                            ckRewind <- false
-                        elif hold && (r.Held || conns.[cid].Held > 0 || isWrite) then
-                            if not r.Held then
-                                r.Held <- true
-                                conns.[cid].Held <- conns.[cid].Held + 1
-                            addHeld nheld &r
-                            nheld <- nheld + 1
+        let drain = not hold && wqLen > 0
+        if drain || nreq > first then
+            let budget = if answers > 0 then answers else Int32.MaxValue
+            let last = if nreq - first > budget then first + budget else nreq
+            // A request answered more than 40 ms after it arrived costs the kernel a delayed-ACK timer and a bare ACK.
+            // In a backlog, oldest-first makes every newcomer wait that long too. So past one pass of backlog the
+            // newest go first; the old end gets a share of the pass from lifoAge on (all of it at twice that age), so
+            // waiting has a bound. A connection's own requests keep their order.
+            let lifo = lifoOn && nreq - first > budget
+            let mutable oldShare = budget
+            if lifo then
+                let age = passMs - reqs.[first].Ms
+                oldShare <- budget * (if age >= lifoAge * 2u then 8 elif age >= lifoAge then lifoCap else lifoMin) / 8
+            let mutable db = drain || lifo
+            let mutable j = first
+            while not db && j < last do
+                if reqs.[j].Route <> RErr then db <- true
+                j <- j + 1
+            let mutable wrote = false
+            let mutable answered = 0
+            let txn = db && Db.begin' ()
+            // the held queue first
+            if drain then
+                let mutable n = 0
+                let mutable stopW = false
+                while not stopW && wqLen > 0 && n < wqMax do
+                    let r = &wq.[wqHead]
+                    let cid = r.Cid
+                    let mutable take = true
+                    if conns.[cid].Gen = r.Gen then
+                        if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then
+                            conns.[cid].Queued <- conns.[cid].Queued - 1
+                            conns.[cid].Held <- conns.[cid].Held - 1
                         else
-                            answer &r cid
-                            answered <- answered + 1
-                            if isWrite then
-                                wrote <- true
-                                ckRewind <- false
-                i <- i + 1
-        if lifo then
-            let mutable k = nreq
-            let mutable stop2 = false
-            while not stop2 && k > i && answered < budget do
-                let r = &reqs.[k - 1]
-                let cid = r.Cid
-                if conns.[cid].Gen = r.Gen then
-                    if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then
-                        conns.[cid].Queued <- conns.[cid].Queued - 1
-                        k <- k - 1
-                    elif conns.[cid].Queued > 1 then stop2 <- true // pipelined: its older request goes first
-                    else
-                        let isWrite = r.Route = RCreate || r.Route = RLike
-                        if oneWrite && isWrite then
-                            oneWrite <- false
-                            hold <- true
-                            answer &r cid
-                            answered <- answered + 1
-                            wrote <- true
-                            ckRewind <- false
-                        elif hold && (r.Held || isWrite) then
-                            if not r.Held then
-                                r.Held <- true
-                                conns.[cid].Held <- conns.[cid].Held + 1
-                            addTail ntail &r
-                            ntail <- ntail + 1
+                            let isWrite = r.Route = RCreate || r.Route = RLike
+                            if isWrite && hold then
+                                // the first commit after a rewind carried its one write: the rest wait
+                                take <- false
+                                stopW <- true
+                            else
+                                answer &r cid
+                                n <- n + 1
+                                if isWrite then
+                                    wrote <- true
+                                    ckRewind <- false
+                                    // the first commit after a rewind still overwrites old WAL pages, each read back
+                                    // from disk first when reclaim evicted it: it carries one write, not a batch
+                                    if oneWrite then
+                                        oneWrite <- false
+                                        hold <- true
+                    if take then
+                        wqHead <- wqHead + 1
+                        wqLen <- wqLen - 1
+                        stWalk <- stWalk + 1L
+                if wqLen = 0 then
+                    wqHead <- 0
+                    warenaLen <- 0
+            let mutable i = first
+            let mutable stop = false
+            while not stop && i < nreq && answered < budget do
+                if lifo && answered >= oldShare then stop <- true
+                else
+                    stWalk <- stWalk + 1L
+                    let r = &reqs.[i]
+                    let cid = r.Cid
+                    if conns.[cid].Gen = r.Gen then
+                        if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then conns.[cid].Queued <- conns.[cid].Queued - 1
                         else
-                            answer &r cid
-                            answered <- answered + 1
-                            if isWrite then
-                                wrote <- true
-                                ckRewind <- false
-                        k <- k - 1
-                else k <- k - 1
-            nreq <- k
-        if wrote then lastWriteMs <- passMs
-        nHeldNow <- nheld + ntail
-        let mutable ok = true
-        if txn && not (Db.commit ()) then
-            ok <- false
-            Db.rollback ()
-        elif not txn then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
-        if not ok && wrote then
-            // never acknowledge an uncommitted write: every connection of this pass closes without an answer
+                            let isWrite = r.Route = RCreate || r.Route = RLike
+                            if conns.[cid].Held > 0 || (hold && isWrite) then toHeld &r cid
+                            else
+                                answer &r cid
+                                answered <- answered + 1
+                                if isWrite then
+                                    wrote <- true
+                                    ckRewind <- false
+                                    if oneWrite then
+                                        oneWrite <- false
+                                        hold <- true
+                    i <- i + 1
+            if lifo then
+                let mutable k = nreq
+                let mutable stop2 = false
+                while not stop2 && k > i && answered < budget do
+                    stWalk <- stWalk + 1L
+                    let r = &reqs.[k - 1]
+                    let cid = r.Cid
+                    if conns.[cid].Gen = r.Gen then
+                        if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then
+                            conns.[cid].Queued <- conns.[cid].Queued - 1
+                            k <- k - 1
+                        elif conns.[cid].Queued - conns.[cid].Held > 1 then stop2 <- true // pipelined: its older request goes first
+                        else
+                            let isWrite = r.Route = RCreate || r.Route = RLike
+                            if conns.[cid].Held > 0 || (hold && isWrite) then toHeld &r cid
+                            else
+                                answer &r cid
+                                answered <- answered + 1
+                                if isWrite then
+                                    wrote <- true
+                                    ckRewind <- false
+                                    if oneWrite then
+                                        oneWrite <- false
+                                        hold <- true
+                            k <- k - 1
+                    else k <- k - 1
+                nreq <- k
+            if wrote then lastWriteMs <- passMs
+            nHeldNow <- wqLen
+            let mutable ok = true
+            if txn && not (Db.commit ()) then
+                ok <- false
+                Db.rollback ()
+            elif not txn then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
+            if not ok && wrote then
+                // never acknowledge an uncommitted write: every connection of this pass closes without an answer
+                for d in 0 .. dirty.Count - 1 do
+                    let cid = dirty.[d]
+                    giveOut conns.[cid].Out
+                    conns.[cid].Out <- null
+                    drop cid
             for d in 0 .. dirty.Count - 1 do
                 let cid = dirty.[d]
-                giveOut conns.[cid].Out
-                conns.[cid].Out <- null
-                drop cid
-        for d in 0 .. dirty.Count - 1 do
-            let cid = dirty.[d]
-            let f = conns.[cid].Fl &&& ~~~DIRTY
-            conns.[cid].Fl <- f
-            if not (isNull conns.[cid].Out) && f &&& SENDING = 0uy then startSend cid
-            elif conns.[cid].Queued = 0 && f &&& (LIVE ||| SENDING) = 0uy && f &&& CLOSEAFTER <> 0uy then
-                conns.[cid].Fl <- f &&& ~~~CLOSEAFTER
-                submitClose cid
-            if conns.[cid].Queued = 0 then conns.[cid].Held <- 0
-        dirty.Clear()
-        // held writes go back in front of what wasn't looked at, in order
-        if nheld > 0 then Array.Copy(hreqs, 0, reqs, i - nheld, nheld)
-        reqHead <- i - nheld
-        if ntail > 0 then
-            if nreq + ntail > reqs.Length then
-                let bigger = Array.zeroCreate<Req> (max (reqs.Length * 2) (nreq + ntail))
-                Array.Copy(reqs, bigger, nreq)
-                reqs <- bigger
-            Array.Copy(treqs, 0, reqs, nreq, ntail)
-            nreq <- nreq + ntail
-        if reqHead = nreq then
-            reqHead <- 0
-            nreq <- 0
-            arenaLen <- 0
-        elif arenaLen > (16 <<< 20) then
-            // a backlog that never empties: keep only the strings still waiting
-            if harena.Length < arenaLen then harena <- GC.AllocateUninitializedArray<byte>(arena.Length, pinned = true)
-            let mutable hl = 0
-            for k in reqHead .. nreq - 1 do
-                let r = &reqs.[k]
-                if r.Route = RCreate then
-                    Buffer.BlockCopy(arena, r.NameOff, harena, hl, r.NameLen)
-                    r.NameOff <- hl
-                    hl <- hl + r.NameLen
-                    Buffer.BlockCopy(arena, r.BodyOff, harena, hl, r.BodyLen)
-                    r.BodyOff <- hl
-                    hl <- hl + r.BodyLen
-            let t = arena
-            arena <- harena
-            harena <- t
-            arenaLen <- hl
+                let f = conns.[cid].Fl &&& ~~~DIRTY
+                conns.[cid].Fl <- f
+                if not (isNull conns.[cid].Out) && f &&& SENDING = 0uy then startSend cid
+                elif conns.[cid].Queued = 0 && f &&& (LIVE ||| SENDING) = 0uy && f &&& CLOSEAFTER <> 0uy then
+                    conns.[cid].Fl <- f &&& ~~~CLOSEAFTER
+                    submitClose cid
+            dirty.Clear()
+            reqHead <- i
+            if reqHead = nreq then
+                reqHead <- 0
+                nreq <- 0
+                arenaLen <- 0
+            elif arenaLen > (16 <<< 20) then
+                // a backlog that never empties: keep only the strings still waiting
+                if harena.Length < arenaLen then harena <- GC.AllocateUninitializedArray<byte>(arena.Length, pinned = true)
+                let mutable hl = 0
+                for k in reqHead .. nreq - 1 do
+                    let r = &reqs.[k]
+                    if r.Route = RCreate then
+                        Buffer.BlockCopy(arena, r.NameOff, harena, hl, r.NameLen)
+                        r.NameOff <- hl
+                        hl <- hl + r.NameLen
+                        Buffer.BlockCopy(arena, r.BodyOff, harena, hl, r.BodyLen)
+                        r.BodyOff <- hl
+                        hl <- hl + r.BodyLen
+                let t = arena
+                arena <- harena
+                harena <- t
+                arenaLen <- hl
 
     // ---------- completions ----------
 
@@ -1049,9 +1081,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         for k in 0 .. nrings - 1 do
             live <- live + R.[k].Live
             ovf <- ovf + R.[k].Ring.CqOverflow
-        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d"
+        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d"
             (now - started) live accErr lastAccErr ovf nobufs nrearm maxBatch pool.Count (Db.cacheKB ()) stPasses stAns
-            Db.walFrames (GC.CollectionCount 0) (GC.CollectionCount 2) (GC.GetTotalMemory false >>> 20)
+            Db.walFrames (GC.CollectionCount 0) (GC.CollectionCount 2) (GC.GetTotalMemory false >>> 20) stWalk wqLen
+        stWalk <- 0L
         maxBatch <- 0
         stPasses <- 0L
         stAns <- 0L
@@ -1082,7 +1115,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                     // A ring with nothing queued and no completion work flagged by the kernel isn't entered at all.
                     if not taskrunFlag || rs.Ring.HasWork then rs.Ring.Enter(0u, 0L) |> ignore
                     if rs.Ring.CqReady > 0u then ready <- true
-            let work = nreq > reqHead + nHeldNow && not ckHold
+            let work = (nreq > reqHead || (wqLen > 0 && uint32 Environment.TickCount64 - lastWriteMs >= wwin)) && not ckHold
             // under load, wait a little for more completions: bigger passes share one COMMIT and one enter
             let ret =
                 if work || ready then R.[0].Ring.Enter(0u, 0L)
@@ -1110,7 +1143,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             if ckHold && ckClock.ElapsedMilliseconds > 250L then // the checkpoint pass is stuck: don't wait longer
                 ckHold <- false
                 if ckLog then eprintfn "hold timeout frames %d" Db.walFrames
-            if nreq > reqHead then
+            if nreq > reqHead || wqLen > 0 then
                 let before = nreq - reqHead
                 flush ()
                 stAns <- stAns + int64 (before - (nreq - reqHead))

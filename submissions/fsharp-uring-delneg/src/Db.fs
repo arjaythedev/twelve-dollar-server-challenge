@@ -8,6 +8,7 @@
 module Db
 
 #nowarn "9"
+#nowarn "51"
 
 open System
 open System.Runtime.InteropServices

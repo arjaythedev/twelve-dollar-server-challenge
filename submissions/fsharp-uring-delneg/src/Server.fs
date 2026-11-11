@@ -38,6 +38,7 @@ let private poolCap = env "POOLCAP" 6144
 let private poolMax = env "POOLMAX" 4096
 let private cqSize = env "CQ" 65536
 let private statsOn = env "STATS" 0 = 1
+let private taskrunFlag = env "TASKRUN_FLAG" 1 = 1
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
 
@@ -1072,8 +1073,9 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 let rs = R.[k]
                 if rs.Active then
                     others <- true
-                    // sends go out and this ring's completions run now; it isn't entered again until the next pass
-                    rs.Ring.Enter(0u, 0L) |> ignore
+                    // sends go out and this ring's completions run now; it isn't entered again until the next pass.
+                    // A ring with nothing queued and no completion work flagged by the kernel isn't entered at all.
+                    if not taskrunFlag || rs.Ring.HasWork then rs.Ring.Enter(0u, 0L) |> ignore
                     if rs.Ring.CqReady > 0u then ready <- true
             let work = nreq > reqHead + nHeldNow && not ckHold
             // under load, wait a little for more completions: bigger passes share one COMMIT and one enter

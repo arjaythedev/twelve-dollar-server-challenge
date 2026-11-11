@@ -11,9 +11,11 @@
 module Sqlite
 
 #nowarn "9"
+#nowarn "51"
 
 open System
 open System.Runtime.InteropServices
+open Microsoft.FSharp.NativeInterop
 
 [<Literal>]
 let L = "libsqlite3td"
@@ -116,8 +118,8 @@ extern nativeint sqlite3DbNameToBtree(nativeint db, byte[] name)
 [<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
 extern int sqlite3BtreeBeginTrans(nativeint bt, int wrflag, nativeint schemaVersion)
 
-[<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
-extern void sqlite3BtreeGetMeta(nativeint bt, int idx, uint32& value)
+[<DllImport(L, EntryPoint = "sqlite3BtreeGetMeta", ExactSpelling = true); SuppressGCTransition>]
+extern void btGetMeta(nativeint bt, int idx, nativeint value)
 
 [<DllImport(L, ExactSpelling = true)>]
 extern int sqlite3BtreeCursorSize()
@@ -131,8 +133,8 @@ extern int sqlite3BtreeCursor(nativeint bt, uint32 root, int wrflag, nativeint k
 [<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
 extern int sqlite3BtreeCloseCursor(nativeint cur)
 
-[<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
-extern int sqlite3BtreeFirst(nativeint cur, int& res)
+[<DllImport(L, EntryPoint = "sqlite3BtreeFirst", ExactSpelling = true); SuppressGCTransition>]
+extern int btFirst(nativeint cur, nativeint res)
 
 [<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
 extern int sqlite3BtreeNext(nativeint cur, int flags)
@@ -140,20 +142,29 @@ extern int sqlite3BtreeNext(nativeint cur, int flags)
 [<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
 extern int sqlite3BtreeEof(nativeint cur)
 
-[<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
-extern int sqlite3BtreeTableMoveto(nativeint cur, int64 key, int bias, int& res)
+[<DllImport(L, EntryPoint = "sqlite3BtreeTableMoveto", ExactSpelling = true); SuppressGCTransition>]
+extern int btTableMoveto(nativeint cur, int64 key, int bias, nativeint res)
 
-[<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
-extern int sqlite3BtreeIndexMoveto(nativeint cur, nativeint unpacked, int& res)
+[<DllImport(L, EntryPoint = "sqlite3BtreeIndexMoveto", ExactSpelling = true); SuppressGCTransition>]
+extern int btIndexMoveto(nativeint cur, nativeint unpacked, nativeint res)
 
-[<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
-extern nativeint sqlite3BtreePayloadFetch(nativeint cur, uint32& amt)
+[<DllImport(L, EntryPoint = "sqlite3BtreePayloadFetch", ExactSpelling = true); SuppressGCTransition>]
+extern nativeint btPayloadFetch(nativeint cur, nativeint amt)
 
 [<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
 extern uint32 sqlite3BtreePayloadSize(nativeint cur)
 
 [<DllImport(L, ExactSpelling = true)>]
 extern nativeint sqlite3KeyInfoAlloc(nativeint db, int n, int x)
+
+// The calls above with an out parameter take it as a raw pointer: a byref (`int&`) parameter makes the runtime call
+// through a marshalling stub, where a call with only blittable arguments is emitted inline. These keep the byref
+// signatures for the callers (the out values are always stack locals).
+let inline sqlite3BtreeGetMeta (bt: nativeint, idx: int, value: byref<uint32>) = btGetMeta (bt, idx, NativePtr.toNativeInt &&value)
+let inline sqlite3BtreeFirst (cur: nativeint, res: byref<int>) = btFirst (cur, NativePtr.toNativeInt &&res)
+let inline sqlite3BtreeTableMoveto (cur: nativeint, key: int64, bias: int, res: byref<int>) = btTableMoveto (cur, key, bias, NativePtr.toNativeInt &&res)
+let inline sqlite3BtreeIndexMoveto (cur: nativeint, unpacked: nativeint, res: byref<int>) = btIndexMoveto (cur, unpacked, NativePtr.toNativeInt &&res)
+let inline sqlite3BtreePayloadFetch (cur: nativeint, amt: byref<uint32>) = btPayloadFetch (cur, NativePtr.toNativeInt &&amt)
 
 /// SQLite's Mem (sqlite3_value) and UnpackedRecord in 3.54.1 without SQLITE_DEBUG (x86-64): only the fields a search
 /// key needs. Mem: u.i @0, flags @20, size 56. UnpackedRecord: pKeyInfo @0, aMem @8, nField @28, default_rc @30, size 40.

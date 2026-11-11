@@ -18,6 +18,8 @@ let SYS_register = 427L
 let SETUP_CQSIZE = 1u <<< 3
 let SETUP_SUBMIT_ALL = 1u <<< 7
 let SETUP_COOP_TASKRUN = 1u <<< 8
+let SETUP_TASKRUN_FLAG = 1u <<< 9
+let SQ_TASKRUN = 1u <<< 2
 let SETUP_SINGLE_ISSUER = 1u <<< 12
 let SETUP_DEFER_TASKRUN = 1u <<< 13
 let FEAT_SINGLE_MMAP = 1u
@@ -87,7 +89,7 @@ type Ring(sqEntries0: uint32, cqEntries0: uint32) =
     do
         NativeMemory.Clear(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> p), unativeint 120)
         wr32 (p + 4n) cqEntries0
-        wr32 (p + 8n) (SETUP_CQSIZE ||| SETUP_SUBMIT_ALL ||| SETUP_COOP_TASKRUN ||| SETUP_SINGLE_ISSUER ||| SETUP_DEFER_TASKRUN)
+        wr32 (p + 8n) (SETUP_CQSIZE ||| SETUP_SUBMIT_ALL ||| SETUP_COOP_TASKRUN ||| SETUP_TASKRUN_FLAG ||| SETUP_SINGLE_ISSUER ||| SETUP_DEFER_TASKRUN)
     let fd =
         let r = Native.syscall (SYS_setup, int64 sqEntries0, int64 p, 0L, 0L, 0L, 0L)
         if r < 0L then
@@ -117,6 +119,7 @@ type Ring(sqEntries0: uint32, cqEntries0: uint32) =
     let sqHead = NativePtr.ofNativeInt<uint32> (ringMem + nativeint (sqOff 0))
     let sqTail = NativePtr.ofNativeInt<uint32> (ringMem + nativeint (sqOff 1))
     let sqMask = rd32 (ringMem + nativeint (sqOff 2))
+    let sqFlags = NativePtr.ofNativeInt<uint32> (ringMem + nativeint (sqOff 4))
     let sqArray = ringMem + nativeint (sqOff 6)
     let cqHead = NativePtr.ofNativeInt<uint32> (ringMem + nativeint (cqOff 0))
     let cqTail = NativePtr.ofNativeInt<uint32> (ringMem + nativeint (cqOff 1))
@@ -177,6 +180,11 @@ type Ring(sqEntries0: uint32, cqEntries0: uint32) =
         s
 
     member _.Unsubmitted = tail - published
+
+    /// true when entering the ring would do something: submissions are queued, or (TASKRUN_FLAG) the kernel has
+    /// completion work waiting to be run, or completions are already posted
+    member this.HasWork =
+        tail <> published || (NativePtr.read sqFlags &&& SQ_TASKRUN) <> 0u || this.CqReady > 0u
 
     /// completions waiting in the CQ
     member _.CqReady = loadAcquire cqTail - NativePtr.read cqHead

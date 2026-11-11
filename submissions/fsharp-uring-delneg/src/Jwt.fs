@@ -81,6 +81,8 @@ let private decimalId (digits: ReadOnlySpan<byte>) =
         if ok then id else 0L
 
 let private bAlg = "alg"B
+/// the header nearly every library writes: an exact match needs no JSON reader (anything else is checked in full)
+let private bStdHeader = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}"B
 let private bHs256 = "HS256"B
 let private bSub = "sub"B
 let private bExp = "exp"B
@@ -146,7 +148,7 @@ let verify (token: ReadOnlySpan<byte>) (wantName: bool) (sub: byref<int64>) (nam
                 else
                     let scratch = Span<byte>(buf, 128, buf.Length - 128)
                     let mutable hl = 0
-                    if not (segment (token.Slice(0, firstDot)) scratch &hl) || not (headerOk (Span<byte>.op_Implicit (scratch.Slice(0, hl)))) then
+                    if not (segment (token.Slice(0, firstDot)) scratch &hl) || not (let h = Span<byte>.op_Implicit (scratch.Slice(0, hl)) in h.SequenceEqual(ReadOnlySpan bStdHeader) || headerOk h) then
                         Invalid
                     else
                         let mutable cl = 0

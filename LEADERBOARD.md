@@ -769,7 +769,10 @@ checkpoint rounds and the explicit WAL sync removed, one passive checkpoint per 
 own queue, drained in bulk after a hold; `CKPASS` 4000 and `HOLD` 16384, checkpoint thread at nice 19): 290,000 held
 at 87 % CPU, 0 errors; 300,000 failed the 2-minute probe on p99 (1.38 s), 320,000 on p99 (4.5 s). An earlier head of
 #394 (`e6763f4`) held **230,000** (22,379 req/s, p95 11.5 / p99 84.0 ms, 69 % CPU). Its merged #392 code held
-**280,000** (26,687 req/s, p95 39.8 / p99 742.3 ms, 86 % CPU, 2026-11-11).
+**280,000** (26,687 req/s, p95 39.8 / p99 742.3 ms, 86 % CPU, 2026-11-11). Its next follow-up **#398** (`389ae2a`,
+2026-11-11: checkpoint passes every 16,000 frames, short holds only once a pass has caught up) held **280,000** at
+82 % CPU (26,733 req/s, p95 22.8 / p99 222.7 ms, 0 errors, 1,228 MB; 290k failed the 2-minute probe on p99 8.09 s,
+300k on p99 3.76 s). That is below #394's 290,000, so #398 is not merged and the row stays at #394.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

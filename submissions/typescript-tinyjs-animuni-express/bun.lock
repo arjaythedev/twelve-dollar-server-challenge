@@ -4,7 +4,7 @@
   "workspaces": {
     "": {
       "dependencies": {
-        "tinyjs-fullstack": "0.1.1",
+        "tinyjs-fullstack": "0.1.2",
       },
     },
   },
@@ -91,7 +91,7 @@
 
     "tinyglobby": ["tinyglobby@0.2.17", "", { "dependencies": { "fdir": "^6.5.0", "picomatch": "^4.0.4" } }, "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g=="],
 
-    "tinyjs-fullstack": ["tinyjs-fullstack@0.1.1", "", { "dependencies": { "preact-render-to-string": "^6.6.0", "vite": "^8.0.0" }, "peerDependencies": { "preact": "^10.28.0", "three": "^0.187.0" }, "optionalPeers": ["three"], "bin": { "tinyjs": "bin/tinyjs.js" } }, "sha512-HLE0/XVeOHhvkl/HLs6Mfq0RxlEECuesoX54I7i4Gmb1CIhD7ARCZEa/DARCA0UJILq1EQ9G6dGkoo5UhrsUFw=="],
+    "tinyjs-fullstack": ["tinyjs-fullstack@0.1.2", "", { "dependencies": { "preact-render-to-string": "^6.6.0", "vite": "^8.0.0" }, "peerDependencies": { "preact": "^10.28.0", "three": "^0.187.0" }, "optionalPeers": ["three"], "bin": { "tinyjs": "bin/tinyjs.js" } }, "sha512-UZdxZBF5dXSENdARcq82ytnHhNOQhBM6zsPFs4QkVRUaILqUa8Cyi8Yfbz7Rjljl26R6VEAL+hKaxfpm/hYFYg=="],
 
     "vite": ["vite@8.3.7", "", { "dependencies": { "lightningcss": "^1.33.0", "picomatch": "^4.0.7", "postcss": "^8.5.32", "rolldown": "~1.2.18", "tinyglobby": "^0.2.17" }, "optionalDependencies": { "fsevents": "~2.3.3" }, "peerDependencies": { "@types/node": "^20.19.0 || >=22.12.0", "@vitejs/devtools": "^0.7.1 || ^0.8.0", "esbuild": "^0.27.0 || ^0.28.0", "jiti": ">=1.21.0", "less": "^4.0.0", "sass": "^1.70.0", "sass-embedded": "^1.70.0", "stylus": ">=0.54.8", "sugarss": "^5.0.0", "terser": "^5.16.0", "tsx": "^4.8.1", "yaml": "^2.4.2" }, "optionalPeers": ["@types/node", "@vitejs/devtools", "esbuild", "jiti", "less", "sass", "sass-embedded", "stylus", "sugarss", "terser", "tsx", "yaml"], "bin": { "vite": "bin/vite.js" } }, "sha512-oxh0dMxrayBr33ScJvvBJ2HBQ2jc1TBrXKR2NyL/MJ9WPuX19mN2DXWUmywKdyw5RFVQBo8hmtb2FMC0LHrnng=="],
   }

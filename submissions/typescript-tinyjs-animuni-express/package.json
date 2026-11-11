@@ -6,6 +6,6 @@
     "start": "tinyjs serve"
   },
   "dependencies": {
-    "tinyjs-fullstack": "0.1.1"
+    "tinyjs-fullstack": "0.1.2"
   }
 }

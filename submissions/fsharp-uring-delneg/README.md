@@ -37,6 +37,11 @@
   is handed to the kernel before its `COMMIT` returns (rule 6). If a commit fails, the pass's connections close
   without an answer, so no response claims a write that didn't land. Writes commit at most once per 10 ms (reads
   aren't held), so a commit carries more writes and fewer WAL frames per write.
+- **Held writes.** A write that must wait (the write window, or a checkpoint hold) moves once to a queue of its own,
+  with every later request on its connection and a copy of a new post's text, and passes don't walk it again. The
+  first pass after the hold answers up to 4,096 of them, oldest first, in its one commit. Releasing at most a pass's
+  64 answers per write window let the held set outgrow the release rate after a checkpoint hold under load: every pass
+  then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
@@ -80,7 +85,7 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 | | |
 |---|---|
 | `src/Ring.fs` | io_uring: setup, mmap, submission entries, completions |
-| `src/Server.fs` | the loop: rings, accept, receive, send, close, HTTP, the batch and its transaction, checkpoint holds |
+| `src/Server.fs` | the loop: rings, accept, receive, send, close, HTTP, the batch and its transaction, held writes, checkpoint holds |
 | `src/Db.fs` | statements, writes, record decoding, the feed and post reads, the self-test, the checkpoint thread |
 | `src/Sqlite.fs` | P/Invoke declarations for SQLite's API and its B-tree functions |
 | `src/Json.fs`, `src/Jwt.fs` | response JSON, HS256 |

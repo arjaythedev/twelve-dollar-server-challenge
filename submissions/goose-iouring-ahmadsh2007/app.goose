@@ -18,6 +18,7 @@ import std;
 struct Cqe { ud: u64, res: i32, flags: u32 }
 
 extern fn ring_add(slots: i64) -> i32;
+extern fn ring_submit(ring: i32);
 extern fn ring_enter(ring: i32, want: i32, ns: i64);
 extern fn ring_reap(ring: i32, out: Cqe[>..]&) -> i64;
 extern fn op_accept(ring: i32, listener: i32, ud: u64);
@@ -29,6 +30,7 @@ extern fn rx_to_box(ring: i32, bid: i32, len: i32, box: i32);
 extern fn rx_drop(ring: i32, bid: i32);
 extern fn rx_publish();
 extern fn box_new() -> i32;
+extern fn box_small() -> i32;
 extern fn box_drop(box: i32);
 extern fn box_put(box: i32, bytes: const u8[:]);
 extern fn box_put2(box: i32, a: const u8[:], b: const u8[:]);
@@ -89,7 +91,8 @@ struct Conn {
     flags: u16,
     out: i32,     // box of responses not handed to the kernel yet (-1: none)
     wire: i32,    // box being sent (-1: none)
-    part: i32,    // box with a request still arriving, or held (-1: none)
+    part: i32,    // box with request bytes not answered yet: a partial request, a held write, or
+                  // requests read ahead of their turn (-1: none)
     sent: u32,    // bytes of `wire` the kernel has taken
     mark: u32,    // `out`'s length when this pass first touched the connection
 }
@@ -97,20 +100,55 @@ struct Conn {
 let F_OPEN: u16 = 1;
 let F_CLOSE: u16 = 2;      // close once the output drains
 let F_HELD: u16 = 4;       // a write waits in `part` (and everything after it)
-let F_EOF: u16 = 8;        // the client finished sending while a write was held
+let F_EOF: u16 = 8;        // the client finished sending while requests of it still waited
 let F_CLOSING: u16 = 16;   // shutdown and close queued
 let F_SENDING: u16 = 32;
 let F_TOUCHED: u16 = 64;   // in this pass's touched list
 let F_ANSWERED: u16 = 128; // answered something in this pass
+let F_READY: u16 = 256;    // on the ready list: requests in `part` wait for a pass with answers left
+let F_REARM: u16 = 512;    // on the re-arm list: its multishot receive ended
 
 struct RingState { open: i64, full: bool, inflight: i32[8] }
 
-struct Held { ci: i64, gen: u16 }
+struct Ref { ci: i64, gen: u16 }
 
 let LISTENERS = 8;
 let MAX_RINGS = 16;
-let WAIT_MIN: i32 = 256;   // a pass waits for this many completions on ring 0, or WAIT_NS
-let WAIT_NS = 1000000;
+// Rings made at startup hold this many connections between them (six rings under
+// LimitNOFILE=65535); more are added only past that. Nothing is allocated in the middle of a ramp.
+let START_CONNS = 384000;
+// A pass waits on ring 0 for WAIT_MIN completions or wait_ns, whichever comes first: in steady
+// state the timer ends it, so a pass (one COMMIT, one enter per ring, one burst of sends) is
+// shared by every request of those milliseconds; a burst on ring 0 ends it early.
+let WAIT_MIN: i32 = 512;
+var wait_ns = 4000000;     // GOOSE_WAIT_US (test knob) overrides it
+// Drain first: a pass reads everything the rings have, but answers at most this many
+// connections; the rest wait in user memory (a few hundred bytes each, where an unread request
+// pins a 4 KB page of socket memory) for the next passes. In steady state a pass answers a
+// hundred or two, so the limit only shows under overload and after a stall. There it keeps
+// passes short: responses leave every few tens of milliseconds, and the sockets are read that
+// often too, so the kernel's TCP memory does not fill up while a backlog is worked off (with
+// long passes it does: requests are dropped and come back on retransmission timers). It costs
+// nothing at saturation: 65,000 requests/s here with 1,024, with 8,192, and with no limit (the
+// version before this one).
+// Waiting requests are answered oldest first, before what just arrived: an overload then
+// delays every request a little and none a lot. The one exception is a stall: when a pass
+// starts more than STALL_US after the one before (the process was not running, or stuck in a
+// system call), the requests of that time are late whatever happens, and answering in order
+// would make every request of the next seconds late behind them. So for up to LATE_FOR_US after
+// a stall, while any of those still wait, what just arrived goes first (a quarter of a pass's
+// answers is kept for the ones that wait: the newest of them first, after a few of the oldest):
+// the stall then costs the requests it held, not every request of the seconds it takes to work
+// the backlog off.
+var answers = 1024;        // GOOSE_ANSWERS (test knob) overrides it
+var answers_left = 0;
+let STALL_US = 1000000;
+let LATE_FOR_US = 15000000;
+var last_pass = 0;         // when the pass before this one began (µs)
+var late_until = 0;        // until then (µs), what arrives is answered before what waits; 0: in order
+// Receives that ended (a ring out of buffers) are armed again at most this many per ring per
+// pass, half a ring's buffers, so arming them cannot run the ring dry again.
+let REARM_MAX = 4096;
 
 // user_data: operation (8 bits) | ring (8) | generation (16) | slot or listener (32)
 let OP_ACCEPT: u64 = 1;
@@ -128,31 +166,31 @@ var conns: Conn[>..];
 var rs: RingState[16];
 var nrings = 0;
 var slots = 0;       // slots per ring
-var depth = 0;       // accepts in flight on the ring that is accepting, over all listeners
+var each = 0;        // accepts in flight per listener on each ring that takes new connections
 var margin = 0;      // a ring stops accepting while fewer than this many slots are free
-var acc_ring = 0;    // the ring new connections go to
 var ring_retry = 0;  // when adding a ring failed: not again before this (µs)
 
 var cqes: Cqe[>..];
 var data: u8[>..];       // one connection's bytes being served
 var touched: i64[>..];   // connections with output (or a close) for the end of this pass
-var rearm: i64[>..];     // connections whose multishot receive ended
-var held: Held[>..];     // connections with a held write
+var held: Ref[>..];      // connections with a held write
+var ready: Ref[>..];     // connections with requests read but not answered yet, oldest first
+var ready_head = 0;
+var rearm: Ref[>..];     // connections whose multishot receive ended, oldest first
+var rearm_head = 0;
+var rearmed: i64[16];
 var err500: u8[>..];     // the response every answer of a failed commit becomes
-
-// Writes are coalesced: a write waits (held, like during a checkpoint) until the window that
-// opened with the first one ends, so several writes share one commit and one set of log frames.
-var write_window = 2000;  // µs; GOOSE_WRITE_US (test knob) overrides it
-var window_end = 0;       // µs; 0 while no write waits
-var writes_now = false;   // while held writes are being served
 
 // Checkpoints (policy here, the copying on sqlite.c's thread). Past CK_START log frames the
 // thread copies the log back; when that finishes, writes wait while it copies what was written
 // meanwhile, so the next write starts the log over. Past CK_HIGH (the thread is falling behind)
 // writes wait too. A wait lasts at most GATE_US; the loop itself never checkpoints.
-var CK_START = 16384;     // GOOSE_CK_FRAMES (test knob) overrides it
-var CK_HIGH = 32768;      // CK_START + 16384
-let GATE_US = 150000;
+// Short cycles: what is copied while writes wait is what was written during the first copy, so
+// the wait grows with the cycle, and on a slow disk a long one outlasts GATE_US and the log
+// never starts over.
+var CK_START = 8192;      // GOOSE_CK_FRAMES (test knob) overrides it
+var CK_HIGH = 32768;      // 4 * CK_START
+let GATE_US = 250000;
 // The checkpointer runs at nice 19, in the loop's idle time. If the loop has none (overload) and
 // the log is past CK_HIGH, the loop gives the CPU away for YIELD_US of every YIELD_EVERY_US, so
 // the log stays bounded instead of growing for as long as the overload lasts.
@@ -175,6 +213,8 @@ var st_commit_us = 0;    // the longest COMMIT
 var st_nobuf = 0;        // receives that ended for lack of a buffer
 var st_rearms = 0;
 var st_maxcqe = 0;       // the most completions one ring gave one pass
+var st_deferred = 0;     // receives kept for a later pass
+var st_stalls = 0;       // passes that began more than STALL_US after the one before
 var st_at = 0;
 
 // ---------------------------------------------------------------------------------------------
@@ -205,15 +245,33 @@ var like_counts: u32[513];
 fn main() {
     if !startup() { exit(1); }
     loop {
-        // Every other ring submits and collects; ring 0 goes last and waits, so a busy pass
-        // spans up to WAIT_NS and shares one COMMIT across many requests.
-        var r = nrings - 1;
-        while r > 0 { ring_enter(r as! i32, 0, 0); r--; }
-        ring_enter(0, WAIT_MIN, WAIT_NS);
+        // The last pass's sends leave now on every ring; then ring 0 waits (unless requests or
+        // receives are still queued from the last pass: then there is work now), and only after
+        // the wait do the other rings collect, so what arrived on them meanwhile is served by
+        // this pass like ring 0's.
+        let busy = ready_head < ready.len || rearm_head < rearm.len;
+        for r in 1..nrings { ring_submit(r as! i32); }
+        if busy { ring_enter(0, 0, 0); } else { ring_enter(0, WAIT_MIN, wait_ns); }
+        for r in 1..nrings { ring_enter(r as! i32, 0, 0); }
         let t0 = clock_us();
-        for k in nrings { drain(k); }
-        rx_publish();
-        if held.len > 0 && !gate && window_end != 0 && t0 >= window_end { release_held(); }
+        if last_pass != 0 && t0 - last_pass > STALL_US { late_until = t0 + LATE_FOR_US; st_stalls++; }
+        last_pass = t0;
+        if t0 >= late_until {
+            answers_left = answers;
+            run_ready(false);        // in order: the ones that wait, then what this pass reads
+            for k in nrings { drain(k); }
+            rx_publish();
+        } else {
+            // After a stall: what arrives first, then the ones that wait, until none does.
+            let kept = min(ready.len - ready_head, answers / 4);
+            answers_left = answers - kept;
+            for k in nrings { drain(k); }
+            rx_publish();
+            answers_left += kept;
+            run_ready(true);
+            if ready_head == ready.len { late_until = 0; }
+        }
+        if held.len > 0 && !gate { release_held(); }
         let t1 = if stats_on { clock_us() } else { 0 };
         // No response from this pass reaches the kernel before its COMMIT returns.
         let committed = db_commit();
@@ -235,27 +293,30 @@ fn main() {
     }
 }
 
+fn knob(name: const u8[:], lo: i64, hi: i64, v: i64&) {
+    var text: u8[>..] = [];
+    if !env_get(name, text) { return; }
+    let x, ok = parse_int(text);
+    if ok && x >= lo && x <= hi { v = x; }
+}
+
 fn startup() -> bool {
     var path: u8[>..] = [];
     var host: u8[>..] = [];
     var port_s: u8[>..] = [];
     var secret: u8[>..] = [];
-    var knob: u8[>..] = [];
+    var flag: u8[>..] = [];
     if !env_get("SQLITE_PATH", path) { path.append("feed.db"); }
     if !env_get("HOST", host) { host.append("127.0.0.1"); }
     if !env_get("PORT", port_s) { port_s.append("3000"); }
     env_get("JWT_SECRET", secret);
-    if env_get("GOOSE_WRITE_US", knob) {
-        let w, ok = parse_int(knob);
-        if ok && w >= 0 && w <= 100000 { write_window = w; }
-    }
-    knob.clear();
-    if env_get("GOOSE_CK_FRAMES", knob) {
-        let f, ok = parse_int(knob);
-        if ok && f >= 256 { CK_START = f; CK_HIGH = f + 16384; }
-    }
-    knob.clear();
-    stats_on = env_get("GOOSE_STATS", knob);
+    var wait_us = wait_ns / 1000;
+    knob("GOOSE_WAIT_US", 50, 100000, wait_us);
+    wait_ns = wait_us * 1000;
+    knob("GOOSE_ANSWERS", 1, 1000000, answers);
+    knob("GOOSE_CK_FRAMES", 256, 1000000, CK_START);
+    CK_HIGH = 4 * CK_START;
+    stats_on = env_get("GOOSE_STATS", flag);
     let port, port_ok = parse_int(port_s);
     if !port_ok || port <= 0 || port > 65535 { log_line("PORT must be 1-65535"); return false; }
     var err: u8[>..] = [];
@@ -270,11 +331,16 @@ fn startup() -> bool {
     started_us = clock_us();
     err500.append("HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 33\r\n\r\n");
     err500.append("{\"error\":\"internal server error\"}");
-    // Rings as large as the descriptor limit allows; a sixteenth of one in accepts at most, and
-    // a ring is left alone once fewer slots than those accepts (plus room) are free.
+    // Rings as large as the descriptor limit allows, enough of them for START_CONNS connections,
+    // all made now. About 2,000 accepts in flight between them (fewer on small tables): an
+    // accept is armed again only after a pass has seen it complete, so the number in flight
+    // bounds the connections accepted per pass, and under load a pass can take a quarter of a
+    // second while a ramp brings thousands of connections a second. A ring is left alone once
+    // fewer slots than its accepts (plus room) are free.
     slots = slot_limit();
-    depth = clamp(slots / 32, LISTENERS, 512) / LISTENERS * LISTENERS;
-    margin = depth + 64;
+    let want = clamp((START_CONNS + slots - 1) / slots, 1, 6);
+    each = clamp(slots / 32 / LISTENERS, 1, max(1, 2048 / LISTENERS / want));
+    margin = each * LISTENERS + 64;
     let lrc = listen_on(host, port, LISTENERS);
     var m: u8[>..] = [];
     if lrc != 0 {
@@ -282,10 +348,15 @@ fn startup() -> bool {
         log_line(m);
         return false;
     }
-    if !add_ring() { log_line("io_uring setup failed"); return false; }
+    for k in want {
+        if !add_ring() {
+            if k == 0 { log_line("io_uring setup failed"); return false; }
+            break;
+        }
+    }
     let locked = lock_code();
-    format(m, "listening on ", host, ":", port, "; io_uring, ", slots, " direct descriptors per ring; ",
-        locked / 1024, " KB of code locked");
+    format(m, "listening on ", host, ":", port, "; io_uring, ", nrings, " rings of ", slots,
+        " direct descriptors; ", locked / 1024, " KB of code locked");
     log_line(m);
     return true;
 }
@@ -297,11 +368,6 @@ fn add_ring() -> bool {
     conns.push_n(Conn { gen: 0, flags: 0, out: -1, wire: -1, part: -1, sent: 0, mark: 0 }, slots);
     rs[nrings] = RingState { open: 0, full: false, inflight: [0; 8] };
     nrings++;
-    if nrings > 1 {
-        var m: u8[>..] = [];
-        format(m, "ring ", nrings - 1, " added");
-        log_line(m);
-    }
     return true;
 }
 
@@ -352,24 +418,41 @@ fn on_recv(r: i64, slot: i64, gen: u16, res: i32, flags: u32) {
     if res > 0 && has_buf {
         if (c.flags & F_CLOSE) != 0 {
             rx_drop(r as! i32, bid);
-        } else if (c.flags & F_HELD) != 0 {
-            rx_to_box(r as! i32, bid, res, c.part); // behind a held write: wait with it
+        } else if (c.flags & (F_HELD | F_READY)) != 0 || answers_left <= 0 {
+            // Behind bytes that still wait, or this pass has no answers left: out of the
+            // kernel now, answered later.
+            if c.part < 0 { c.part = box_small(); }
+            rx_to_box(r as! i32, bid, res, c.part);
+            if (c.flags & (F_HELD | F_READY)) == 0 {
+                c.flags |= F_READY;
+                ready.push(Ref { ci: ci, gen: gen });
+            }
+            st_deferred++;
         } else {
+            answers_left--;
             data.clear();
             if c.part >= 0 { box_read(c.part, data); box_drop(c.part); c.part = -1; }
             rx_take(r as! i32, bid, res, data);
             serve(ci, data);
         }
-        if (flags & CQE_MORE) == 0 { rearm.push(ci); }
+        if (flags & CQE_MORE) == 0 { arm_later(ci); }
     } else if res > 0 || res == -ENOBUFS {
         st_nobuf++;
-        rearm.push(ci); // the receive ended without a buffer: re-armed once buffers are back
+        arm_later(ci); // the receive ended without a buffer
     } else {
         // End of stream or an error: answer what was asked, then close.
         if has_buf { rx_drop(r as! i32, bid); }
-        if (c.flags & F_HELD) != 0 { c.flags |= F_EOF; }
+        if (c.flags & (F_HELD | F_READY)) != 0 { c.flags |= F_EOF; }
         else { c.flags |= F_CLOSE; touch(ci); }
     }
+}
+
+// The connection's multishot receive ended: it is armed again by rearm_receives, in turn.
+fn arm_later(ci: i64) {
+    let c .= conns[ci];
+    if (c.flags & F_REARM) != 0 { return; }
+    c.flags |= F_REARM;
+    rearm.push(Ref { ci: ci, gen: c.gen });
 }
 
 fn on_send(r: i64, slot: i64, gen: u16, res: i32) {
@@ -447,48 +530,71 @@ fn flush(committed: bool) {
     touched.clear();
 }
 
+// Arms the receives that ended, oldest first, at most REARM_MAX per ring: an armed receive
+// takes a buffer at once if its request is already there, and a ring must keep buffers for the
+// receives that are still armed.
 fn rearm_receives() {
-    st_rearms += rearm.len;
-    for k in rearm.len {
-        let ci = rearm[k];
-        let c = conns[ci];
+    if rearm_head == rearm.len { return; }
+    for r in nrings { rearmed[r] = 0; }
+    while rearm_head < rearm.len {
+        let h = rearm[rearm_head];
+        let r = h.ci / slots;
+        if rearmed[r] >= REARM_MAX { break; }
+        rearm_head++;
+        let c .= conns[h.ci];
+        if c.gen != h.gen || (c.flags & F_REARM) == 0 { continue; }
+        c.flags &= ~F_REARM;
         if (c.flags & F_OPEN) != 0 && (c.flags & F_CLOSING) == 0 {
-            op_recv((ci / slots) as! i32, (ci % slots) as! i32, ud(OP_RECV, ci / slots, c.gen, ci % slots));
+            op_recv(r as! i32, (h.ci % slots) as! i32, ud(OP_RECV, r, c.gen, h.ci % slots));
+            rearmed[r] += 1;
+            st_rearms++;
         }
     }
-    rearm.clear();
+    if rearm_head == rearm.len { rearm.clear(); rearm_head = 0; }
+    else if rearm_head >= 65536 {
+        let n = rearm.len - rearm_head;
+        rearm[..n].move_from(rearm[rearm_head..]);
+        rearm.pop_n(rearm_head);
+        rearm_head = 0;
+    }
 }
 
-// Keeps single-shot accepts in flight on the accepting ring; when it is (nearly) full, moves to
-// a ring with room, adding one if none has (retried once a second if that fails).
+// Keeps single-shot accepts in flight on the rings with the fewest connections (within SPREAD of
+// the emptiest), so connections spread evenly over the rings. When no ring has room, one is
+// added (retried once a second if that fails).
+let SPREAD = 256;
+
 fn accept_more(now: i64) {
-    if rs[acc_ring].full {
-        var next = -1;
-        for r in nrings { if next < 0 && !rs[r].full { next = r; } }
-        if next < 0 {
-            if now < ring_retry { return; }
-            if !add_ring() {
-                ring_retry = now + 1000000;
-                log_line("cannot add a ring; retrying in 1 s");
-                return;
-            }
-            next = nrings - 1;
-        }
-        acc_ring = next;
+    var least = -1;
+    for r in nrings {
+        if !rs[r].full && (least < 0 || rs[r].open < least) { least = rs[r].open; }
     }
-    let r = acc_ring;
-    let each = depth / LISTENERS;
-    for li in LISTENERS {
-        while rs[r].inflight[li] < each {
-            op_accept(r as! i32, li as! i32, ud(OP_ACCEPT, r, 0, li));
-            rs[r].inflight[li] += 1;
+    if least < 0 {
+        if now < ring_retry { return; }
+        if add_ring() {
+            var m: u8[>..] = [];
+            format(m, "ring ", nrings - 1, " added");
+            log_line(m);
+        } else {
+            ring_retry = now + 1000000;
+            log_line("cannot add a ring; retrying in 1 s");
+        }
+        return;
+    }
+    for r in nrings {
+        if rs[r].full || rs[r].open > least + SPREAD { continue; }
+        for li in LISTENERS {
+            while rs[r].inflight[li] < each {
+                op_accept(r as! i32, li as! i32, ud(OP_ACCEPT, r, 0, li));
+                rs[r].inflight[li] += 1;
+            }
         }
     }
 }
 
-// Parses and answers every complete request in `data` (the connection's earlier partial bytes
-// come first). A write that may not run in this pass stops it: that request and everything
-// behind it wait with the connection until writes are let through.
+// Parses and answers every complete request in `data` (the connection's earlier bytes come
+// first). A write stops it while writes wait for a checkpoint: that request and everything
+// behind it stay with the connection until writes are let through.
 fn serve(ci: i64, data: const u8[:]) {
     var off = 0;
     var req = Req { .. };
@@ -496,16 +602,17 @@ fn serve(ci: i64, data: const u8[:]) {
         let rest = data[off..];
         let st = parse_request(rest, req);
         if st == 0 { break; }
-        st_reqs++;
         if st < 0 {
+            st_reqs++;
             error(ci, 400, "bad request");
             close_after(ci);
             return;
         }
-        if req.post && !writes_now {
+        if req.post && gate {
             hold(ci, rest);
             return;
         }
+        st_reqs++;
         handle(ci, rest, req);
         if req.close { close_after(ci); return; }
         off += req.used;
@@ -515,17 +622,15 @@ fn serve(ci: i64, data: const u8[:]) {
 
 fn keep(ci: i64, rest: const u8[:]) {
     let c .= conns[ci];
-    if c.part < 0 { c.part = box_new(); }
+    if c.part < 0 { c.part = box_small(); }
     box_put(c.part, rest);
 }
 
 fn hold(ci: i64, rest: const u8[:]) {
-    st_reqs--; // counted when it is served
     keep(ci, rest);
     let c .= conns[ci];
     c.flags |= F_HELD;
-    held.push(Held { ci: ci, gen: c.gen });
-    if window_end == 0 { window_end = clock_us() + write_window; }
+    held.push(Ref { ci: ci, gen: c.gen });
 }
 
 fn close_after(ci: i64) {
@@ -535,22 +640,58 @@ fn close_after(ci: i64) {
     touch(ci);
 }
 
+// Takes the connection's waiting bytes and serves them.
+fn serve_waiting(ci: i64) {
+    let c .= conns[ci];
+    data.clear();
+    if c.part >= 0 { box_read(c.part, data); box_drop(c.part); c.part = -1; }
+    serve(ci, data);
+    if (c.flags & (F_EOF | F_HELD)) == F_EOF { c.flags |= F_CLOSE; touch(ci); }
+}
+
 // Serves every held write (and what queued behind it) in this pass, in the order they came.
 fn release_held() {
     var list = copy(held);
     held.clear();
-    window_end = 0;
-    writes_now = true;
     for h in list {
         let c .= conns[h.ci];
         if c.gen != h.gen || (c.flags & F_OPEN) == 0 || (c.flags & (F_CLOSING | F_HELD)) != F_HELD { continue; }
         c.flags &= ~F_HELD;
-        data.clear();
-        if c.part >= 0 { box_read(c.part, data); box_drop(c.part); c.part = -1; }
-        serve(h.ci, data);
-        if (c.flags & F_EOF) != 0 { c.flags |= F_CLOSE; touch(h.ci); }
+        serve_waiting(h.ci);
     }
-    writes_now = false;
+}
+
+// One connection off the ready list: true if it was answered.
+fn answer_ready(ci: i64, gen: u16) -> bool {
+    let c .= conns[ci];
+    if c.gen != gen || (c.flags & (F_OPEN | F_CLOSING | F_READY)) != (F_OPEN | F_READY) { return false; }
+    c.flags &= ~F_READY;
+    if (c.flags & F_HELD) != 0 { return false; } // release_held answers it, with what is behind the write
+    serve_waiting(ci);
+    return true;
+}
+
+// Answers connections on the ready list while this pass has answers left: oldest first, or,
+// after a stall, an eighth of the answers to the oldest and the rest to the newest.
+fn run_ready(late: bool) {
+    var old = if late { answers_left / 8 } else { answers_left };
+    while old > 0 && ready_head < ready.len {
+        let h = ready[ready_head];
+        ready_head++;
+        if answer_ready(h.ci, h.gen) { answers_left--; old--; }
+    }
+    while answers_left > 0 && ready_head < ready.len {
+        let h = ready[ready.len - 1];
+        ready.pop_n(1);
+        if answer_ready(h.ci, h.gen) { answers_left--; }
+    }
+    if ready_head == ready.len { ready.clear(); ready_head = 0; }
+    else if ready_head >= 65536 {
+        let n = ready.len - ready_head;
+        ready[..n].move_from(ready[ready_head..]);
+        ready.pop_n(ready_head);
+        ready_head = 0;
+    }
 }
 
 fn checkpoints(now: i64) {
@@ -590,13 +731,20 @@ fn stats(now: i64) {
     if st_at == 0 { st_at = now; }
     if now - st_at < 1000000 { return; }
     var open = 0;
-    for r in nrings { open += rs[r].open; }
+    var most = 0;
+    var least = slots;
+    for r in nrings {
+        open += rs[r].open;
+        most = max(most, rs[r].open);
+        least = min(least, rs[r].open);
+    }
     var m: u8[>..] = [];
     format(m, "stats: ", st_reqs, " req/s, ", st_passes, " passes/s, max pass ", st_maxpass,
         " us (serve ", st_serve_us, ", commit ", st_commit_us, "), max cqes ", st_maxcqe,
-        ", nobuf ", st_nobuf, ", rearms ", st_rearms, ", boxes ", box_live(), ", open ", open,
-        ", rings ", nrings, ", wal ", wal_frames(), ", gates ", st_gates, ", restarts ", st_restarts,
-        ", yields ", st_yields, ", held ", held.len);
+        ", nobuf ", st_nobuf, ", rearms ", st_rearms, ", deferred ", st_deferred, ", ready ",
+        ready.len - ready_head, ", boxes ", box_live(), ", open ", open,
+        ", rings ", nrings, " (", least, "-", most, " each), wal ", wal_frames(), ", gates ", st_gates,
+        ", restarts ", st_restarts, ", yields ", st_yields, ", held ", held.len, ", stalls ", st_stalls);
     log_line(m);
     st_at = now;
     st_reqs = 0;
@@ -607,6 +755,7 @@ fn stats(now: i64) {
     st_nobuf = 0;
     st_rearms = 0;
     st_maxcqe = 0;
+    st_deferred = 0;
 }
 
 

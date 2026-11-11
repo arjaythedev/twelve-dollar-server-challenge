@@ -170,11 +170,12 @@ def main():
                     break
             except OSError:
                 time.sleep(0.05)
-        threads = [threading.Thread(target=worker, args=(port, i, 4000, None)) for i in range(8)]
+        # 32 connections at once, so a pass serves a batch of requests as it does under load.
+        threads = [threading.Thread(target=worker, args=(port, i, 1000, None)) for i in range(32)]
         t0 = time.time()
         for t in threads: t.start()
         for t in threads: t.join()
-        print(f"trained: {8 * 4000} requests in {time.time() - t0:.1f} s", file=sys.stderr)
+        print(f"trained: {32 * 1000} requests in {time.time() - t0:.1f} s", file=sys.stderr)
     finally:
         p.send_signal(signal.SIGTERM)  # the instrumented build's handler exits so the profile is written
         p.wait(timeout=30)

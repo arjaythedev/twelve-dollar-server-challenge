@@ -39,10 +39,14 @@ typedef struct { uint64_t ud; int32_t res; uint32_t flags; } cqe_t;
 #pragma pack(pop)
 
 #define MAX_RINGS 16
-#define RX_COUNT 16384 /* receive buffers per ring (a power of two): a burst after a long pass must not run a ring dry */
+/* Receive buffers per ring (a power of two). A pass uses a few dozen; the rest is for the pass
+ * after a stall (8,192 hold more than a second of a ring's requests at 300,000 users), and a
+ * ring that still runs dry only ends receives that app.goose arms again, a bounded number per
+ * pass. */
+#define RX_COUNT 8192
 #define RX_SIZE 1024 /* a request is a few hundred bytes; a longer one spans buffers */
-#define SQ_DEPTH 4096
-#define CQ_DEPTH 65536
+#define SQ_DEPTH 2048
+#define CQ_DEPTH 32768
 
 typedef struct {
   struct io_uring q;
@@ -56,60 +60,76 @@ static int nrings;
 static int lfd[16];
 static int nlisten;
 
-/* ---- byte boxes ---- */
+/* ---- byte boxes ----
+ *
+ * Two kinds, each with its own spare list so one never ends up holding the other's memory: a
+ * small one for request bytes kept with a connection (a partial request, a held write, a
+ * request read ahead of its turn: there can be a hundred thousand of those after a stall, so
+ * they must not cost 4 KB each), and a large one for responses. */
 
-typedef struct { uint32_t len, cap; uint8_t b[]; } box_t;
+typedef struct { uint32_t len, cap; uint8_t kind, pad[7]; uint8_t b[]; } box_t;
 
-static box_t **boxes;      /* by handle */
-static int32_t *box_free;  /* free handles */
-static int32_t nbox, capbox, nfree;
-#define BOX_FIRST 4096     /* a new box's capacity: a feed response fits */
-#define BOX_KEEP 32768     /* boxes that grew past this are shrunk when freed */
+static box_t **boxes;        /* by handle */
+static int32_t nbox, capbox;
+static int32_t *box_free[2]; /* free handles, by kind */
+static int32_t nfree[2], capfree[2];
+static const uint32_t box_first[2] = {256, 4096};  /* a new box's capacity (a feed response fits the large one) */
+static const uint32_t box_keep[2] = {2048, 32768}; /* boxes that grew past this give their memory back when dropped */
+#define BOX_SPARE 8192       /* spare boxes of a kind that keep their memory */
 
 static void oom(void) {
   fputs("out of memory\n", stderr);
   abort();
 }
 
-static box_t *box_alloc(uint32_t cap) {
-  box_t *x = malloc(sizeof(box_t) + cap);
+static box_t *box_alloc(int kind) {
+  box_t *x = malloc(sizeof(box_t) + box_first[kind]);
   if (!x) oom();
   x->len = 0;
-  x->cap = cap;
+  x->cap = box_first[kind];
+  x->kind = (uint8_t)kind;
   return x;
 }
 
-/* A new, empty box. */
-int32_t box_new(void) {
-  if (nfree) {
-    int32_t h = box_free[--nfree];
-    if (!boxes[h]) boxes[h] = box_alloc(BOX_FIRST);
+static int32_t box_get(int kind) {
+  if (nfree[kind]) {
+    int32_t h = box_free[kind][--nfree[kind]];
+    if (!boxes[h]) boxes[h] = box_alloc(kind);
     boxes[h]->len = 0;
     return h;
   }
   if (nbox == capbox) {
     capbox = capbox ? capbox * 2 : 4096;
     boxes = realloc(boxes, (size_t)capbox * sizeof *boxes);
-    box_free = realloc(box_free, (size_t)capbox * sizeof *box_free);
-    if (!boxes || !box_free) oom();
+    if (!boxes) oom();
   }
-  boxes[nbox] = box_alloc(BOX_FIRST);
+  boxes[nbox] = box_alloc(kind);
   return nbox++;
 }
 
-/* Spare boxes keep their memory, up to BOX_SPARE of them; past that a dropped box's memory goes
- * back to the allocator (its number is reused later), so a burst does not pin memory for good. */
-#define BOX_SPARE 8192
+/* A new, empty box for a response. */
+int32_t box_new(void) { return box_get(1); }
 
+/* A new, empty box for request bytes kept with a connection. */
+int32_t box_small(void) { return box_get(0); }
+
+/* Spare boxes keep their memory, up to BOX_SPARE of a kind; past that a dropped box's memory goes
+ * back to the allocator (its number is reused later), so a burst does not pin memory for good. */
 void box_drop(int32_t h) {
-  if (nfree >= BOX_SPARE || boxes[h]->cap > BOX_KEEP) {
+  int kind = boxes[h]->kind;
+  if (nfree[kind] >= BOX_SPARE || boxes[h]->cap > box_keep[kind]) {
     free(boxes[h]);
     boxes[h] = NULL;
   }
-  box_free[nfree++] = h;
+  if (nfree[kind] == capfree[kind]) {
+    capfree[kind] = capfree[kind] ? capfree[kind] * 2 : 4096;
+    box_free[kind] = realloc(box_free[kind], (size_t)capfree[kind] * sizeof(int32_t));
+    if (!box_free[kind]) oom();
+  }
+  box_free[kind][nfree[kind]++] = h;
 }
 
-int64_t box_live(void) { return nbox - nfree; }
+int64_t box_live(void) { return nbox - nfree[0] - nfree[1]; }
 
 static inline uint8_t *box_room(int32_t h, uint64_t n) {
   box_t *x = boxes[h];
@@ -249,6 +269,12 @@ void op_close(int32_t ri, int32_t slot, uint64_t ud_shut, uint64_t ud_close) {
   if (!(b = sqe(r))) return;
   io_uring_prep_close_direct(b, (unsigned)slot);
   io_uring_sqe_set_data64(b, ud_close);
+}
+
+/* Hands the ring's queued operations to the kernel without collecting completions. */
+void ring_submit(int32_t ri) {
+  int rc = io_uring_submit(&rings[ri]->q);
+  if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN) fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc));
 }
 
 /* Submits the ring's queue and runs its completions; with want > 0 waits for that many or

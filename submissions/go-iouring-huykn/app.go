@@ -154,7 +154,7 @@ func (a *app) feed(b []byte) []byte {
 		if i > 0 {
 			b = append(b, ',')
 		}
-		b = a.appendPost(b, int64(r.key), rows.text(r.content), rows.text(r.timestamp), rows.text(r.username), int64(r.count))
+		b = a.appendFeedPost(b, int64(r.key), rows.text(r.content), rows.text(r.timestamp), rows.text(r.username), int64(r.count))
 	}
 	b = append(b, "]}"...)
 	return end(b, s)

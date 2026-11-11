@@ -1412,15 +1412,6 @@ pub fn run_pass(
         let t0 = Instant::now();
         let mut cqes = 0u64;
         let mut queue_full = false;
-        // DEFER_TASKRUN only runs task work inside an enter carrying GETEVENTS,
-        // so ask the ring to do it before draining; poll() alone never does.
-        if defer_taskrun {
-            for r in rings.iter_mut() {
-                if r.ring.submission().taskrun() {
-                    let _ = r.ring.submit_and_wait(0);
-                }
-            }
-        }
         let nrings = rings.len();
         for k in 0..nrings {
             let ri = (ring_cursor + k) % nrings;
@@ -1464,19 +1455,33 @@ pub fn run_pass(
         let t4 = if cqes > 0 || queue_full || ready_reads || !feed_reads.is_empty() || !post_reads.is_empty() {
             t3
         } else {
-            fds.clear();
-            for r in &rings {
-                fds.push(libc::pollfd {
-                    fd: r.ring.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                });
+            // Deferred task work only runs inside an enter carrying GETEVENTS and
+            // poll() cannot drive it, so drain it here on the idle path. Busy
+            // passes already enter through submit_rings and pay nothing extra.
+            let mut drained = false;
+            if defer_taskrun {
+                for r in rings.iter_mut() {
+                    if r.ring.submission().taskrun() {
+                        let _ = r.ring.submit_and_wait(0);
+                        drained = true;
+                    }
+                }
             }
-            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1) };
-            if rc < 0 {
-                let e = io::Error::last_os_error();
-                if e.raw_os_error() != Some(libc::EINTR) {
-                    return Err(e);
+            if !drained {
+                fds.clear();
+                for r in &rings {
+                    fds.push(libc::pollfd {
+                        fd: r.ring.as_raw_fd(),
+                        events: libc::POLLIN,
+                        revents: 0,
+                    });
+                }
+                let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, 1) };
+                if rc < 0 {
+                    let e = io::Error::last_os_error();
+                    if e.raw_os_error() != Some(libc::EINTR) {
+                        return Err(e);
+                    }
                 }
             }
             Instant::now()

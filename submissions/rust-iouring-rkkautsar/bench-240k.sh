@@ -70,6 +70,7 @@ docker run -d --name "$name-server" --label "feedbench.run=$name" --cgroup-paren
   --memory=1536m --memory-swap=1536m --security-opt seccomp=unconfined \
   --ulimit nofile=1048576:1048576 -e JWT_SECRET=twelve-dollar-challenge \
   -e SQLITE_PATH=/data/feed.db -e HOST=0.0.0.0 -e PORT=3000 -e SHARDS="$server_shards" \
+  -e RECV_MODE="${RECV_MODE:-hybrid}" -e SQPOLL_MS="${SQPOLL_MS:-}" -e DEFER_TASKRUN="${DEFER_TASKRUN:-}" \
   -v "$submission/target/release/feed-server:/server:ro" -v "$run_dir/data:/data" \
   ubuntu:24.04 /server >"$run_dir/server-id"
 for _ in $(seq 1 30); do
@@ -85,7 +86,7 @@ server_pid=$(docker inspect -f '{{.State.Pid}}' "$name-server")
 docker exec "$name-server" sh -c '
   while :; do
     date +%s
-    cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.stat /sys/fs/cgroup/memory.events
+    cat /sys/fs/cgroup/memory.current /sys/fs/cgroup/memory.stat /sys/fs/cgroup/memory.events /sys/fs/cgroup/cpu.stat
     sleep 5
   done
 ' >"$run_dir/memory.log" 2>&1 &

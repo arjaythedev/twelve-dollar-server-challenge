@@ -469,6 +469,13 @@ fn make_listener(addr: &str) -> io::Result<i32> {
     Ok(fd)
 }
 
+/// Deferred task work runs only on our own enter, so completions arrive in
+/// batches instead of at arbitrary points. On by default; DEFER_TASKRUN=0
+/// restores the previous COOP_TASKRUN behaviour.
+fn defer_taskrun_enabled() -> bool {
+    std::env::var("DEFER_TASKRUN").map_or(true, |v| v != "0")
+}
+
 impl RingState {
     fn new(addr: &str) -> io::Result<Self> {
         let (poll_read, hybrid) = match std::env::var("RECV_MODE").as_deref() {
@@ -484,7 +491,15 @@ impl RingState {
             let mut ring = None;
             for attempt in 0..6 {
                 let mut builder = IoUring::builder();
-                builder.setup_single_issuer().setup_coop_taskrun().setup_cqsize(16_384);
+                // DEFER_TASKRUN forces deferred task work to run only on our own
+                // enter, so completions arrive in batches instead of whenever the
+                // kernel decides. It requires SINGLE_ISSUER.
+                if defer_taskrun_enabled() {
+                    builder.setup_single_issuer().setup_defer_taskrun()
+                        .setup_taskrun_flag().setup_cqsize(16_384);
+                } else {
+                    builder.setup_single_issuer().setup_coop_taskrun().setup_cqsize(16_384);
+                }
                 match builder.build(RING_ENTRIES) {
                     Ok(r) => {
                         ring = Some(r);
@@ -1392,10 +1407,20 @@ pub fn run_pass(
     let mut read_ns = 0u128;
     let mut poll_ns = 0u128;
     let mut ring_cursor = 0usize;
+    let defer_taskrun = defer_taskrun_enabled();
     loop {
         let t0 = Instant::now();
         let mut cqes = 0u64;
         let mut queue_full = false;
+        // DEFER_TASKRUN only runs task work inside an enter carrying GETEVENTS,
+        // so ask the ring to do it before draining; poll() alone never does.
+        if defer_taskrun {
+            for r in rings.iter_mut() {
+                if r.ring.submission().taskrun() {
+                    let _ = r.ring.submit_and_wait(0);
+                }
+            }
+        }
         let nrings = rings.len();
         for k in 0..nrings {
             let ri = (ring_cursor + k) % nrings;

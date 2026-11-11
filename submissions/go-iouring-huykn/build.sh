@@ -13,8 +13,4 @@ if [ ! -f sqlite/sqlite3.c ]; then
   (cd sqlite && unzip -qo $SQ.zip && mv $SQ/sqlite3.c $SQ/sqlite3.h . && rm -rf $SQ $SQ.zip)
 fi
 export CGO_ENABLED=1 GOFLAGS=-trimpath GOTOOLCHAIN=local
-if [ "$(go env GOARCH)" = amd64 ]; then
-  go build -tags feed_sse2 -o bin/server .
-else
-  go build -o bin/server .
-fi
+go build -o bin/server .

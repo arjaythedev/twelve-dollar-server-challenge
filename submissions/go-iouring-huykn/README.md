@@ -58,37 +58,22 @@ query and skip a write transaction if already present.
 
 ## Transactions and checkpoints
 
-When no request work is queued, ring 0 waits for a target of 16 completions or
-at most 1 ms, then the loop drains ready completions from all rings. The target
-is capped by ring 0's open connection count, with a minimum of one, so a single
-connection still wakes on its first completion. Queued requests bypass the wait.
-Secondary rings enter the kernel only when submissions, deferred task work or
-CQ overflow require it. Each pass answers up to 2,048 requests.
+The loop wakes on the first completion on ring 0, then drains ready completions.
+An idle wait lasts at most 1 ms before polling the other rings. Each pass stages
+up to 2,048 receive answers without waiting for a full batch.
 Writes and indexed reads start a deferred transaction on
 demand. Later requests in the same pass can see
 its writes. Responses remain staged until commit succeeds; commit failure turns
 all staged responses into errors. Implicit SQLite rollback is tracked so lost
 writes cannot be acknowledged as successful.
 
-The code baseline is PR369 (`e7c9291`, identical submission source to `4d85716`),
-which reached 276k VUs on x86. The checkpoint follow-up (`9b938fb`) held 270k
-at the same reported 32 µs/request, with better reported tail latency.
-WAL uses `synchronous=NORMAL`. The checkpoint trigger is 8,192 WAL frames, with
-2,048-frame retry spacing. A nice-5 worker copies and pre-syncs the bulk while
-writes continue, then copies the tail while POSTs wait for at most 250 ms.
-Other connections' reads continue; held pipelines retain ordering and EOF.
-Completion is checked between transactions using the existing 1 ms bounded wait.
-At 65,536 frames, an idle worker permits a restart after committed sends are
-submitted. Long-lived readers can defer restart. Worker startup failure retains
-SQLite's automatic 8,192-page checkpoint fallback. Both connections use 64 MiB
-growth chunks with native `posix_fallocate` enabled.
-
-A local ARM sweep of 8,192–16,384 frames established no reliable replacement
-for 8,192. See the [comparison](bench/wal-trigger-comparison.json); production
-x86 performance at 28 µs/request remains unverified. The 10,240-frame native
-experiment held 155k users and failed the 160k probe; the trigger is restored
-to 8,192. The current candidate adds only feed-specific SSE2 serialization on
-amd64 (`feed_sse2` build tag); other architectures retain the portable writer.
+WAL uses `synchronous=NORMAL`. A new per-handle worker runs passive checkpoints
+on its own connection. Notifications coalesce and start at 8,192 WAL frames,
+with further notifications at coarse growth intervals. At 65,536 frames the
+request thread waits for the worker, then attempts a WAL restart outside any
+transaction. Long-lived readers may defer a restart; the normal server has no
+cross-batch read cursors. Worker startup failure retains SQLite's automatic
+checkpoint fallback at 8,192 pages.
 
 The default is SQLite's built-in `unix-excl` VFS: one process owns the database
 and SQLite keeps the WAL index in heap memory. Other processes cannot open the
@@ -107,6 +92,12 @@ force reference SQL reads, `HKN_VFS=unix` to use SQLite's default Unix VFS, and
 server's own database configuration; none detect benchmark traffic.
 
 ## Build and validation
+
+The runtime is restored to exact PR369 (`e7c9291`). Isolated nonwaiting and
+task-work-aware polling candidates passed correctness checks but showed no
+repeatable ARM performance gain, so they were not promoted. See the
+[application comparison](bench/poll-implementation-comparison.md). Native x86
+300k capacity remains unverified.
 
 From the repository root on Linux:
 
@@ -156,7 +147,7 @@ isolation, the WAL growth barrier, and schema-cookie fallback:
 
 ```sh
 cc -O1 -DSQLITE_DEBUG -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
-  -DSQLITE_OMIT_LOAD_EXTENSION -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1 -DHAVE_POSIX_FALLOCATE=1 \
+  -DSQLITE_OMIT_LOAD_EXTENSION -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1 \
   -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_TRACE -DSQLITE_OMIT_AUTOINIT \
   testdata/store_contract.c sqlite_engine.c checkpoint.c -lm -lpthread -o /tmp/huykn-store-test
 cp ../../seed/feed.db /tmp/huykn-contract.db

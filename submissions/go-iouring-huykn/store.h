@@ -27,7 +27,6 @@ const hkn_result *hkn_create(hkn_store *store, int64_t user,
 // 201 inserted, 200 already present, 404 missing post, -1 database failure.
 int hkn_vote(hkn_store *store, int64_t user, int64_t post);
 int hkn_finish(hkn_store *store);
-int hkn_tick(hkn_store *store, int64_t now);
 int hkn_probe(hkn_store *store);
 const char *hkn_error(hkn_store *store);
 

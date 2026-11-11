@@ -29,6 +29,8 @@ let private vfs =
     | null | "" -> z "unix-excl"
     | v -> z v
 
+let private chunkMB = match Int32.TryParse(Environment.GetEnvironmentVariable "CHUNK_MB") with | true, v when v > 0 -> v | _ -> 0
+
 let mutable private db = 0n
 let mutable private sHealth = 0n
 let mutable private sFeed = 0n
@@ -70,7 +72,7 @@ let private text (sql: string) =
 
 // ---------- records (https://sqlite.org/fileformat2.html#record_format) ----------
 
-[<Struct>]
+[<Struct; NoEquality; NoComparison>]
 type Col =
     val mutable P: nativeint
     val mutable Len: int
@@ -152,7 +154,7 @@ let private record (cur: nativeint) (n: int) =
 // ---------- B-tree reads ----------
 
 let mutable private bt = 0n
-let mutable private useBt = false
+let mutable useBt = false
 let mutable private cookie = 0u
 let mutable private rootPosts = 0u
 let mutable private rootUsers = 0u
@@ -235,16 +237,41 @@ let private likesSeek (c: nativeint) (id: int64) =
         if rc = DONE then 1 elif rc <> OK then -1 else 0
     else 0
 
+/// The first column of the cursor's index entry (likes_post_id_idx: post_id) when it is an integer stored on the page:
+/// a header-size byte, a type byte, then the big-endian value. Index entries here are a few bytes, so this is the
+/// only shape it meets; anything else goes through the general decoder. False: not an integer, or malformed.
+let private firstInt (c: nativeint) (v: byref<int64>) =
+    // PayloadSize first: it parses the cell the cursor is on (getCellInfo), which PayloadFetch only reads back
+    sqlite3BtreePayloadSize c |> ignore
+    let mutable amt = 0u
+    let p = sqlite3BtreePayloadFetch (c, &amt)
+    let hdr = if amt >= 2u then rd p 0 else 0x80uy
+    let t = if amt >= 2u then rd p 1 else 0x80uy
+    if hdr < 0x80uy && t >= 1uy && t <= 6uy && hdr >= 2uy && uint32 hdr + uint32 intSize.[int t] <= amt then
+        let h = int hdr
+        let mutable x = int64 (sbyte (rd p h))
+        for k in 1 .. intSize.[int t] - 1 do
+            x <- (x <<< 8) ||| int64 (rd p (h + k))
+        v <- x
+        true
+    elif hdr < 0x80uy && (t = 8uy || t = 9uy) && hdr >= 2uy then
+        v <- int64 (t - 8uy)
+        true
+    elif record c 1 && isInt cols.[0].T then
+        v <- cols.[0].V
+        true
+    else false
+
 /// Adds the likes of post ids lo..hi to cnt[id - lo]. 0 ok, -1 error.
 let private likesCount (c: nativeint) (lo: int64) (hi: int64) (cnt: Span<int64>) =
     let r = likesSeek c lo
     if r <> 0 then (if r < 0 then -1 else 0)
     else
         let mutable result = 1
+        let mutable v = 0L
         while result = 1 do
-            if not (record c 1) || not (isInt cols.[0].T) then result <- -1
+            if not (firstInt c &v) then result <- -1
             else
-                let v = cols.[0].V
                 if v > hi then result <- 0
                 else
                     if v >= lo then cnt.[int (v - lo)] <- cnt.[int (v - lo)] + 1L
@@ -253,7 +280,7 @@ let private likesCount (c: nativeint) (lo: int64) (hi: int64) (cnt: Span<int64>)
                     elif rc <> OK then result <- -1
         result
 
-[<Struct>]
+[<Struct; NoEquality; NoComparison>]
 type View =
     val mutable Body: nativeint
     val mutable BodyLen: int
@@ -584,6 +611,11 @@ let openDb (path: string) (cacheKB: int) (warm: bool) =
     exec "PRAGMA journal_size_limit=0"
     exec ("PRAGMA cache_size=-" + string cacheKB)
     sqlite3_wal_hook (db, Marshal.GetFunctionPointerForDelegate walHook, 0n) |> ignore
+    // CHUNK_MB: the database file grows this many MiB at a time (SQLITE_FCNTL_CHUNK_SIZE), so a checkpoint's writes past
+    // its end don't each extend the file
+    if chunkMB > 0 then
+        let mutable bytes = chunkMB <<< 20
+        sqlite3_file_control (db, z "main", 6, &bytes) |> ignore
     exec "SELECT count(*) FROM sqlite_schema"
     sHealth <- prep "SELECT 1"
     sFeed <- prep sqlFeed
@@ -635,6 +667,9 @@ type Checkpointer(path: string, nice: int) =
                     sqlite3_busy_timeout (cdb, 0) |> ignore
                     sqlite3_exec (cdb, z "PRAGMA synchronous=NORMAL", 0n, 0n, 0n) |> ignore
                     sqlite3_wal_autocheckpoint (cdb, 0) |> ignore
+                    if chunkMB > 0 then
+                        let mutable bytes = chunkMB <<< 20
+                        sqlite3_file_control (cdb, main, 6, &bytes) |> ignore
                     // kept open: closing any descriptor of the file would drop the process's POSIX locks on it
                     dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
             let mutable log = -1

@@ -112,16 +112,24 @@ let private ELongBody = 8uy
 [<Literal>]
 let private EInternal = 9uy
 
+// (an F# "…"B literal inside a function builds a new array on every call, so they are module values)
+let private s200 = "HTTP/1.1 200 OK\r\n"B
+let private s201 = "HTTP/1.1 201 Created\r\n"B
+let private s400 = "HTTP/1.1 400 Bad Request\r\n"B
+let private s401 = "HTTP/1.1 401 Unauthorized\r\n"B
+let private s404 = "HTTP/1.1 404 Not Found\r\n"B
+let private s503 = "HTTP/1.1 503 Service Unavailable\r\n"B
+let private s500 = "HTTP/1.1 500 Internal Server Error\r\n"B
+
 let private statusLine (st: int) =
     match st with
-    | 200 -> "HTTP/1.1 200 OK\r\n"B
-    | 201 -> "HTTP/1.1 201 Created\r\n"B
-    | 400 -> "HTTP/1.1 400 Bad Request\r\n"B
-    | 401 -> "HTTP/1.1 401 Unauthorized\r\n"B
-    | 404 -> "HTTP/1.1 404 Not Found\r\n"B
-    | 503 -> "HTTP/1.1 503 Service Unavailable\r\n"B
-    | _ -> "HTTP/1.1 500 Internal Server Error\r\n"B
-let private lines = [| 200; 201; 400; 401; 404; 500; 503 |] |> Array.map (fun s -> s, statusLine s) |> dict
+    | 200 -> s200
+    | 201 -> s201
+    | 400 -> s400
+    | 401 -> s401
+    | 404 -> s404
+    | 503 -> s503
+    | _ -> s500
 
 let private hCtype = "Content-Type: application/json\r\nContent-Length: "B
 let private hEnd = "\r\n\r\n"B
@@ -161,7 +169,7 @@ let private parseId (s: ReadOnlySpan<byte>) =
             if d < 0 || d > 9 then ok <- false else v <- v * 10L + int64 d
         if ok && v > 0L then v else -1L
 
-[<Struct>]
+[<Struct; NoEquality; NoComparison>]
 type Req =
     val mutable Cid: int
     val mutable Gen: uint32
@@ -377,11 +385,14 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     /// in flight and are used last.
     let acceptTarget () =
         let mutable q = -1
-        for i in nrings - 1 .. -1 .. 0 do
+        let mutable i = 0
+        while q < 0 && i < nrings do
             if not R.[i].Full && not R.[i].High then q <- i
-        if q < 0 then
-            for i in nrings - 1 .. -1 .. 0 do
-                if not R.[i].Full then q <- i
+            i <- i + 1
+        i <- 0
+        while q < 0 && i < nrings do
+            if not R.[i].Full then q <- i
+            i <- i + 1
         q
 
     let acceptArmedAnywhere () =
@@ -741,7 +752,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         queued.[cid] <- queued.[cid] - 1
         let o = takeOut ()
         let st = body &r o
-        let line = lines.[st]
+        let line = statusLine st
         let mutable n = 0
         let h = Span<byte>(hdr)
         ReadOnlySpan(line).CopyTo h

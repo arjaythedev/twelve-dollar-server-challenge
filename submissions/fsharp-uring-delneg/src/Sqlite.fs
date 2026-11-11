@@ -97,6 +97,9 @@ extern int sqlite3_wal_autocheckpoint(nativeint db, int n)
 extern int sqlite3_wal_checkpoint_v2(nativeint db, byte[] name, int mode, int& log, int& ckpt)
 
 [<DllImport(L, ExactSpelling = true)>]
+extern int sqlite3_file_control(nativeint db, byte[] name, int op, int& arg)
+
+[<DllImport(L, ExactSpelling = true)>]
 extern int sqlite3_busy_timeout(nativeint db, int ms)
 
 [<DllImport(L, ExactSpelling = true)>]

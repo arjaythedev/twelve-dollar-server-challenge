@@ -9,31 +9,65 @@ open System.Buffers.Text
 open System.Security.Cryptography
 open System.Text
 open System.Text.Json
+open System.Runtime.InteropServices
+open Microsoft.FSharp.NativeInterop
 
-let mutable private key: byte[] = [||]
+#nowarn "9"
 
-let init (secret: string) = key <- Encoding.UTF8.GetBytes secret
+// HMAC-SHA256 on libcrypto's SHA-256 (the OpenSSL 3 library .NET itself uses), called directly: the key's inner and
+// outer padded blocks are hashed once at startup, so each token costs its own blocks plus one outer block, with no
+// allocation and none of the per-call error-queue and context work of the framework's HMAC class. Every token's
+// signature is still computed and compared in full (constant time).
+[<Literal>]
+let private Crypto = "libcrypto.so.3"
 
-/// per-thread state (a module cannot hold [<ThreadStatic>] fields): one keyed HMAC per thread (the key setup is
-/// reused; every call still hashes the whole signing input) and a scratch buffer
+[<DllImport(Crypto); SuppressGCTransition>]
+extern int private SHA256_Init(nativeint ctx)
+
+[<DllImport(Crypto); SuppressGCTransition>]
+extern int private SHA256_Update(nativeint ctx, nativeint data, unativeint len)
+
+[<DllImport(Crypto); SuppressGCTransition>]
+extern int private SHA256_Final(nativeint md, nativeint ctx)
+
+/// sizeof(SHA256_CTX) is 112; room to spare
+[<Literal>]
+let private CtxSize = 128
+
+let private ctxInner = Marshal.AllocHGlobal CtxSize
+let private ctxOuter = Marshal.AllocHGlobal CtxSize
+let private ctxWork = Marshal.AllocHGlobal CtxSize
+let private digest = Marshal.AllocHGlobal 32
+
+let init (secret: string) =
+    let mutable key = Encoding.UTF8.GetBytes secret
+    if key.Length > 64 then key <- SHA256.HashData key
+    let pad (b: byte) = Array.init 64 (fun i -> (if i < key.Length then key.[i] else 0uy) ^^^ b)
+    let block (ctx: nativeint) (data: byte[]) =
+        SHA256_Init ctx |> ignore
+        let h = GCHandle.Alloc(data, GCHandleType.Pinned)
+        SHA256_Update(ctx, h.AddrOfPinnedObject(), 64un) |> ignore
+        h.Free()
+    block ctxInner (pad 0x36uy)
+    block ctxOuter (pad 0x5cuy)
+
+let private mac (data: ReadOnlySpan<byte>) (dst: Span<byte>) =
+    use pd = fixed data
+    use po = fixed dst
+    Buffer.MemoryCopy(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> ctxInner), NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> ctxWork), int64 CtxSize, int64 CtxSize)
+    SHA256_Update(ctxWork, NativePtr.toNativeInt pd, unativeint data.Length) |> ignore
+    SHA256_Final(digest, ctxWork) |> ignore
+    Buffer.MemoryCopy(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> ctxOuter), NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> ctxWork), int64 CtxSize, int64 CtxSize)
+    SHA256_Update(ctxWork, digest, 32un) |> ignore
+    SHA256_Final(NativePtr.toNativeInt po, ctxWork) |> ignore
+
+/// per-thread scratch (a module cannot hold [<ThreadStatic>] fields); the loop thread is the only caller
 type private Tls =
     [<ThreadStatic; DefaultValue>]
-    static val mutable private hmac: HMACSHA256
-    [<ThreadStatic; DefaultValue>]
     static val mutable private scratch: byte[]
-    static member Hmac
-        with get () = Tls.hmac
-        and set v = Tls.hmac <- v
     static member Scratch
         with get () = Tls.scratch
         and set v = Tls.scratch <- v
-
-let private mac (data: ReadOnlySpan<byte>) (dst: Span<byte>) =
-    let mutable h = Tls.Hmac
-    if isNull h then
-        h <- new HMACSHA256(key)
-        Tls.Hmac <- h
-    h.TryComputeHash(data, dst) |> ignore
 
 /// a positive integer written in decimal digits only (at most 18); 0 otherwise
 let private decimalId (digits: ReadOnlySpan<byte>) =
@@ -146,7 +180,12 @@ let verify (token: ReadOnlySpan<byte>) (wantName: bool) (sub: byref<int64>) (nam
                                                         else 0L
                                                 | 2 ->
                                                     let mutable e = 0.0
-                                                    if reader.TokenType = JsonTokenType.Number && reader.TryGetDouble(&e) then
+                                                    let mutable ei = 0L
+                                                    if reader.TokenType <> JsonTokenType.Number then hasExp <- false
+                                                    elif reader.TryGetInt64(&ei) then // the usual integer `exp`, without the float parser
+                                                        exp <- float ei
+                                                        hasExp <- true
+                                                    elif reader.TryGetDouble(&e) then
                                                         exp <- e
                                                         hasExp <- true
                                                     else hasExp <- false

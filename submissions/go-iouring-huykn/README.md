@@ -58,10 +58,12 @@ query and skip a write transaction if already present.
 
 ## Transactions and checkpoints
 
-The loop wakes on the first completion on ring 0, then drains ready completions.
-An idle wait lasts at most 1 ms before checking the other rings. Secondary rings
-enter the kernel only when submissions, deferred task work or CQ overflow
-require it. Each pass answers up to 2,048 requests without waiting for a full batch.
+When no request work is queued, ring 0 waits for a target of 16 completions or
+at most 1 ms, then the loop drains ready completions from all rings. The target
+is capped by ring 0's open connection count, with a minimum of one, so a single
+connection still wakes on its first completion. Queued requests bypass the wait.
+Secondary rings enter the kernel only when submissions, deferred task work or
+CQ overflow require it. Each pass answers up to 2,048 requests.
 Writes and indexed reads start a deferred transaction on
 demand. Later requests in the same pass can see
 its writes. Responses remain staged until commit succeeds; commit failure turns

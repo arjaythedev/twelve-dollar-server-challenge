@@ -47,12 +47,19 @@
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
   waits without bound.
-- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
+- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 16,000 new frames the loop
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
-  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
-  (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 250 ms. After each pass the thread drops the database file's pages from the kernel's cache (the server reads
-  through SQLite's own page cache).
+  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind. Past 16,384 frames, passes go on
+  while writes flow until one leaves at most 2,000 frames uncopied. Only then do writes wait (reads go on) for one
+  short pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at most 250 ms; past
+  262,144 frames writes are held after any pass.
+  A pass costs little CPU (about 20 ms) but writes scattered pages of the indexes to the database file, then fsyncs:
+  250 ms to seconds on a VPS disk, longer while the CPU is busy. Holding writes through a whole pass made them wait that
+  long. Long passes also copy a page that many writes touched once: per request, the disk got about half the write
+  requests it got with passes every 4,000 frames.
+  After each pass the thread drops the database file's pages from the kernel's cache (the server reads through
+  SQLite's own page cache), and the WAL's copied frames too (no reader goes back to them), so a WAL that grows while
+  the disk is slow doesn't fill memory.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 256 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. Inserts bind `created_at` in the column default's format

@@ -757,6 +757,9 @@ let openDb (path: string) (cacheKB: int) (warm: bool) =
     else eprintfn "B-tree reads off: SQL for every read"
     useBt
 
+/// bytes per WAL frame: a 24-byte header and a page
+let walFrameBytes () = 24 + int (scalar "PRAGMA page_size")
+
 // ---------- the checkpoint thread ----------
 
 /// A thread with its own connection runs PASSIVE checkpoints when the loop asks, so the copy and its two fsyncs never
@@ -768,10 +771,14 @@ type Checkpointer(path: string, nice: int) =
     let wake = new AutoResetEvent(false)
     let mutable rc = 0
     let mutable backfilled = -1
+    let mutable wallUs = 0L
+    let mutable cpuUs = 0L
+    let frameBytes = walFrameBytes ()
     let run () =
         if nice <> 0 then Native.setpriority (0, Native.gettid (), nice) |> ignore
         let mutable cdb = 0n
         let mutable dropFd = -1
+        let mutable walFd = -1
         let main = z "main"
         while true do
             wake.WaitOne() |> ignore
@@ -789,10 +796,19 @@ type Checkpointer(path: string, nice: int) =
                     dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
             let mutable log = -1
             let mutable done' = -1
+            let t0 = Diagnostics.Stopwatch.GetTimestamp()
+            let c0 = Native.threadCpuUs ()
             let r = if cdb <> 0n then sqlite3_wal_checkpoint_v2 (cdb, main, CHECKPOINT_PASSIVE, &log, &done') else 14
             // the pass synced what it wrote and the server reads from its own page cache: the kernel's copy would only
             // make it reclaim, on the one CPU, when memory gets short
             if dropFd >= 0 then Native.posix_fadvise (dropFd, 0L, 0L, 4) |> ignore // POSIX_FADV_DONTNEED
+            // the WAL frames the pass copied are synced and never read again (readers start past them): out of the cache
+            // too, so a WAL that grows while the disk is slow doesn't fill memory
+            if walFd < 0 && cdb <> 0n then walFd <- Native.``open`` (z (path + "-wal"), 0x80000) // kept open, as above
+            if walFd >= 0 && r = 0 && done' > 0 then
+                Native.posix_fadvise (walFd, 0L, 32L + int64 done' * int64 frameBytes, 4) |> ignore
+            Volatile.Write(&cpuUs, Native.threadCpuUs () - c0)
+            Volatile.Write(&wallUs, int64 (Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMicroseconds))
             Volatile.Write(&backfilled, done')
             Volatile.Write(&rc, r)
             Native.write (efd, one, 8un) |> ignore
@@ -805,3 +821,6 @@ type Checkpointer(path: string, nice: int) =
     /// the last pass: SQLite's rc and the frames it backfilled (-1 unknown)
     member _.Rc = Volatile.Read &rc
     member _.Backfilled = Volatile.Read &backfilled
+    /// the last pass's wall time and its thread's CPU time, in microseconds
+    member _.WallUs = Volatile.Read &wallUs
+    member _.CpuUs = Volatile.Read &cpuUs

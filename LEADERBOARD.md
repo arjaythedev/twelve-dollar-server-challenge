@@ -563,6 +563,10 @@ p95/p99 (728 / 1,185 ms at 96 % CPU), 280,000 on p95/p99 (2,761 / 5,377 ms at 98
 **230,000** (22,366 req/s, p95 28.4 / p99 186.2 ms, 0 err, 88 % CPU, 36 µs/req, 640 MB, 2026-11-11); 240,000 failed the
 2-minute probe on p95/p99 (1,001 / 4,820 ms at 91 % CPU, 0 errors) and 320,000 on connection refused (78 % errors). Not
 merged (below the merged row).
+Follow-up **#397** (`c882e4f`, held read snapshot ended every 20 ms for a passive `wal_checkpoint` after writer commits):
+**220,000** (21,322 req/s, p95 243.6 / p99 539.9 ms, 0 err, 77 % CPU, 33 µs/req, 803 MB, 2026-11-11); 230,000 failed the
+2-minute probe on p95/p99 (773 / 1,505 ms at 82 % CPU, 0 errors), 240,000 on p95/p99 (540 / 1,173 ms at 83 % CPU) and
+320,000 on connection refused (80 % errors). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

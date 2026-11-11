@@ -20,11 +20,14 @@ const (
 
 	setupCQSize       = 1 << 3
 	setupSubmitAll    = 1 << 7
+	setupTaskrunFlag  = 1 << 9
 	setupSingleIssuer = 1 << 12
 	setupDeferTaskrun = 1 << 13
 
 	enterGetEvents = 1 << 0
 	enterExtArg    = 1 << 3
+	sqCQOverflow   = 1 << 1
+	sqTaskrun      = 1 << 2
 
 	featSingleMmap = 1 << 0
 
@@ -109,6 +112,7 @@ type uring struct {
 	err     error
 	sqHead  *uint32
 	sqTail  *uint32
+	sqFlags *uint32
 	sqes    []sqe
 	cqHead  *uint32
 	cqTail  *uint32
@@ -123,7 +127,7 @@ type uring struct {
 
 func newUring(entries, cqEntries uint32) (*uring, error) {
 	var p params
-	p.flags = setupCQSize | setupSubmitAll | setupSingleIssuer | setupDeferTaskrun
+	p.flags = setupCQSize | setupSubmitAll | setupSingleIssuer | setupDeferTaskrun | setupTaskrunFlag
 	p.cqEntries = cqEntries
 	fd, _, e := syscall.RawSyscall(sysIoUringSetup, uintptr(entries), uintptr(unsafe.Pointer(&p)), 0)
 	if e != 0 {
@@ -156,6 +160,7 @@ func newUring(entries, cqEntries uint32) (*uring, error) {
 	at := func(off uint32) unsafe.Pointer { return unsafe.Add(ring, off) }
 	r.sqHead = (*uint32)(at(p.sqOff.head))
 	r.sqTail = (*uint32)(at(p.sqOff.tail))
+	r.sqFlags = (*uint32)(at(p.sqOff.flags))
 	r.sqMask = *(*uint32)(at(p.sqOff.ringMask))
 	r.sqes = unsafe.Slice((*sqe)(sqesP), p.sqEntries)
 	// The index array maps ring slot i to SQE i once and for all.
@@ -282,6 +287,13 @@ var zeroTS timespec
 // timeout instead of none: newer kernels run at most max(min_complete, 20) deferred completions
 // per enter, so an enter with min_complete = 0 would see only ~20 of them.
 func (r *uring) poll() { r.enter(enterGetEvents, cqEntries, &zeroTS) }
+
+// Include published entries not yet consumed after a partial/interrupted enter.
+// Deferred work and CQ overflow need GETEVENTS even when no SQ entries remain.
+func (r *uring) needsEnter() bool {
+	return r.tail != atomic.LoadUint32(r.sqHead) ||
+		atomic.LoadUint32(r.sqFlags)&(sqTaskrun|sqCQOverflow) != 0
+}
 
 func atomicLoad(p *uint32) uint32     { return atomic.LoadUint32(p) }
 func atomicStore(p *uint32, v uint32) { atomic.StoreUint32(p, v) }

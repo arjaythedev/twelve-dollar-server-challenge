@@ -59,8 +59,9 @@ query and skip a write transaction if already present.
 ## Transactions and checkpoints
 
 The loop wakes on the first completion on ring 0, then drains ready completions.
-An idle wait lasts at most 1 ms before polling the other rings. Each pass stages
-up to 2,048 receive answers without waiting for a full batch.
+An idle wait lasts at most 1 ms before checking the other rings. Secondary rings
+enter the kernel only when submissions, deferred task work or CQ overflow
+require it. Each pass answers up to 2,048 requests without waiting for a full batch.
 Writes and indexed reads start a deferred transaction on
 demand. Later requests in the same pass can see
 its writes. Responses remain staged until commit succeeds; commit failure turns
@@ -81,8 +82,8 @@ SQLite's automatic 8,192-page checkpoint fallback. Both connections use 64 MiB
 growth chunks with native `posix_fallocate` enabled.
 
 A local ARM sweep of 8,192–16,384 frames established no reliable replacement
-for 8,192. Production x86 performance at 28 µs/request remains unverified.
-The 10,240-frame native
+for 8,192. See the [comparison](bench/wal-trigger-comparison.json); production
+x86 performance at 28 µs/request remains unverified. The 10,240-frame native
 experiment held 155k users and failed the 160k probe; the trigger is restored
 to 8,192. The current candidate adds only feed-specific SSE2 serialization on
 amd64 (`feed_sse2` build tag); other architectures retain the portable writer.

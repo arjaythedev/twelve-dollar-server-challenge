@@ -727,7 +727,7 @@ func (s *server) run() error {
 			u := s.rings[ri].u
 			if ri == 0 && !busy {
 				u.enter(enterGetEvents, waitMin, &ts)
-			} else {
+			} else if ri == 0 || u.needsEnter() {
 				u.poll()
 			}
 		}

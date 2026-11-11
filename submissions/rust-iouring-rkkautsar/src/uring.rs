@@ -1305,12 +1305,61 @@ fn process_writer(
 
 
 
+/// Per-pass answer budgets, overridable to test whether draining a large read
+/// batch in one pass is what inflates the tail.
+fn budget(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(default)
+}
+
+/// Reads the budget once: the loop must never allocate per pass.
+fn feed_budget() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| budget("FEED_BUDGET", FEED_ANSWERS_PER_PASS))
+}
+
+fn post_budget() -> usize {
+    static V: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *V.get_or_init(|| budget("POST_BUDGET", POST_ANSWERS_PER_PASS))
+}
+
+/// Interval at which the read snapshot is dropped so a checkpoint can run.
+/// 0 restores the old behaviour: snapshot held, checkpoints starved and the WAL
+/// grows without bound (1.17 GB and a p95 of 3.5 s at 240k in 30 s).
+fn checkpoint_every() -> Duration {
+    static MS: OnceLock<u64> = OnceLock::new();
+    Duration::from_millis(*MS.get_or_init(|| {
+        std::env::var("CHECKPOINT_EVERY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(20)
+    }))
+}
+
 fn apply_reads(
     app: &mut App,
     rings: &mut [RingState],
     feed_reads: &mut VecDeque<ReadJob>,
     post_reads: &mut VecDeque<ReadJob>,
 ) {
+    // A held read snapshot blocks every PASSIVE checkpoint, which is what makes
+    // each writer commit retry (and pay for) the auto-checkpoint. Releasing the
+    // snapshot briefly on a timer lets the checkpoint finish, so commits stay
+    // cheap and the WAL index stays small for readers.
+    let every = checkpoint_every();
+    if !every.is_zero() && app.read.in_tx() {
+        let now = Instant::now();
+        if now.duration_since(app.last_checkpoint) >= every {
+            if crate::writer::WRITES_SINCE_CHECKPOINT.swap(0, Ordering::Relaxed) > 0 {
+                app.read.end_read(true);
+                app.read.checkpoint();
+            }
+            app.last_checkpoint = now;
+        }
+    }
     if feed_reads.is_empty() && post_reads.is_empty() {
         submit_rings(rings);
         return;
@@ -1322,7 +1371,7 @@ fn apply_reads(
         app.read.end_read(false);
     }
     if !feed_reads.is_empty() {
-        let n = feed_reads.len().min(FEED_ANSWERS_PER_PASS);
+        let n = feed_reads.len().min(feed_budget());
         for job in feed_reads.iter().take(n) {
             let at = diag_start();
             let packet = if ok {
@@ -1339,7 +1388,7 @@ fn apply_reads(
         submit_rings(rings);
     }
     if !post_reads.is_empty() {
-        let n = post_reads.len().min(POST_ANSWERS_PER_PASS);
+        let n = post_reads.len().min(post_budget());
         for job in post_reads.iter().take(n) {
             let id = match job.kind {
                 ReadKind::Post(id) => id,
@@ -1361,6 +1410,20 @@ fn apply_reads(
         post_reads.drain(..n);
     }
     submit_rings(rings);
+}
+
+static STATS_RESET: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn on_stats_reset(_sig: libc::c_int) {
+    STATS_RESET.store(true, Ordering::Relaxed);
+}
+
+/// SIGUSR1 drops the latency counters, so later printouts describe only the
+/// scored hold instead of the whole process including the connection ramp.
+fn install_stats_reset() {
+    unsafe {
+        libc::signal(libc::SIGUSR1, on_stats_reset as libc::sighandler_t);
+    }
 }
 
 pub fn run_pass(
@@ -1392,8 +1455,12 @@ pub fn run_pass(
     let mut read_ns = 0u128;
     let mut poll_ns = 0u128;
     let mut ring_cursor = 0usize;
+    install_stats_reset();
     loop {
         let t0 = Instant::now();
+        if STATS_RESET.swap(false, Ordering::Relaxed) {
+            crate::stats::reset();
+        }
         let mut cqes = 0u64;
         let mut queue_full = false;
         let nrings = rings.len();

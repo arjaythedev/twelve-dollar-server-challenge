@@ -56,6 +56,7 @@ impl App {
             read,
             mac,
             started: Instant::now(),
+            last_checkpoint: Instant::now(),
         })
     }
 }
@@ -64,6 +65,8 @@ pub(crate) struct App {
     pub read: ReadDb,
     mac: Hmac<Sha256>,
     started: Instant,
+    /// When the read snapshot was last released so a checkpoint could run.
+    pub last_checkpoint: Instant,
 }
 
 pub(crate) enum Handled {

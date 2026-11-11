@@ -44,6 +44,8 @@ docker run --rm --privileged --cgroupns host lgipimg:latest sh -c '
 containers=()
 cleanup() {
   if [ -n "${monitor_pid:-}" ]; then kill "$monitor_pid" 2>/dev/null || true; fi
+  if [ -n "${pressure_pid:-}" ]; then kill "$pressure_pid" 2>/dev/null || true; fi
+  if [ -n "${reset_pid:-}" ]; then kill "$reset_pid" 2>/dev/null || true; fi
   if [ -n "${watchdog_pid:-}" ]; then kill "$watchdog_pid" 2>/dev/null || true; fi
   if [ -n "${observer_pid:-}" ]; then kill "$observer_pid" 2>/dev/null || true; fi
   docker rm -f "$name-observer" >/dev/null 2>&1 || true
@@ -69,7 +71,7 @@ chmod 777 "$run_dir/results"
 docker run -d --name "$name-server" --label "feedbench.run=$name" --cgroup-parent "/$cgroup_name" --network none --cpuset-cpus=11 \
   --memory=1536m --memory-swap=1536m --security-opt seccomp=unconfined \
   --ulimit nofile=1048576:1048576 -e JWT_SECRET=twelve-dollar-challenge \
-  -e SQLITE_PATH=/data/feed.db -e HOST=0.0.0.0 -e PORT=3000 -e SHARDS="$server_shards" \
+  -e SQLITE_PATH=/data/feed.db -e HOST=0.0.0.0 -e PORT=3000 -e SHARDS="$server_shards" -e STATS="${STATS:-}" -e FEED_BUDGET="${FEED_BUDGET:-}" -e POST_BUDGET="${POST_BUDGET:-}" -e WAL_AUTOCHECKPOINT="${WAL_AUTOCHECKPOINT:-}" -e CHECKPOINT_EVERY_MS="${CHECKPOINT_EVERY_MS:-}" \
   -v "$submission/target/release/feed-server:/server:ro" -v "$run_dir/data:/data" \
   ubuntu:24.04 /server >"$run_dir/server-id"
 for _ in $(seq 1 30); do
@@ -90,6 +92,15 @@ docker exec "$name-server" sh -c '
   done
 ' >"$run_dir/memory.log" 2>&1 &
 monitor_pid=$!
+(
+  while :; do
+    awk -F'avg10=' '/^some/{print "PSI_MEM", $2+0; exit}' /proc/pressure/memory 2>/dev/null
+    awk -F'avg10=' '/^some/{print "PSI_CPU", $2+0; exit}' /proc/pressure/cpu 2>/dev/null
+    awk '/^cpu /{print "STEAL", $9}' /proc/stat
+    sleep 2
+  done
+) >"$run_dir/pressure.log" 2>&1 &
+pressure_pid=$!
 start_ms=$(( $(date +%s%3N) + 60000 ))
 container="$name-client"
 containers+=("$container")
@@ -150,6 +161,12 @@ for i in $(seq 0 10); do
 done
 ' -- "$server_pid" "$client_pid" "$link_prefix"
 (
+  target=$((start_ms + 75000))
+  while [ "$(date +%s%3N)" -lt "$target" ]; do sleep 1; done
+  docker exec "$name-server" kill -USR1 1 >/dev/null 2>&1 || true
+) &
+reset_pid=$!
+(
   docker wait "$name-server" >"$run_dir/server-exit.tmp"
   mv "$run_dir/server-exit.tmp" "$run_dir/server-exit"
   echo 'Server exited during the load test' >&2
@@ -189,6 +206,7 @@ if [ -e "$run_dir/server-exit" ] || [ "$(docker inspect --format '{{.State.Runni
   echo 'FAIL: server exited before benchmark completion' >&2
   exit 1
 fi
+set +e
 python3 - "$run_dir/results" "$hold_seconds" "$target_users" "$verify_connections" "$start_ms" "$(cat "$run_dir/client-exit")" <<'PY'
 import json, pathlib, sys
 p = pathlib.Path(sys.argv[1])
@@ -238,9 +256,38 @@ if sys.argv[4] == '1':
         print('FAIL: no complete kernel socket snapshot inside the hold window')
         passed = False
 print(f'{"PASS" if passed else "FAIL"} hold_s={sys.argv[2]} target={target} min_active_sum={minimum} requests={requests} errors={errors} p95_ms={p95:.1f} p99_ms={p99:.1f}')
+import pathlib
+_lag = pathlib.Path(sys.argv[1]) / 'clientlag.txt'
+_pq = max(w["packet_queue_lag_p99_ms"] for w in workers)
+_tl = max(w["timer_lag_p99_ms"] for w in workers)
+_lag.write_text(f'{_pq} {_tl}')
 print(f'client worst_worker_timer_lag_p99_ms={max(w["timer_lag_p99_ms"] for w in workers)} worst_worker_read_batch_lag_p99_ms={max(w["read_batch_lag_p99_ms"] for w in workers)} worst_worker_packet_queue_lag_p99_ms={max(w["packet_queue_lag_p99_ms"] for w in workers)} packet_samples={sum(w["packet_queue_samples"] for w in workers)} (1000 means >=1000)')
 sys.exit(0 if passed else 1)
 PY
+gate_status=$?
+set -e
+if [ -s "$run_dir/pressure.log" ]; then
+  psi_mem_max=$(awk '$1=="PSI_MEM"{if($2>m)m=$2} END{printf "%g", m+0}' "$run_dir/pressure.log")
+  psi_cpu_max=$(awk '$1=="PSI_CPU"{if($2>m)m=$2} END{printf "%g", m+0}' "$run_dir/pressure.log")
+  steal_max=$(awk '$1=="STEAL"{if($2>m)m=$2} END{print m+0}' "$run_dir/pressure.log")
+  lag_pq=0; lag_tl=0
+  if [ -s "$run_dir/results/clientlag.txt" ]; then
+    read -r lag_pq lag_tl < "$run_dir/results/clientlag.txt"
+  fi
+  if awk -v v="$lag_pq" 'BEGIN{exit !(v>30)}'; then
+    echo "GATE INVALID reason=client_lag packet_queue=${lag_pq}ms timer=${lag_tl}ms"
+  elif [ "$gate_status" -ne 0 ]; then
+    echo "GATE INVALID reason=latency"
+  elif awk -v v="$psi_mem_max" -v lim="${MAX_PSI_MEM:-2.0}" 'BEGIN{exit !(v>lim)}'; then
+    echo "GATE INVALID reason=memory_pressure psi_mem=$psi_mem_max"
+  elif [ "$steal_max" -gt 0 ]; then
+    echo "GATE INVALID reason=host_steal steal=$steal_max"
+  else
+    echo "GATE VALID psi_mem=$psi_mem_max psi_cpu=$psi_cpu_max"
+  fi
+else
+  echo "GATE INVALID reason=no_pressure_samples"
+fi
 if [ -e "$run_dir/server-exit" ] || [ "$(docker inspect --format '{{.State.Running}}' "$name-server")" != true ]; then
   echo 'FAIL: server exited before benchmark completion' >&2
   exit 1

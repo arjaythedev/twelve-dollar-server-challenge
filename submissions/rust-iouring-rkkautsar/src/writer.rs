@@ -1,10 +1,15 @@
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::db::{Stmt, WriteDb};
 use crate::{error, json_string, WriteCmd, WriteKind};
+
+/// Writes committed since the loop last checkpointed. A checkpoint with nothing
+/// to check point would only add loop-thread stalls, so the loop skips it.
+pub static WRITES_SINCE_CHECKPOINT: AtomicU64 = AtomicU64::new(0);
 
 const POST_INSERT_SQL: &str = "INSERT INTO posts (user_id, body)
                      SELECT CAST(value->>0 AS INTEGER), CAST(value->>1 AS TEXT)
@@ -157,6 +162,7 @@ pub fn run_batch(
     cache: &mut BatchCache,
     jobs: &[WriteJob],
 ) -> (Vec<(u16, Vec<u8>)>, bool) {
+    WRITES_SINCE_CHECKPOINT.fetch_add(jobs.len() as u64, Ordering::Relaxed);
     let began = db.begin().is_ok();
     let mut committed = false;
     let mut results: Vec<(u16, Vec<u8>)> = (0..jobs.len())

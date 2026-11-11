@@ -497,7 +497,9 @@ impl Ctx {
     }
 
     fn on_read(&mut self, idx: usize) -> bool {
-        let mut buf = [0u8; READ_BUF];
+        // recv fills exactly `n` bytes; zeroing 64 KiB per response is pure
+        // client CPU and was the largest per-event cost in the load generator.
+        let mut buf = [std::mem::MaybeUninit::<u8>::uninit(); READ_BUF];
         let fd = self.vus[idx].fd;
         let n = if idx % 256 == 0 {
             let mut iov = libc::iovec { iov_base: buf.as_mut_ptr() as *mut c_void, iov_len: READ_BUF };
@@ -541,7 +543,8 @@ impl Ctx {
             self.close_vu(idx, true);
             return false;
         }
-        self.vus[idx].pending.extend_from_slice(&buf[..n as usize]);
+        let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n as usize) };
+        self.vus[idx].pending.extend_from_slice(bytes);
         if let Some((status, hdr, used)) = Self::parse_response(&self.vus[idx].pending) {
             let post_id = if self.vus[idx].phase == 0 && status == 200 {
                 let json = serde_json::from_slice::<serde_json::Value>(

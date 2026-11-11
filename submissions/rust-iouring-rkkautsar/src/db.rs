@@ -349,6 +349,17 @@ impl ReadDb {
         true
     }
 
+    /// True while the long-lived read snapshot is open.
+    pub fn in_tx(&self) -> bool {
+        self.in_tx
+    }
+
+    /// Copies committed WAL pages back into the database. Only useful while no
+    /// read snapshot is open, otherwise SQLite cannot finish the checkpoint.
+    pub fn checkpoint(&self) {
+        let _ = self.db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+    }
+
     pub fn end_read(&mut self, ok: bool) {
         if self.in_tx {
             unsafe {

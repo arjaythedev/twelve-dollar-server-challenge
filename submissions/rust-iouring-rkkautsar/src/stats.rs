@@ -150,3 +150,19 @@ pub fn phase(kind: usize, at: Option<Instant>) {
         );
     }
 }
+
+/// Clears every counter so a later printout covers only the scored hold.
+pub fn reset() {
+    for a in CNT.iter().chain(SUM.iter()).chain(MAX.iter()) {
+        a.store(0, Ordering::Relaxed);
+    }
+    for a in hist().iter() {
+        a.store(0, Ordering::Relaxed);
+    }
+    for a in PCNT.iter().chain(PSUM.iter()).chain(PMAX.iter()) {
+        a.store(0, Ordering::Relaxed);
+    }
+    for a in phist().iter() {
+        a.store(0, Ordering::Relaxed);
+    }
+}

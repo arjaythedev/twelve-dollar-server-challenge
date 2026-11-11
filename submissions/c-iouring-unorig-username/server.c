@@ -41,7 +41,7 @@ typedef struct {
   char *in; uint32_t inlen, incap;  // partial request, or input held while a send is in flight
   sop_t *q;                         // responses queued behind the send in flight
   sop_t *out;                       // the send in flight
-  uint32_t gen, ready_s;            // ready_s: when it joined the ready list
+  uint32_t gen, ready_ms;           // ready_ms: when it joined the ready list (now_ms)
   uint8_t open, closing, sending, eof, sent100, queued, ready;
 } conn_t;
 // Accepted sockets live in each ring's registered file table, not in the process descriptor table.
@@ -57,6 +57,8 @@ static uint32_t tsize;  // slots per ring
 static sqlite3 *db;
 static sqlite3_stmt *st_feed, *st_post, *st_ins, *st_like, *st_one, *st_begin, *st_commit, *st_rollback;
 static time_t started, now_s;
+static uint32_t now_ms;  // CLOCK_MONOTONIC in ms, set once per pass; wraps in 49 days, unsigned differences stay right
+static int64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
 
 // user_data: low 3 bits tag the operation. A send's user_data is its sop_t pointer (tag 0).
 enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ, T_WAL };
@@ -851,7 +853,10 @@ static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
 // wait on their connection, in a copy the size of the request, on a list served newest first (below).
 #define ANSWERS 128       // #326 (objc-uring-delneg): 128 answers held p99 at 117-131 ms where 256 gave 134-290 and 512 850-910
 #define READS 4096
-#define READY_AGE_S 8     // the oldest on the list get half of a pass once they have waited this long (#326 --lifoage, --lifocap)
+// Parked this long, a request goes before the newest ones. 200 ms: five times the 40 ms delayed-ACK window, so the young
+// ones still get the newest-first benefit; about 60 passes at 26 us/req, so a backlog has had its chance to drain; and
+// a fifth of the 1 s p99 limit, leaving room for the scheduling and checkpoint stalls that add to a parked request's wait.
+#define READY_AGE_MS 200
 static int answers_left = ANSWERS;
 static inline uint64_t fifo_pop(fifo_t *f) {
   uint64_t v = f->a[f->head++];
@@ -867,20 +872,19 @@ static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
   if (c->incap - c->inlen < n) { c->incap = (c->inlen + n) * 2; c->in = realloc(c->in, c->incap); }
   memcpy(c->in + c->inlen, p, n); c->inlen += n;
   if (c->inlen > 4 * MAXREQ) { conn_close(who); return; }  // keeps sending but won't read its replies
-  if (later) { if (!c->ready) { c->ready = 1; c->ready_s = now_s; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
+  if (later) { if (!c->ready) { c->ready = 1; c->ready_ms = now_ms; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
   else if (!c->sending) process(who, c, c->in, c->inlen);
 }
 // With the answers this pass has left, what earlier passes read: newest first, as #326 (objc-uring-delneg, 1baccb2) does.
 // A reply later than 40 ms after its request costs the kernel a delayed-ACK timer and a bare ACK, so oldest first in a
-// backlog makes every newcomer late too and the extra CPU keeps the backlog alive. The oldest wait for spare capacity,
-// and from READY_AGE_S on get half of each pass, so waiting is bounded. A connection's own requests keep their order.
+// backlog makes every newcomer late too and the extra CPU keeps the backlog alive. The oldest wait for spare capacity
+// until they have been parked READY_AGE_MS; from then on they go first, oldest first, so a parked request waits for the
+// backlog ahead of it to drain, not for spare capacity. A connection's own requests keep their order.
 static void run_ready(void) {
-  while (readyq.n && !conn_of(readyq.a[readyq.head])) fifo_pop(&readyq);  // closed while waiting
-  int old = 0;
-  if (readyq.n && now_s - R[K(readyq.a[readyq.head])].c[SLOT(readyq.a[readyq.head])].ready_s >= READY_AGE_S) old = ANSWERS / 2;
   while (answers_left && readyq.n) {
     uint64_t who;
-    if (old-- > 0) who = fifo_pop(&readyq);
+    conn_t *h = conn_of(readyq.a[readyq.head]);  // NULL: closed while waiting, drop it from the head
+    if (!h || now_ms - h->ready_ms >= READY_AGE_MS) who = fifo_pop(&readyq);
     else { who = readyq.a[--readyq.n]; if (readyq.n == readyq.head) readyq.head = readyq.n = 0; }
     conn_t *c = conn_of(who);
     if (!c) continue;
@@ -1068,7 +1072,7 @@ static void run(void) {
     for (int i = 0; i < nlimbo; i++) sop_free((sop_t *)(uintptr_t)limbo[i]);  // those cancels are in now
     nlimbo = 0;
     if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -ETIME && rc != -EAGAIN) { fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc)); exit(1); }
-    now_s = time(NULL); seen = 0;
+    now_s = time(NULL); now_ms = mono_ns() / 1000000; seen = 0;
     answers_left = ANSWERS;
     // Requests that just arrived go first. After a stall the backlog has missed any latency target already; answered
     // first, it would make everything behind it miss too.
@@ -1154,7 +1158,6 @@ enum { WAL_LEFT = 1, WAL_ALL };  // what a pass reports; a counter value, so nev
 static sqlite3 *wal_db;
 static int wal_asks, wal_frames, wal_asked_at, wal_busy, wal_last_pass;
 static int64_t post_deadline;  // 0: no limit
-static int64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
 static int wal_hook(void *u, sqlite3 *d, const char *n, int frames) { wal_frames = frames; return SQLITE_OK; }
 static void *wal_worker(void *a) {
   uint64_t go, outcome;

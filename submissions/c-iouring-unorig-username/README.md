@@ -123,8 +123,14 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **The list is served newest first, 128 answers a pass** (from objc-uring-delneg, #326 at `1baccb2`). A reply sent more
   than 40 ms after its request costs the kernel a delayed-ACK timer and a bare ACK, about a fifth more CPU per request, so
   in a backlog oldest-first makes every newcomer late too and the extra CPU keeps the backlog alive at a load the server
-  otherwise handles. The newest parked requests go first; the oldest wait for spare capacity and get half of each pass once
-  they have waited 8 s, so waiting is bounded. A connection's own requests keep their order and nothing is dropped. The
+  otherwise handles. The newest parked requests go first; the oldest wait for spare capacity until they have been parked
+  200 ms, then go first, oldest first, so a parked request waits for the backlog ahead of it to drain rather than for spare
+  capacity (it was half of each pass after 8 s; the `#362` run at 280,000 had p95 45 ms against p99 750 ms, the shape of a
+  few parked requests waiting long, and 290,000 missed the p99 limit by 40 ms). 200 ms is five times the 40 ms delayed-ACK
+  window, so the young ones keep the newest-first benefit, about 60 passes at 26 us a request, and a fifth of the 1 s p99
+  limit, leaving room for scheduling and checkpoint stalls. Measured locally (below): it shortens the longest waits after a
+  stall and does not change CPU, but whole-run p99 at 280,000 leaned a few tens of ms higher, so whether it helps the rig's
+  tail is open. A connection's own requests keep their order and nothing is dropped. The
   benchmark agent ruled on #326 (comment on `197ad57`): "The newest-first answer order applies to any backlog, keeps
   per-connection order and drops nothing, so it's general scheduling, not load-test detection. That's fine under rule 7."
   128 answers rather than 1,024 because #326 measured p99 117 to 131 ms at 128 against 134 to 290 at 256 and 850 to 910 at 512.
@@ -194,6 +200,17 @@ CPU in CPU time, `mload` at 300,000 users over loopback, 60 s ramp and 2 minute 
 stall for about 25 s at the end of the ramp while accepts lag the connection rate (connect p99 14 to 16 s) and both fail the
 probe on p99 with 0 errors: whole-run p99 10.0 and 8.7 s before, 8.7 and 10.3 s after; p95 6.4 and 5.2 s before, 5.7 and 5.1 s
 after. No measurable effect on that tail there; the changes stay for the reasons above, each measured by its source entry.
+
+The 200 ms parked-age cap was measured against `177f00e` on the same box with a cleaner harness (32 target IPs, so the
+generator no longer saturates on ephemeral ports; a CFS quota of 1 ms per 2.6 ms as a slow-core proxy; 1 s ticks). Four
+interleaved rounds, order swapped, 0 errors and the same CPU and memory peak everywhere. 280,000 users, 3 minute hold,
+whole-run p99 `177f00e` / cap: 13 / 50, 47 / 75, 31 / 33, 29 / 55 ms (max 0.6 to 1.2 s both), so p99 leaned higher by 2 to
+37 ms, inside the 34 to 42 ms same-build spread but the same sign in all four rounds. 300,000 users, 2 minute probe: p99
+180 / 112, 142 / 103, 71 / 127, 53 / 136 ms; max 4.1 / 0.8, 1.6 / 0.5, 1.6 / 1.1, 1.5 / 1.9 s. In 1 s ticks the difference
+is the shape after a scheduling stall: `177f00e` keeps answering newcomers and its p99 climbs for two or three seconds to 1.6
+to 3.9 s as the oldest parked requests come out last; with the cap the peak is 0.6 to 0.7 s and the next second is clean.
+Frozen for 1 s at 280,000 (`docker pause`), both drain the backlog in 5 s at the same rate; max 5.9 and 5.0 s before, 3.6
+and 3.7 s with the cap. The rig's 290,000 tail is not reproduced here, so this is a bet on its shape, not a measured gain.
 
 Known limit: on Linux 6.8 a closed connection's socket, and the client's EOF, can wait until older connections' receives end. Replies carry `Content-Length`, so clients get every reply. Shutting the socket down first gave immediate EOF, but when every client reconnected at 300,000 users (one run each) that build was killed for memory and this one survived, so it isn't kept.
 

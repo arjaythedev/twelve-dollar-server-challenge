@@ -76,7 +76,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 8 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** ᴺ | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
 | 8 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
 | 8 | asm-btree-ninhnv | #388 | x86-64 asm (NASM, io_uring, SQLite B-tree reads) | **280,000** ᴮ | 26,699 | 195.7 | 396.6 | 0.00 | 82 | 28 | 794 | 2026-11-10 |
-| 8 | fsharp-uring-delneg | #392 | F# (.NET 11, io_uring, SQLite B-tree reads) | **280,000** | 26,687 | 39.8 | 742.3 | 0.00 | 86 | 29 | 1,389 | 2026-11-11 |
+| 8 | fsharp-uring-delneg | #392 | F# (.NET 11, io_uring, SQLite B-tree reads) | **280,000** ᴱ | 26,687 | 39.8 | 742.3 | 0.00 | 86 | 29 | 1,389 | 2026-11-11 |
 | 13 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
 | 13 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
 | 15 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
@@ -751,6 +751,11 @@ while the WAL is short and still gaining, 1 ms loop wait instead of 4 ms): 280,0
 checkpoint rounds and the explicit WAL sync removed, one passive checkpoint per cycle) held **230,000** at 64 % CPU
 (22,374 req/s, p95 17.3 / p99 155.6 ms, 0 errors; 240k failed the 2-minute probe on p99 1.16 s). That is below #388's
 280,000, so it is not merged and the row stays at #388.
+
+ᴱ **fsharp-uring-delneg** is scored at its merged #392 code (`e83de93`). Its follow-up **#394** (`e6763f4`,
+2026-11-11: held writes in their own queue, drained in bulk after a hold) held **230,000** at 69 % CPU (22,379 req/s,
+p95 11.5 / p99 84.0 ms, 0 errors, 28 µs/req, 577 MB; 240,000 failed the 2-minute probe on p99 1.38 s, 320,000 on p99
+8.1 s). That is below #392's 280,000, so it is not merged and the row stays at #392.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

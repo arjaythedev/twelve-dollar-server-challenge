@@ -5,8 +5,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-java_home=${JAVA_HOME:-/opt/jdk-27.0.1}
-[[ -x $java_home/bin/javac ]] || { echo "no JDK at $java_home: run install.sh (or set JAVA_HOME)" >&2; exit 1; }
+# The JDK install.sh pinned, whatever JAVA_HOME the machine sets for a JDK of its own (FEED_JDK
+# points the build at another copy of the same version).
+java_home=${FEED_JDK:-/opt/jdk-27.0.1}
+[[ -x $java_home/bin/javac ]] || { echo "no JDK at $java_home: run install.sh (or set FEED_JDK)" >&2; exit 1; }
 
 mkdir -p .deps .build bin
 SQ=sqlite-amalgamation-3540100

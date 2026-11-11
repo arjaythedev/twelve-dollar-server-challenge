@@ -11,7 +11,8 @@
 ## Design
 
 - **One thread drives everything** (the box has one CPU): an io_uring loop over several rings, the HTTP parser, the
-  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own.
+  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, at nice 19, so it takes
+  the CPU only when the loop leaves it.
 - **io_uring in F#.** `Ring.fs` maps the rings and writes submission entries in place; the rings are
   `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN`, so completions are posted in batches when the loop enters a ring.
   Accepted sockets are fixed (direct) descriptors from multishot accepts. A table may hold up to `RLIMIT_NOFILE`
@@ -46,9 +47,9 @@
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
   waits without bound.
-- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 2,000 new frames the loop
+- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
-  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 8,192 frames, writes wait
+  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
   most 250 ms. After each pass the thread drops the database file's pages from the kernel's cache (the server reads
   through SQLite's own page cache).

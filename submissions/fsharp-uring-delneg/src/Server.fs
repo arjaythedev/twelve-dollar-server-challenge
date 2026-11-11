@@ -30,8 +30,8 @@ let private lifoAge = uint32 (env "LIFOAGE" 8000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
-let private ckPass = env "CKPASS" 2000
-let private ckHoldAt = env "HOLD" 8192
+let private ckPass = env "CKPASS" 4000
+let private ckHoldAt = env "HOLD" 16384
 let private batchN = env "BATCH" 128
 let private batchWaitUs = env "BWAIT" 1000
 let private batchThresh = env "BTHRESH" 8

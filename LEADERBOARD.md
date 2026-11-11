@@ -82,7 +82,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 15 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
 | 16 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
 | 16 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
-| 16 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
+| 16 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
 | 16 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
 | 16 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
 | 16 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
@@ -576,6 +576,12 @@ CPU, 82 µs/req, 636 MB, 2026-11-10). CPU-bound: 115,000 and 120,000 failed the 
 and 591 / 1,221 ms at 97–98 % CPU, 0 errors). Its next commit `c0f58b9` (faster header parser) scored **115,000**
 (11,292 req/s, p95 165.2 / p99 539.9 ms, 0 err, 96 % CPU, 79 µs/req, 996 MB, 2026-11-10); still below the merged row,
 so not merged. 120,000 failed the 2-minute probe on p95/p99 (943 / 1,662 ms at 99 % CPU, 0 errors).
+
+ᴳ **goose-iouring-ahmadsh2007** stays on its merged #291 row. Its follow-up **#395** (`f963d02`, rings made at startup,
+≤1,024 connections answered per pass, newest first for 15 s after a loop stall, 4 ms pass wait; held, not merged: it
+didn't beat the merged row) scored **230,000** (22,354 req/s, p95 32.6 / p99 285.6 ms, 0 err, 67 % CPU, 28 µs/req,
+999 MB, 2026-11-11). 240,000 failed the 2-minute probe on p95/p99 (241 / 1,475 ms at 72 % CPU, 0 errors) and 320,000
+on p95/p99 (2,285 / 2,524 ms at 97 % CPU).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

@@ -291,21 +291,134 @@ type View =
     val mutable AuLen: int
 
 /// The posts row under pc and its author (through uc). 0 ok, -1 not covered, 1 no such author (the SQL join drops it).
-let private postView (pc: nativeint) (uc: nativeint) (v: byref<View>) =
-    if not (record pc 4) || not (isInt cols.[1].T) || not (isText cols.[2].T) || not (isText cols.[3].T) then -1
+// ---------- specialized decoders for the three record shapes the reads meet ----------
+// Each reads only the columns it needs, with the record's type codes taken as 1- or 2-byte varints (every column
+// here fits: a 500-character body's type code is 2 bytes). Any other shape goes through `record` above.
+
+/// a type code of 1 or 2 varint bytes at p[h], h moved past it; 0xFFFFFFFF otherwise
+let inline private code (p: nativeint) (h: byref<int>) =
+    let b0 = rd p h
+    if b0 < 0x80uy then
+        h <- h + 1
+        uint32 b0
     else
+        let b1 = rd p (h + 1)
+        if b1 < 0x80uy then
+            h <- h + 2
+            (uint32 (b0 &&& 0x7Fuy) <<< 7) ||| uint32 b1
+        else 0xFFFFFFFFu
+
+/// bytes of a column of type code t (t valid and not 10/11)
+let inline private width (t: uint32) =
+    if t >= 12u then int ((t - 12u) >>> 1)
+    else
+        match t with
+        | 5u -> 6
+        | 6u | 7u -> 8
+        | 8u | 9u | 0u -> 0
+        | _ -> int t
+
+/// an integer column of type code t at p[d]
+let inline private intAt (p: nativeint) (d: int) (t: uint32) =
+    match t with
+    | 8u -> 0L
+    | 9u -> 1L
+    | _ ->
+        let n = width t
+        let mutable x = int64 (sbyte (rd p d))
+        for k in 1 .. n - 1 do
+            x <- (x <<< 8) ||| int64 (rd p (d + k))
+        x
+
+/// the cursor's record when it is wholly on its page with a one-byte header length: its address, size and header
+/// length (0 when not)
+let inline private local (c: nativeint) (p: byref<nativeint>) (size: byref<int>) =
+    let sz = sqlite3BtreePayloadSize c
+    let mutable amt = 0u
+    p <- sqlite3BtreePayloadFetch (c, &amt)
+    size <- int sz
+    if amt < sz || sz < 2u then 0
+    else
+        let hdr = rd p 0
+        if hdr < 0x80uy && uint32 hdr <= sz then int hdr else 0
+
+/// posts_created_at_id_idx entry (created_at, id): the id
+let private topId (c: nativeint) (id: byref<int64>) =
+    let mutable p = 0n
+    let mutable size = 0
+    let hdr = local c &p &size
+    let mutable h = 1
+    let t0 = if hdr > 0 then code p &h else 0xFFFFFFFFu
+    let t1 = if hdr > 0 && t0 <> 0xFFFFFFFFu then code p &h else 0xFFFFFFFFu
+    if t1 <> 0xFFFFFFFFu && h <= hdr && isText t0 && isInt t1 && hdr + width t0 + width t1 <= size then
+        id <- intAt p (hdr + width t0) t1
+        true
+    elif record c 2 && isInt cols.[1].T then
+        id <- cols.[1].V
+        true
+    else false
+
+/// posts row (id, user_id, body, created_at): the user id, body and created_at into v
+let private postRow (c: nativeint) (uid: byref<int64>) (v: byref<View>) =
+    let mutable p = 0n
+    let mutable size = 0
+    let hdr = local c &p &size
+    let mutable h = 1
+    let bad = 0xFFFFFFFFu
+    let t0 = if hdr > 0 then code p &h else bad
+    let t1 = if t0 <> bad then code p &h else bad
+    let t2 = if t1 <> bad then code p &h else bad
+    let t3 = if t2 <> bad then code p &h else bad
+    if t3 <> bad && h <= hdr && (t0 = 0u || isInt t0) && isInt t1 && isText t2 && isText t3 then
+        let d1 = hdr + width t0
+        let d2 = d1 + width t1
+        let d3 = d2 + width t2
+        if d3 + width t3 > size then false
+        else
+            uid <- intAt p d1 t1
+            v.Body <- p + nativeint d2
+            v.BodyLen <- width t2
+            v.Ca <- p + nativeint d3
+            v.CaLen <- width t3
+            true
+    elif record c 4 && isInt cols.[1].T && isText cols.[2].T && isText cols.[3].T then
+        uid <- cols.[1].V
         v.Body <- cols.[2].P
         v.BodyLen <- cols.[2].Len
         v.Ca <- cols.[3].P
         v.CaLen <- cols.[3].Len
+        true
+    else false
+
+/// users row (id, username, ...): the username into v
+let private userRow (c: nativeint) (v: byref<View>) =
+    let mutable p = 0n
+    let mutable size = 0
+    let hdr = local c &p &size
+    let mutable h = 1
+    let bad = 0xFFFFFFFFu
+    let t0 = if hdr > 0 then code p &h else bad
+    let t1 = if t0 <> bad then code p &h else bad
+    if t1 <> bad && h <= hdr && (t0 = 0u || isInt t0) && isText t1 && hdr + width t0 + width t1 <= size then
+        v.Au <- p + nativeint (hdr + width t0)
+        v.AuLen <- width t1
+        true
+    elif record c 2 && isText cols.[1].T then
+        v.Au <- cols.[1].P
+        v.AuLen <- cols.[1].Len
+        true
+    else false
+
+/// The posts row under pc and its author (through uc). 0 ok, -1 not covered, 1 no such author (the SQL join drops it).
+let private postView (pc: nativeint) (uc: nativeint) (v: byref<View>) =
+    let mutable uid = 0L
+    if not (postRow pc &uid &v) then -1
+    else
         let mutable res = 0
-        if sqlite3BtreeTableMoveto (uc, cols.[1].V, 0, &res) <> OK then -1
+        if sqlite3BtreeTableMoveto (uc, uid, 0, &res) <> OK then -1
         elif res <> 0 then 1
-        elif not (record uc 2) || not (isText cols.[1].T) then -1
-        else
-            v.Au <- cols.[1].P
-            v.AuLen <- cols.[1].Len
-            0
+        elif not (userRow uc &v) then -1
+        else 0
 
 [<Literal>]
 let private Span_ = 512
@@ -332,9 +445,10 @@ let private btFeed (o: Json.Out) =
             let mutable rc = sqlite3BtreeFirst (top, &res) // the index is (created_at DESC, id DESC): newest first
             let mutable ok = true
             while ok && rc = OK && res = 0 && n < 20 do
-                if not (record top 2) || not (isInt cols.[1].T) then ok <- false
+                let mutable id = 0L
+                if not (topId top &id) then ok <- false
                 else
-                    feedIds.[n] <- cols.[1].V
+                    feedIds.[n] <- id
                     n <- n + 1
                     rc <- sqlite3BtreeNext (top, 0)
                     if rc = DONE then

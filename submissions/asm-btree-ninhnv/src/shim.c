@@ -51,14 +51,21 @@ static u8 *spill;
 static u32 spill_cap;
 
 /* Checkpoints. Past CKPT_FRAMES frames a helper thread copies the log back into the database.
- * Then writes are held (reads go on) while the other helper copies what was written meanwhile
- * and SQLite syncs the database, so the next write can restart the log from the top. A hold
- * lasts at most HOLD_MS. Past CKPT_FORCE frames (the helpers can't keep up) the loop checkpoints
- * by itself. */
+ * While the log stays short (below CKPT_GROW times CKPT_FRAMES) it goes on in rounds: sync the
+ * database file, copy what was written meanwhile, until at most CKPT_LEFT frames were written
+ * during a round or a round stops gaining. Then writes are held (reads go on) while the other
+ * helper copies what was written meanwhile, so the next write can restart the log from the top.
+ * A hold lasts at most HOLD_MS. Past CKPT_FORCE frames (the helpers can't keep up) the loop
+ * checkpoints by itself. */
 #ifndef CKPT_FRAMES /* overridable only to exercise holds in tests */
 #define CKPT_FRAMES 4096
 #endif
 #define CKPT_FORCE 65536
+#define CKPT_LEFT 128
+#ifndef CKPT_ROUNDS
+#define CKPT_ROUNDS 5
+#endif
+#define CKPT_GROW 2
 #define HOLD_MS 250
 #ifndef BULK_NICE
 #define BULK_NICE 19
@@ -76,7 +83,7 @@ static struct timespec hold_t0;
  * loop's longest pass (with the CPU time it used: far less means it was blocked or waiting for
  * the CPU), passes over 100 ms, and the longest commit. */
 static unsigned n_holds, n_expired, n_forced, max_frames;
-static unsigned hold_max_ms, hold_all_ms;
+static unsigned hold_max_ms, hold_all_ms, n_rounds;
 static unsigned pass_max_us, pass_max_cpu_us, n_slow, commit_max_us;
 
 static unsigned us_between(const struct timespec *a, const struct timespec *b) {
@@ -145,14 +152,22 @@ static void ck_set(int s) {
   pthread_mutex_unlock(&ck_mu);
 }
 
+/* Syncs the database file. An unfinished copy leaves the pages it wrote unsynced (SQLite syncs the
+ * file only when a copy brings in every frame), so the copy made during a write hold would have to
+ * flush the whole cycle's pages while writes wait: on a slow disk the hold ran out first, the log
+ * never restarted and grew until the loop had to copy it. Synced before the hold, the held copy
+ * has only its own few pages to flush. (The approach of swift-iouring-akbashev, PR #376.) */
+static void ck_sync_db(void) {
+  sqlite3_file *f = 0;
+  if (sqlite3_file_control(ckdb, "main", SQLITE_FCNTL_FILE_POINTER, &f) == SQLITE_OK && f && f->pMethods)
+    f->pMethods->xSync(f, SQLITE_SYNC_NORMAL);
+}
+
 /* PASSIVE checkpoints, as the loop asks for them. PASSIVE never waits for the loop's locks and the
  * loop never waits for these threads. Two threads take turns on the one connection (the states
  * are strictly sequential). The bulk thread runs at nice BULK_NICE, so on one vCPU its copying and
- * its sync of the log stay out of the loop's way. The tail thread runs at normal priority because
- * writes wait for it. The database file is synced only by the tail's copy, that is while writes
- * are held: an earlier version synced it from the bulk thread as well, to shorten the hold, and
- * those syncs met the loop's commits (the longest commit of a probe was 22 to 69 ms in six of
- * eight probes on droplets at 260,000 to 300,000 users, and 4 to 14 ms in all eight without). */
+ * its syncs stay out of the loop's way. The tail thread runs at normal priority because writes
+ * wait for it; after the bulk thread's rounds it has a handful of frames to copy and sync. */
 static void *ck_main(void *arg) {
   int serve = (int)(long)arg;
   if (serve == CK_BULK) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), BULK_NICE);
@@ -161,7 +176,31 @@ static void *ck_main(void *arg) {
     while (ck_state != serve) pthread_cond_wait(&ck_cv, &ck_mu);
     pthread_mutex_unlock(&ck_mu);
     int nlog = -1, ndone = -2, rc = SQLITE_OK;
-    rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    if (serve == CK_BULK) {
+      /* The cycle's frames, then rounds of [copy what was written meanwhile, sync the database]
+       * until little was written during a round. A checkpoint reports the log as it was when
+       * it began; what the loop wrote since is the loop's own count (wal_frames, set at each
+       * commit) minus that. */
+      rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+      /* Rounds pay off while this thread keeps up: the hold then finds a few frames to copy and
+       * a few pages to flush. When it does not keep up (a busy CPU leaves a nice-19 thread
+       * little, or the disk is slower than the writes), rounds only let the log grow while no
+       * hold can start: at 260,000 users on a droplet the log reached 41,000 frames with
+       * unbounded rounds and 9,000 without any. So a round starts only while the log is short
+       * and the round before it gained. */
+      for (int i = 0, prev = 0; i < CKPT_ROUNDS && rc == SQLITE_OK && nlog == ndone; i++) {
+        int now = __atomic_load_n(&wal_frames, __ATOMIC_RELAXED);
+        if (now >= CKPT_GROW * CKPT_FRAMES) break;
+        ck_sync_db();
+        int left = __atomic_load_n(&wal_frames, __ATOMIC_RELAXED) - nlog;
+        if (left <= CKPT_LEFT || (i && left >= prev)) break;
+        prev = left;
+        rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+        n_rounds++;
+      }
+    } else {
+      rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    }
     pthread_mutex_lock(&ck_mu);
     ck_full = rc == SQLITE_OK && nlog == ndone;
     __atomic_store_n(&ck_state, serve + 1, __ATOMIC_RELEASE);
@@ -320,10 +359,16 @@ int td_open(const char *path, char *err, int n) {
   if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl"))
     return fail(err, n, "open");
   /* WAL + synchronous=NORMAL (rule 6). No mmap: a page in SQLite's own cache keeps its parsed
-   * header and needs no WAL-index lookup; the pages the requests touch fit in 64 MB. */
+   * header and needs no WAL-index lookup; the pages the requests touch fit in 64 MB.
+   * journal_size_limit: the first commit after a checkpoint cuts the log file back to 1 MB, so
+   * the cycle's frames are appended to it. Without a limit SQLite keeps the file (17 MB and more)
+   * and writes each 4,120-byte frame over the old log; that write covers part of a 4 KB block,
+   * and once the kernel has dropped the old block from its page cache (a few hundred thousand
+   * sockets leave it little room) it is read back from the disk first, inside the loop's COMMIT. */
   if (sqlite3_exec(db,
                    "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;"
                    "PRAGMA cache_size = -65536; PRAGMA mmap_size = 0; PRAGMA wal_autocheckpoint = 0;"
+                   "PRAGMA journal_size_limit = 1048576;"
                    "SELECT count(*) FROM sqlite_schema",
                    0, 0, 0))
     return fail(err, n, "pragmas");
@@ -468,11 +513,11 @@ int td_tick(void) {
     if (!log_t0.tv_sec) log_t0 = now;
     else if (ms_since(&log_t0) >= 60000) {
       log_t0 = now;
-      dprintf(2, "wal: %u holds (longest %u ms, %u ms in all), %u ran out, %u copies on the loop, "
+      dprintf(2, "wal: %u holds (longest %u ms, %u ms in all, %u extra rounds), %u ran out, %u copies on the loop, "
                  "at most %u frames; loop: longest pass %u ms (%u ms of CPU), %u over 100 ms, longest commit %u ms\n",
-              n_holds, hold_max_ms, hold_all_ms, n_expired, n_forced, max_frames, pass_max_us / 1000,
+              n_holds, hold_max_ms, hold_all_ms, n_rounds, n_expired, n_forced, max_frames, pass_max_us / 1000,
               pass_max_cpu_us / 1000, n_slow, commit_max_us / 1000);
-      n_holds = n_expired = n_forced = max_frames = hold_max_ms = hold_all_ms = 0;
+      n_holds = n_expired = n_forced = max_frames = hold_max_ms = hold_all_ms = n_rounds = 0;
       pass_max_us = pass_max_cpu_us = n_slow = commit_max_us = 0;
     }
   }

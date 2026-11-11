@@ -81,32 +81,48 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   commit, rule 6). **No response from a pass is handed to the kernel until that `COMMIT` returns.**
   If it fails, every response the pass produced is replaced by a 500 and the connection is closed.
 - **Checkpoints off the request path.** Automatic checkpoints are off. Once the WAL holds 4,096
-  frames, a helper thread (nice 19, own connection) copies it back with a PASSIVE checkpoint. Then
-  writes are briefly held: the next
-  POST on each connection stays unread while a second helper thread copies the frames written
-  meanwhile and SQLite syncs the database, so the
+  frames, a helper thread (nice 19, own connection) copies it back with PASSIVE checkpoints: the
+  cycle's frames first, then, while the log is still under 8,192 frames, rounds of "sync the
+  database file, copy what was written meanwhile" until at most 128 frames were written during a
+  round or a round stops gaining. Then writes are briefly held: the next
+  POST on each connection stays unread while a second helper thread copies the last frames, so the
   next write can restart the log from the top. Reads go on during a hold, and a hold lasts at
   most 250 ms. Past 65,536 frames the loop checkpoints by itself.
-  - *Why the database is synced only during the hold:* #373 and #388 also synced it from the
-    first helper before the hold, in rounds, so that the held copy had little left to flush. That
-    shortened the holds, but those syncs ran while the loop was committing, and commits then
-    waited on the disk: on droplets with 260,000 to 300,000 users the longest commit of a
-    2-minute probe was 22 to 69 ms in six of eight probes, against 4 to 14 ms in all eight
-    without the extra syncs. A commit stalls every request, a hold only the writes (8% of them).
-    Without the rounds the helper also copies for less of the time, and the log stayed under
-    10,400 frames at every level tried. The price is longer holds: 33 to 55 ms each on those
-    droplets, 2.1 to 2.5 s a minute, against 0.5 to 1.1 s. On a slow disk a hold runs towards
-    its 250 ms: with the disk modelled at 60 MB/s (every `fsync` taking 5 ms plus its unsynced
-    bytes at that rate) and ~16,500 req/s, 28 holds a minute took 6.1 s in all and one ran out;
-    writes then had p95 169 ms and p99 236 ms, reads p99 7 ms, all requests p99 40 ms.
-    Measurements on droplets below.
+  - *Why the sync before the hold:* a copy that doesn't finish the log leaves its pages unsynced
+    (SQLite syncs the database only when every frame is in), so the held copy had to flush the
+    whole cycle while writes waited. On a slow disk the hold ran out first, the log was not
+    restarted, and the next cycle began at once. With the disk modelled at 60 MB/s (every
+    `fsync` taking 5 ms plus its unsynced bytes at that rate) and 240,000 users of the k6 model,
+    hold-phase latency went from p99 89–91 ms and a 290–300 ms maximum (every hold ran its full
+    250 ms) to p99 23–24 ms and a 90–116 ms maximum, with no hold running out (two runs each).
+  - *Why the rounds are bounded:* they only pay off while the helper keeps up. On a busy vCPU a
+    nice-19 thread gets little, each round takes longer than the one before, and no hold can
+    start while rounds run, so the log grows instead of restarting. On a 1 vCPU / 2 GB droplet
+    with 260,000 users the log reached 32,625 and 41,550 frames with unbounded rounds (two
+    droplets), and 141,927 at 320,000; without any rounds it never passed 9,811 at any level.
+    Bounded, it stayed under 14,100 in 2-minute probes up to 280,000 users, and write holds
+    added up to 0.1–0.6 s a minute, against 1–2 s a minute without rounds.
   - *Why two threads:* the second one runs at normal priority because writes wait for it; at
-    nice 19 it got ~1.5% of a busy CPU and holds ran out (tried again on a droplet with a full
-    vCPU: 47 and 60 holds ran out in two minutes and the log reached 67,840 frames).
-  - The log has a line a minute: holds (the longest and their sum), holds that ran
+    nice 19 it got ~1.5% of a busy CPU and holds ran out. After the rounds it has a handful of
+    frames to copy and sync.
+  - The log has a line a minute: holds (the longest, their sum, the extra rounds), holds that ran
     out, copies the loop made itself, the most frames the WAL held; and for the loop its longest
     pass with the CPU time that pass used, the passes over 100 ms and the longest commit. A long
     pass with little CPU time means the loop was blocked or kept off the CPU.
+- **The log file is cut back after every checkpoint** (`PRAGMA journal_size_limit`, 1 MB; many
+  submissions here set it). SQLite otherwise keeps the WAL file at its largest size and writes
+  the next cycle over the old one. A frame is 4,120 bytes, so nearly every one of those writes
+  covers part of a 4 KB block, and the kernel needs the rest of that block first: if the old log
+  has left the page cache, it is read back from the disk before `write` returns. On a 2 GB
+  machine with a few hundred thousand sockets the page cache is small and the old log does leave
+  it. On a Synteq machine of the benchmark box's size with 300,000 users, the loop's kernel
+  stack (sampled every 10 ms) sat in `ext4_block_write_begin` → `__wait_on_buffer` under SQLite's
+  `write` during its long passes, and commits took 50 to 700 ms. With the limit, the first commit
+  after a checkpoint truncates the file to 1 MB and the rest of the cycle is appended to it, so
+  no old block is read; those waits were gone from the samples. The price is a truncate and new
+  block allocations in every cycle: time inside `COMMIT` went from about 34 to about 48 ms a
+  second at that load. Durability is unchanged: the log is only restarted, and so only cut,
+  after a checkpoint has copied every frame and synced the database. Measurements below.
 - **Page cache after a split.** When a write splits a B-tree page, SQLite renumbers the new pages
   through a temporary page number far past the end of the file, and its page cache keeps the
   largest number it has seen. Every later commit truncates the cache to the file size, and from
@@ -234,8 +250,57 @@ answer to that step from 59 ms to over a second.
 PR #388 at `1960322` (bounded checkpoint rounds, 1 ms wait): **280,000 users** held for 5 minutes
 (26,699 req/s, p95 195.7 ms, p99 396.6 ms, 0 errors, 82% CPU, 28 µs per request, 794 MB peak).
 290,000 failed its 2-minute probe on latency, 300,000 had a 1.78 s p99 and 320,000 a 2.24 s p99
-at 98% CPU. Of the three versions scored, the first (no rounds, 4 ms wait) had the mildest
-320,000-user probe (p99 1.14 s); this version is that checkpoint with the 1 ms wait.
+at 98% CPU.
+
+PR #390 at `8a8c4e1` (the rounds removed, the database synced only during the write hold):
+230,000 users held for 5 minutes (22,374 req/s, p95 17.3 ms, p99 155.6 ms, 0 errors, 64% CPU,
+1,195 MB peak); 240,000 and 320,000 failed. Not merged, and withdrawn here: droplets had
+favoured it at the top of their range (commits no longer waited behind the helper's syncs), but
+on the box the longer holds cost more than that gained. This version is #388's checkpoint again,
+with the log-size limit as its one change.
+
+### On Synteq machines (the box's provider and size, not the box)
+
+Three rented machines: the server on 1 vCPU / 2 GB (Xeon Platinum 8260, Ubuntu 24.04, kernel
+6.8.0-117, ext4), and two load generators with three addresses each running a C model of
+`bench/load.js` (60 s ramp, hold, 30 s ramp down), every probe on a fresh database. The variants
+were settings of one test binary: the merged source with a per-second trace and its knobs read
+from the environment (not part of this PR). 2-minute probes of #388 as merged: 280,000 passed
+twice, 290,000 passed twice and failed once, 300,000 failed five times out of five. The box's own
+search had 280,000 pass and 290,000 fail, so the levels agree to within a step. The disk does
+not: #390's first commit passed 240,000 here and failed it on the box, so syncs are faster here.
+
+Probes that passed, out of those run, with and without the log-size limit:
+
+| users | #388 as merged | 1 MB limit, any build | of which this commit's code |
+|---|---|---|---|
+| 290,000, 2 minutes | 2 of 3 | 1 of 2 | 0 of 1 (p99 2.8 s) |
+| 300,000, 2 minutes | 0 of 5 | 3 of 6 | 2 of 2 (p99 221 and 715 ms) |
+| 310,000, 2 minutes | | 4 of 7 | 1 of 2 (p99 917 ms; p95 520 ms) |
+| 320,000 to 340,000, 2 minutes | | 0 of 4 | |
+| 290,000, 5 minutes | | 1 of 1 (p95 16 / p99 181 ms) | |
+| 300,000, 5 minutes | | 1 of 1 (p95 32 / p99 233 ms) | |
+| 310,000, 5 minutes | | 0 of 1 (p99 1.58 s) | |
+
+"Any build" adds builds that also changed something that showed no consistent effect by itself:
+fewer accepts in flight, or reading the head of the log ahead of time; the 5-minute holds were
+run only on those. The same build at the same level ranged from a p99 of 26 ms to 3.5 s (#388 at
+290,000), so these counts are small against the noise, and the box's slower disk may weigh the
+limit's extra file work differently. What I take from it: one cause of long commits is gone,
+and 300,000 went from never passing to passing about half the time.
+
+The limit does not move the ceiling. What the trace, `perf` and the stack samples showed there:
+
+- In the hold a request costs 26–28 µs of the vCPU, about three quarters of it in the kernel
+  (TCP, softirq, io_uring); this server and SQLite take about 6.5 µs, SQLite 4.1 of them.
+- The last seconds of the ramp are the hardest: requests run about 5% above the hold's rate while
+  some 5,000 connections a second are still being accepted. That is about 91% of the vCPU with
+  300,000 users and 97% with 310,000; every failing probe with the limit fell behind there.
+- A loop that has fallen behind gets slower per answer (32–35 µs): a request not answered within
+  40 ms costs a separate ACK, and receives run out of provided buffers. At 300,000 and above the
+  backlog then often lasts to the end of the probe.
+- From 320,000 the 2 GB run out: in three of the four 2-minute probes there the kernel killed
+  the server for memory (`Result=oom-kill`).
 
 ### On DigitalOcean droplets (not the benchmark box)
 
@@ -288,27 +353,6 @@ and no write hold over 129 ms; the passes over 100 ms sit in the minute where th
 and in them the loop got about half the CPU. About a fifth of the vCPU was user code (this
 server and SQLite); the kernel's TCP and io_uring work took the rest of what was used.
 
-**Without the rounds (this version)**, against #388, on two more runs of two droplets each, the
-server built with a per-second trace and the checkpoint settings read from the environment (one
-binary for every variant). One droplet of each run was overloaded by the calibration and is left
-out; on the other two, 2-minute probes, p95 / p99 in ms and the longest commit:
-
-| run, users | #388 | without rounds | 16,384-frame cycle | both |
-|---|---|---|---|---|
-| 1, 280,000 | **450 / 1,451**, 69 ms | **627 / 1,080**, 5 ms | **520 / 933**, 42 ms | |
-| 1, 300,000 | **1,797 / 2,096**, 5 ms | **608 / 888**, 5 ms | **1,206 / 1,940**, 59 ms | |
-| 2, 260,000 | 44 / 144, 6 ms | 95 / 260, 7 ms | 206 / 419, 24 ms | 188 / 610, 20 ms |
-| 2, 280,000 | **924 / 1,245**, 34 ms | 399 / 762, 14 ms | 490 / 962, 32 ms | 385 / 625, 28 ms |
-
-Bold fails. The load generator makes about 10% more requests a user than k6 does on the benchmark
-box (0.106 against 0.095 a second), so these levels are harder than their numbers; run 1 was
-also matched to the box by CPU share, which set it too hard, and nothing passed in it. One sample
-a cell on shared hosts: the direction (better at the top, a little worse below it) is what I take
-from it, not the sizes. The trace also showed where a request's time goes at these levels:
-about 7 µs in this server and SQLite, about 10 µs in the kernel on the loop's thread, and about
-16 µs in the kernel's network processing. A 65,536-frame cycle was tried too and was worse:
-commits took three times as long once the log file grew past its usual size.
-
 Correctness checks beyond `test/test.sh` (42/42):
 
 - `/feed` and 3,000 random `/posts/:id` compared byte-for-byte with the reference SQL query (via
@@ -320,7 +364,8 @@ Correctness checks beyond `test/test.sh` (42/42):
   lowered to 64 frames (500 write holds in 10 s, pipelined POSTs), after `kill -9` mid-load
   (three trials; three more on the slow-disk model with the checkpoint rounds, 31,841–42,121
   posts and as many likes each; three more with the bounded rounds, 7,584–19,733 each; three more
-  without rounds, 7,304–27,759 each), and on a
+  with the log-size limit and the full 4,096-frame cycle, 62,497–98,235 each, the log file cut
+  back to 1 MB 23 to 37 times a trial), and on a
   full disk (writes then get 500, never 201; reads and
   `/health` go on).
 - After 2.3 million requests of mixed load with the page-cache wrapper: `integrity_check` ok, and

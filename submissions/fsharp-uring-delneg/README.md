@@ -29,6 +29,10 @@
   across receives. Header search is `Span.IndexOf` (vectorized). **Responses are written in place**: the body goes
   into a pinned buffer from a pool after 128 bytes of room, the head is written in front of it once the length is
   known, and the send goes out of that buffer, so in steady state no response allocates or copies.
+- **JWT (HS256).** Every token's signature, `alg` and `exp` are checked on every request. The HMAC runs on the
+  system OpenSSL's SHA-256 (`libcrypto.so.3`, the library .NET itself uses), called through P/Invoke: the key's inner
+  and outer padded blocks are hashed once at startup, so a token costs its own blocks and one outer block, compared
+  in constant time.
 - **Group commit.** Each loop pass is one SQLite transaction (WAL, `synchronous=NORMAL`), and no response of the pass
   is handed to the kernel before its `COMMIT` returns (rule 6). If a commit fails, the pass's connections close
   without an answer, so no response claims a write that didn't land. Writes commit at most once per 10 ms (reads

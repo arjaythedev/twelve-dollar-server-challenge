@@ -171,6 +171,19 @@ let private parseId (s: ReadOnlySpan<byte>) =
         if ok && v > 0L then v else -1L
 
 [<Struct; NoEquality; NoComparison>]
+type Conn =
+    val mutable Out: Json.Out // responses built and not sent yet (head at OutStart)
+    val mutable Wire: Json.Out // the response the kernel is sending (from WireOff)
+    val mutable In: byte[] // bytes of a request split across receives
+    val mutable Gen: uint32
+    val mutable Queued: int // requests read and not answered yet
+    val mutable Held: int // requests held back by a write hold
+    val mutable InLen: int
+    val mutable OutStart: int
+    val mutable WireOff: int
+    val mutable Fl: byte
+
+[<Struct; NoEquality; NoComparison>]
 type Req =
     val mutable Cid: int
     val mutable Gen: uint32
@@ -261,16 +274,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let lowGap = margin / 2
     let total = slots * nringsWanted
     // connections, by id = ring * slots + fixed-file slot
-    let gen = Array.zeroCreate<uint32> total
-    let fl = Array.zeroCreate<byte> total
-    let queued = Array.zeroCreate<int> total
-    let held = Array.zeroCreate<int> total
-    let inb = Array.zeroCreate<byte[]> total
-    let inLen = Array.zeroCreate<int> total
-    let out = Array.zeroCreate<Json.Out> total
-    let outStart = Array.zeroCreate<int> total
-    let wire = Array.zeroCreate<Json.Out> total
-    let wireOff = Array.zeroCreate<int> total
+    // one record per connection (an array of structs: a connection's state shares a cache line or two)
+    let conns = Array.zeroCreate<Conn> total
     let pool = Stack<Json.Out>()
     let cqes = List<Cqe>(8192)
     // the batch: requests read and not answered yet, reqs[reqHead .. nreq), oldest first
@@ -328,19 +333,19 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             arena <- bigger
 
     let armRecv (cid: int) =
-        (ringOf cid).RecvMulti(fslot cid, 0us, ud UdRecv cid gen.[cid])
-        fl.[cid] <- fl.[cid] ||| RECV
+        (ringOf cid).RecvMulti(fslot cid, 0us, ud UdRecv cid conns.[cid].Gen)
+        conns.[cid].Fl <- conns.[cid].Fl ||| RECV
 
     let submitClose (cid: int) =
-        giveOut out.[cid]
-        out.[cid] <- null
-        giveOut wire.[cid]
-        wire.[cid] <- null
-        inb.[cid] <- null
-        inLen.[cid] <- 0
+        giveOut conns.[cid].Out
+        conns.[cid].Out <- null
+        giveOut conns.[cid].Wire
+        conns.[cid].Wire <- null
+        conns.[cid].In <- null
+        conns.[cid].InLen <- 0
         let r = ringOf cid
         let slot = fslot cid
-        if fl.[cid] &&& RECV <> 0uy then
+        if conns.[cid].Fl &&& RECV <> 0uy then
             // SHUTDOWN ends the multishot receive now (and sends the FIN), then the slot is closed
             let s = r.Sqe()
             wr8 s OP_SHUTDOWN
@@ -351,25 +356,25 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         let c = r.Sqe()
         wr8 c OP_CLOSE
         wr32 (c + 44n) (uint32 (slot + 1))
-        wr64 (c + 32n) (ud UdClose cid gen.[cid])
+        wr64 (c + 32n) (ud UdClose cid conns.[cid].Gen)
 
     /// stop using the connection: closes now, or after the send in flight
     let drop (cid: int) =
-        let f = fl.[cid]
+        let f = conns.[cid].Fl
         if f &&& LIVE <> 0uy then
-            fl.[cid] <- f &&& ~~~LIVE
-            if f &&& SENDING <> 0uy then fl.[cid] <- fl.[cid] ||| CLOSEAFTER else submitClose cid
+            conns.[cid].Fl <- f &&& ~~~LIVE
+            if f &&& SENDING <> 0uy then conns.[cid].Fl <- conns.[cid].Fl ||| CLOSEAFTER else submitClose cid
 
     let sendWire (cid: int) =
-        let w = wire.[cid]
-        let off = wireOff.[cid]
-        (ringOf cid).Send(fslot cid, true, Marshal.UnsafeAddrOfPinnedArrayElement(w.Wire, off), w.N - off, MSG_NOSIGNAL, ud UdSend cid gen.[cid])
+        let w = conns.[cid].Wire
+        let off = conns.[cid].WireOff
+        (ringOf cid).Send(fslot cid, true, Marshal.UnsafeAddrOfPinnedArrayElement(w.Wire, off), w.N - off, MSG_NOSIGNAL, ud UdSend cid conns.[cid].Gen)
 
     let startSend (cid: int) =
-        wire.[cid] <- out.[cid]
-        wireOff.[cid] <- outStart.[cid]
-        out.[cid] <- null
-        fl.[cid] <- fl.[cid] ||| SENDING
+        conns.[cid].Wire <- conns.[cid].Out
+        conns.[cid].WireOff <- conns.[cid].OutStart
+        conns.[cid].Out <- null
+        conns.[cid].Fl <- conns.[cid].Fl ||| SENDING
         sendWire cid
 
     // ---------- accept ----------
@@ -457,13 +462,13 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         let r = &reqs.[idx]
         nreq <- nreq + 1
         r.Cid <- cid
-        r.Gen <- gen.[cid]
+        r.Gen <- conns.[cid].Gen
         r.Close <- close
         r.Route <- RErr
         r.Err <- ENotFound
         r.Held <- false
         r.Ms <- passMs
-        queued.[cid] <- queued.[cid] + 1
+        conns.[cid].Queued <- conns.[cid].Queued + 1
         idx
 
     let fail (r: byref<Req>) (e: byte) =
@@ -652,19 +657,19 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                             else fail &r ENotFound
                             off <- off + total
                             if close then
-                                fl.[cid] <- (fl.[cid] &&& ~~~LIVE) ||| CLOSEAFTER
+                                conns.[cid].Fl <- (conns.[cid].Fl &&& ~~~LIVE) ||| CLOSEAFTER
                                 result <- off
         result
 
     let onData (cid: int) (d: ReadOnlySpan<byte>) =
-        let n = inLen.[cid]
+        let n = conns.[cid].InLen
         if n > 0 then
-            let mutable b = inb.[cid]
+            let mutable b = conns.[cid].In
             if b.Length - n < d.Length then
                 let bigger = Array.zeroCreate<byte> (max (b.Length * 2) (n + d.Length))
                 Buffer.BlockCopy(b, 0, bigger, 0, n)
                 b <- bigger
-                inb.[cid] <- b
+                conns.[cid].In <- b
             d.CopyTo(Span<byte>(b, n, d.Length))
             let all = n + d.Length
             let used = parse cid (ReadOnlySpan<byte>(b, 0, all))
@@ -672,20 +677,20 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             else
                 let left = all - used
                 if left = 0 then
-                    inb.[cid] <- null
-                    inLen.[cid] <- 0
+                    conns.[cid].In <- null
+                    conns.[cid].InLen <- 0
                 else
                     if used > 0 then Buffer.BlockCopy(b, used, b, 0, left)
-                    inLen.[cid] <- left
+                    conns.[cid].InLen <- left
         else
             let used = parse cid d
             if used < 0 then drop cid
-            elif used < d.Length && fl.[cid] &&& LIVE <> 0uy then
+            elif used < d.Length && conns.[cid].Fl &&& LIVE <> 0uy then
                 let left = d.Length - used
                 let b = Array.zeroCreate<byte> (max 2048 left)
                 d.Slice(used).CopyTo(Span<byte> b)
-                inb.[cid] <- b
-                inLen.[cid] <- left
+                conns.[cid].In <- b
+                conns.[cid].InLen <- left
 
     // ---------- answers ----------
 
@@ -749,8 +754,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     /// The body goes into a pooled buffer after room for the head, and the head is written in front of it once the
     /// length is known: one contiguous send, no copy (unless an earlier answer on the connection waits to be sent).
     let answer (r: byref<Req>) (cid: int) =
-        if r.Held then held.[cid] <- held.[cid] - 1
-        queued.[cid] <- queued.[cid] - 1
+        if r.Held then conns.[cid].Held <- conns.[cid].Held - 1
+        conns.[cid].Queued <- conns.[cid].Queued - 1
         let o = takeOut ()
         let st = body &r o
         let line = statusLine st
@@ -765,15 +770,15 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         n <- n + tail.Length
         let start = Json.Head - n
         h.Slice(0, n).CopyTo(Span<byte>(o.Wire, start, n))
-        let cur = out.[cid]
+        let cur = conns.[cid].Out
         if isNull cur then
-            out.[cid] <- o
-            outStart.[cid] <- start
+            conns.[cid].Out <- o
+            conns.[cid].OutStart <- start
         else
             Json.put cur (ReadOnlySpan(o.Wire, start, o.N - start))
             giveOut o
-        if fl.[cid] &&& DIRTY = 0uy then
-            fl.[cid] <- fl.[cid] ||| DIRTY
+        if conns.[cid].Fl &&& DIRTY = 0uy then
+            conns.[cid].Fl <- conns.[cid].Fl ||| DIRTY
             dirty.Add cid
 
     let addHeld (n: int) (r: byref<Req>) =
@@ -826,8 +831,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             else
                 let r = &reqs.[i]
                 let cid = r.Cid
-                if gen.[cid] = r.Gen then
-                    if fl.[cid] &&& (LIVE ||| CLOSEAFTER) = 0uy then queued.[cid] <- queued.[cid] - 1
+                if conns.[cid].Gen = r.Gen then
+                    if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then conns.[cid].Queued <- conns.[cid].Queued - 1
                     else
                         let isWrite = r.Route = RCreate || r.Route = RLike
                         // the first commit after a rewind still overwrites old WAL pages, each read back from disk
@@ -839,10 +844,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                             answered <- answered + 1
                             wrote <- true
                             ckRewind <- false
-                        elif hold && (r.Held || held.[cid] > 0 || isWrite) then
+                        elif hold && (r.Held || conns.[cid].Held > 0 || isWrite) then
                             if not r.Held then
                                 r.Held <- true
-                                held.[cid] <- held.[cid] + 1
+                                conns.[cid].Held <- conns.[cid].Held + 1
                             addHeld nheld &r
                             nheld <- nheld + 1
                         else
@@ -858,11 +863,11 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             while not stop2 && k > i && answered < budget do
                 let r = &reqs.[k - 1]
                 let cid = r.Cid
-                if gen.[cid] = r.Gen then
-                    if fl.[cid] &&& (LIVE ||| CLOSEAFTER) = 0uy then
-                        queued.[cid] <- queued.[cid] - 1
+                if conns.[cid].Gen = r.Gen then
+                    if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then
+                        conns.[cid].Queued <- conns.[cid].Queued - 1
                         k <- k - 1
-                    elif queued.[cid] > 1 then stop2 <- true // pipelined: its older request goes first
+                    elif conns.[cid].Queued > 1 then stop2 <- true // pipelined: its older request goes first
                     else
                         let isWrite = r.Route = RCreate || r.Route = RLike
                         if oneWrite && isWrite then
@@ -875,7 +880,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                         elif hold && (r.Held || isWrite) then
                             if not r.Held then
                                 r.Held <- true
-                                held.[cid] <- held.[cid] + 1
+                                conns.[cid].Held <- conns.[cid].Held + 1
                             addTail ntail &r
                             ntail <- ntail + 1
                         else
@@ -898,18 +903,18 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             // never acknowledge an uncommitted write: every connection of this pass closes without an answer
             for d in 0 .. dirty.Count - 1 do
                 let cid = dirty.[d]
-                giveOut out.[cid]
-                out.[cid] <- null
+                giveOut conns.[cid].Out
+                conns.[cid].Out <- null
                 drop cid
         for d in 0 .. dirty.Count - 1 do
             let cid = dirty.[d]
-            let f = fl.[cid] &&& ~~~DIRTY
-            fl.[cid] <- f
-            if not (isNull out.[cid]) && f &&& SENDING = 0uy then startSend cid
-            elif queued.[cid] = 0 && f &&& (LIVE ||| SENDING) = 0uy && f &&& CLOSEAFTER <> 0uy then
-                fl.[cid] <- f &&& ~~~CLOSEAFTER
+            let f = conns.[cid].Fl &&& ~~~DIRTY
+            conns.[cid].Fl <- f
+            if not (isNull conns.[cid].Out) && f &&& SENDING = 0uy then startSend cid
+            elif conns.[cid].Queued = 0 && f &&& (LIVE ||| SENDING) = 0uy && f &&& CLOSEAFTER <> 0uy then
+                conns.[cid].Fl <- f &&& ~~~CLOSEAFTER
                 submitClose cid
-            if queued.[cid] = 0 then held.[cid] <- 0
+            if conns.[cid].Queued = 0 then conns.[cid].Held <- 0
         dirty.Clear()
         // held writes go back in front of what wasn't looked at, in order
         if nheld > 0 then Array.Copy(hreqs, 0, reqs, i - nheld, nheld)
@@ -955,40 +960,40 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             let rs = R.[k]
             let hasBuf = flags &&& CQE_F_BUFFER <> 0u
             let bid = int (flags >>> 16)
-            if gen.[cid] <> udGen u then (if hasBuf then rs.Recycle bid)
+            if conns.[cid].Gen <> udGen u then (if hasBuf then rs.Recycle bid)
             else
-                if flags &&& CQE_F_MORE = 0u then fl.[cid] <- fl.[cid] &&& ~~~RECV
+                if flags &&& CQE_F_MORE = 0u then conns.[cid].Fl <- conns.[cid].Fl &&& ~~~RECV
                 if res > 0 then
-                    if fl.[cid] &&& LIVE <> 0uy then
+                    if conns.[cid].Fl &&& LIVE <> 0uy then
                         onData cid (ReadOnlySpan<byte>(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> (rs.Buffer bid)), res))
                     rs.Recycle bid
-                    if fl.[cid] &&& (RECV ||| LIVE) = LIVE then armRecv cid
+                    if conns.[cid].Fl &&& (RECV ||| LIVE) = LIVE then armRecv cid
                 else
                     if hasBuf then rs.Recycle bid
                     if res = -ENOBUFS then
                         nobufs <- nobufs + 1L
-                        if fl.[cid] &&& (LIVE ||| REARM) = LIVE then
-                            fl.[cid] <- fl.[cid] ||| REARM
+                        if conns.[cid].Fl &&& (LIVE ||| REARM) = LIVE then
+                            conns.[cid].Fl <- conns.[cid].Fl ||| REARM
                             rs.Rq.[(rs.RqHead + rs.RqLen) % slots] <- cid
                             rs.RqLen <- rs.RqLen + 1
                             nrearm <- nrearm + 1
-                    elif fl.[cid] &&& LIVE <> 0uy then drop cid
+                    elif conns.[cid].Fl &&& LIVE <> 0uy then drop cid
         | 3UL -> // send
-            if gen.[cid] = udGen u then
-                let w = wire.[cid]
-                if res > 0 && wireOff.[cid] + res < w.N then
-                    wireOff.[cid] <- wireOff.[cid] + res
+            if conns.[cid].Gen = udGen u then
+                let w = conns.[cid].Wire
+                if res > 0 && conns.[cid].WireOff + res < w.N then
+                    conns.[cid].WireOff <- conns.[cid].WireOff + res
                     sendWire cid
                 else
-                    fl.[cid] <- fl.[cid] &&& ~~~SENDING
+                    conns.[cid].Fl <- conns.[cid].Fl &&& ~~~SENDING
                     giveOut w
-                    wire.[cid] <- null
-                    if res <= 0 then fl.[cid] <- (fl.[cid] &&& ~~~LIVE) ||| CLOSEAFTER
-                    if fl.[cid] &&& CLOSEAFTER <> 0uy then
-                        if queued.[cid] = 0 then // else the pass closes it after its last answer
-                            fl.[cid] <- fl.[cid] &&& ~~~(CLOSEAFTER ||| LIVE)
+                    conns.[cid].Wire <- null
+                    if res <= 0 then conns.[cid].Fl <- (conns.[cid].Fl &&& ~~~LIVE) ||| CLOSEAFTER
+                    if conns.[cid].Fl &&& CLOSEAFTER <> 0uy then
+                        if conns.[cid].Queued = 0 then // else the pass closes it after its last answer
+                            conns.[cid].Fl <- conns.[cid].Fl &&& ~~~(CLOSEAFTER ||| LIVE)
                             submitClose cid
-                    elif not (isNull out.[cid]) then startSend cid // what waits in out is committed
+                    elif not (isNull conns.[cid].Out) then startSend cid // what waits in out is committed
         | 1UL -> // accept
             let rs = R.[k]
             if flags &&& CQE_F_MORE = 0u then
@@ -1007,12 +1012,12 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 lastAccErr <- res
             else
                 let c = k * slots + res
-                gen.[c] <- (gen.[c] + 1u) &&& 0xFFFFFFu
-                fl.[c] <- LIVE
-                queued.[c] <- 0
-                held.[c] <- 0
-                inb.[c] <- null
-                inLen.[c] <- 0
+                conns.[c].Gen <- (conns.[c].Gen + 1u) &&& 0xFFFFFFu
+                conns.[c].Fl <- LIVE
+                conns.[c].Queued <- 0
+                conns.[c].Held <- 0
+                conns.[c].In <- null
+                conns.[c].InLen <- 0
                 rs.Live <- rs.Live + 1
                 armRecv c
                 if rs.Live >= highWater && not rs.High then
@@ -1120,8 +1125,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                     for _ in 1 .. n do
                         let cid = rs.Rq.[rs.RqHead]
                         rs.RqHead <- (rs.RqHead + 1) % slots
-                        fl.[cid] <- fl.[cid] &&& ~~~REARM
-                        if fl.[cid] &&& (LIVE ||| RECV) = LIVE then armRecv cid
+                        conns.[cid].Fl <- conns.[cid].Fl &&& ~~~REARM
+                        if conns.[cid].Fl &&& (LIVE ||| RECV) = LIVE then armRecv cid
                     rs.RqLen <- rs.RqLen - n
                     nrearm <- nrearm - n
             if not (acceptArmedAnywhere ()) then

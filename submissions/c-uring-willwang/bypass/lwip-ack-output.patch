@@ -1,0 +1,16 @@
+--- a/src/core/tcp.c
++++ b/src/core/tcp.c
+@@ -1497,8 +1497,11 @@
+       if (pcb->flags & TF_ACK_DELAY) {
+         LWIP_DEBUGF(TCP_DEBUG, ("tcp_fasttmr: delayed ACK\n"));
+         tcp_ack_now(pcb);
+-        tcp_output(pcb);
+-        tcp_clear_flags(pcb, TF_ACK_DELAY | TF_ACK_NOW);
++        /* A full link may refuse this empty ACK. Keep its intent for the
++         * pending short deadline or the next native fast timer tick. */
++        if (tcp_output(pcb) == ERR_OK) {
++          tcp_clear_flags(pcb, TF_ACK_DELAY | TF_ACK_NOW);
++        }
+       }
+       /* send pending FIN */
+       if (pcb->flags & TF_CLOSEPEND) {

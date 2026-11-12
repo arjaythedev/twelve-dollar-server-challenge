@@ -1,0 +1,478 @@
+--- a/src/include/lwip/opt.h
++++ b/src/include/lwip/opt.h
+@@ -1290,6 +1290,13 @@
+ #error "LWIP_TCP_FAST_WORK requires LWIP_TCP_TUPLE_INDEX_BITS"
+ #endif
+ 
++#ifndef LWIP_TCP_SLOW_WORK
++#define LWIP_TCP_SLOW_WORK                      0
++#endif
++#if LWIP_TCP_SLOW_WORK && (!LWIP_TCP_FAST_WORK || !LWIP_CALLBACK_API && defined(LWIP_CALLBACK_API))
++#error "The slow calendar is for the indexed fast-work raw callback port."
++#endif
++
+ #if !defined LWIP_TCP || defined __DOXYGEN__
+ #define LWIP_TCP                        1
+ #endif
+--- a/src/include/lwip/tcp.h
++++ b/src/include/lwip/tcp.h
+@@ -250,6 +250,12 @@
+   struct tcp_pcb **tuple_hash_prev;
+ #if LWIP_TCP_FAST_WORK
+   u64_t fast_order;
++#if LWIP_TCP_SLOW_WORK
++  struct tcp_pcb *slow_next;
++  struct tcp_pcb **slow_prev;
++  u32_t slow_stamp;
++  u8_t slow_slot, slow_enrolled, slow_parked;
++#endif
+ #endif
+ #endif
+ 
+@@ -430,6 +436,10 @@
+ 
+ #if LWIP_TCP_FAST_WORK
+ void tcp_fast_work_mark(struct tcp_pcb *pcb);
++#if LWIP_TCP_SLOW_WORK
++void tcp_slow_work_wake(struct tcp_pcb *pcb);
++void tcp_slow_work_enroll(struct tcp_pcb *pcb);
++#endif
+ #define tcp_set_flags(pcb, set_flags) do { \
+   const tcpflags_t tcp_set_bits_ = (tcpflags_t)(set_flags); \
+   (pcb)->flags = (tcpflags_t)((pcb)->flags | tcp_set_bits_); \
+--- a/src/core/tcp_tuple_index.inc
++++ b/src/core/tcp_tuple_index.inc
+@@ -16,6 +16,11 @@
+ static uint64_t tcp_index_key[2];
+ static u8_t tcp_index_ready;
+ static u32_t tcp_index_unresolved[2];
++#if LWIP_TCP_SLOW_WORK
++static void tcp_slow_before_callback(void);
++static void tcp_slow_register(struct tcp_pcb *pcb);
++static void tcp_slow_remove(struct tcp_pcb *pcb);
++#endif
+ 
+ #if LWIP_TCP_FAST_WORK
+ /* The active list is ordered by registration / most recent promotion. A
+@@ -32,6 +37,9 @@
+ tcp_fast_work_mark(struct tcp_pcb *pcb)
+ {
+   const u64_t rank = pcb->fast_order;
++#if LWIP_TCP_SLOW_WORK
++  tcp_slow_work_wake(pcb);
++#endif
+   if (rank != 0 && rank < tcp_fast_due) tcp_fast_due = rank;
+   if (tcp_fast_running && rank != 0 && rank < tcp_fast_again) tcp_fast_again = rank;
+ }
+@@ -137,6 +145,9 @@
+   if (list != &tcp_active_pcbs && list != &tcp_tw_pcbs) return;
+ #if LWIP_TCP_FAST_WORK
+   if (list == &tcp_active_pcbs) {
++#if LWIP_TCP_SLOW_WORK
++    tcp_slow_register(pcb);
++#endif
+     tcp_fast_promote(pcb);
+     if (pcb->refused_data != NULL || (pcb->flags & (TF_ACK_DELAY | TF_CLOSEPEND)))
+       tcp_fast_work_mark(pcb);
+@@ -171,6 +182,9 @@
+     return 0;
+   }
+ #if LWIP_TCP_FAST_WORK
++#if LWIP_TCP_SLOW_WORK
++  if (!tw) tcp_slow_remove(pcb);
++#endif
+   if (!tw) pcb->fast_order = 0;
+ #endif
+   if (pcb->next != NULL) pcb->next->tuple_list_prev = pcb->tuple_list_prev;
+@@ -195,6 +209,10 @@
+ tcp_index_promote(struct tcp_pcb *pcb, int move_bucket)
+ {
+   struct tcp_pcb *prev = pcb->tuple_list_prev;
++#if LWIP_TCP_SLOW_WORK
++  tcp_slow_before_callback();
++  tcp_slow_work_wake(pcb);
++#endif
+   if (prev == NULL) {
+     TCP_STATS_INC(tcp.cachehit);
+     return;
+--- a/src/core/tcp.c
++++ b/src/core/tcp.c
+@@ -190,6 +190,9 @@
+ /** Timer counter to handle calling slow-timer from tcp_tmr() */
+ static u8_t tcp_timer;
+ static u8_t tcp_timer_ctr;
++#if LWIP_TCP_SLOW_WORK
++#include "tcp_slow_work.inc"
++#endif
+ static u16_t tcp_new_port(void);
+ 
+ static err_t tcp_close_shutdown_fin(struct tcp_pcb *pcb);
+@@ -350,6 +353,9 @@
+ static err_t
+ tcp_close_shutdown(struct tcp_pcb *pcb, u8_t rst_on_unacked_data)
+ {
++#if LWIP_TCP_SLOW_WORK
++  if (pcb->state != LISTEN) tcp_slow_work_wake(pcb);
++#endif
+   LWIP_ASSERT("tcp_close_shutdown: invalid pcb", pcb != NULL);
+ 
+   if (rst_on_unacked_data && ((pcb->state == ESTABLISHED) || (pcb->state == CLOSE_WAIT))) {
+@@ -980,6 +986,9 @@
+   LWIP_ASSERT_CORE_LOCKED();
+ 
+   LWIP_ERROR("tcp_recved: invalid pcb", pcb != NULL, return);
++#if LWIP_TCP_SLOW_WORK
++  if (pcb->state != LISTEN) tcp_slow_work_wake(pcb);
++#endif
+ 
+   /* pcb->state LISTEN not allowed here */
+   LWIP_ASSERT("don't call tcp_recved for listen-pcbs",
+@@ -1208,7 +1217,9 @@
+ 
+   ++tcp_ticks;
+   ++tcp_timer_ctr;
+-#if LWIP_TCP_FAST_WORK
++#if LWIP_TCP_SLOW_WORK
++  tcp_slow_begin();
++#elif LWIP_TCP_FAST_WORK
+   tcp_last_full_timer = tcp_timer_ctr;
+ #endif
+ 
+@@ -1216,6 +1227,9 @@
+   /* Steps through all of the active PCBs. */
+   prev = NULL;
+   pcb = tcp_active_pcbs;
++#if LWIP_TCP_SLOW_WORK
++  pcb = tcp_slow_next(pcb);
++#endif
+   if (pcb == NULL) {
+     LWIP_DEBUGF(TCP_DEBUG, ("tcp_slowtmr: no active pcbs\n"));
+   }
+@@ -1224,13 +1238,27 @@
+     LWIP_ASSERT("tcp_slowtmr: active pcb->state != CLOSED", pcb->state != CLOSED);
+     LWIP_ASSERT("tcp_slowtmr: active pcb->state != LISTEN", pcb->state != LISTEN);
+     LWIP_ASSERT("tcp_slowtmr: active pcb->state != TIME-WAIT", pcb->state != TIME_WAIT);
++#if LWIP_TCP_SLOW_WORK
++    prev = pcb->tuple_list_prev;
++#endif
+     if (pcb->last_timer == tcp_timer_ctr) {
++#if LWIP_TCP_SLOW_WORK
++      tcp_slow_seen(pcb);
++      pcb = tcp_slow_next(pcb->next);
++      continue;
++#endif
+       /* skip this pcb, we have already processed it */
+       prev = pcb;
+       pcb = pcb->next;
+       continue;
+     }
+     pcb->last_timer = tcp_timer_ctr;
++#if LWIP_TCP_SLOW_WORK
++    if (tcp_slow_prepare(pcb)) {
++      pcb = tcp_slow_next(pcb->next);
++      continue;
++    }
++#endif
+ 
+     pcb_remove = 0;
+     pcb_reset = 0;
+@@ -1419,6 +1447,13 @@
+       tcp_free(pcb2);
+ 
+       tcp_active_pcbs_changed = 0;
++#if LWIP_TCP_SLOW_WORK
++#if LWIP_CALLBACK_API
++      if (err_fn) tcp_slow_before_callback();
++#else
++      tcp_slow_before_callback();
++#endif
++#endif
+       TCP_EVENT_ERR(last_state, err_fn, err_arg, ERR_ABRT);
+       if (tcp_active_pcbs_changed) {
+         goto tcp_slowtmr_start;
+@@ -1434,6 +1469,13 @@
+         prev->polltmr = 0;
+         LWIP_DEBUGF(TCP_DEBUG, ("tcp_slowtmr: polling application\n"));
+         tcp_active_pcbs_changed = 0;
++#if LWIP_TCP_SLOW_WORK
++#if LWIP_CALLBACK_API
++        if (prev->poll) tcp_slow_before_callback();
++#else
++        tcp_slow_before_callback();
++#endif
++#endif
+         TCP_EVENT_POLL(prev, err);
+         if (tcp_active_pcbs_changed) {
+           goto tcp_slowtmr_start;
+@@ -1444,8 +1486,15 @@
+         }
+       }
+     }
++#if LWIP_TCP_SLOW_WORK
++    pcb = tcp_slow_next(pcb);
++#endif
+   }
+ 
++#if LWIP_TCP_SLOW_WORK
++  tcp_slow_running = 0;
++  tcp_slow_current = NULL;
++#endif
+ 
+   /* Steps through all of the TIME-WAIT PCBs. */
+   prev = NULL;
+@@ -2160,6 +2209,9 @@
+ 
+   LWIP_ERROR("tcp_poll: invalid pcb", pcb != NULL, return);
+   LWIP_ASSERT("invalid socket state for poll", pcb->state != LISTEN);
++#if LWIP_TCP_SLOW_WORK
++  tcp_slow_work_wake(pcb);
++#endif
+ 
+ #if LWIP_CALLBACK_API
+   pcb->poll = poll;
+--- a/src/core/tcp_out.c
++++ b/src/core/tcp_out.c
+@@ -415,6 +415,9 @@
+   u16_t mss_local;
+ 
+   LWIP_ERROR("tcp_write: invalid pcb", pcb != NULL, return ERR_ARG);
++#if LWIP_TCP_SLOW_WORK
++  if (pcb->state != LISTEN) tcp_slow_work_wake(pcb);
++#endif
+ 
+   /* don't allocate segments bigger than half the maximum window we ever received */
+   mss_local = LWIP_MIN(pcb->mss, TCPWND_MIN16(pcb->snd_wnd_max / 2));
+@@ -1255,6 +1258,9 @@
+   LWIP_ASSERT("don't call tcp_output for listen-pcbs",
+               pcb->state != LISTEN);
+ 
++#if LWIP_TCP_SLOW_WORK
++  tcp_slow_work_wake(pcb);
++#endif
+   /* First, check if we are invoked by the TCP input processing
+      code. If so, we do not output anything. Instead, we rely on the
+      input processing code to call us when input processing is done
+--- /dev/null
++++ b/src/core/tcp_slow_work.inc
+@@ -0,0 +1,221 @@
++/* Single-owner NO_SYS scheduler for the pinned IPv4 raw API port. */
++#include <stdlib.h>
++
++#define TCP_SLOW_SLOTS 256U
++#define TCP_SLOW_MAX_DUE 32768U
++#define TCP_SLOW_MAX_SLEEP 127U
++
++struct tcp_slow_due_entry {
++  u64_t order;
++  struct tcp_pcb *pcb;
++};
++static struct tcp_pcb *tcp_slow_slots[TCP_SLOW_SLOTS];
++static u32_t tcp_slow_counts[TCP_SLOW_SLOTS];
++static struct tcp_slow_due_entry tcp_slow_due[TCP_SLOW_MAX_DUE];
++static u32_t tcp_slow_active_count, tcp_slow_count, tcp_slow_pos;
++static u8_t tcp_slow_running, tcp_slow_sparse, tcp_slow_synced;
++static struct tcp_pcb *tcp_slow_current;
++static u64_t tcp_slow_order;
++
++static void
++tcp_slow_unlink(struct tcp_pcb *pcb)
++{
++  if (pcb->slow_prev) {
++    *pcb->slow_prev = pcb->slow_next;
++    if (pcb->slow_next) pcb->slow_next->slow_prev = pcb->slow_prev;
++    --tcp_slow_counts[pcb->slow_slot];
++    pcb->slow_prev = NULL;
++    pcb->slow_next = NULL;
++  }
++}
++
++static void
++tcp_slow_schedule(struct tcp_pcb *pcb, unsigned delay)
++{
++  const u8_t slot = (u8_t)(tcp_ticks + delay);
++  if (pcb->slow_prev && pcb->slow_slot == slot) return;
++  tcp_slow_unlink(pcb);
++  pcb->slow_next = tcp_slow_slots[slot];
++  if (pcb->slow_next) pcb->slow_next->slow_prev = &pcb->slow_next;
++  tcp_slow_slots[slot] = pcb;
++  pcb->slow_prev = &tcp_slow_slots[slot];
++  pcb->slow_slot = slot;
++  ++tcp_slow_counts[slot];
++}
++
++/* Only a fully inert PCB is parked, and never past its next poll or probe. */
++static void
++tcp_slow_materialize(struct tcp_pcb *pcb, u32_t through)
++{
++  if (pcb->slow_parked) {
++    pcb->polltmr = (u8_t)(pcb->polltmr + (u8_t)(through - pcb->slow_stamp));
++    pcb->slow_stamp = through;
++  }
++}
++
++/* Before the first external callback in a tick, expose exactly the partial
++ * upstream scan to the application. In particular a callback can inspect or
++ * remove an arbitrary peer, insert a new one, or make a new peer runnable. */
++static void
++tcp_slow_before_callback(void)
++{
++  struct tcp_pcb *pcb;
++  if (!tcp_slow_running || tcp_slow_synced) return;
++  for (pcb = tcp_active_pcbs; pcb != NULL; pcb = pcb->next) {
++    int passed = pcb->fast_order > tcp_slow_order || pcb->last_timer == tcp_timer_ctr;
++    if (pcb->slow_parked) tcp_slow_materialize(pcb, passed ? tcp_ticks : tcp_ticks - 1);
++    if (passed) pcb->last_timer = tcp_timer_ctr;
++  }
++  tcp_slow_sparse = 0;
++  tcp_slow_synced = 1;
++}
++
++static void
++tcp_slow_register(struct tcp_pcb *pcb)
++{
++  if (tcp_slow_running) tcp_slow_before_callback();
++  pcb->slow_stamp = tcp_ticks;
++  pcb->slow_parked = 0;
++  ++tcp_slow_active_count;
++  tcp_slow_schedule(pcb, 1);
++}
++
++static void
++tcp_slow_remove(struct tcp_pcb *pcb)
++{
++  if (tcp_slow_running && pcb != tcp_slow_current) tcp_slow_before_callback();
++  tcp_slow_unlink(pcb);
++  pcb->slow_parked = 0;
++  --tcp_slow_active_count;
++}
++
++void
++tcp_slow_work_wake(struct tcp_pcb *pcb)
++{
++  u32_t through;
++  if (!pcb->slow_parked) return;
++  if (tcp_slow_running && pcb != tcp_slow_current) tcp_slow_before_callback();
++  through = tcp_ticks;
++  if (tcp_slow_running && pcb->last_timer != tcp_timer_ctr) --through;
++  tcp_slow_materialize(pcb, through);
++  pcb->slow_parked = 0;
++  tcp_slow_schedule(pcb, 1);
++}
++
++static unsigned
++tcp_slow_delay(const struct tcp_pcb *pcb, u32_t from)
++{
++  unsigned delay;
++  u32_t age, limit, probe, death;
++  if (!pcb->slow_enrolled || pcb->state != ESTABLISHED || pcb->rtime >= 0 || pcb->rto <= 0 ||
++      pcb->nrtx || pcb->persist_backoff || pcb->unsent || pcb->unacked || pcb->refused_data ||
++      (pcb->flags & (TF_CLOSEPEND | TF_RXCLOSED | TF_FIN | TF_RTO | TF_NAGLEMEMERR)) ||
++      pcb->pollinterval <= 2 || pcb->polltmr >= pcb->pollinterval) return 1;
++#if TCP_QUEUE_OOSEQ
++  if (pcb->ooseq) return 1;
++#endif
++#if LWIP_CALLBACK_API
++  if (pcb->poll) return 1;
++#endif
++  delay = (unsigned)pcb->pollinterval - pcb->polltmr;
++  if (ip_get_option(pcb, SOF_KEEPALIVE)) {
++    /* Mirror the upstream unsigned arithmetic, including > and wraparound. */
++    age = (u32_t)(from - pcb->tmr);
++    probe = (pcb->keep_idle + pcb->keep_cnt_sent * TCP_KEEP_INTVL(pcb)) / TCP_SLOW_INTERVAL;
++    death = (pcb->keep_idle + TCP_KEEP_DUR(pcb)) / TCP_SLOW_INTERVAL;
++    limit = LWIP_MIN(probe, death);
++    if (age >= limit) return 1;
++    delay = (unsigned)LWIP_MIN((u32_t)delay, limit - age + 1);
++  }
++  return LWIP_MIN(delay, TCP_SLOW_MAX_SLEEP);
++}
++
++void
++tcp_slow_work_enroll(struct tcp_pcb *pcb)
++{
++  unsigned delay;
++  if (tcp_slow_running) tcp_slow_before_callback();
++  tcp_slow_work_wake(pcb);
++  pcb->slow_enrolled = 1;
++  if (tcp_slow_running || !pcb->slow_prev) return;
++  delay = tcp_slow_delay(pcb, tcp_ticks);
++  if (delay > 1) {
++    pcb->slow_parked = 1;
++    pcb->slow_stamp = tcp_ticks;
++    tcp_slow_schedule(pcb, delay);
++  }
++}
++
++static int
++tcp_slow_compare(const void *a, const void *b)
++{
++  const struct tcp_slow_due_entry *x = (const struct tcp_slow_due_entry *)a;
++  const struct tcp_slow_due_entry *y = (const struct tcp_slow_due_entry *)b;
++  return (x->order < y->order) - (x->order > y->order);
++}
++
++static void
++tcp_slow_begin(void)
++{
++  struct tcp_pcb *pcb;
++  u8_t slot = (u8_t)tcp_ticks;
++  tcp_slow_count = tcp_slow_counts[slot];
++  tcp_slow_pos = 0;
++  tcp_slow_running = 1;
++  tcp_slow_synced = 0;
++  tcp_slow_current = NULL;
++  tcp_slow_order = UINT64_MAX;
++  tcp_slow_sparse = tcp_slow_count <= TCP_SLOW_MAX_DUE &&
++                    tcp_slow_count <= tcp_slow_active_count / 2 &&
++                    (u8_t)(tcp_timer_ctr - tcp_last_full_timer) < 128;
++  if (tcp_slow_sparse) {
++    u32_t i = 0;
++    for (pcb = tcp_slow_slots[slot]; pcb != NULL; pcb = pcb->slow_next) {
++      tcp_slow_due[i].order = pcb->fast_order;
++      tcp_slow_due[i++].pcb = pcb;
++    }
++    if (i > 1) qsort(tcp_slow_due, i, sizeof(tcp_slow_due[0]), tcp_slow_compare);
++  } else {
++    tcp_last_full_timer = tcp_timer_ctr;
++  }
++}
++
++static struct tcp_pcb *
++tcp_slow_next(struct tcp_pcb *ordinary_next)
++{
++  struct tcp_pcb *pcb = ordinary_next;
++  if (tcp_slow_sparse)
++    pcb = tcp_slow_pos < tcp_slow_count ? tcp_slow_due[tcp_slow_pos++].pcb : NULL;
++  tcp_slow_current = pcb;
++  if (pcb) tcp_slow_order = pcb->fast_order;
++  return pcb;
++}
++
++/* Return true only when the sole upstream effect this tick is ++polltmr. */
++static int
++tcp_slow_prepare(struct tcp_pcb *pcb)
++{
++  const u32_t previous = tcp_ticks - 1;
++  unsigned delay;
++  tcp_slow_materialize(pcb, previous);
++  pcb->slow_parked = 0;
++  pcb->slow_stamp = tcp_ticks;
++  delay = tcp_slow_delay(pcb, previous);
++  if (delay > 1) {
++    ++pcb->polltmr;
++    pcb->slow_parked = 1;
++    tcp_slow_schedule(pcb, delay - 1);
++    return 1;
++  }
++  tcp_slow_schedule(pcb, 1);
++  return 0;
++}
++
++static void
++tcp_slow_seen(struct tcp_pcb *pcb)
++{
++  if (pcb->slow_prev && pcb->slow_slot == (u8_t)tcp_ticks) {
++    /* A callback can register a just-allocated PCB in the middle of a tick. */
++    tcp_slow_schedule(pcb, 1);
++  }
++}

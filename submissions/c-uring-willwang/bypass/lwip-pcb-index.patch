@@ -1,0 +1,344 @@
+--- a/src/include/lwip/opt.h
++++ b/src/include/lwip/opt.h
+@@ -1277,6 +1277,11 @@
+ /**
+  * LWIP_TCP==1: Turn on TCP.
+  */
++/* Optional IPv4 NO_SYS TCP PCB lookup table. Zero keeps upstream traversal. */
++#ifndef LWIP_TCP_TUPLE_INDEX_BITS
++#define LWIP_TCP_TUPLE_INDEX_BITS               0
++#endif
++
+ #if !defined LWIP_TCP || defined __DOXYGEN__
+ #define LWIP_TCP                        1
+ #endif
+--- a/src/include/lwip/tcp.h
++++ b/src/include/lwip/tcp.h
+@@ -244,6 +244,11 @@
+   IP_PCB;
+ /** protocol specific PCB members */
+   TCP_PCB_COMMON(struct tcp_pcb);
++#if LWIP_TCP_TUPLE_INDEX_BITS
++  struct tcp_pcb *tuple_next;
++  struct tcp_pcb *tuple_list_prev;
++  struct tcp_pcb **tuple_hash_prev;
++#endif
+ 
+   /* ports are in host byte order */
+   u16_t remote_port;
+--- a/src/include/lwip/priv/tcp_priv.h
++++ b/src/include/lwip/priv/tcp_priv.h
+@@ -352,7 +352,7 @@
+ #define TCP_DEBUG_PCB_LISTS 0
+ #endif
+ #if TCP_DEBUG_PCB_LISTS
+-#define TCP_REG(pcbs, npcb) do {\
++#define TCP_LIST_REG(pcbs, npcb) do {\
+                             struct tcp_pcb *tcp_tmp_pcb; \
+                             LWIP_DEBUGF(TCP_DEBUG, ("TCP_REG %p local port %"U16_F"\n", (void *)(npcb), (npcb)->local_port)); \
+                             for (tcp_tmp_pcb = *(pcbs); \
+@@ -367,7 +367,7 @@
+                             LWIP_ASSERT("TCP_REG: tcp_pcbs sane", tcp_pcbs_sane()); \
+               tcp_timer_needed(); \
+                             } while(0)
+-#define TCP_RMV(pcbs, npcb) do { \
++#define TCP_LIST_RMV(pcbs, npcb) do { \
+                             struct tcp_pcb *tcp_tmp_pcb; \
+                             LWIP_ASSERT("TCP_RMV: pcbs != NULL", *(pcbs) != NULL); \
+                             LWIP_DEBUGF(TCP_DEBUG, ("TCP_RMV: removing %p from %p\n", (void *)(npcb), (void *)(*(pcbs)))); \
+@@ -386,14 +386,14 @@
+ 
+ #else /* LWIP_DEBUG */
+ 
+-#define TCP_REG(pcbs, npcb)                        \
++#define TCP_LIST_REG(pcbs, npcb)                        \
+   do {                                             \
+     (npcb)->next = *pcbs;                          \
+     *(pcbs) = (npcb);                              \
+     tcp_timer_needed();                            \
+   } while (0)
+ 
+-#define TCP_RMV(pcbs, npcb)                        \
++#define TCP_LIST_RMV(pcbs, npcb)                        \
+   do {                                             \
+     if(*(pcbs) == (npcb)) {                        \
+       (*(pcbs)) = (*pcbs)->next;                   \
+@@ -414,6 +414,19 @@
+ 
+ #endif /* LWIP_DEBUG */
+ 
++#if LWIP_TCP_TUPLE_INDEX_BITS
++struct tcp_pcb *tcp_index_input_head(int timewait, const ip_addr_t *local, const ip_addr_t *remote,
++                                    u16_t lport, u16_t rport, int *full);
++void tcp_index_register(struct tcp_pcb **list, struct tcp_pcb *pcb);
++int tcp_index_remove(struct tcp_pcb **list, struct tcp_pcb *pcb);
++void tcp_index_promote(struct tcp_pcb *pcb, int move_bucket);
++#define TCP_REG(pcbs, pcb) do { tcp_index_register((pcbs), (pcb)); TCP_LIST_REG((pcbs), (pcb)); } while (0)
++#define TCP_RMV(pcbs, pcb) do { if (!tcp_index_remove((pcbs), (pcb))) TCP_LIST_RMV((pcbs), (pcb)); } while (0)
++#else
++#define TCP_REG TCP_LIST_REG
++#define TCP_RMV TCP_LIST_RMV
++#endif
++
+ #define TCP_REG_ACTIVE(npcb)                       \
+   do {                                             \
+     TCP_REG(&tcp_active_pcbs, npcb);               \
+--- a/src/core/tcp.c
++++ b/src/core/tcp.c
+@@ -183,6 +183,9 @@
+ };
+ 
+ u8_t tcp_active_pcbs_changed;
++#if LWIP_TCP_TUPLE_INDEX_BITS
++#include "tcp_tuple_index.inc"
++#endif
+ 
+ /** Timer counter to handle calling slow-timer from tcp_tmr() */
+ static u8_t tcp_timer;
+@@ -1389,6 +1392,9 @@
+       enum tcp_state last_state;
+       tcp_pcb_purge(pcb);
+       /* Remove PCB from tcp_active_pcbs list. */
++#if LWIP_TCP_TUPLE_INDEX_BITS
++      tcp_index_forget(&tcp_active_pcbs, pcb);
++#endif
+       if (prev != NULL) {
+         LWIP_ASSERT("tcp_slowtmr: middle tcp != tcp_active_pcbs", pcb != tcp_active_pcbs);
+         prev->next = pcb->next;
+@@ -1455,6 +1461,9 @@
+       struct tcp_pcb *pcb2;
+       tcp_pcb_purge(pcb);
+       /* Remove PCB from tcp_tw_pcbs list. */
++#if LWIP_TCP_TUPLE_INDEX_BITS
++      tcp_index_forget(&tcp_tw_pcbs, pcb);
++#endif
+       if (prev != NULL) {
+         LWIP_ASSERT("tcp_slowtmr: middle tcp != tcp_tw_pcbs", pcb != tcp_tw_pcbs);
+         prev->next = pcb->next;
+--- a/src/core/tcp_in.c
++++ b/src/core/tcp_in.c
+@@ -118,6 +118,9 @@
+ tcp_input(struct pbuf *p, struct netif *inp)
+ {
+   struct tcp_pcb *pcb, *prev;
++#if LWIP_TCP_TUPLE_INDEX_BITS
++  int tuple_full = 0;
++#endif
+   struct tcp_pcb_listen *lpcb;
+ #if SO_REUSE
+   struct tcp_pcb *lpcb_prev = NULL;
+@@ -247,7 +250,12 @@
+      for an active connection. */
+   prev = NULL;
+ 
++#if LWIP_TCP_TUPLE_INDEX_BITS
++  for (pcb = tcp_index_input_head(0, ip_current_dest_addr(), ip_current_src_addr(), tcphdr->dest, tcphdr->src, &tuple_full);
++       pcb != NULL; pcb = tuple_full ? pcb->next : pcb->tuple_next) {
++#else
+   for (pcb = tcp_active_pcbs; pcb != NULL; pcb = pcb->next) {
++#endif
+     LWIP_ASSERT("tcp_input: active pcb->state != CLOSED", pcb->state != CLOSED);
+     LWIP_ASSERT("tcp_input: active pcb->state != TIME-WAIT", pcb->state != TIME_WAIT);
+     LWIP_ASSERT("tcp_input: active pcb->state != LISTEN", pcb->state != LISTEN);
+@@ -267,6 +275,9 @@
+          lookups will be faster (we exploit locality in TCP segment
+          arrivals). */
+       LWIP_ASSERT("tcp_input: pcb->next != pcb (before cache)", pcb->next != pcb);
++#if LWIP_TCP_TUPLE_INDEX_BITS
++      tcp_index_promote(pcb, tuple_full || prev != NULL);
++#else
+       if (prev != NULL) {
+         prev->next = pcb->next;
+         pcb->next = tcp_active_pcbs;
+@@ -274,6 +285,7 @@
+       } else {
+         TCP_STATS_INC(tcp.cachehit);
+       }
++#endif
+       LWIP_ASSERT("tcp_input: pcb->next != pcb (after cache)", pcb->next != pcb);
+       break;
+     }
+@@ -283,7 +295,12 @@
+   if (pcb == NULL) {
+     /* If it did not go to an active connection, we check the connections
+        in the TIME-WAIT state. */
++#if LWIP_TCP_TUPLE_INDEX_BITS
++    for (pcb = tcp_index_input_head(1, ip_current_dest_addr(), ip_current_src_addr(), tcphdr->dest, tcphdr->src, &tuple_full);
++         pcb != NULL; pcb = tuple_full ? pcb->next : pcb->tuple_next) {
++#else
+     for (pcb = tcp_tw_pcbs; pcb != NULL; pcb = pcb->next) {
++#endif
+       LWIP_ASSERT("tcp_input: TIME-WAIT pcb->state == TIME-WAIT", pcb->state == TIME_WAIT);
+ 
+       /* check if PCB is bound to specific netif */
+--- /dev/null
++++ b/src/core/tcp_tuple_index.inc
+@@ -0,0 +1,168 @@
++/* Optional IPv4 NO_SYS packet-demultiplexing index for lwIP 2.2.1.
++ * Intrusive storage preserves the original active and TIME_WAIT lists,
++ * their ordering, and the complete upstream comparisons and state machine.
++ * All methods run in lwIP's single core context. */
++#include <stdint.h>
++
++#if !NO_SYS || !LWIP_IPV4 || LWIP_IPV6 || LWIP_TCP_TUPLE_INDEX_BITS < 1 || LWIP_TCP_TUPLE_INDEX_BITS > 20
++#error "select 1..20 index bits only for the single-core IPv4 NO_SYS configuration"
++#endif
++#ifndef LWIP_RAND
++#error "provide port entropy through LWIP_RAND() for the tuple hash"
++#endif
++
++#define TCP_INDEX_COUNT (1U << LWIP_TCP_TUPLE_INDEX_BITS)
++static struct tcp_pcb *tcp_index_buckets[2][TCP_INDEX_COUNT];
++static uint64_t tcp_index_key[2];
++static u8_t tcp_index_ready;
++static u32_t tcp_index_unresolved[2];
++
++static uint64_t
++tcp_index_rotl(uint64_t value, unsigned bits)
++{
++  return (value << bits) | (value >> (64 - bits));
++}
++
++/* SipHash-2-4 over the 12-byte TCP 4-tuple. Keys live for one stack lifetime. */
++static void
++tcp_index_round(uint64_t *a, uint64_t *b, uint64_t *c, uint64_t *d)
++{
++  *a += *b; *b = tcp_index_rotl(*b, 13) ^ *a; *a = tcp_index_rotl(*a, 32);
++  *c += *d; *d = tcp_index_rotl(*d, 16) ^ *c;
++  *a += *d; *d = tcp_index_rotl(*d, 21) ^ *a;
++  *c += *b; *b = tcp_index_rotl(*b, 17) ^ *c; *c = tcp_index_rotl(*c, 32);
++}
++
++static u32_t
++tcp_index_slot(const ip_addr_t *local, const ip_addr_t *remote, u16_t lport, u16_t rport)
++{
++  uint64_t a, b, c, d;
++  uint64_t m = (uint64_t)ip4_addr_get_u32(remote) << 32 | ip4_addr_get_u32(local);
++  uint64_t tail = (UINT64_C(12) << 56) | ((uint64_t)rport << 16) | lport;
++  unsigned i;
++  if (!tcp_index_ready) {
++    for (i = 0; i < 2; i++) {
++      uint64_t high = LWIP_RAND();
++      tcp_index_key[i] = (high << 32) | (u32_t)LWIP_RAND();
++    }
++    tcp_index_ready = 1;
++  }
++  a = UINT64_C(0x736f6d6570736575) ^ tcp_index_key[0];
++  b = UINT64_C(0x646f72616e646f6d) ^ tcp_index_key[1];
++  c = UINT64_C(0x6c7967656e657261) ^ tcp_index_key[0];
++  d = UINT64_C(0x7465646279746573) ^ tcp_index_key[1];
++  d ^= m;
++  for (i = 0; i < 2; i++) tcp_index_round(&a, &b, &c, &d);
++  a ^= m; d ^= tail;
++  for (i = 0; i < 2; i++) tcp_index_round(&a, &b, &c, &d);
++  a ^= tail; c ^= 0xff;
++  for (i = 0; i < 4; i++) tcp_index_round(&a, &b, &c, &d);
++  return (u32_t)(a ^ b ^ c ^ d) & (TCP_INDEX_COUNT - 1);
++}
++
++static struct tcp_pcb **
++tcp_index_bucket(struct tcp_pcb **list, const struct tcp_pcb *pcb)
++{
++  return &tcp_index_buckets[list == &tcp_tw_pcbs][tcp_index_slot(
++      &pcb->local_ip, &pcb->remote_ip, pcb->local_port, pcb->remote_port)];
++}
++
++struct tcp_pcb *
++tcp_index_input_head(int timewait, const ip_addr_t *local, const ip_addr_t *remote,
++                     u16_t lport, u16_t rport, int *full)
++{
++  *full = tcp_index_unresolved[timewait] != 0;
++  if (*full) return timewait ? tcp_tw_pcbs : tcp_active_pcbs;
++  return tcp_index_buckets[timewait][tcp_index_slot(local, remote, lport, rport)];
++}
++
++static void
++tcp_index_push(struct tcp_pcb **bucket, struct tcp_pcb *pcb)
++{
++  pcb->tuple_hash_prev = bucket;
++  pcb->tuple_next = *bucket;
++  if (*bucket != NULL) (*bucket)->tuple_hash_prev = &pcb->tuple_next;
++  *bucket = pcb;
++}
++
++static void
++tcp_index_unhash(struct tcp_pcb *pcb)
++{
++  *pcb->tuple_hash_prev = pcb->tuple_next;
++  if (pcb->tuple_next != NULL) pcb->tuple_next->tuple_hash_prev = pcb->tuple_hash_prev;
++  pcb->tuple_hash_prev = NULL;
++  pcb->tuple_next = NULL;
++}
++
++void
++tcp_index_register(struct tcp_pcb **list, struct tcp_pcb *pcb)
++{
++  if (list != &tcp_active_pcbs && list != &tcp_tw_pcbs) return;
++  /* In upstream normal connect and accept paths the tuple is complete.
++   * Upstream tests and private core extensions may register an empty PCB
++   * before populating its tuple. Keep those lists on original traversal. */
++  if (!pcb->local_port || !pcb->remote_port || ip_addr_isany(&pcb->local_ip) || ip_addr_isany(&pcb->remote_ip)) {
++    pcb->tuple_hash_prev = NULL;
++    pcb->tuple_next = NULL;
++    tcp_index_unresolved[list == &tcp_tw_pcbs]++;
++  } else {
++    tcp_index_push(tcp_index_bucket(list, pcb), pcb);
++  }
++  pcb->tuple_list_prev = NULL;
++  if (*list != NULL) (*list)->tuple_list_prev = pcb;
++}
++
++/* The slow timer captures pcb->next after unlinking the PCB. */
++static int
++tcp_index_forget(struct tcp_pcb **list, struct tcp_pcb *pcb)
++{
++  int tw;
++  if (list != &tcp_active_pcbs && list != &tcp_tw_pcbs) return 0;
++  tw = list == &tcp_tw_pcbs;
++  if (pcb->tuple_hash_prev != NULL) {
++    tcp_index_unhash(pcb);
++  } else if (tcp_index_unresolved[tw] != 0 && (pcb->tuple_list_prev != NULL || *list == pcb)) {
++    tcp_index_unresolved[tw]--;
++  } else {
++    return 0;
++  }
++  if (pcb->next != NULL) pcb->next->tuple_list_prev = pcb->tuple_list_prev;
++  pcb->tuple_list_prev = NULL;
++  return 1;
++}
++
++int
++tcp_index_remove(struct tcp_pcb **list, struct tcp_pcb *pcb)
++{
++  struct tcp_pcb *prev;
++  if (list != &tcp_active_pcbs && list != &tcp_tw_pcbs) return 0;
++  prev = pcb->tuple_list_prev;
++  if (!tcp_index_forget(list, pcb)) return 0;
++  if (prev == NULL) *list = pcb->next;
++  else prev->next = pcb->next;
++  pcb->next = NULL;
++  return 1;
++}
++
++void
++tcp_index_promote(struct tcp_pcb *pcb, int move_bucket)
++{
++  struct tcp_pcb *prev = pcb->tuple_list_prev;
++  if (prev == NULL) {
++    TCP_STATS_INC(tcp.cachehit);
++    return;
++  }
++  if (move_bucket && pcb->tuple_hash_prev != NULL) {
++    struct tcp_pcb **head = tcp_index_bucket(&tcp_active_pcbs, pcb);
++    if (*head != pcb) {
++      tcp_index_unhash(pcb);
++      tcp_index_push(head, pcb);
++    }
++  }
++  prev->next = pcb->next;
++  if (pcb->next != NULL) pcb->next->tuple_list_prev = prev;
++  pcb->next = tcp_active_pcbs;
++  tcp_active_pcbs->tuple_list_prev = pcb;
++  tcp_active_pcbs = pcb;
++  pcb->tuple_list_prev = NULL;
++}

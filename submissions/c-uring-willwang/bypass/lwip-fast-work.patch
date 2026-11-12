@@ -1,0 +1,220 @@
+--- a/src/include/lwip/opt.h
++++ b/src/include/lwip/opt.h
+@@ -1282,6 +1282,14 @@
+ #define LWIP_TCP_TUPLE_INDEX_BITS               0
+ #endif
+ 
++/* Optional exact-order work boundary for the IPv4 NO_SYS TCP fast timer. */
++#ifndef LWIP_TCP_FAST_WORK
++#define LWIP_TCP_FAST_WORK                      0
++#endif
++#if LWIP_TCP_FAST_WORK && !LWIP_TCP_TUPLE_INDEX_BITS
++#error "LWIP_TCP_FAST_WORK requires LWIP_TCP_TUPLE_INDEX_BITS"
++#endif
++
+ #if !defined LWIP_TCP || defined __DOXYGEN__
+ #define LWIP_TCP                        1
+ #endif
+--- a/src/include/lwip/tcp.h
++++ b/src/include/lwip/tcp.h
+@@ -248,6 +248,9 @@
+   struct tcp_pcb *tuple_next;
+   struct tcp_pcb *tuple_list_prev;
+   struct tcp_pcb **tuple_hash_prev;
++#if LWIP_TCP_FAST_WORK
++  u64_t fast_order;
++#endif
+ #endif
+ 
+   /* ports are in host byte order */
+@@ -425,7 +428,16 @@
+ #endif /* LWIP_CALLBACK_API */
+ void             tcp_poll    (struct tcp_pcb *pcb, tcp_poll_fn poll, u8_t interval);
+ 
++#if LWIP_TCP_FAST_WORK
++void tcp_fast_work_mark(struct tcp_pcb *pcb);
++#define tcp_set_flags(pcb, set_flags) do { \
++  const tcpflags_t tcp_set_bits_ = (tcpflags_t)(set_flags); \
++  (pcb)->flags = (tcpflags_t)((pcb)->flags | tcp_set_bits_); \
++  if (tcp_set_bits_ & (TF_ACK_DELAY | TF_CLOSEPEND)) tcp_fast_work_mark(pcb); \
++} while (0)
++#else
+ #define          tcp_set_flags(pcb, set_flags)     do { (pcb)->flags = (tcpflags_t)((pcb)->flags |  (set_flags)); } while(0)
++#endif
+ #define          tcp_clear_flags(pcb, clr_flags)   do { (pcb)->flags = (tcpflags_t)((pcb)->flags & (tcpflags_t)(~(clr_flags) & TCP_ALLFLAGS)); } while(0)
+ #define          tcp_is_flag_set(pcb, flag)        (((pcb)->flags & (flag)) != 0)
+ 
+--- a/src/core/tcp.c
++++ b/src/core/tcp.c
+@@ -1208,6 +1208,9 @@
+ 
+   ++tcp_ticks;
+   ++tcp_timer_ctr;
++#if LWIP_TCP_FAST_WORK
++  tcp_last_full_timer = tcp_timer_ctr;
++#endif
+ 
+ tcp_slowtmr_start:
+   /* Steps through all of the active PCBs. */
+@@ -1494,11 +1497,25 @@
+   struct tcp_pcb *pcb;
+ 
+   ++tcp_timer_ctr;
++#if LWIP_TCP_FAST_WORK
++  /* last_timer is one byte, shared with tcp_slowtmr. With normal tcp_tmr()
++   * a complete slow walk happens every other fast tick. Preserve freshness
++   * even if an embedding calls only tcp_fasttmr() directly for many ticks. */
++  if ((u8_t)(tcp_timer_ctr - tcp_last_full_timer) >= 128) {
++    tcp_fast_due = 0;
++    tcp_last_full_timer = tcp_timer_ctr;
++  }
++  tcp_fast_again = TCP_FAST_NONE;
++  tcp_fast_running = 1;
++#endif
+ 
+ tcp_fasttmr_start:
+   pcb = tcp_active_pcbs;
+ 
+   while (pcb != NULL) {
++#if LWIP_TCP_FAST_WORK
++    if (pcb->fast_order < tcp_fast_due) break;
++#endif
+     if (pcb->last_timer != tcp_timer_ctr) {
+       struct tcp_pcb *next;
+       pcb->last_timer = tcp_timer_ctr;
+@@ -1517,6 +1534,12 @@
+       }
+ 
+       next = pcb->next;
++#if LWIP_TCP_FAST_WORK
++      /* Before the callback, which can remove either this PCB or its
++       * neighbors. Stale marks only extend a later walk. */
++      if (pcb->refused_data != NULL || (pcb->flags & (TF_ACK_DELAY | TF_CLOSEPEND)))
++        tcp_fast_work_mark(pcb);
++#endif
+ 
+       /* If there is data which was previously "refused" by upper layer */
+       if (pcb->refused_data != NULL) {
+@@ -1532,6 +1555,10 @@
+       pcb = pcb->next;
+     }
+   }
++#if LWIP_TCP_FAST_WORK
++  tcp_fast_running = 0;
++  tcp_fast_due = tcp_fast_again;
++#endif
+ }
+ 
+ /** Call tcp_output for all active pcbs that have TF_NAGLEMEMERR set */
+@@ -1569,6 +1596,9 @@
+ #if TCP_QUEUE_OOSEQ && LWIP_WND_SCALE
+     pbuf_split_64k(refused_data, &rest);
+     pcb->refused_data = rest;
++#if LWIP_TCP_FAST_WORK
++      if (pcb->refused_data != NULL) tcp_fast_work_mark(pcb);
++#endif
+ #else /* TCP_QUEUE_OOSEQ && LWIP_WND_SCALE */
+     pcb->refused_data = NULL;
+ #endif /* TCP_QUEUE_OOSEQ && LWIP_WND_SCALE */
+@@ -1606,6 +1636,9 @@
+       }
+ #endif /* TCP_QUEUE_OOSEQ && LWIP_WND_SCALE */
+       pcb->refused_data = refused_data;
++#if LWIP_TCP_FAST_WORK
++      if (pcb->refused_data != NULL) tcp_fast_work_mark(pcb);
++#endif
+       return ERR_INPROGRESS;
+     }
+   }
+--- a/src/core/tcp_in.c
++++ b/src/core/tcp_in.c
+@@ -533,6 +533,9 @@
+             }
+ #endif /* TCP_QUEUE_OOSEQ && LWIP_WND_SCALE */
+             pcb->refused_data = recv_data;
++#if LWIP_TCP_FAST_WORK
++      if (pcb->refused_data != NULL) tcp_fast_work_mark(pcb);
++#endif
+             LWIP_DEBUGF(TCP_INPUT_DEBUG, ("tcp_input: keep incoming packet, because pcb is \"full\"\n"));
+ #if TCP_QUEUE_OOSEQ && LWIP_WND_SCALE
+             break;
+--- a/src/core/tcp_tuple_index.inc
++++ b/src/core/tcp_tuple_index.inc
+@@ -17,6 +17,43 @@
+ static u8_t tcp_index_ready;
+ static u32_t tcp_index_unresolved[2];
+ 
++#if LWIP_TCP_FAST_WORK
++/* The active list is ordered by registration / most recent promotion. A
++ * minimum rank therefore names a conservative prefix, in exact list order.
++ * Boundaries contain no weak pointers to PCBs that a callback may delete. */
++#define TCP_FAST_NONE UINT64_MAX
++static u64_t tcp_fast_rank;
++static u64_t tcp_fast_due = TCP_FAST_NONE;
++static u64_t tcp_fast_again = TCP_FAST_NONE;
++static u8_t tcp_fast_running;
++static u8_t tcp_last_full_timer;
++
++void
++tcp_fast_work_mark(struct tcp_pcb *pcb)
++{
++  const u64_t rank = pcb->fast_order;
++  if (rank != 0 && rank < tcp_fast_due) tcp_fast_due = rank;
++  if (tcp_fast_running && rank != 0 && rank < tcp_fast_again) tcp_fast_again = rank;
++}
++
++static void
++tcp_fast_promote(struct tcp_pcb *pcb)
++{
++  if (tcp_fast_rank == TCP_FAST_NONE - 1) {
++    /* Reserve zero for unregistered PCBs and all-ones for an empty pass.
++     * Renumber in place; a tick in progress remains conservative. */
++    struct tcp_pcb *p;
++    u64_t rank = TCP_FAST_NONE / 2;
++    tcp_fast_rank = rank;
++    for (p = tcp_active_pcbs; p != NULL; p = p->next) p->fast_order = rank--;
++    tcp_fast_due = 0;
++    if (tcp_fast_running) tcp_fast_again = 0;
++  }
++  pcb->fast_order = ++tcp_fast_rank;
++}
++#endif
++
++
+ static uint64_t
+ tcp_index_rotl(uint64_t value, unsigned bits)
+ {
+@@ -98,6 +135,13 @@
+ tcp_index_register(struct tcp_pcb **list, struct tcp_pcb *pcb)
+ {
+   if (list != &tcp_active_pcbs && list != &tcp_tw_pcbs) return;
++#if LWIP_TCP_FAST_WORK
++  if (list == &tcp_active_pcbs) {
++    tcp_fast_promote(pcb);
++    if (pcb->refused_data != NULL || (pcb->flags & (TF_ACK_DELAY | TF_CLOSEPEND)))
++      tcp_fast_work_mark(pcb);
++  }
++#endif
+   /* In upstream normal connect and accept paths the tuple is complete.
+    * Upstream tests and private core extensions may register an empty PCB
+    * before populating its tuple. Keep those lists on original traversal. */
+@@ -126,6 +170,9 @@
+   } else {
+     return 0;
+   }
++#if LWIP_TCP_FAST_WORK
++  if (!tw) pcb->fast_order = 0;
++#endif
+   if (pcb->next != NULL) pcb->next->tuple_list_prev = pcb->tuple_list_prev;
+   pcb->tuple_list_prev = NULL;
+   return 1;
+@@ -152,6 +199,9 @@
+     TCP_STATS_INC(tcp.cachehit);
+     return;
+   }
++#if LWIP_TCP_FAST_WORK
++  tcp_fast_promote(pcb);
++#endif
+   if (move_bucket && pcb->tuple_hash_prev != NULL) {
+     struct tcp_pcb **head = tcp_index_bucket(&tcp_active_pcbs, pcb);
+     if (*head != pcb) {

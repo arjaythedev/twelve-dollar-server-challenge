@@ -1,0 +1,117 @@
+--- a/src/core/tcp.c
++++ b/src/core/tcp.c
+@@ -1213,6 +1213,11 @@
+   u8_t pcb_reset;       /* flag if a RST should be sent when removing */
+   err_t err;
+ 
++#if LWIP_TCP_SLOW_STATS
++  uint64_t active_visits = 0, timewait_visits = 0;
++  const uint64_t wall_start = tcp_calendar_now(CLOCK_MONOTONIC);
++  const uint64_t cpu_start = tcp_calendar_now(CLOCK_THREAD_CPUTIME_ID);
++#endif
+   err = ERR_OK;
+ 
+   ++tcp_ticks;
+@@ -1234,6 +1239,9 @@
+     LWIP_DEBUGF(TCP_DEBUG, ("tcp_slowtmr: no active pcbs\n"));
+   }
+   while (pcb != NULL) {
++#if LWIP_TCP_SLOW_STATS
++    ++active_visits;
++#endif
+     LWIP_DEBUGF(TCP_DEBUG, ("tcp_slowtmr: processing active pcb\n"));
+     LWIP_ASSERT("tcp_slowtmr: active pcb->state != CLOSED", pcb->state != CLOSED);
+     LWIP_ASSERT("tcp_slowtmr: active pcb->state != LISTEN", pcb->state != LISTEN);
+@@ -1500,6 +1508,9 @@
+   prev = NULL;
+   pcb = tcp_tw_pcbs;
+   while (pcb != NULL) {
++#if LWIP_TCP_SLOW_STATS
++    ++timewait_visits;
++#endif
+     LWIP_ASSERT("tcp_slowtmr: TIME-WAIT pcb->state == TIME-WAIT", pcb->state == TIME_WAIT);
+     pcb_remove = 0;
+ 
+@@ -1532,6 +1543,14 @@
+       pcb = pcb->next;
+     }
+   }
++#if LWIP_TCP_SLOW_STATS
++  tcp_calendar_stats.active_visits += active_visits;
++  tcp_calendar_stats.timewait_visits += timewait_visits;
++  tcp_calendar_duration(cpu_start, tcp_calendar_now(CLOCK_THREAD_CPUTIME_ID),
++                        &tcp_calendar_stats.cpu_ns, &tcp_calendar_stats.max_cpu_ns);
++  tcp_calendar_duration(wall_start, tcp_calendar_now(CLOCK_MONOTONIC),
++                        &tcp_calendar_stats.wall_ns, &tcp_calendar_stats.max_wall_ns);
++#endif
+ }
+ 
+ /**
+--- a/src/core/tcp_slow_work.inc
++++ b/src/core/tcp_slow_work.inc
+@@ -1,6 +1,36 @@
+ /* Single-owner NO_SYS scheduler for the pinned IPv4 raw API port. */
+ #include <stdlib.h>
+ 
++#if LWIP_TCP_SLOW_STATS
++#include "slow-stats.h"
++#include <time.h>
++static struct tcp_slow_work_stats tcp_calendar_stats;
++
++static uint64_t
++tcp_calendar_now(clockid_t clock)
++{
++  struct timespec sample;
++  if (clock_gettime(clock, &sample) != 0) return 0;
++  return (uint64_t)sample.tv_sec * UINT64_C(1000000000) + (uint64_t)sample.tv_nsec;
++}
++
++static void
++tcp_calendar_duration(uint64_t start, uint64_t finish, uint64_t *sum, uint64_t *maximum)
++{
++  if (start && finish >= start) {
++    const uint64_t elapsed = finish - start;
++    *sum += elapsed;
++    if (elapsed > *maximum) *maximum = elapsed;
++  }
++}
++
++void
++tcp_slow_work_snapshot(struct tcp_slow_work_stats *out)
++{
++  if (out) *out = tcp_calendar_stats;
++}
++#endif
++
+ #define TCP_SLOW_SLOTS 256U
+ #define TCP_SLOW_MAX_DUE 32768U
+ #define TCP_SLOW_MAX_SLEEP 127U
+@@ -61,6 +91,11 @@
+ {
+   struct tcp_pcb *pcb;
+   if (!tcp_slow_running || tcp_slow_synced) return;
++#if LWIP_TCP_SLOW_STATS
++  ++tcp_calendar_stats.callback_sync;
++  tcp_calendar_stats.callback_fallback += tcp_slow_sparse;
++  tcp_calendar_stats.callback_sync_visits += tcp_slow_active_count;
++#endif
+   for (pcb = tcp_active_pcbs; pcb != NULL; pcb = pcb->next) {
+     int passed = pcb->fast_order > tcp_slow_order || pcb->last_timer == tcp_timer_ctr;
+     if (pcb->slow_parked) tcp_slow_materialize(pcb, passed ? tcp_ticks : tcp_ticks - 1);
+@@ -168,6 +203,16 @@
+   tcp_slow_sparse = tcp_slow_count <= TCP_SLOW_MAX_DUE &&
+                     tcp_slow_count <= tcp_slow_active_count / 2 &&
+                     (u8_t)(tcp_timer_ctr - tcp_last_full_timer) < 128;
++#if LWIP_TCP_SLOW_STATS
++  ++tcp_calendar_stats.ticks;
++  tcp_calendar_stats.sparse += tcp_slow_sparse;
++  tcp_calendar_stats.dense += !tcp_slow_sparse;
++  tcp_calendar_stats.wrap_refresh += (u8_t)(tcp_timer_ctr - tcp_last_full_timer) >= 128;
++  tcp_calendar_stats.due_total += tcp_slow_count;
++  tcp_calendar_stats.active_total += tcp_slow_active_count;
++  if (tcp_slow_count > tcp_calendar_stats.max_due) tcp_calendar_stats.max_due = tcp_slow_count;
++  if (tcp_slow_active_count > tcp_calendar_stats.max_active) tcp_calendar_stats.max_active = tcp_slow_active_count;
++#endif
+   if (tcp_slow_sparse) {
+     u32_t i = 0;
+     for (pcb = tcp_slow_slots[slot]; pcb != NULL; pcb = pcb->slow_next) {

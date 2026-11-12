@@ -1,0 +1,147 @@
+--- a/bypass/main.c
++++ b/bypass/main.c
+@@ -32,8 +32,7 @@
+ static void usage(FILE *stream) {
+     fputs("Usage: start.sh --bypass --interface IFNAME --address IPV4/PREFIX\n"
+           "       [--gateway IPV4] [--mode auto|packet|xdp|xdp-skb|xdp-zc]\n"
+-          "       [--shared-ip] [--packet-fd FD] [--packet-rx-frames N] [--packet-tx-frames N]\n"
+-          "       [--packet-gso] [--queue N]\n"
++          "       [--shared-ip] [--packet-fd FD] [--packet-rx-frames N] [--packet-gso] [--queue N]\n"
+           "       [--xdp-rx-frames N] [--xdp-tx-frames N] [--max-connections N] [--rx-cpu-stats]\n"
+           "Set SQLITE_PATH, JWT_SECRET, HOST and PORT as for the standard server.\n"
+           "Use a dedicated service IPv4 address, or select --shared-ip with an explicit XDP mode.\n",
+@@ -76,8 +75,7 @@
+         {"gateway", required_argument, NULL, 'g'}, {"mode", required_argument, NULL, 'm'},
+         {"packet-fd", required_argument, NULL, 'f'}, {"queue", required_argument, NULL, 'q'},
+         {"max-connections", required_argument, NULL, 'n'}, {"shared-ip", no_argument, NULL, 's'},
+-        {"packet-rx-frames", required_argument, NULL, 'r'}, {"packet-tx-frames", required_argument, NULL, 'T'},
+-        {"xdp-rx-frames", required_argument, NULL, 'x'},
++        {"packet-rx-frames", required_argument, NULL, 'r'}, {"xdp-rx-frames", required_argument, NULL, 'x'},
+         {"xdp-tx-frames", required_argument, NULL, 't'},
+         {"rx-cpu-stats", no_argument, NULL, 'c'}, {"packet-gso", no_argument, NULL, 'G'},
+         {"help", no_argument, NULL, 'h'},
+@@ -106,11 +104,10 @@
+         case 's': link->shared_ip = 1; break;
+         case 'G': link->packet_gso = 1; break;
+         case 'c': link->probe_rx_cpus = 1; break;
+-        case 'r': case 'T': case 'x': case 't':
+-            if (number(optarg, 16384, &value) || value < (opt == 'r' || opt == 'T' ? 16u : 64u) ||
++        case 'r': case 'x': case 't':
++            if (number(optarg, 16384, &value) || value < (opt == 'r' ? 16u : 64u) ||
+                 (value & (value - 1))) return -1;
+             if (opt == 'r') link->packet_rx_frames = value;
+-            else if (opt == 'T') link->packet_tx_frames = value;
+             else if (opt == 'x') link->xdp_rx_frames = value;
+             else link->xdp_tx_frames = value;
+             break;
+@@ -130,7 +127,6 @@
+     if (link->shared_ip && !link_is_xdp(link->mode)) return -1;
+     if (link->probe_rx_cpus && !link_is_xdp(link->mode)) return -1;
+     if (link->packet_rx_frames && link->mode != LINK_PACKET) return -1;
+-    if (link->packet_tx_frames && link->mode != LINK_PACKET && !link->packet_gso) return -1;
+     if (link->packet_gso && link->mode != LINK_PACKET && !link_is_xdp(link->mode)) return -1;
+     if (link->packet_gso && link->xdp_tx_frames) return -1;
+     if ((link->xdp_rx_frames || link->xdp_tx_frames) && !link_is_xdp(link->mode)) return -1;
+--- a/bypass/link.h
++++ b/bypass/link.h
+@@ -33,7 +33,6 @@
+     int packet_fd;         /* -1, or a delegated ETH_P_ALL fd bound to ifname. */
+     unsigned mtu;          /* 0 discovers the actual interface MTU. */
+     unsigned packet_rx_frames; /* AF_PACKET only. Zero selects 512 frame slots. */
+-    unsigned packet_tx_frames; /* AF_PACKET sender, including hybrid GSO. Zero selects 512 slots. */
+     unsigned xdp_tx_frames; /* AF_XDP TX/COMPLETION slots. Zero selects 512. */
+     unsigned xdp_rx_frames; /* AF_XDP RX/FILL slots. Zero selects 512. */
+     unsigned probe_rx_cpus; /* Enable per-CPU XDP_REDIRECT counters for diagnostics. */
+--- a/bypass/link.c
++++ b/bypass/link.c
+@@ -26,10 +26,7 @@
+ #include <sys/socket.h>
+ #include <unistd.h>
+ 
+-enum {
+-    DEFAULT_TX_FRAMES = 512, DEFAULT_RX_FRAMES = 512, BLOCK_FRAMES = 16,
+-    MAX_RX_BYTES = 32 * 1024 * 1024, MAX_TX_BYTES = 64 * 1024 * 1024
+-};
++enum { TX_FRAMES = 512, DEFAULT_RX_FRAMES = 512, BLOCK_FRAMES = 16, MAX_RX_BYTES = 32 * 1024 * 1024 };
+ 
+ struct BypassLink {
+     int fd;
+@@ -37,7 +34,7 @@
+     XdpLink *xdp;
+ #endif
+     LinkConfig cfg;
+-    unsigned ifindex, frame_size, tx_frame_size, rx_slots, tx_slots, rx, tx, held, kicked;
++    unsigned ifindex, frame_size, tx_frame_size, rx_slots, rx, tx, held, kicked;
+     size_t rx_bytes, mapping_bytes;
+     unsigned char *mapping;
+     uint64_t rx_frames, tx_frames, partial_checksums, rejected, oversized;
+@@ -200,12 +197,6 @@
+             return socket_error(error, size, "queued AF_PACKET GSO setup");
+         if (tx_frame < 8192) tx_frame = 8192;
+     }
+-    unsigned tx_slots = link->cfg.packet_tx_frames ? link->cfg.packet_tx_frames : DEFAULT_TX_FRAMES;
+-    if (tx_slots < BLOCK_FRAMES || (tx_slots & (tx_slots - 1)) || tx_slots > MAX_TX_BYTES / tx_frame) {
+-        errno = EINVAL;
+-        return errorf(error, size, "TX ring needs a power of two in %u..%u for %u-byte slots",
+-                      BLOCK_FRAMES, MAX_TX_BYTES / tx_frame, tx_frame);
+-    }
+     if (rx_slots) {
+         struct tpacket_req rx = {.tp_block_size = frame * BLOCK_FRAMES, .tp_frame_size = frame,
+                                  .tp_block_nr = rx_slots / BLOCK_FRAMES, .tp_frame_nr = rx_slots};
+@@ -213,15 +204,14 @@
+             return socket_error(error, size, "packet RX ring");
+     }
+     struct tpacket_req tx = {.tp_block_size = tx_frame * BLOCK_FRAMES, .tp_frame_size = tx_frame,
+-                             .tp_block_nr = tx_slots / BLOCK_FRAMES, .tp_frame_nr = tx_slots};
++                             .tp_block_nr = TX_FRAMES / BLOCK_FRAMES, .tp_frame_nr = TX_FRAMES};
+     if (setsockopt(fd, SOL_PACKET, PACKET_TX_RING, &tx, sizeof(tx)))
+         return socket_error(error, size, "packet TX ring");
+     link->rx_slots = rx_slots;
+-    link->tx_slots = tx_slots;
+     link->frame_size = frame;
+     link->tx_frame_size = tx_frame;
+     link->rx_bytes = (size_t)frame * rx_slots;
+-    link->mapping_bytes = link->rx_bytes + (size_t)tx_frame * tx_slots;
++    link->mapping_bytes = link->rx_bytes + (size_t)tx_frame * TX_FRAMES;
+     void *p = mmap(NULL, link->mapping_bytes, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+     if (p == MAP_FAILED) return socket_error(error, size, "packet rings mmap");
+     link->mapping = p;
+@@ -304,10 +294,6 @@
+         errorf(error, size, "setting the PACKET_MMAP RX ring size requires explicit packet mode");
+         return NULL;
+     }
+-    if (cfg->packet_tx_frames && cfg->mode != LINK_PACKET && !cfg->packet_gso) {
+-        errorf(error, size, "setting the PACKET_MMAP TX ring size requires a packet sender");
+-        return NULL;
+-    }
+     if ((cfg->xdp_rx_frames || cfg->xdp_tx_frames) && !link_is_xdp(cfg->mode)) {
+         errorf(error, size, "setting XDP ring sizes requires explicit XDP mode");
+         return NULL;
+@@ -471,8 +457,7 @@
+ }
+ 
+ static struct tpacket2_hdr *packet_tx_slot(BypassLink *link, unsigned sequence) {
+-    unsigned slot = sequence & (link->tx_slots - 1);
+-    return (void *)(link->mapping + link->rx_bytes + (size_t)slot * link->tx_frame_size);
++    return (void *)(link->mapping + link->rx_bytes + (size_t)(sequence % TX_FRAMES) * link->tx_frame_size);
+ }
+ 
+ static void publish_packet(BypassLink *link, struct tpacket2_hdr *slot, unsigned n) {
+@@ -625,7 +610,7 @@
+                     " tx_errors=%" PRIu64 " gso_groups=%" PRIu64 " merged_frames=%" PRIu64
+                     " packet_tx_slots=%u tx_slot_bytes=%u\n",
+                     link->rx_frames, link->tx_frames, link->rejected, link->tx_busy, link->tx_deferred,
+-                    link->tx_errors, link->gso_groups, link->gso_merged, link->tx_slots, link->tx_frame_size);
++                    link->tx_errors, link->gso_groups, link->gso_merged, TX_FRAMES, link->tx_frame_size);
+         } else {
+             fprintf(stderr, "XDP link rx=%" PRIu64 " tx=%" PRIu64 " rejected=%" PRIu64 "\n",
+                     link->rx_frames, link->tx_frames, link->rejected);
+@@ -652,7 +637,7 @@
+             " tx_kick_deferred=%" PRIu64 " tx_errors=%" PRIu64 " rx_slots=%u tx_slots=%u rx_bytes=%zu\n",
+             link->rx_frames, link->tx_frames, link->partial_checksums, link->rejected, link->oversized,
+             link->kernel_packets, link->kernel_drops, stat_errno, link->tx_busy, link->tx_deferred,
+-            link->tx_errors, link->rx_slots, link->tx_slots, link->rx_bytes);
++            link->tx_errors, link->rx_slots, TX_FRAMES, link->rx_bytes);
+     if (link->cfg.packet_gso)
+         fprintf(stderr, "packet GSO groups=%" PRIu64 " merged_frames=%" PRIu64 " tx_slot_bytes=%u\n",
+                 link->gso_groups, link->gso_merged, link->tx_frame_size);

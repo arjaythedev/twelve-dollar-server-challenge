@@ -1,0 +1,2 @@
+# A blank unified-diff context line consists of a single space.
+bypass/*.patch whitespace=-blank-at-eol

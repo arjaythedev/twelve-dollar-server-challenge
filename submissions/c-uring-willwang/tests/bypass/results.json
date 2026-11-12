@@ -1,0 +1,2661 @@
+{
+  "description": "Independent private-veth measurements on Linux 6.8. All throughput and latency derive from original organizer Go histograms. No public leaderboard submission.",
+  "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+  "stock_mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+  "host": "Linux 6.8.0-147-generic, AMD EPYC-Genoa KVM guest, 16 logical CPUs and one thread per core",
+  "server_cpu": 10,
+  "manager_cpu": 15,
+  "mtu": 1500,
+  "server_application_mib": 1730,
+  "swap_mib": 0,
+  "interpretation": {
+    "server_core_us_per_request": "Inclusive physical CPU10 user+system+nice+irq+softirq. The XDP driver runs the redirect on the transmitting client CPU on this veth; this measurement alone understates that mode's ingress cost.",
+    "combined_server_and_client_core_us_per_request": "Sum of all physical server and client busy-core time per completed request, including the stock Go load generators.",
+    "client_wire_checksums": "The three matched arms sharing this setting charge checksum completion to the Linux sender. Changing the setting also changes the private client's TSO feature mask."
+  },
+  "runs": [
+    {
+      "run": "linux-6k-p1",
+      "mode": "baseline",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "virtual_users": 6000,
+      "ramp_s": 8,
+      "hold_s": 32,
+      "think_scale": 0.05,
+      "client_wire_checksums": false,
+      "client_cpu": [
+        3,
+        4,
+        5
+      ],
+      "shards": 1,
+      "stock": {
+        "dials": 6000,
+        "reqs": 458353,
+        "fails": 0,
+        "req_per_s": 11458.531461356752,
+        "p95_ms": 12.935617171633234,
+        "p99_ms": 30.438643872999418,
+        "pass": true,
+        "successful_requests_per_s": 11458.531461356752,
+        "p50_ms": 0.322520616158038,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 18.25,
+        "server_softirq_s": 11.5,
+        "other_client_busy_s": 38.98,
+        "server_cpu_us_per_success": 39.81647332950804,
+        "client_at_cutoff": 6000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 6000,
+      "linux_client_at_end_of_ramp": 5897,
+      "first_sample_all_clients_s": 9,
+      "peak_established_linux_server": 6000,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 928732,
+        "OutSegs": 895635,
+        "RetransSegs": 1
+      },
+      "fully_connected": {
+        "start_s": 10,
+        "end_s": 35,
+        "requests": 316171,
+        "rps": 12646.84,
+        "server_core_us_per_request": 37.95414506706814,
+        "app_cgroup_us_per_request": 34.634413023332314,
+        "combined_server_and_client_core_us_per_request": 118.73321715147816,
+        "server_softirq_s": 7.59,
+        "client_softirq_s": 9.41
+      },
+      "peak_stock_connected": 6000,
+      "post_close": {
+        "observed_s": 0.10206623900012346,
+        "original_pid_alive": null,
+        "oom_kills": null,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 4074,
+        "durable_new_posts": 4081
+      },
+      "scored_sampled_peak_server_bytes": 106602496
+    },
+    {
+      "run": "indexed-6k-p1",
+      "mode": "packet",
+      "server_sha256": "d85c9f9b827ddffd5e3b08d5f73b82b886f9dd2ddbaf634a0951582a8c19592b",
+      "virtual_users": 6000,
+      "ramp_s": 8,
+      "hold_s": 32,
+      "think_scale": 0.05,
+      "client_wire_checksums": false,
+      "client_cpu": [
+        3,
+        4,
+        5
+      ],
+      "shards": 1,
+      "stock": {
+        "dials": 6000,
+        "reqs": 458427,
+        "fails": 0,
+        "req_per_s": 11460.503503019994,
+        "p95_ms": 12.43087384569394,
+        "p99_ms": 30.137271161385563,
+        "pass": true,
+        "successful_requests_per_s": 11460.503503019994,
+        "p50_ms": 0.2565463758087175,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 16.46,
+        "server_softirq_s": 10.06,
+        "other_client_busy_s": 40.11,
+        "server_cpu_us_per_success": 35.90538951676057,
+        "client_at_cutoff": 6000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 6000,
+      "linux_client_at_end_of_ramp": 5911,
+      "first_sample_all_clients_s": 9,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx": 1364428,
+        "tx": 904898,
+        "checksum_completed": 1358474,
+        "rejected": 0,
+        "oversize": 0
+      },
+      "fully_connected": {
+        "start_s": 10,
+        "end_s": 35,
+        "requests": 316372,
+        "rps": 12654.88,
+        "server_core_us_per_request": 33.69451152440798,
+        "app_cgroup_us_per_request": 29.97993817404827,
+        "combined_server_and_client_core_us_per_request": 114.1061788021696,
+        "server_softirq_s": 6.65,
+        "client_softirq_s": 10.21
+      },
+      "peak_stock_connected": 6000,
+      "post_close": {
+        "observed_s": 0.006072930002119392,
+        "original_pid_alive": null,
+        "oom_kills": null,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 4124,
+        "durable_new_posts": 4124
+      },
+      "scored_sampled_peak_server_bytes": 169283584
+    },
+    {
+      "run": "linux-32k-p1",
+      "mode": "baseline",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": false,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 756008,
+        "fails": 0,
+        "req_per_s": 18900.010060568893,
+        "p95_ms": 17.262631261334235,
+        "p99_ms": 33.95943148452363,
+        "pass": true,
+        "successful_requests_per_s": 18900.010060568893,
+        "p50_ms": 0.42192433343373653,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 30.419999999999998,
+        "server_softirq_s": 19.66,
+        "other_client_busy_s": 107.53,
+        "server_cpu_us_per_success": 40.2376694426514,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30695,
+      "first_sample_all_clients_s": 11,
+      "peak_established_linux_server": 32000,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 1576016,
+        "OutSegs": 1543832,
+        "RetransSegs": 0
+      },
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 422565,
+        "rps": 21128.25,
+        "server_core_us_per_request": 36.680747340645816,
+        "app_cgroup_us_per_request": 34.53157502396081,
+        "combined_server_and_client_core_us_per_request": 158.17684853217847,
+        "server_softirq_s": 10.06,
+        "client_softirq_s": 17.27
+      },
+      "peak_private_conntrack": {
+        "client": 0,
+        "server": 0
+      },
+      "peak_stock_connected": 32000,
+      "post_close": {
+        "observed_s": 1.0174284570020973,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 6621,
+        "durable_new_posts": 6623
+      },
+      "scored_sampled_peak_server_bytes": 229179392,
+      "app_peak_bytes_including_shutdown": 354607104
+    },
+    {
+      "run": "indexed-32k-p1",
+      "mode": "packet",
+      "server_sha256": "d85c9f9b827ddffd5e3b08d5f73b82b886f9dd2ddbaf634a0951582a8c19592b",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": false,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 756640,
+        "fails": 0,
+        "req_per_s": 18915.810588895147,
+        "p95_ms": 14.147493993698196,
+        "p99_ms": 31.99132062193718,
+        "pass": true,
+        "successful_requests_per_s": 18915.810588895147,
+        "p50_ms": 0.322520616158038,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 27.74,
+        "server_softirq_s": 17.36,
+        "other_client_busy_s": 104.39999999999999,
+        "server_cpu_us_per_success": 36.66208500740114,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 1167
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30726,
+      "first_sample_all_clients_s": 12,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx": 2346307,
+        "tx": 1575613,
+        "checksum_completed": 2316796,
+        "rejected": 0,
+        "oversize": 0
+      },
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 423327,
+        "rps": 21166.35,
+        "server_core_us_per_request": 34.41783774717889,
+        "app_cgroup_us_per_request": 32.08233115298575,
+        "combined_server_and_client_core_us_per_request": 155.57713068148263,
+        "server_softirq_s": 9.21,
+        "client_softirq_s": 18.54
+      },
+      "post_close": {
+        "last_observed_app_connections": 49,
+        "verified": false,
+        "reason": "The initial log sampler exited after reading a partly written stats line during disconnect."
+      }
+    },
+    {
+      "run": "indexed-100k-native",
+      "mode": "packet",
+      "server_sha256": "d85c9f9b827ddffd5e3b08d5f73b82b886f9dd2ddbaf634a0951582a8c19592b",
+      "virtual_users": 100000,
+      "ramp_s": 20,
+      "hold_s": 35,
+      "think_scale": 1.0,
+      "client_wire_checksums": false,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 8,
+      "stock": {
+        "dials": 100000,
+        "reqs": 526640,
+        "fails": 0,
+        "req_per_s": 9575.094130353804,
+        "p95_ms": 26.74529794377747,
+        "p99_ms": 203.61402637687965,
+        "pass": true,
+        "successful_requests_per_s": 9575.094130353804,
+        "p50_ms": 0.20610838513783752,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 34.13,
+        "server_softirq_s": 18.74,
+        "other_client_busy_s": 179.54999999999998,
+        "server_cpu_us_per_success": 64.80707883943491,
+        "client_at_cutoff": 100000,
+        "server_rx_drops": 0,
+        "client_retransmits": 6238
+      },
+      "peak_established_linux_client": 100000,
+      "linux_client_at_end_of_ramp": 87319,
+      "first_sample_all_clients_s": 26,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx": 2030486,
+        "tx": 1459563,
+        "checksum_completed": 1944183,
+        "rejected": 0,
+        "oversize": 0
+      },
+      "fully_connected": {
+        "start_s": 30,
+        "end_s": 50,
+        "requests": 211536,
+        "rps": 10576.8,
+        "server_core_us_per_request": 55.782467286892064,
+        "app_cgroup_us_per_request": 46.275551206414036,
+        "combined_server_and_client_core_us_per_request": 279.7632554269722,
+        "server_softirq_s": 6.4,
+        "client_softirq_s": 12.33
+      },
+      "peak_private_conntrack": {
+        "client": 0,
+        "server": 0
+      },
+      "peak_stock_connected": 100000,
+      "post_close": {
+        "observed_s": 170.60789484799898,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 3003,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 4138,
+        "durable_new_posts": 4139
+      },
+      "scored_sampled_peak_server_bytes": 179380224,
+      "app_peak_bytes_including_shutdown": 265580544
+    },
+    {
+      "run": "wire-linux-32k",
+      "mode": "baseline",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 756098,
+        "fails": 0,
+        "req_per_s": 18901.988268846264,
+        "p95_ms": 15.472905826298172,
+        "p99_ms": 31.674574873205128,
+        "pass": true,
+        "successful_requests_per_s": 18901.988268846264,
+        "p50_ms": 0.40546099128883467,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 30.439999999999998,
+        "server_softirq_s": 19.93,
+        "other_client_busy_s": 113.63,
+        "server_cpu_us_per_success": 40.259331462323665,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30803,
+      "first_sample_all_clients_s": 11,
+      "peak_established_linux_server": 32000,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 1576273,
+        "OutSegs": 1533923,
+        "RetransSegs": 1
+      },
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 422495,
+        "rps": 21124.75,
+        "server_core_us_per_request": 36.80516929194428,
+        "app_cgroup_us_per_request": 34.15087279139398,
+        "combined_server_and_client_core_us_per_request": 159.2444881004509,
+        "server_softirq_s": 10.25,
+        "client_softirq_s": 17.2
+      },
+      "peak_private_conntrack": {
+        "client": 0,
+        "server": 0
+      },
+      "peak_stock_connected": 32000,
+      "post_close": {
+        "observed_s": 1.0106486700024107,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 6716,
+        "durable_new_posts": 6718
+      },
+      "scored_sampled_peak_server_bytes": 255234048,
+      "app_peak_bytes_including_shutdown": 380125184
+    },
+    {
+      "run": "wire-xdp-32k",
+      "mode": "xdp",
+      "server_sha256": "b77804293ab4776484b68ced96e9eeb7ad627277c7b77d0291945239fd6e1fea",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 756198,
+        "fails": 0,
+        "req_per_s": 18904.565095965434,
+        "p95_ms": 12.807541754092316,
+        "p99_ms": 30.743030311729413,
+        "pass": true,
+        "successful_requests_per_s": 18904.565095965434,
+        "p50_ms": 0.1623239827125636,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 18.39,
+        "server_softirq_s": 6.8,
+        "other_client_busy_s": 114.08000000000001,
+        "server_cpu_us_per_success": 24.319027556274943,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30739,
+      "first_sample_all_clients_s": 11,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 3101,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 3101,
+        "tx_ring_empty": 815518,
+        "tx_busy": 68889,
+        "tx_kick_deferred": 7652,
+        "tx_errors": 0
+      },
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 422913,
+        "rps": 21145.65,
+        "server_core_us_per_request": 22.03762948880739,
+        "app_cgroup_us_per_request": 21.469065741653722,
+        "combined_server_and_client_core_us_per_request": 148.1628609193853,
+        "server_softirq_s": 3.63,
+        "client_softirq_s": 17.5
+      },
+      "peak_private_conntrack": {
+        "client": 0,
+        "server": 0
+      },
+      "peak_stock_connected": 32000,
+      "post_close": {
+        "observed_s": 120.14311672499753,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 4,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 6695,
+        "durable_new_posts": 6699
+      },
+      "scored_sampled_peak_server_bytes": 228036608,
+      "app_peak_bytes_including_shutdown": 265981952
+    },
+    {
+      "run": "wire-packet-32k",
+      "mode": "packet",
+      "server_sha256": "b77804293ab4776484b68ced96e9eeb7ad627277c7b77d0291945239fd6e1fea",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 756260,
+        "fails": 0,
+        "req_per_s": 18906.429755996207,
+        "p95_ms": 13.868732471030484,
+        "p99_ms": 31.674574873205128,
+        "pass": true,
+        "successful_requests_per_s": 18906.429755996207,
+        "p50_ms": 0.322520616158038,
+        "errors_pct": 0
+      },
+      "network_settings": {},
+      "whole_scored_window": {
+        "server_busy_s": 28.45,
+        "server_softirq_s": 17.3,
+        "other_client_busy_s": 117.63999999999999,
+        "server_cpu_us_per_success": 37.619337264961786,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 760
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30700,
+      "first_sample_all_clients_s": 11,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx": 2344702,
+        "tx": 1574899,
+        "checksum_completed": 0,
+        "rejected": 0,
+        "oversize": 0,
+        "kernel_packets": 2432037,
+        "kernel_drops": 87332,
+        "stat_errno": 0,
+        "tx_busy": 25116,
+        "tx_kick_deferred": 0,
+        "tx_errors": 0
+      },
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 422590,
+        "rps": 21129.5,
+        "server_core_us_per_request": 34.92747107125109,
+        "app_cgroup_us_per_request": 31.76967746515535,
+        "combined_server_and_client_core_us_per_request": 167.96422063939042,
+        "server_softirq_s": 8.98,
+        "client_softirq_s": 18.38
+      },
+      "peak_private_conntrack": {
+        "client": 0,
+        "server": 0
+      },
+      "peak_stock_connected": 32000,
+      "post_close": {
+        "observed_s": 120.98228694499994,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 65,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 6609,
+        "durable_new_posts": 6613
+      },
+      "scored_sampled_peak_server_bytes": 208166912,
+      "app_peak_bytes_including_shutdown": 265543680
+    },
+    {
+      "run": "wire-skb-32k",
+      "mode": "xdp",
+      "server_sha256": "116e7a291eb5bf4262f6868f2de723232d5d4d55873d7b8b4ffd248eee44c803",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 755768,
+        "fails": 0,
+        "req_per_s": 18893.79549659173,
+        "p95_ms": 13.195623076783068,
+        "p99_ms": 31.050460614846706,
+        "pass": true,
+        "successful_requests_per_s": 18893.79549659173,
+        "p50_ms": 0.2591118395668046,
+        "errors_pct": 0
+      },
+      "network_settings": {
+        "xdp_attachment": "skb"
+      },
+      "whole_scored_window": {
+        "server_busy_s": 25.96,
+        "server_softirq_s": 17.07,
+        "other_client_busy_s": 112.71000000000001,
+        "server_cpu_us_per_success": 34.349165352330346,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30717,
+      "first_sample_all_clients_s": 11,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 41237,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 41237,
+        "tx_ring_empty": 574892,
+        "tx_busy": 63712,
+        "tx_kick_deferred": 10802,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 2402071
+      },
+      "xdp_attachment": "skb",
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 421744,
+        "rps": 21087.2,
+        "server_core_us_per_request": 31.51200728403961,
+        "app_cgroup_us_per_request": 27.843976440684397,
+        "combined_server_and_client_core_us_per_request": 171.00421108539777,
+        "server_softirq_s": 8.7,
+        "client_softirq_s": 18.01
+      },
+      "peak_private_conntrack": {
+        "client": 0,
+        "server": 0
+      },
+      "peak_stock_connected": 32000,
+      "post_close": {
+        "observed_s": 75.86590933999832,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 6634,
+        "durable_new_posts": 6636
+      },
+      "scored_sampled_peak_server_bytes": 203431936,
+      "app_peak_bytes_including_shutdown": 261853184
+    },
+    {
+      "run": "paid-skb-350k-full",
+      "mode": "xdp",
+      "server_sha256": "116e7a291eb5bf4262f6868f2de723232d5d4d55873d7b8b4ffd248eee44c803",
+      "virtual_users": 350000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 1186454,
+        "reqs": 6927186,
+        "fails": 954127,
+        "req_per_s": 19241.80808793012,
+        "p95_ms": 59746.45223996186,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 16591.506995175787,
+        "p50_ms": 218.3017958635019,
+        "errors_pct": 13.773659318516927,
+        "organizer_errors": {
+          "connection reset by peer": 9,
+          "timeout": 954119
+        }
+      },
+      "configuration": "Indexed userspace TCP, 512 RX and 512 TX generic XDP descriptors.",
+      "network_settings": {
+        "xdp_attachment": "skb"
+      },
+      "whole_scored_window": {
+        "server_busy_s": 351.41,
+        "server_softirq_s": 178.71,
+        "other_client_busy_s": 2499.03,
+        "server_cpu_us_per_success": 58.832501068547955,
+        "client_at_cutoff": 232124,
+        "server_rx_drops": 4951116,
+        "client_retransmits": 16717899
+      },
+      "peak_established_linux_client": 325088,
+      "linux_client_at_end_of_ramp": 253538,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 14629213,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 14629213,
+        "tx_ring_empty": 800537,
+        "tx_busy": 55495216,
+        "tx_kick_deferred": 400405,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 37155677
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "client": 0,
+        "server": 0
+      },
+      "peak_stock_connected": 324343,
+      "post_close": {
+        "observed_s": 210.6352913169976,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 486,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 50680,
+        "durable_new_posts": 51119
+      },
+      "scored_sampled_peak_server_bytes": 637493248,
+      "app_peak_bytes_including_shutdown": 637222912
+    },
+    {
+      "run": "deep-fast-skb-350k-full",
+      "mode": "xdp",
+      "server_sha256": "c54a780b2fe2808607ec66b9ee1f5832ef48a23aacd863132114ebdf6a5bccf4",
+      "virtual_users": 350000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 839050,
+        "reqs": 8250371,
+        "fails": 513186,
+        "req_per_s": 22917.172352133603,
+        "p95_ms": 59746.45223996186,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 21491.688333208633,
+        "p50_ms": 216.14039194406132,
+        "errors_pct": 6.220156645076931,
+        "organizer_errors": {
+          "connection reset by peer": 88,
+          "timeout": 513099
+        }
+      },
+      "configuration": "Event-driven fast TCP timer, 8192 RX and 2048 TX generic XDP descriptors.",
+      "network_settings": {
+        "native_bridge": false,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "xdp_tx_frames": 2048,
+        "packet_gso": false
+      },
+      "whole_scored_window": {
+        "server_busy_s": 353.02000000000004,
+        "server_softirq_s": 204.27,
+        "other_client_busy_s": 2522.12,
+        "server_cpu_us_per_success": 45.62641322393093,
+        "client_at_cutoff": 322431,
+        "server_rx_drops": 2670835,
+        "client_retransmits": 8398727
+      },
+      "peak_established_linux_client": 340325,
+      "linux_client_at_end_of_ramp": 296781,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 13224072,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 13224072,
+        "tx_ring_empty": 756861,
+        "tx_busy": 15095105,
+        "tx_kick_deferred": 541140,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 2048,
+        "chunk": 2048,
+        "umem_bytes": 20971520,
+        "tx_pressure_kicks": 183996,
+        "tx_pressure_rescued": 14147
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 37019943
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 339648,
+      "post_close": {
+        "observed_s": 194.43797314200492,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 67277,
+        "durable_new_posts": 68015
+      },
+      "scored_sampled_peak_server_bytes": 770199552,
+      "app_peak_bytes_including_shutdown": 769957888
+    },
+    {
+      "run": "hybrid-skb-32k",
+      "mode": "xdp",
+      "server_sha256": "ddf68d7c48c655d37f25dc0cca3c261d7f2048b480201c8682867afc4e1963f9",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 756140,
+        "fails": 0,
+        "req_per_s": 18901.96444646524,
+        "p95_ms": 13.460855100626404,
+        "p99_ms": 31.360965220995176,
+        "pass": true,
+        "successful_requests_per_s": 18901.96444646524,
+        "p50_ms": 0.24409507386186075,
+        "errors_pct": 0
+      },
+      "network_settings": {
+        "native_bridge": false,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 24.51,
+        "server_softirq_s": 15.76,
+        "other_client_busy_s": 99.14,
+        "server_cpu_us_per_success": 32.414632210966225,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30686,
+      "first_sample_all_clients_s": 11,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 51085,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 51085,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 1697690
+      },
+      "xdp_attachment": "skb",
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 422388,
+        "rps": 21119.4,
+        "server_core_us_per_request": 30.11449188897412,
+        "app_cgroup_us_per_request": 26.794816614108356,
+        "combined_server_and_client_core_us_per_request": 140.4869456518651,
+        "server_softirq_s": 8.3,
+        "client_softirq_s": 16.38
+      },
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 32000,
+      "post_close": {
+        "observed_s": 75.64756780999596,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 6785,
+        "durable_new_posts": 6792
+      },
+      "scored_sampled_peak_server_bytes": 162070528,
+      "app_peak_bytes_including_shutdown": 274485248
+    },
+    {
+      "run": "hybrid-native-bridge-32k",
+      "mode": "xdp",
+      "server_sha256": "ddf68d7c48c655d37f25dc0cca3c261d7f2048b480201c8682867afc4e1963f9",
+      "virtual_users": 32000,
+      "ramp_s": 10,
+      "hold_s": 30,
+      "think_scale": 0.16,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8
+      ],
+      "shards": 3,
+      "stock": {
+        "dials": 32000,
+        "reqs": 756270,
+        "fails": 0,
+        "req_per_s": 18906.297998153266,
+        "p95_ms": 13.064973343349568,
+        "p99_ms": 31.050460614846706,
+        "pass": true,
+        "successful_requests_per_s": 18906.297998153266,
+        "p50_ms": 0.2978423779266059,
+        "errors_pct": 0
+      },
+      "network_settings": {
+        "native_bridge": true,
+        "xdp_attachment": "auto",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 26.69,
+        "server_softirq_s": 18.12,
+        "other_client_busy_s": 104.25999999999999,
+        "server_cpu_us_per_success": 35.29162865114311,
+        "client_at_cutoff": 32000,
+        "server_rx_drops": 0,
+        "client_retransmits": 0
+      },
+      "peak_established_linux_client": 32000,
+      "linux_client_at_end_of_ramp": 30691,
+      "first_sample_all_clients_s": 11,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 38086,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 38086,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 1690429
+      },
+      "xdp_attachment": "auto",
+      "fully_connected": {
+        "start_s": 15,
+        "end_s": 35,
+        "requests": 422382,
+        "rps": 21119.1,
+        "server_core_us_per_request": 32.31671804196201,
+        "app_cgroup_us_per_request": 28.793987433176603,
+        "combined_server_and_client_core_us_per_request": 149.4618615376602,
+        "server_softirq_s": 9.38,
+        "client_softirq_s": 16.27
+      },
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0,
+        "bridge": 0
+      },
+      "peak_stock_connected": 32000,
+      "post_close": {
+        "observed_s": 75.7015053590003,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 6816,
+        "durable_new_posts": 6823
+      },
+      "scored_sampled_peak_server_bytes": 163454976,
+      "app_peak_bytes_including_shutdown": 289648640
+    },
+    {
+      "run": "hybrid-skb-350k-full",
+      "mode": "xdp",
+      "server_sha256": "ddf68d7c48c655d37f25dc0cca3c261d7f2048b480201c8682867afc4e1963f9",
+      "virtual_users": 350000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 742535,
+        "reqs": 9011669,
+        "fails": 418701,
+        "req_per_s": 25031.509202725498,
+        "p95_ms": 6367.999502065777,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 23868.49290300451,
+        "p50_ms": 191.81362337926382,
+        "errors_pct": 4.646209264898656,
+        "organizer_errors": {
+          "connection reset by peer": 20,
+          "timeout": 418681
+        }
+      },
+      "configuration": "Event-driven fast TCP timer, generic XDP receive, 512-slot AF_PACKET/GSO transmit.",
+      "network_settings": {
+        "native_bridge": false,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 352.39,
+        "server_softirq_s": 199.15,
+        "other_client_busy_s": 2493.9,
+        "server_cpu_us_per_success": 41.00911349838612,
+        "client_at_cutoff": 323117,
+        "server_rx_drops": 2431523,
+        "client_retransmits": 8367170
+      },
+      "peak_established_linux_client": 341046,
+      "linux_client_at_end_of_ramp": 305018,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 11055029,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 11055029,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 30992128
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 341045,
+      "post_close": {
+        "observed_s": 185.62200972199935,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 74750,
+        "durable_new_posts": 75680
+      },
+      "scored_sampled_peak_server_bytes": 648511488,
+      "app_peak_bytes_including_shutdown": 648155136
+    },
+    {
+      "run": "release-hybrid-skb-400k-full",
+      "mode": "xdp",
+      "server_sha256": "61fcf2d5a947fc7f179b9e895d8c2d26cc77d39d9eafc0867960b9b16ec5a3b8",
+      "virtual_users": 400000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 1132149,
+        "reqs": 8315427,
+        "fails": 795432,
+        "req_per_s": 23097.917438940163,
+        "p95_ms": 59746.45223996186,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 20888.431063280674,
+        "p50_ms": 253.4416078990445,
+        "errors_pct": 9.565738476208137,
+        "organizer_errors": {
+          "connection reset by peer": 63,
+          "timeout": 795369
+        }
+      },
+      "configuration": "Release build, generic XDP receive, 512-slot AF_PACKET/GSO transmit.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": false,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 353.74,
+        "server_softirq_s": 198.69,
+        "other_client_busy_s": 2991.01,
+        "server_cpu_us_per_success": 47.03992489356708,
+        "client_at_cutoff": 334997,
+        "server_rx_drops": 5553108,
+        "client_retransmits": 14363232
+      },
+      "peak_established_linux_client": 387135,
+      "linux_client_at_end_of_ramp": 326898,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 14816936,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 14816936,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 33277003
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 386003,
+      "post_close": {
+        "observed_s": 187.0519565249997,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 62801,
+        "durable_new_posts": 63963
+      },
+      "scored_sampled_peak_server_bytes": 720785408,
+      "app_peak_bytes_including_shutdown": 720486400
+    },
+    {
+      "run": "release-linux-350k-full",
+      "mode": "baseline",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "virtual_users": 350000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 350070,
+        "reqs": 7495215,
+        "fails": 70,
+        "req_per_s": 20819.617905378298,
+        "p95_ms": 8498.120021484994,
+        "p99_ms": 11684.410908579282,
+        "pass": false,
+        "successful_requests_per_s": 20819.423464891486,
+        "p50_ms": 6964.587271870684,
+        "errors_pct": 0.0009339291801502692,
+        "organizer_errors": {
+          "timeout": 70
+        }
+      },
+      "configuration": "Release Linux TCP with io_uring fixed files and epoll readiness.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": false,
+        "packet_gso": false
+      },
+      "whole_scored_window": {
+        "server_busy_s": 355.76,
+        "server_softirq_s": 256.78,
+        "other_client_busy_s": 2180.28,
+        "server_cpu_us_per_success": 47.46539259747477,
+        "client_at_cutoff": 350000,
+        "server_rx_drops": 407532,
+        "client_retransmits": 99903
+      },
+      "peak_established_linux_client": 350000,
+      "linux_client_at_end_of_ramp": 324745,
+      "first_sample_all_clients_s": 89,
+      "peak_established_linux_server": 350000,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 17342186,
+        "OutSegs": 23213527,
+        "RetransSegs": 16850
+      },
+      "fully_connected": {
+        "start_s": 90,
+        "end_s": 355,
+        "requests": 5899924,
+        "rps": 22263.864150943395,
+        "server_core_us_per_request": 44.86498470149785,
+        "app_cgroup_us_per_request": 44.2244766203768,
+        "combined_server_and_client_core_us_per_request": 301.5462572060251,
+        "server_softirq_s": 191.21,
+        "client_softirq_s": 398.87
+      },
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 350000,
+      "post_close": {
+        "observed_s": 9.100536883997847,
+        "original_pid_alive": false,
+        "oom_kills": 1,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": false,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 65490,
+        "durable_new_posts": 65519
+      },
+      "scored_sampled_peak_server_bytes": 1484058624,
+      "app_peak_bytes_including_shutdown": 1906647040,
+      "measurement_note": "A separate 64-peer correctness/performance fixture on two spare cores finished about 1.5 s after ramp start. The measured server and stock-client CPUs remained dedicated."
+    },
+    {
+      "run": "release-shared-skb-250k-full",
+      "mode": "xdp",
+      "server_sha256": "61fcf2d5a947fc7f179b9e895d8c2d26cc77d39d9eafc0867960b9b16ec5a3b8",
+      "virtual_users": 250000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 250000,
+        "reqs": 8842829,
+        "fails": 0,
+        "req_per_s": 24562.509230045292,
+        "p95_ms": 72.34105175032849,
+        "p99_ms": 110.96956694920223,
+        "pass": true,
+        "successful_requests_per_s": 24562.509230045292,
+        "p50_ms": 4.505277364769966,
+        "errors_pct": 0
+      },
+      "configuration": "Release build, shared IPv4 address, generic XDP receive, 512-slot AF_PACKET/GSO transmit.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": null,
+      "sampler_gap": {
+        "last_complete_s": 261,
+        "scored_end_s": 360,
+        "reason": "Executor restarted while the independent stock workers continued. Full load-client histograms were recovered; whole-scored-window CPU was unavailable."
+      },
+      "peak_established_linux_client": 250000,
+      "linux_client_at_end_of_ramp": 239490,
+      "first_sample_all_clients_s": 65,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 906028,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 906028,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 21365080
+      },
+      "xdp_attachment": "skb",
+      "fully_connected": {
+        "start_s": 65,
+        "end_s": 260,
+        "requests": 5145518,
+        "rps": 26387.271794871795,
+        "server_core_us_per_request": 35.325889443978234,
+        "app_cgroup_us_per_request": 33.14425253200941,
+        "combined_server_and_client_core_us_per_request": 249.9204161757864,
+        "server_softirq_s": 105.64,
+        "client_softirq_s": 261.7
+      },
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "post_close": {
+        "observed_s": 296.877916097641,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 79360,
+        "durable_new_posts": 79374,
+        "observation_timing": "Observed empty when the original process was reattached. The exact drain time was not continuously observed."
+      },
+      "scored_sampled_peak_server_bytes": null,
+      "app_peak_bytes_including_shutdown": 378060800
+    },
+    {
+      "run": "custom-calendar-skb-350k-full",
+      "mode": "xdp",
+      "server_sha256": "e283914176f550706bdfeb5c2c28832ebe7c87232899acf7e380c1247e014fdd",
+      "virtual_users": 350000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 794261,
+        "reqs": 8488390,
+        "fails": 483585,
+        "req_per_s": 23578.246444040993,
+        "p95_ms": 20196.791382025847,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 22234.989795060257,
+        "p50_ms": 189.9144785933305,
+        "errors_pct": 5.697016748759188,
+        "organizer_errors": {
+          "connection reset by peer": 26,
+          "timeout": 483559
+        }
+      },
+      "configuration": "Same measured network and SQLite paths, plus the custom slow TCP deadline scheduler.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": false,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 352.27000000000004,
+        "server_softirq_s": 193.68,
+        "other_client_busy_s": 2392.66,
+        "server_cpu_us_per_success": 44.00731810456345,
+        "client_at_cutoff": 309729,
+        "server_rx_drops": 3252669,
+        "client_retransmits": 10173011
+      },
+      "peak_established_linux_client": 342576,
+      "linux_client_at_end_of_ramp": 304629,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 11714936,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 11714936,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 30562906
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 342273,
+      "post_close": {
+        "observed_s": 194.57648536900524,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": null,
+        "sqlite_quick_check": null,
+        "acknowledged_post_creates": 68389,
+        "durable_new_posts": null,
+        "observation_timing": "The original service was alive after all connections were released. The final health probe dispatched another request and returned; Docker cleanup timed out before the response verdict was written."
+      },
+      "recovery_note": "All load/closure samples were written before the Docker API timed out removing this exited container. Independent database check and positive health status were not recorded.",
+      "scored_sampled_peak_server_bytes": 689950720,
+      "app_peak_bytes_including_shutdown": 690774016
+    },
+    {
+      "run": "release-shared-skb-285k-full",
+      "mode": "xdp",
+      "server_sha256": "61fcf2d5a947fc7f179b9e895d8c2d26cc77d39d9eafc0867960b9b16ec5a3b8",
+      "virtual_users": 285000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 285001,
+        "reqs": 9993416,
+        "fails": 1,
+        "req_per_s": 27758.535474798497,
+        "p95_ms": 209.78373499012548,
+        "p99_ms": 442.46084766574086,
+        "pass": true,
+        "successful_requests_per_s": 27758.532697116123,
+        "p50_ms": 81.5157078183423,
+        "errors_pct": 1.0006588337761583e-05,
+        "organizer_errors": {
+          "timeout": 1
+        }
+      },
+      "configuration": "Release build, shared IPv4 address, generic XDP receive, 512-slot AF_PACKET/GSO transmit.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 348.66,
+        "server_softirq_s": 199.62,
+        "other_client_busy_s": 2183.23,
+        "server_cpu_us_per_success": 34.88897438963558,
+        "client_at_cutoff": 285000,
+        "server_rx_drops": 404658,
+        "client_retransmits": 451337
+      },
+      "peak_established_linux_client": 285000,
+      "linux_client_at_end_of_ramp": 271832,
+      "first_sample_all_clients_s": 69,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 1925948,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 1925948,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 24731004
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 285000,
+      "post_close": {
+        "observed_s": 90.85888260999491,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 90110,
+        "durable_new_posts": 90181
+      },
+      "scored_sampled_peak_server_bytes": 428331008,
+      "app_peak_bytes_including_shutdown": 427986944
+    },
+    {
+      "run": "custom-wide-shared-skb-285k-full",
+      "mode": "xdp",
+      "server_sha256": "9b07fbc9f610045c21f20b91e35f951fca0a8bffb41a9add758f20cc4afd0332",
+      "virtual_users": 285000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 346778,
+        "reqs": 8955923,
+        "fails": 62792,
+        "req_per_s": 24876.980435729904,
+        "p95_ms": 1030.840845664524,
+        "p99_ms": 35612.354278326486,
+        "pass": false,
+        "successful_requests_per_s": 24702.56230422963,
+        "p50_ms": 132.73596738433065,
+        "errors_pct": 0.701122597860656,
+        "organizer_errors": {
+          "connection reset by peer": 4,
+          "timeout": 62788
+        }
+      },
+      "configuration": "Larger keyed TCP flow index, verified quarter-tick delayed ACK deadline, 4096-slot AF_PACKET/GSO transmit, shared IP.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_tx_frames": 4096,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 349.95,
+        "server_softirq_s": 201.57,
+        "other_client_busy_s": 2175.0,
+        "server_cpu_us_per_success": 39.35059542021814,
+        "client_at_cutoff": 283142,
+        "server_rx_drops": 705200,
+        "client_retransmits": 4107492
+      },
+      "peak_established_linux_client": 284961,
+      "linux_client_at_end_of_ramp": 268069,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 7999592,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 7999592,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 27991977
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 284946,
+      "post_close": {
+        "observed_s": 190.0659715790025,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 79293,
+        "durable_new_posts": 79794
+      },
+      "scored_sampled_peak_server_bytes": 516808704,
+      "app_peak_bytes_including_shutdown": 516694016
+    },
+    {
+      "run": "qualified-shared-skb-310k-full",
+      "mode": "xdp",
+      "server_sha256": "459ed2e7d419ad01c3361b9b4cbc1d04c8bcaeb7d37175149cc4713747a220bb",
+      "virtual_users": 310000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 467866,
+        "reqs": 9284846,
+        "fails": 168422,
+        "req_per_s": 25790.554877810213,
+        "p95_ms": 1295.9349889724615,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 25322.728396506103,
+        "p50_ms": 155.6433607681547,
+        "errors_pct": 1.8139450024265347,
+        "organizer_errors": {
+          "connection reset by peer": 8,
+          "timeout": 168414
+        }
+      },
+      "configuration": "Current canonical fast timer, 17-bit keyed flow table, shared IP, explicit 512-slot AF_PACKET/GSO transmit.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_tx_frames": 512,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 351.82,
+        "server_softirq_s": 198.94,
+        "other_client_busy_s": 2338.57,
+        "server_cpu_us_per_success": 38.59188646776411,
+        "client_at_cutoff": 299172,
+        "server_rx_drops": 1104598,
+        "client_retransmits": 4994366
+      },
+      "peak_established_linux_client": 307213,
+      "linux_client_at_end_of_ramp": 285574,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 8314189,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 8314189,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 28787154
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 307037,
+      "post_close": {
+        "observed_s": 200.55160294199595,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 81174,
+        "durable_new_posts": 81816
+      },
+      "scored_sampled_peak_server_bytes": 586924032,
+      "app_peak_bytes_including_shutdown": 586559488
+    },
+    {
+      "run": "ackonly-shared-skb-285k-full",
+      "mode": "xdp",
+      "server_sha256": "2b402ac59b645019ce9666e6736eef4a774b8d702a6c217504f9ca45dc722511",
+      "virtual_users": 285000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 354453,
+        "reqs": 9196690,
+        "fails": 70635,
+        "req_per_s": 25545.73193825413,
+        "p95_ms": 933.2067699447765,
+        "p99_ms": 19798.834802495683,
+        "pass": false,
+        "successful_requests_per_s": 25349.528437270776,
+        "p50_ms": 146.6230864105916,
+        "errors_pct": 0.7680480694684718,
+        "organizer_errors": {
+          "timeout": 70635
+        }
+      },
+      "configuration": "Narrow 17-bit flow table, custom 40 ms delayed-ACK deadline and transmit retry, shared IP, 8192-slot XDP receive and 512-slot AF_PACKET/GSO transmit.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_tx_frames": 512,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 350.42,
+        "server_softirq_s": 196.08,
+        "other_client_busy_s": 2171.9,
+        "server_cpu_us_per_success": 38.39775236945208,
+        "client_at_cutoff": 283654,
+        "server_rx_drops": 664359,
+        "client_retransmits": 3488085
+      },
+      "peak_established_linux_client": 284478,
+      "linux_client_at_end_of_ramp": 265671,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 6780106,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 6780106,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 27080485
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 284476,
+      "post_close": {
+        "observed_s": 148.30539997499727,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 81097,
+        "durable_new_posts": 81315
+      },
+      "scored_sampled_peak_server_bytes": 489938944,
+      "app_peak_bytes_including_shutdown": 489672704
+    },
+    {
+      "run": "capacity-shared-skb-300k-full",
+      "mode": "xdp",
+      "server_sha256": "459ed2e7d419ad01c3361b9b4cbc1d04c8bcaeb7d37175149cc4713747a220bb",
+      "virtual_users": 300000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 404874,
+        "reqs": 9294673,
+        "fails": 113583,
+        "req_per_s": 25817.70652121798,
+        "p95_ms": 1030.840845664524,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 25502.208325660213,
+        "p50_ms": 152.57657167743815,
+        "errors_pct": 1.2220225499057362,
+        "organizer_errors": {
+          "connection reset by peer": 2,
+          "timeout": 113581
+        }
+      },
+      "configuration": "Current canonical release, 17-bit keyed TCP flow table, shared service IP, explicit 8192 RX and 512 packet TX slots.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_tx_frames": 512,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 350.45,
+        "server_softirq_s": 197.35,
+        "other_client_busy_s": 2208.68,
+        "server_cpu_us_per_success": 38.170848995053966,
+        "client_at_cutoff": 291078,
+        "server_rx_drops": 897063,
+        "client_retransmits": 4240363
+      },
+      "peak_established_linux_client": 299322,
+      "linux_client_at_end_of_ramp": 279616,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 7640708,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 7640708,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 28130398
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 299234,
+      "post_close": {
+        "observed_s": 156.42865447999793,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 82140,
+        "durable_new_posts": 82760
+      },
+      "scored_sampled_peak_server_bytes": 546791424,
+      "app_peak_bytes_including_shutdown": 546496512
+    },
+    {
+      "run": "release-matched-shared-skb-285k-full",
+      "mode": "xdp",
+      "server_sha256": "459ed2e7d419ad01c3361b9b4cbc1d04c8bcaeb7d37175149cc4713747a220bb",
+      "virtual_users": 285000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 323873,
+        "reqs": 9355947,
+        "fails": 46746,
+        "req_per_s": 25987.949380860922,
+        "p95_ms": 844.819914862182,
+        "p99_ms": 13700.890709913576,
+        "pass": false,
+        "successful_requests_per_s": 25858.103339433183,
+        "p50_ms": 138.1255799313637,
+        "errors_pct": 0.4996394272006885,
+        "organizer_errors": {
+          "timeout": 46746
+        }
+      },
+      "configuration": "Configurable canonical build, 17-bit keyed TCP flow table, shared service IP, explicit 512-slot packet TX, immediately preceding the incumbent.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_tx_frames": 512,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 349.71,
+        "server_softirq_s": 198.98,
+        "other_client_busy_s": 2177.34,
+        "server_cpu_us_per_success": 37.56605964357199,
+        "client_at_cutoff": 277126,
+        "server_rx_drops": 591443,
+        "client_retransmits": 3071845
+      },
+      "peak_established_linux_client": 284857,
+      "linux_client_at_end_of_ramp": 269290,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 6109027,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 6109027,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 26805986
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 284818,
+      "post_close": {
+        "observed_s": 195.6742870970047,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 83678,
+        "durable_new_posts": 83946
+      },
+      "scored_sampled_peak_server_bytes": 529199104,
+      "app_peak_bytes_including_shutdown": 528875520
+    },
+    {
+      "run": "kensac-matched-285k-full",
+      "mode": "baseline",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "virtual_users": 285000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 655873,
+        "reqs": 5833160,
+        "fails": 370873,
+        "req_per_s": 16202.63744342772,
+        "p95_ms": 59746.45223996186,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 15172.47184595459,
+        "p50_ms": 170.22485146322967,
+        "errors_pct": 6.35801178092149,
+        "organizer_errors": {
+          "timeout": 370873
+        }
+      },
+      "configuration": "Pinned unmodified Kensac Rust 1.94 release using genuine Linux TCP on the same private veth and paid CPU.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": false,
+        "packet_gso": false
+      },
+      "whole_scored_window": {
+        "server_busy_s": 352.37,
+        "server_softirq_s": 239.66,
+        "other_client_busy_s": 2038.22,
+        "server_cpu_us_per_success": 64.50960925341344,
+        "client_at_cutoff": 285000,
+        "server_rx_drops": 3258417,
+        "client_retransmits": 9026
+      },
+      "peak_established_linux_client": 285000,
+      "linux_client_at_end_of_ramp": 272988,
+      "first_sample_all_clients_s": 67,
+      "peak_established_linux_server": 395946,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 16412005,
+        "OutSegs": 21382056,
+        "RetransSegs": 9552
+      },
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 285000,
+      "post_close": {
+        "observed_s": 29.174071856999944,
+        "original_pid_alive": false,
+        "oom_kills": 1,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": false,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 46820,
+        "durable_new_posts": 48882
+      },
+      "scored_sampled_peak_server_bytes": 1816166400,
+      "app_peak_bytes_including_shutdown": 2526498816
+    },
+    {
+      "run": "release-fixed512-shared-skb-285k-full",
+      "mode": "xdp",
+      "server_sha256": "61fcf2d5a947fc7f179b9e895d8c2d26cc77d39d9eafc0867960b9b16ec5a3b8",
+      "virtual_users": 285000,
+      "ramp_s": 60,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "client_wire_checksums": true,
+      "client_cpu": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        11,
+        12,
+        13
+      ],
+      "shards": 32,
+      "stock": {
+        "dials": 382920,
+        "reqs": 8838891,
+        "fails": 102471,
+        "req_per_s": 24551.849776574505,
+        "p95_ms": 1127.415451384782,
+        "p99_ms": 59746.45223996186,
+        "pass": false,
+        "successful_requests_per_s": 24267.215358245852,
+        "p50_ms": 157.19979437583626,
+        "errors_pct": 1.1593196476797825,
+        "organizer_errors": {
+          "connection reset by peer": 6,
+          "timeout": 102465
+        }
+      },
+      "configuration": "Final packaged default with fixed 512-slot packet TX, same executable and geometry as the first canonical 285k run, immediately following the incumbent.",
+      "network_settings": {
+        "native_bridge": false,
+        "shared_ip": true,
+        "xdp_attachment": "skb",
+        "xdp_rx_frames": 8192,
+        "packet_gso": true
+      },
+      "whole_scored_window": {
+        "server_busy_s": 348.87,
+        "server_softirq_s": 193.5,
+        "other_client_busy_s": 2117.07,
+        "server_cpu_us_per_success": 39.932832899517194,
+        "client_at_cutoff": 280056,
+        "server_rx_drops": 894373,
+        "client_retransmits": 4131282
+      },
+      "peak_established_linux_client": 284657,
+      "linux_client_at_end_of_ramp": 265221,
+      "first_sample_all_clients_s": null,
+      "peak_established_linux_server": 0,
+      "whole_server_kernel_tcp_segments": {
+        "InSegs": 0,
+        "OutSegs": 0,
+        "RetransSegs": 0
+      },
+      "link_counters_at_last_report": {
+        "rx_dropped": 7176813,
+        "rx_invalid": 0,
+        "tx_invalid": 0,
+        "rx_ring_full": 0,
+        "fill_empty": 7176813,
+        "tx_ring_empty": 0,
+        "tx_busy": 0,
+        "tx_kick_deferred": 0,
+        "tx_kick_ebusy": 0,
+        "tx_errors": 0,
+        "rx_slots": 8192,
+        "tx_slots": 0,
+        "chunk": 2048,
+        "umem_bytes": 16777216,
+        "tx_pressure_kicks": 0,
+        "tx_pressure_rescued": 0
+      },
+      "xdp_redirects_by_cpu_at_last_report": {
+        "10": 26717931
+      },
+      "xdp_attachment": "skb",
+      "peak_private_conntrack": {
+        "server": 0,
+        "client": 0
+      },
+      "peak_stock_connected": 284644,
+      "post_close": {
+        "observed_s": 195.8198647620011,
+        "original_pid_alive": true,
+        "oom_kills": 0,
+        "remaining_client_tcp": 0,
+        "remaining_app_connections": 0,
+        "health": true,
+        "sqlite_quick_check": [
+          "ok"
+        ],
+        "acknowledged_post_creates": 78075,
+        "durable_new_posts": 78582
+      },
+      "scored_sampled_peak_server_bytes": 536363008,
+      "app_peak_bytes_including_shutdown": 536162304
+    }
+  ],
+  "incumbent_comparison": {
+    "incumbent_run": "kensac-matched-285k-full",
+    "incumbent_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+    "configured_users": 285000,
+    "adjacent_release_run": "release-matched-shared-skb-285k-full",
+    "adjacent_release_sha256": "459ed2e7d419ad01c3361b9b4cbc1d04c8bcaeb7d37175149cc4713747a220bb",
+    "adjacent_release_pass": false,
+    "adjacent_release_to_incumbent_successful_rps_ratio": 1.7042775628104188,
+    "incumbent_to_adjacent_release_p99_ratio": 4.360771391069561,
+    "passing_bypass_runs": [
+      {
+        "run": "release-shared-skb-285k-full",
+        "success_rate_ratio_vs_incumbent": 1.8295326548598825,
+        "incumbent_p99_divided_by_bypass_p99": 135.03217867786935
+      }
+    ],
+    "scope": "Identical private veth, physical peers, source count, HTTP client, seed, paid CPU, app memory and schedule. Local scores only.",
+    "sequence": [
+      "release-matched-shared-skb-285k-full",
+      "kensac-matched-285k-full",
+      "release-fixed512-shared-skb-285k-full"
+    ],
+    "final_default_run": "release-fixed512-shared-skb-285k-full",
+    "final_default_sha256": "61fcf2d5a947fc7f179b9e895d8c2d26cc77d39d9eafc0867960b9b16ec5a3b8",
+    "final_default_pass": false,
+    "final_default_to_incumbent_successful_rps_ratio": 1.5994239834240442,
+    "incumbent_to_final_default_p99_ratio": 1.0,
+    "independent_fixed512_default_trials": [
+      {
+        "run": "release-shared-skb-285k-full",
+        "pass": true,
+        "p95_ms": 209.78373499012548,
+        "p99_ms": 442.46084766574086,
+        "fails": 1,
+        "successful_requests_per_s": 27758.532697116123
+      },
+      {
+        "run": "release-fixed512-shared-skb-285k-full",
+        "pass": false,
+        "p95_ms": 1127.415451384782,
+        "p99_ms": 59746.45223996186,
+        "fails": 102471,
+        "successful_requests_per_s": 24267.215358245852
+      }
+    ]
+  }
+}

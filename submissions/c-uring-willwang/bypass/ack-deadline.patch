@@ -1,0 +1,78 @@
+--- a/bypass/stack.c
++++ b/bypass/stack.c
+@@ -42,6 +42,7 @@
+     Connection *prev, *next;
+     Buf input, output;
+     size_t sent;
++    uint16_t ack_slot;
+     unsigned eof : 1, closing : 1, retry_output : 1;
+ };
+ 
+@@ -59,6 +60,8 @@
+     unsigned initialized : 1, up : 1;
+ } stack;
+ 
++#include "ack-deadline.h"
++
+ u32_t sys_now(void) {
+     struct timespec now;
+     clock_gettime(CLOCK_MONOTONIC, &now);
+@@ -146,6 +149,7 @@
+ }
+ 
+ static void forget(Connection *c) {
++    discard_ack(c);
+     dequeue(c);
+     *c->all_prev = c->all_next;
+     if (c->all_next) c->all_next->all_prev = c->all_prev;
+@@ -214,6 +218,7 @@
+     }
+     pbuf_free(p);
+     tcp_recved(pcb, (u16_t)length);
++    observe_ack(c);
+     wake(c);
+     return ERR_OK;
+ }
+@@ -275,6 +280,7 @@
+     }
+     if (copied || c->retry_output) {
+         c->retry_output = tcp_output(c->pcb) != ERR_OK;
++        if (c->ack_slot && !(c->pcb->flags & TF_ACK_DELAY)) discard_ack(c);
+         if (c->retry_output) retry_later(c);
+     }
+     if (c->output.len && c->sent == c->output.len) {
+@@ -325,8 +331,12 @@
+ int stack_dispatch(void) {
+     if (!stack.up) return -1;
+     sys_check_timeouts();
+-    release_retries(sys_now());
+-    if (!stack.ready.first && (!stack.held.first || db_writes_deferred())) return 0;
++    uint32_t now = sys_now();
++    release_retries(now);
++    if (!stack.ready.first && (!stack.held.first || db_writes_deferred())) {
++        release_due_acks(now);
++        return 0;
++    }
+ 
+     /* A connection contributes at most one uncommitted response per pass.
+      * No network callback runs while SQLite is evaluating this batch. */
+@@ -381,6 +391,8 @@
+         if (!c->output.len) close_connection(c, 1);
+         else flush(c);
+     }
++    /* Give ready responses this pass to acknowledge their input first. */
++    if (delayed.first) release_due_acks(sys_now());
+     return (int)count;
+ }
+ 
+@@ -396,6 +408,10 @@
+         int32_t delay = (int32_t)(stack.retry_at - sys_now());
+         if (delay <= 0) return 0;
+         if ((unsigned)delay < wait) wait = (unsigned)delay;
++    }
++    if (delayed.first) {
++        unsigned ack = ack_wait(sys_now());
++        if (ack < wait) wait = ack;
+     }
+     return wait;
+ }

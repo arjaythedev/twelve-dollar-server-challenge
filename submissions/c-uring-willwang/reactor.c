@@ -998,7 +998,13 @@ static int needs_enter(Ring *r) {
     return r->tail != get_acquire(r->sq_head) ||
            (get_acquire(r->sq_flags) & (IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW));
 }
-static int start_listener(const char *host, const char *port) {
+/* The embedded epoll build borrows its listener and calls local_step(). */
+#ifdef TWELVE_LOCAL_REACTOR
+#define STANDALONE_ONLY __attribute__((unused))
+#else
+#define STANDALONE_ONLY
+#endif
+static int STANDALONE_ONLY start_listener(const char *host, const char *port) {
     char *end = NULL;
     long number = strtol(port, &end, 10);
     struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons((uint16_t)number)};
@@ -1050,7 +1056,7 @@ static int enable_and_recheck(void) {
     return 0;
 }
 
-static void ring_loop(void) {
+static void STANDALONE_ONLY ring_loop(void) {
     unsigned rotation = 0, busy_passes = 0;
     park_fd = epoll_create1(EPOLL_CLOEXEC);
     if (park_fd < 0) fatal("park epoll_create");
@@ -1115,6 +1121,18 @@ static void epoll_accept(unsigned listener) {
             close_conn(k, find_conn(k));
     }
 }
+#ifdef TWELVE_LOCAL_REACTOR
+#include "bypass/local.h"
+
+int local_step(void) {
+    enum { LOCAL_QUANTUM = 16 };
+    struct epoll_event events[LOCAL_QUANTUM];
+    char input[BUFFER_SIZE];
+    {
+        int n = epoll_wait(poll_fd, events, LOCAL_QUANTUM, 0);
+        if (n < 0 && errno != EINTR) return -1;
+        budget = LOCAL_QUANTUM;
+#else
 static void epoll_loop(void) {
     struct epoll_event events[512];
     char input[BUFFER_SIZE];
@@ -1122,6 +1140,7 @@ static void epoll_loop(void) {
         int n = epoll_wait(poll_fd, events, 512, runnable() ? 0 : has_items(&held_writes) ? 1 : -1);
         if (n < 0 && errno != EINTR) fatal("epoll_wait sockets");
         budget = PASS_REPLIES;
+#endif
         drain_ready();
         for (int i = 0; i < n; ++i) {
             uint64_t k = events[i].data.u64;
@@ -1146,9 +1165,60 @@ static void epoll_loop(void) {
             }
         }
         finish_pass();
+#ifdef TWELVE_LOCAL_REACTOR
+        return 0;
+#endif
     }
 }
 
+#ifdef TWELVE_LOCAL_REACTOR
+int local_open(int listener) {
+    struct rlimit limit;
+    if (listener < 0 || rings[0].conns) { errno = EINVAL; return -1; }
+    if (getrlimit(RLIMIT_NOFILE, &limit) < 0) return -1;
+    slots = limit.rlim_cur > 65535 ? 65535 : (unsigned)limit.rlim_cur;
+    poll_fd = epoll_create1(EPOLL_CLOEXEC);
+    if (poll_fd < 0) return -1;
+    rings[0].conns = calloc(slots, sizeof(Connection));
+    struct epoll_event event = {.events = EPOLLIN, .data.u64 = op(ACCEPT, 0)};
+    if (!rings[0].conns || epoll_ctl(poll_fd, EPOLL_CTL_ADD, listener, &event) < 0) {
+        int error = errno;
+        free(rings[0].conns);
+        rings[0].conns = NULL;
+        close(poll_fd);
+        errno = error;
+        return -1;
+    }
+    listeners[0] = listener;
+    epoll_mode = 1;
+    return poll_fd;
+}
+
+unsigned local_timeout_ms(void) {
+    if (runnable()) return 0;
+    return has_items(&held_writes) ? 1 : UINT32_MAX;
+}
+
+void local_close(void) {
+    if (!rings[0].conns) return;
+    for (unsigned i = 0; i < slots; ++i) {
+        Connection *c = &rings[0].conns[i];
+        if (c->flags & OPEN) close((int)i);
+        free(c->input);
+    }
+    for (unsigned i = 0; i < allocated; ++i) {
+        free(outputs[i].bytes.data);
+        outputs[i] = (Output){0};
+    }
+    free(rings[0].conns);
+    rings[0] = (Ring){0};
+    free(ready.keys);
+    free(held_writes.keys);
+    ready = held_writes = (Queue){0};
+    unused = allocated = staged_count = budget = in_pass = 0;
+    close(poll_fd);
+}
+#else
 int reactor_run(const char *host, const char *port) {
     struct rlimit limit;
     if (getrlimit(RLIMIT_NOFILE, &limit) < 0) { perror("getrlimit"); return 1; }
@@ -1181,3 +1251,4 @@ int reactor_run(const char *host, const char *port) {
     else ring_loop();
     return 0;
 }
+#endif

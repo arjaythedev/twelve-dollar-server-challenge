@@ -1,0 +1,62 @@
+--- a/src/core/tcp_tuple_index.inc
++++ b/src/core/tcp_tuple_index.inc
+@@ -12,7 +12,17 @@
+ #endif
+ 
+ #define TCP_INDEX_COUNT (1U << LWIP_TCP_TUPLE_INDEX_BITS)
+-static struct tcp_pcb *tcp_index_buckets[2][TCP_INDEX_COUNT];
++/* High-concurrency listeners may size established and TIME_WAIT buckets
++ * independently. The key, chain links and PCB layout are shared unchanged. */
++#ifndef LWIP_TCP_ACTIVE_INDEX_BITS
++#define LWIP_TCP_ACTIVE_INDEX_BITS LWIP_TCP_TUPLE_INDEX_BITS
++#endif
++#if LWIP_TCP_ACTIVE_INDEX_BITS < 1 || LWIP_TCP_ACTIVE_INDEX_BITS > 20
++#error "active PCB index accepts 1..20 bits"
++#endif
++#define TCP_ACTIVE_INDEX_COUNT (1U << LWIP_TCP_ACTIVE_INDEX_BITS)
++static struct tcp_pcb *tcp_active_heads[TCP_ACTIVE_INDEX_COUNT];
++static struct tcp_pcb *tcp_timewait_heads[TCP_INDEX_COUNT];
+ static uint64_t tcp_index_key[2];
+ static u8_t tcp_index_ready;
+ static u32_t tcp_index_unresolved[2];
+@@ -71,7 +81,7 @@
+ }
+ 
+ static u32_t
+-tcp_index_slot(const ip_addr_t *local, const ip_addr_t *remote, u16_t lport, u16_t rport)
++tcp_index_hash(const ip_addr_t *local, const ip_addr_t *remote, u16_t lport, u16_t rport)
+ {
+   uint64_t a, b, c, d;
+   uint64_t m = (uint64_t)ip4_addr_get_u32(remote) << 32 | ip4_addr_get_u32(local);
+@@ -94,23 +104,27 @@
+   for (i = 0; i < 2; i++) tcp_index_round(&a, &b, &c, &d);
+   a ^= tail; c ^= 0xff;
+   for (i = 0; i < 4; i++) tcp_index_round(&a, &b, &c, &d);
+-  return (u32_t)(a ^ b ^ c ^ d) & (TCP_INDEX_COUNT - 1);
++  return (u32_t)(a ^ b ^ c ^ d);
+ }
+ 
+ static struct tcp_pcb **
+ tcp_index_bucket(struct tcp_pcb **list, const struct tcp_pcb *pcb)
+ {
+-  return &tcp_index_buckets[list == &tcp_tw_pcbs][tcp_index_slot(
+-      &pcb->local_ip, &pcb->remote_ip, pcb->local_port, pcb->remote_port)];
++  u32_t hash = tcp_index_hash(&pcb->local_ip, &pcb->remote_ip, pcb->local_port, pcb->remote_port);
++  if (list == &tcp_tw_pcbs) return &tcp_timewait_heads[hash & (TCP_INDEX_COUNT - 1)];
++  return &tcp_active_heads[hash & (TCP_ACTIVE_INDEX_COUNT - 1)];
+ }
+ 
+ struct tcp_pcb *
+ tcp_index_input_head(int timewait, const ip_addr_t *local, const ip_addr_t *remote,
+                      u16_t lport, u16_t rport, int *full)
+ {
++  u32_t hash;
+   *full = tcp_index_unresolved[timewait] != 0;
+   if (*full) return timewait ? tcp_tw_pcbs : tcp_active_pcbs;
+-  return tcp_index_buckets[timewait][tcp_index_slot(local, remote, lport, rport)];
++  hash = tcp_index_hash(local, remote, lport, rport);
++  if (timewait) return tcp_timewait_heads[hash & (TCP_INDEX_COUNT - 1)];
++  return tcp_active_heads[hash & (TCP_ACTIVE_INDEX_COUNT - 1)];
+ }
+ 
+ static void

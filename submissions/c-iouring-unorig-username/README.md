@@ -56,6 +56,23 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   ends with one `COMMIT`. Responses are written into an arena and only handed to `send` SQEs after that
   `COMMIT` returns, so a `201` always means the row is committed (rule 6). If a commit fails, nothing
   from a batch with writes is sent: those connections are closed instead.
+- **Fewer commits, fewer log bytes (`COMMIT_MS`).** Every `COMMIT` writes the pages all writes share (the
+  last leaves of `likes`, `posts` and their indexes, page 1 when the file grows) to the log again: on a
+  warmed seed copy a like or post costs 3.35 WAL frames when each commits alone, 1.95 at 22 per commit,
+  1.25 at 256. With `-DCOMMIT_MS=N` a transaction that wrote stays open across passes until its first
+  write is N ms old; reads are still answered every pass, a write's answer waits for the `COMMIT`, and a
+  connection with an answer waiting is not served again until it is sent, so answers stay in order. The
+  commit comes early when the checkpoint worker reports (the log restarts as before) or the arena is
+  half full. Durability is unchanged (rule 6). Idea from rust-iouring-kensac (#264), which commits once
+  per 256-completion pass. Default 20 ms (`-DCOMMIT_MS=0` commits every pass, as before). Local A/B
+  against the previous build, two rounds order-swapped, arm64 slow-core proxy, 290,000 users: disk
+  writes per write request 13.1 KB to 9.3 KB (-29 %), WAL restarts 105 to 69 per run, CPU and memory
+  the same; p95 6 to 13 ms and POST p99 33-39 to 47-51 ms (the commit wait), p99 23-31 vs 25-29 ms.
+  With the docker disk capped at 25 MB/s (which reproduces the rig's 290,000 line on the previous
+  build): p99 596 / 720 to 180 / 207 ms, POST p99 1,445 / 1,474 to 338 / 334 ms, max 1.7-2.3 s to
+  0.56-0.71 s, because the write demand falls under the cap and the log no longer sits at `WAL_MAX`
+  waiting for a copy the disk cannot finish. 280,000 for 300 s with the burner: p99 6 to 21 ms (POST
+  p99 13-15 to 24 ms), max and errors unchanged (0).
 - **Sends go through io_uring**, one in flight per connection so responses stay in order (later ones
   queue behind it). Each send owns a copy of its bytes, so the arena is reused immediately and a slow
   reader can never pin it. Short sends resubmit the rest. Closing a connection cancels its pending

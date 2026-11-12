@@ -25,7 +25,7 @@ SQLITE_FLAGS="-DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 -DSQLITE_
   -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_USE_ALLOCA -DHAVE_USLEEP=1 -DHAVE_FDATASYNC=1"
 # Profile-guided build: an instrumented binary serves a request mix against a synthetic database it
 # creates (train.c, no challenge data), then the real binary is compiled with that profile.
-CC="gcc -O3 $MARCH -flto -fno-plt -w $SQLITE_FLAGS -Ideps/$SQLITE -Ideps/$URING/src/include
+CC="gcc -O3 $MARCH ${CFLAGS_EXTRA:-} -flto -fno-plt -w $SQLITE_FLAGS -Ideps/$SQLITE -Ideps/$URING/src/include
   server.c deps/$URING/src/liburing.a -lpthread -lm -o bin/server -fprofile-dir=$PWD/deps/pgo"
 rm -rf deps/pgo
 $CC -DPGO_TRAIN -fprofile-generate -fprofile-update=single

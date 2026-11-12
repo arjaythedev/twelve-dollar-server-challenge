@@ -21,6 +21,7 @@
 #define BUFFER_SIZE 512 /* most requests fit; a small buffer drains more sockets per MB than a 2 KB one */
 #define ACCEPT_DEPTH 512 /* 64 per ring let the accept queues fill (32k) during a 5k conn/s ramp */
 #define REQUESTS_PER_PASS 512 /* requests handed to V per pass; other completions are not capped */
+#define HELD_MAX_MS 800 /* a held request this old goes before fresh completions */
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
 #define TASKRUN_ROUNDS 64 /* 64 enters of up to 20 items: about 1,280 completions per ring per pass */
@@ -129,6 +130,7 @@ static void td_want_input(struct td_ring *r, int slot)
     if (c->pending_len) {
         c->operation = RECV;
         c->queued = 1;
+        c->recv_ms = (uint32_t)r->now; /* held input ages from here, for td_deliver and QUICKACK */
         c->next = -1;
         if (r->deliver_tail < 0) r->deliver_head = slot;
         else r->clients[r->deliver_tail].next = slot;
@@ -473,6 +475,28 @@ static void td_sleep(struct td_net *net, const struct timespec *timeout)
     }
 }
 
+/* td_deliver hands held requests to V, oldest first, while the head is at least min_age ms old. */
+static int td_deliver(struct td_ring *r, int i, struct td_event *events, int count, int capacity,
+                      int *requests, int quota, uint32_t min_age)
+{
+    while (r->deliver_head >= 0 && *requests < quota && count < capacity) {
+        int slot = r->deliver_head;
+        struct td_client *c = &r->clients[slot];
+        if ((uint32_t)r->now - c->recv_ms < min_age) break;
+        r->deliver_head = c->next;
+        if (r->deliver_head < 0) r->deliver_tail = -1;
+        c->queued = 0;
+        c->operation = APPLICATION;
+        /* buffer -2: td_net_release frees the held input */
+        ++*requests;
+        events[count++] = (struct td_event){ .kind = 2, .id = i * SLOTS + slot, .data = c->pending,
+                                             .len = (int)c->pending_len, .buffer = -2 };
+        c->pending = NULL;
+        c->pending_len = 0;
+    }
+    return count;
+}
+
 int td_net_next(struct td_net *net, struct td_event *events, int capacity, int timeout_ms)
 {
     assert(capacity > 0);
@@ -489,22 +513,11 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             td_schedule(r, now);
             td_submit(net, r);
             /* Only requests are budgeted: accepts, sends and closes are cheap for V, and leaving
-             * them in the CQ lets the accept queues and socket buffers fill. */
+             * them in the CQ lets the accept queues and socket buffers fill. Held requests already
+             * missed the 40 ms delayed-ACK timer, so fresh completions go first and get their ACK
+             * on the reply; only held requests older than HELD_MAX_MS go before them. */
             int quota = requests + REQUESTS_PER_PASS / RINGS;
-            while (r->deliver_head >= 0 && requests < quota && count < capacity) {
-                int slot = r->deliver_head;
-                struct td_client *c = &r->clients[slot];
-                r->deliver_head = c->next;
-                if (r->deliver_head < 0) r->deliver_tail = -1;
-                c->queued = 0;
-                c->operation = APPLICATION;
-                /* buffer -2: td_net_release frees the held input */
-                ++requests;
-                events[count++] = (struct td_event){ .kind = 2, .id = i * SLOTS + slot, .data = c->pending,
-                                                     .len = (int)c->pending_len, .buffer = -2 };
-                c->pending = NULL;
-                c->pending_len = 0;
-            }
+            count = td_deliver(r, i, events, count, capacity, &requests, quota, HELD_MAX_MS);
             struct io_uring_cqe *cqe;
             unsigned head, consumed = 0;
             io_uring_for_each_cqe(&r->ring, head, cqe) {
@@ -525,6 +538,7 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
                 ++consumed;
             }
             io_uring_cq_advance(&r->ring, consumed);
+            count = td_deliver(r, i, events, count, capacity, &requests, quota, 0);
             internal |= consumed != 0;
             pending |= r->ready_head >= 0 || io_uring_sq_ready(&r->ring) != 0;
             if (r->retry_head >= 0 && r->retry_at < wake) wake = r->retry_at;

@@ -714,7 +714,10 @@ probe on p99, 1.80 s / 2.71 s / 25.6 s). Still below 276,000, so the row stays a
 562 ms, 0 errors; 250k, 260k and 280k failed the 2-minute probe on p99, 1.46 s / 1.87 s / 5.02 s). Still below 276,000,
 so the row stays at #369. Re-run at `d57b119` (2026-11-12: ring-0 wait target 4 → 2) held **238,000** at 83 % CPU
 (23,047 req/s, p99 335 ms, 0 errors; 250k passed the 2-minute probe but failed the 5-minute hold on p99, 1.21 s; 260k
-and 280k failed the 2-minute probe on p99, 3.17 s / 8.09 s). Still below 276,000, so the row stays at #369.
+and 280k failed the 2-minute probe on p99, 3.17 s / 8.09 s). Still below 276,000, so the row stays at #369. Re-run at
+`890d528` (2026-11-12: ring-0 wait target 2 → 4, checkpoint diagnostics behind a build tag that is off by default) held
+**250,000** at 85 % CPU (24,090 req/s, p99 602 ms, 0 errors; 260k and 280k failed the 2-minute probe on p99, 2.09 s /
+4.72 s). Still below 276,000, so the row stays at #369.
 go-gnet-kaikegm is now scored at its follow-up #180 (`372538d`, was 65,000 at #48): it closes the oldest idle
 connections past 55k open, so it no longer hits the limit at 80–93k (88,000 held at 77 % CPU, CPU-bound: 93k failed the
 5-minute hold on p99), but a fast ramp to 120k/160k still fills the fd table and the process exits the same way (89–94 %

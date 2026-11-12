@@ -30,7 +30,7 @@ const (
 	bufSize        = 2048 // receive buffer; a longer request is read in more than one piece
 	bufCount       = 1024 // receive buffers per ring
 	maxRings       = 16
-	waitMin        = 2       // coalesce a small group within the bounded idle wait
+	waitMin        = 4       // coalesce a small group within the bounded idle wait
 	waitNs         = 1000000 // bound idle waits before polling the other rings
 	readsPerPass   = 16384
 	answersPerPass = 2048

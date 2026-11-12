@@ -1,6 +1,7 @@
 #include "store.h"
 #include "read_plan.h"
 #include "checkpoint.h"
+#include "diagnostics.h"
 #include "sqlite/sqlite3.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,7 @@ struct hkn_store {
   hkn_result result;
   hkn_read_plan *reader;
   hkn_checkpoint *checkpoint;
+  HKN_DIAG(hkn_diagnostics diagnostics;)
   int wal_frames, checkpoint_sent;
   char error[256];
   int transaction, poisoned;
@@ -69,6 +71,7 @@ void hkn_disconnect(hkn_store *s) {
   if (!s) return;
   hkn_plan_release(s->reader);
   hkn_checkpoint_free(s->checkpoint);
+  HKN_DIAG(hkn_diag_flush(&s->diagnostics, "main", hkn_diag_now().wall, 1);)
   for (int i = 0; i < QUERY_COUNT; ++i) sqlite3_finalize(s->statement[i]);
   sqlite3_close(s->connection);
   free(s);
@@ -232,9 +235,16 @@ int hkn_vote(hkn_store *s, int64_t user, int64_t post) {
 }
 
 int hkn_finish(hkn_store *s) {
+  HKN_DIAG(hkn_diag_pass(&s->diagnostics);)
   hkn_plan_end(s->reader);
   if (!s->transaction) return 0;
+  HKN_DIAG(int attempted = !s->poisoned;
+           hkn_diag_clock commit_started = hkn_diag_now();)
   int bad = s->poisoned || execute(s, COMMIT_WRITE);
+  HKN_DIAG(if (attempted) {
+    hkn_diag_record(&s->diagnostics, HKN_COMMIT, commit_started, hkn_diag_now());
+    if (bad) ++s->diagnostics.commit_errors;
+  })
   if (bad && !sqlite3_get_autocommit(s->connection)) execute(s, ABORT_WRITE);
   if (!sqlite3_get_autocommit(s->connection)) {
     s->poisoned = 1;
@@ -242,6 +252,7 @@ int hkn_finish(hkn_store *s) {
   }
   s->transaction = 0;
   s->poisoned = 0;
+  HKN_DIAG(if (s->wal_frames > s->diagnostics.wal_max) s->diagnostics.wal_max = s->wal_frames;)
   if (bad || !s->checkpoint) return bad ? -1 : 0;
   // WAL growth is observed only after durable commit, with all read cursors
   // closed. Signal at coarse frame intervals rather than on every request.
@@ -255,8 +266,18 @@ int hkn_finish(hkn_store *s) {
   if (s->wal_frames >= 65536) {
     // A bounded-growth fallback waits outside any transaction, then lets SQLite
     // restart the WAL. This also excludes racing checkpoint calls on the worker.
+    HKN_DIAG(hkn_diag_clock started = hkn_diag_now();)
     int code = hkn_checkpoint_wait(s->checkpoint);
-    if (code == SQLITE_OK) code = sqlite3_wal_checkpoint_v2(s->connection, "main", SQLITE_CHECKPOINT_RESTART, NULL, NULL);
+    HKN_DIAG(hkn_diag_record(&s->diagnostics, HKN_WORKER_WAIT, started, hkn_diag_now());)
+    if (code == SQLITE_OK) {
+      int *log = NULL, *done = NULL;
+      HKN_DIAG(int log_frames = -1, done_frames = -1;
+               log = &log_frames; done = &done_frames;
+               started = hkn_diag_now();)
+      code = sqlite3_wal_checkpoint_v2(s->connection, "main", SQLITE_CHECKPOINT_RESTART, log, done);
+      HKN_DIAG(hkn_diag_record(&s->diagnostics, HKN_RESTART, started, hkn_diag_now());
+               hkn_diag_checkpoint(&s->diagnostics, code, log_frames, done_frames);)
+    }
     if (code != SQLITE_OK && code != SQLITE_BUSY) return failed(s, code);
     if (code == SQLITE_OK) { s->wal_frames = 0; s->checkpoint_sent = 0; }
   }

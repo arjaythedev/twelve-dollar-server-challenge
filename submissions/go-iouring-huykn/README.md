@@ -149,6 +149,28 @@ cp ../../seed/feed.db /tmp/huykn-contract.db
 /tmp/huykn-store-test /tmp/huykn-contract.db
 ```
 
+Build optional stall diagnostics with `bash build.sh -tags diagnostics`, then run
+`bash start.sh`. Both modes produce `bin/server`; `bash build.sh` restores the normal build.
+Normal builds compile out the counters, clock reads and logging. The diagnostic
+build writes cumulative `hkn_diag` records to stderr every 60 seconds while
+active and on clean database close. Forced termination can lose the last interval.
+It measures COMMIT, worker wait, RESTART and PASSIVE wall/thread CPU nanoseconds,
+counts and maximum wall time, plus observed WAL frames and checkpoint outcomes.
+`complete` means all reported frames were copied, not that a busy RESTART reset
+the WAL; `unknown` includes errors and invalid frame outputs. `log_last` and
+`done_last` are SQLite's latest frame outputs; `log_decreases` counts decreases
+between observations. WAL maxima are sampled, not file-size measurements.
+
+`pass` measures intervals between existing commit-boundary calls, including idle
+waits and response processing; it is not a request latency or process CPU metric.
+Each thread owns its counters. No extra cgo call is made per request. Diagnostic
+clock reads and logging add overhead, so use plain builds for acceptance scores.
+Queue sizes are not collected. Validate both C build modes, including pinned
+readers, rollback and the growth barrier, with disposable backups:
+
+```sh
+python3 testdata/check-diagnostics.py ../../seed/feed.db
+```
 
 ## Credits
 

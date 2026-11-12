@@ -51,9 +51,12 @@
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 250 ms. After each pass the thread drops the database file's pages from the kernel's cache (the server reads
-  through SQLite's own page cache), and the WAL's copied frames too (no reader goes back to them), so a WAL that grows
-  while the disk is slow doesn't fill memory.
+  most 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
+  reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
+  of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes
+  started writeback of every page each of them wrote, a hot index page once per pass; left dirty until that sync, each
+  page is written once, and the disk got about 60 % fewer write requests per request on the test box.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 256 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. Inserts bind `created_at` in the column default's format

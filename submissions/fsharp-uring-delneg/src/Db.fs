@@ -822,9 +822,14 @@ type Checkpointer(path: string, nice: int) =
             let t0 = Diagnostics.Stopwatch.GetTimestamp()
             let c0 = Native.threadCpuUs ()
             let r = if cdb <> 0n then sqlite3_wal_checkpoint_v2 (cdb, main, CHECKPOINT_PASSIVE, &log, &done') else 14
-            // the pass synced what it wrote and the server reads from its own page cache: the kernel's copy would only
-            // make it reclaim, on the one CPU, when memory gets short
-            if dropFd >= 0 then Native.posix_fadvise (dropFd, 0L, 0L, 4) |> ignore // POSIX_FADV_DONTNEED
+            // SQLite syncs the database only at the end of a pass that copied every frame in the WAL, i.e. when no
+            // commit added frames while it ran (writes held): then the WAL still ends where the pass stopped. Then every
+            // page is clean and the server reads from its own page cache: the kernel's copy goes, so it never has to
+            // reclaim it on the one CPU when memory gets short. After a pass that didn't catch up, the pages it wrote
+            // stay dirty until that sync, which writes each page once however many passes wrote it (a drop here would
+            // start writing them all back after every pass, and fail to drop the ones still being written).
+            if dropFd >= 0 && r = 0 && done' > 0 && done' = log && walFrames = done' then
+                Native.posix_fadvise (dropFd, 0L, 0L, 4) |> ignore // POSIX_FADV_DONTNEED
             // the WAL frames the pass copied are synced and never read again (readers start past them): out of the cache
             // too, so a WAL that grows while the disk is slow doesn't fill memory
             if walFd < 0 && cdb <> 0n then walFd <- Native.``open`` (z (path + "-wal"), 0x80000) // kept open, as above

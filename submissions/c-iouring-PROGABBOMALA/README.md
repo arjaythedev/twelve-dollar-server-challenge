@@ -54,9 +54,15 @@ batch in one SQLite transaction and then sends the answers.
 - **Feed.** 20 ids from `posts_created_at_id_idx`, then the rows in ascending id order (SQLite
   steps to the next cell instead of searching again), and one scan of `likes_post_id_idx` for all
   the like counts.
-- **WAL.** PASSIVE checkpoints from the second thread (nice 19). When the log reaches 4096 frames
-  the thread copies most of it, then POSTs are held for a moment (250 ms max, GETs continue) so
-  the rest can be copied and the next write restarts the log from the beginning.
+- **WAL.** PASSIVE checkpoints off the request thread. When the log reaches 4096 frames a nice 19
+  thread copies it twice and syncs the database file after each copy, while writes go on. Then
+  POSTs are held for a moment (250 ms max, GETs continue) and a second thread at normal priority
+  copies the few frames left, so the next write restarts the log from the beginning. The sync
+  before the hold matters: a PASSIVE copy that doesn't reach the end of the log leaves its pages
+  unsynced, and the held copy would have to flush the whole cycle while writes wait.
+- **WAL file cut back.** `journal_size_limit` is 1 MiB, so the first commit after a restart
+  truncates the log. Otherwise the next cycle overwrites the old file in 4120-byte frames and a
+  block that left the page cache is read from disk inside COMMIT.
 - No printf in the request path.
 
 `RING_SLOTS` and `CKPT_FRAMES` are env vars I use for testing with small values. `start.sh` does
@@ -70,6 +76,8 @@ not set them.
 - Rings are created at startup instead of during the ramp.
 - Bounded reads after a burst and drain first (before, all the ended receives were armed again
   together and reading stopped at the answer limit).
+- Checkpoints: database synced before the write hold, the held copy on a normal priority thread,
+  WAL file cut back after each restart.
 - JWT signature compared in constant time.
 
 ## Credits
@@ -83,6 +91,9 @@ Code is written from scratch, but these ideas come from other submissions:
   payload fetch, index seek, like range count), sending from shared arenas with `MSG_WAITALL`,
   header written in front of the body
 - #250 c-iouring-shivanshthapliyal: entering a ring only when `IORING_SQ_TASKRUN` is set
+- #388 / #390 asm-btree-ninhnv: syncing the database before the write hold, the held copy on a
+  normal priority thread, and `journal_size_limit` with the reason for it (its README has the
+  measurements)
 
 ## Build
 

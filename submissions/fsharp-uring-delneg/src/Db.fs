@@ -25,10 +25,13 @@ let private sqlPost =
 
 /// SQLite's unix-excl VFS: the process holds the file's lock for its life, and the WAL index lives in its own memory,
 /// shared by its two connections (no -shm file, no file locks per transaction). VFS=unix for the default one.
-let private vfs =
+let private vfsName =
     match Environment.GetEnvironmentVariable "VFS" with
-    | null | "" -> z "unix-excl"
-    | v -> z v
+    | null | "" -> "unix-excl"
+    | v -> v
+/// WALBUF=0: the loop's WAL writes go straight to unix-excl, one pwrite per frame header and one per page (Vfs.fs)
+let walBuf = vfsName = "unix-excl" && Environment.GetEnvironmentVariable "WALBUF" <> "0"
+let mutable private vfs = z vfsName
 
 let private chunkMB = match Int32.TryParse(Environment.GetEnvironmentVariable "CHUNK_MB") with | true, v when v > 0 -> v | _ -> 0
 
@@ -49,6 +52,13 @@ let mutable walFrames = 0
 [<UnmanagedFunctionPointer(CallingConvention.Cdecl)>]
 type private WalHook = delegate of nativeint * nativeint * nativeint * int -> int
 let private walHook = WalHook(fun _ _ _ frames -> walFrames <- frames; 0)
+
+/// failed writes, commits and BEGINs since start (each logged with SQLite's extended code: the first 20, then every 1000th)
+let mutable dbErrors = 0L
+let private logErr (what: string) (rc: int) =
+    dbErrors <- dbErrors + 1L
+    if dbErrors <= 20L || dbErrors % 1000L = 0L then
+        eprintfn "sqlite %s failed: rc %d extended %d %s (%d so far)" what rc (sqlite3_extended_errcode db) (errmsg db) dbErrors
 
 let private exec (sql: string) =
     let rc = sqlite3_exec (db, z sql, 0n, 0n, 0n)
@@ -608,6 +618,7 @@ let create (uid: int64) (body: nativeint) (bodyLen: int) (created: byref<byte[]>
     sqlite3_bind_text (sCreate, 2, body, bodyLen, 0n) |> ignore // SQLITE_STATIC: the arena is pinned and kept until the reset
     sqlite3_bind_text (sCreate, 3, Marshal.UnsafeAddrOfPinnedArrayElement(t, 0), 24, 0n) |> ignore
     let rc = sqlite3_step_commit sCreate
+    if rc <> DONE then logErr "insert post" rc
     sqlite3_reset sCreate |> ignore
     if rc = DONE then sqlite3_last_insert_rowid db else -1L
 
@@ -618,6 +629,7 @@ let like (uid: int64) (pid: int64) =
     sqlite3_bind_int64 (sLike, 2, pid) |> ignore
     sqlite3_bind_text (sLike, 3, Marshal.UnsafeAddrOfPinnedArrayElement(t, 0), 24, 0n) |> ignore
     let rc = sqlite3_step_commit sLike
+    if rc <> DONE then logErr "insert like" rc
     sqlite3_reset sLike |> ignore
     if rc <> DONE then -1
     elif sqlite3_changes db = 1 then 1
@@ -637,14 +649,19 @@ let lastError () = errmsg db
 let begin' () =
     let rc = sqlite3_step sBegin
     sqlite3_reset sBegin |> ignore
+    if rc <> DONE then logErr "BEGIN" rc
     rc = DONE
 
 /// true when committed
 let commit () =
     endCursors ()
+    if walBuf then Vfs.enter ()
     let rc = sqlite3_step_commit sCommit
+    let f = if walBuf then Vfs.leave () else OK
+    if rc <> DONE then logErr "COMMIT" rc
+    elif f <> OK then logErr "WAL write" f
     sqlite3_reset sCommit |> ignore
-    rc = DONE
+    rc = DONE && f = OK
 
 let rollback () =
     endCursors ()
@@ -714,7 +731,12 @@ let private selfTest () =
 /// Opens the database (SQLITE_PATH). cacheKB: SQLite's page cache limit.
 let openDb (path: string) (cacheKB: int) (warm: bool) =
     let mutable h = 0n
+    // PCACHE=0: pcache1 as it is
+    let pc = Environment.GetEnvironmentVariable "PCACHE" <> "0" && Pcache.install ()
     if sqlite3_initialize () <> OK then failwith "sqlite3_initialize"
+    if walBuf then
+        if Vfs.register "fsu-excl" "unix-excl" then vfs <- z "fsu-excl"
+        else eprintfn "WAL write gathering off: no unix-excl VFS"
     if sqlite3_open_v2 (z path, &h, OPEN_READWRITE ||| OPEN_NOMUTEX, vfs) <> OK then failwithf "open %s: %s" path (errmsg h)
     db <- h
     exec "PRAGMA journal_mode=WAL"
@@ -732,6 +754,7 @@ let openDb (path: string) (cacheKB: int) (warm: bool) =
         let mutable bytes = chunkMB <<< 20
         sqlite3_file_control (db, z "main", 6, &bytes) |> ignore
     exec "SELECT count(*) FROM sqlite_schema"
+    if pc then Pcache.enable (int (scalar "PRAGMA page_size"))
     sHealth <- prep "SELECT 1"
     sFeed <- prep sqlFeed
     sPost <- prep sqlPost

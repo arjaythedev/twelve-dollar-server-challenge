@@ -178,4 +178,7 @@ let z (s: string) =
     let b = Text.Encoding.UTF8.GetBytes s
     Array.append b [| 0uy |]
 
+[<DllImport(L, ExactSpelling = true)>]
+extern int sqlite3_extended_errcode(nativeint db)
+
 let errmsg (db: nativeint) = Marshal.PtrToStringUTF8(sqlite3_errmsg db)

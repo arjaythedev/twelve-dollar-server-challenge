@@ -30,7 +30,7 @@ let private lifoAge = uint32 (env "LIFOAGE" 8000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
-let private ckPass = env "CKPASS" 16000
+let private ckPass = env "CKPASS" 4000
 let private ckHoldAt = env "HOLD" 16384
 let private batchN = env "BATCH" 128
 let private batchWaitUs = env "BWAIT" 1000
@@ -40,7 +40,7 @@ let private poolMax = env "POOLMAX" 4096
 let private cqSize = env "CQ" 65536
 let private statsOn = env "STATS" 0 = 1
 let private taskrunFlag = env "TASKRUN_FLAG" 1 = 1
-let private holdRem = env "HOLDREM" 2000 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
+let private holdRem = env "HOLDREM" 0 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
 let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frames (1 GB of WAL), hold after any pass
 let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
 
@@ -323,6 +323,9 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable stPasses = 0L
     let mutable stAns = 0L
     let mutable stWalk = 0L
+    let mutable stCommitUs = 0L
+    let mutable stCommitMax = 0L
+    let mutable stCommits = 0L
     let mutable lastStats = 0L
     let mutable lastUtc = 0L
 
@@ -953,9 +956,15 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             if wrote then lastWriteMs <- passMs
             nHeldNow <- wqLen
             let mutable ok = true
+            let c0 = if statsOn then Diagnostics.Stopwatch.GetTimestamp() else 0L
             if txn && not (Db.commit ()) then
                 ok <- false
                 Db.rollback ()
+            if statsOn && txn then
+                let us = int64 (Diagnostics.Stopwatch.GetElapsedTime(c0).TotalMicroseconds)
+                stCommitUs <- stCommitUs + us
+                stCommits <- stCommits + 1L
+                if us > stCommitMax then stCommitMax <- us
             elif not txn then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
             if not ok && wrote then
                 // never acknowledge an uncommitted write: every connection of this pass closes without an answer
@@ -1097,9 +1106,13 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         for k in 0 .. nrings - 1 do
             live <- live + R.[k].Live
             ovf <- ovf + R.[k].Ring.CqOverflow
-        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d"
+        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d"
             (now - started) live accErr lastAccErr ovf nobufs nrearm maxBatch pool.Count (Db.cacheKB ()) stPasses stAns
             Db.walFrames (GC.CollectionCount 0) (GC.CollectionCount 2) (GC.GetTotalMemory false >>> 20) stWalk wqLen
+            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked
+        stCommits <- 0L
+        stCommitUs <- 0L
+        stCommitMax <- 0L
         stWalk <- 0L
         maxBatch <- 0
         stPasses <- 0L

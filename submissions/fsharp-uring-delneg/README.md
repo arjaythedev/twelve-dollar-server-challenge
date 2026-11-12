@@ -47,24 +47,34 @@
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
   waits without bound.
-- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 16,000 new frames the loop
+- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
-  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind. Past 16,384 frames, passes go on
-  while writes flow until one leaves at most 2,000 frames uncopied. Only then do writes wait (reads go on) for one
-  short pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at most 250 ms; past
-  262,144 frames writes are held after any pass.
-  A pass costs little CPU (about 20 ms) but writes scattered pages of the indexes to the database file, then fsyncs:
-  250 ms to seconds on a VPS disk, longer while the CPU is busy. Holding writes through a whole pass made them wait that
-  long. Long passes also copy a page that many writes touched once: per request, the disk got about half the write
-  requests it got with passes every 4,000 frames.
-  After each pass the thread drops the database file's pages from the kernel's cache (the server reads through
-  SQLite's own page cache), and the WAL's copied frames too (no reader goes back to them), so a WAL that grows while
-  the disk is slow doesn't fill memory.
+  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
+  (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
+  most 250 ms. After each pass the thread drops the database file's pages from the kernel's cache (the server reads
+  through SQLite's own page cache), and the WAL's copied frames too (no reader goes back to them), so a WAL that grows
+  while the disk is slow doesn't fill memory.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 256 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. Inserts bind `created_at` in the column default's format
   and take the id from `sqlite3_last_insert_rowid` (no `RETURNING`); a like is one `INSERT … SELECT … WHERE EXISTS
   … ON CONFLICT DO NOTHING`, and `sqlite3_changes` tells a new like from a repeat or a missing post.
+- **One write per commit.** A VFS of its own over `unix-excl` (SQLite's public VFS interface, the pattern of its own
+  vfstrace and multiplex shims) changes only the WAL file's writes. SQLite writes a transaction's frames one after
+  another, each as two writes (its 24-byte header, then the page): thousands of `pwrite` calls a second under load.
+  While the loop runs `COMMIT`, writes that continue where the last one ended go into a buffer, which goes to the file
+  when the commit frame's page arrives (its header's database-size field is non-zero), inside SQLite's own call. So the
+  commit is in the kernel before SQLite publishes it in the WAL index and before `COMMIT` returns, and the buffer is
+  empty whenever SQLite isn't inside that call. Any other write, and every sync, truncate and close, writes the buffer
+  first. The unix VFS hands at most 131,071 bytes to one `pwrite` (and reports a longer write as a full disk), so a
+  large commit goes out in pieces that size. Reads, locks and the database file are `unix-excl`'s.
+- **Page cache.** SQLite's own page cache (pcache1) through `SQLITE_CONFIG_PCACHE2`, with one method of its own,
+  `xRekey`. A B-tree split that puts its new pages in order swaps two of them through a temporary page number, the
+  lock-byte page's (262,145 for 4 KB pages), and pcache1 keeps the largest page number it has held until a truncate
+  walks the cache. So after each such swap, the next commit's truncate (drop the pages past the end of the file)
+  scanned the whole hash table, tens of thousands of slots, to find nothing: 2.5 % of the server's CPU under a stream
+  of likes. Here the page waits out the swap under page number 0, which SQLite never gives a page, and that walk is
+  gone. Fetches, truncates and everything else are pcache1's; `xRekey` runs only inside an `INSERT`'s split.
 
 ## Reads walk SQLite's B-trees
 
@@ -96,6 +106,8 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 | `src/Server.fs` | the loop: rings, accept, receive, send, close, HTTP, the batch and its transaction, held writes, checkpoint holds |
 | `src/Db.fs` | statements, writes, record decoding, the feed and post reads, the self-test, the checkpoint thread |
 | `src/Sqlite.fs` | P/Invoke declarations for SQLite's API and its B-tree functions |
+| `src/Vfs.fs` | the VFS that writes each commit's WAL frames with one `pwrite` |
+| `src/Pcache.fs` | pcache1 with an `xRekey` of its own |
 | `src/Json.fs`, `src/Jwt.fs` | response JSON, HS256 |
 | `src/Native.fs`, `src/Program.fs` | libc calls, startup |
 
@@ -114,7 +126,8 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
 `LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 10), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
-(`unix-excl`), `STATS` (1: a line a second on stderr).
+(`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
+line a second on stderr).
 
 ## Credits
 
@@ -122,6 +135,8 @@ The loop's policies (accept high-water marks, bounded re-arms, answers per pass,
 window, checkpoint holds) come from the author's [objc-uring-delneg](../objc-uring-delneg), and `Ring.fs` and `Jwt.fs`
 from the author's F# entries. Ideas from other entries: the `unix-excl` VFS and eight `SO_REUSEPORT` listeners from
 [rust-iouring-kensac](../rust-iouring-kensac), and calling SQLite's `sqlite3Btree*` functions on the unmodified
-amalgamation built with `SQLITE_PRIVATE` defined empty from [swift-iouring-akbashev](../swift-iouring-akbashev).
+amalgamation built with `SQLITE_PRIVATE` defined empty from [swift-iouring-akbashev](../swift-iouring-akbashev),
+and writing each commit's WAL frames with one `pwrite` at the commit frame, and the page cache's truncate walk, from
+[c-iouring-pavlyhalim](../c-iouring-pavlyhalim).
 
 MIT license (the repository's).

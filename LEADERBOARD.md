@@ -597,7 +597,10 @@ on p95/p99 (2,285 / 2,524 ms at 97 % CPU).
 **`f2f9227`** (held, not merged: it didn't beat the merged row): **253,000** (24,302 req/s, p95 285.6 / p99 665.4 ms,
 0 err, 73 % CPU, 27 µs/req, 1,216 MB, 2026-11-12). 280,000 passed the 2-minute probe but failed the 5-minute hold on
 p99 (1.76 s at 83 % CPU, 0 errors), 266,000 failed the 5-minute hold on p99 (3.47 s at 79 % CPU), and 320,000 failed the 2-minute probe (0.59 % connection
-refused, 94 % CPU). #402's head moved to `9caa0a5` during the run; that commit is queued for its own run.
+refused, 94 % CPU). #402's head moved to `9caa0a5` during the run; that commit was then scored too: **270,000**
+(25,718 req/s, p95 366.2 / p99 961.5 ms, 0 err, 78 % CPU, 27 µs/req, 1,482 MB, 2026-11-12), level with the merged
+row, so not merged (280,000 failed the 2-minute probe on p99, 1.68 s at 80 % CPU). The head moved again to `42abbf3`
+during that run; it is queued for its own run.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

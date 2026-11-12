@@ -949,8 +949,10 @@ fn listener(ip: std::net::Ipv4Addr, port: u16) -> io::Result<RawFd> {
         if libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_REUSEPORT, &one as *const _ as *const _, sz) < 0 {
             return Err(io::Error::last_os_error());
         }
-        // Accepted sockets inherit TCP_NODELAY.
+        // Accepted sockets inherit TCP_NODELAY and the congestion control algorithm. Reno is
+        // enough for one-request flows and is cheaper per ACK than CUBIC.
         libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_NODELAY, &one as *const _ as *const _, sz);
+        libc::setsockopt(fd, libc::IPPROTO_TCP, libc::TCP_CONGESTION, b"reno\0".as_ptr() as *const _, 5);
         let addr = libc::sockaddr_in {
             sin_family: libc::AF_INET as libc::sa_family_t,
             sin_port: port.to_be(),

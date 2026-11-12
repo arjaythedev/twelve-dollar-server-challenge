@@ -71,6 +71,9 @@ The buffer ring is charged to `RLIMIT_MEMLOCK`. Registration tries 2,048 first a
 1,024 / 512 / 256 for that ring if the limit does not allow it, so a host with a small locked-memory
 limit still starts and serves; it just gets less burst protection.
 
+Accepted sockets inherit `TCP_NODELAY` and now `TCP_CONGESTION=reno` from the listener: a
+request/response flow does not need CUBIC, and Reno is cheaper per ACK.
+
 Everything else — accept with direct descriptors, 8 `SO_REUSEPORT` listeners and early ring
 switching, multishot receive into provided buffers, bounded single-shot reads after a burst, one
 send per connection, one SQLite transaction per pass with group commit, writes through SQL, no

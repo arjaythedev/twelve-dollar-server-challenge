@@ -103,7 +103,7 @@ static unsigned answers_left;
 
 static struct {
   uint64_t batches, cqes, reqs, accepts, closes, enobufs, reads, deferred, rq_max, ready_max, max_batch, cq_overflow, cancels;
-  uint64_t max_turn_ns, max_commit_ns;
+  uint64_t max_turn_ns, max_commit_ns, max_gap_ns; /* longest batch, longest commit, longest time outside a batch while busy */
 } S;
 static uint64_t reads_done; /* single-shot reads that returned data or EAGAIN */
 
@@ -589,6 +589,7 @@ static void flush_replies(int commit_failed) {
 /* ---------- housekeeping ---------- */
 
 static uint64_t T_reqs, T_accepts, T_closes;
+static long majflt_prev;
 static void stats(uint64_t dt_ns) {
   unsigned open = 0;
   fprintf(stderr, "rings open=");
@@ -605,7 +606,8 @@ static void stats(uint64_t dt_ns) {
           " total_reqs=%llu req/s=%.0f batches/s=%.0f avg_batch=%.1f max_batch=%llu accepts=%llu closes=%llu enobufs=%llu reads=%llu "
           "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
           "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
-          "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu\n",
+          "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu "
+          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu\n",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
@@ -614,7 +616,9 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)A.n_err, c_miss, ru.ru_maxrss / 1024, cpu, (double)S.max_turn_ns / 1e6, (double)S.max_commit_ns / 1e6,
           (unsigned long long)wal_pwrites, (double)A.db.bulk_max_ns / 1e6, (double)A.db.hold_max_ns / 1e6,
           (double)A.db.hold_total_ns / 1e6, (unsigned long long)A.db.n_hold_timeout, (unsigned long long)A.db.tail_frames_max,
-          (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max);
+          (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max, (double)S.max_gap_ns / 1e6, ru.ru_majflt - majflt_prev,
+          (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy);
+  majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
 }
@@ -857,12 +861,17 @@ int main(int argc, char **argv) {
   }
   if (ring_create(0) < 0) return 1;
   NR = 1;
+  /* The rings a full load needs are made now, while the box is idle: a ring is ~1 MB of
+   * physically contiguous kernel memory, and asking for that mid-ramp, with a gigabyte of socket
+   * slab fragmenting the memory, can stall the loop in compaction. */
+  long pre = env_long("PRE_CONNS", 330000);
+  while (NR < NR_MAX && (long)NR * (long)nslots < pre && ring_create(NR) == 0) NR++;
   prewarm();
   fprintf(stderr, "listening on %s:%s: up to %u rings x %u direct descriptors; cache %d KiB; code locked %zu KiB\n", host, port, NR_MAX,
           nslots, cache_kib, lock_code() >> 10);
   accept_policy();
 
-  uint64_t last_stats = now_ns();
+  uint64_t last_stats = now_ns(), te_prev = 0;
   unsigned last_cqes = 0;
   for (;;) {
     /* 1. the other rings: submit what the last batch queued and collect their completions */
@@ -878,8 +887,10 @@ int main(int argc, char **argv) {
     }
     /* 3. the batch */
     uint64_t t = now_ns();
+    if (last_cqes && te_prev && t - te_prev > S.max_gap_ns) S.max_gap_ns = t - te_prev; /* a busy wait should take ~1 ms */
     A.now = (int64_t)time(NULL);
     writes_ok = !A.db.writes_held;
+    if (writes_ok && db_begin_write(&A.db) < 0) writes_ok = 0; /* the tail thread is restarting the log: this batch reads only */
     answers_left = answers_per_pass;
     unsigned ncq = reap_all();
     run_ready(); /* oldest first: what earlier batches read */
@@ -901,6 +912,7 @@ int main(int argc, char **argv) {
     if (nrq - rq_head > S.rq_max) S.rq_max = nrq - rq_head;
     if (nready > S.ready_max) S.ready_max = nready;
     uint64_t te = now_ns();
+    te_prev = te;
     if (te - t > S.max_turn_ns) S.max_turn_ns = te - t;
     if (t - last_stats > STATS_NS) { stats(t - last_stats); last_stats = t; }
     if (stop_requested) {

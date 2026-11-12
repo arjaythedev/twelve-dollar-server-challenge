@@ -26,7 +26,7 @@ static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the l
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
 static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
-#define CKPT_FORCE 131072        /* last resort (512 MB): the loop checkpoints by itself */
+#define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
 #define CKPT_NICE 19
 
 enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
@@ -34,7 +34,8 @@ enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 struct db {
   sqlite3 *c;
   Btree *btree;
-  sqlite3_stmt *st_begin, *st_commit, *st_rollback, *st_health;
+  sqlite3_stmt *st_begin, *st_begin_imm, *st_commit, *st_rollback, *st_health;
+  uint64_t n_begin_busy; /* batches that found the write lock taken (the tail thread restarting the log) */
   sqlite3_stmt *st_ins_post, *st_ins_like, *st_post_exists;
   sqlite3_stmt *st_feed_ref, *st_post_ref;
   int in_tx;  /* the batch's transaction is open */
@@ -55,7 +56,8 @@ struct db {
   int writes_held; /* the tail is being copied: writes wait (reads go on) */
   uint64_t hold_t0;
   /* stats */
-  uint64_t n_ckpt, n_cycles, n_force, n_fallback, n_tail_short, n_passes_max, n_hold_timeout;
+  uint64_t n_ckpt, n_cycles, n_force, n_fallback, n_tail_short, n_passes_max, n_hold_timeout, n_tail_restart;
+  int tail_restarted; /* the tail thread restarted the log itself (its one-frame transaction) */
   uint64_t bulk_t0, bulk_max_ns, hold_max_ns, hold_total_ns, tail_frames_max;
 };
 
@@ -160,10 +162,12 @@ static int pcache_install(void) {
  * header. This shim keeps writes that continue exactly where the previous write on the WAL
  * ended in a buffer and writes the buffer with one pwrite when the commit frame's page arrives,
  * inside SQLite's own xWrite call, so the commit is in the kernel before SQLite updates the
- * wal-index and before COMMIT returns. Any other call on the file flushes the buffer first and
- * goes straight through, so the bytes and their order are SQLite's. Readers find frames only
- * through the wal-index, so none can see a buffered one. (After c-iouring-pavlyhalim #245 and
- * c-iouring-shivanshthapliyal #250.) */
+ * wal-index and before COMMIT returns. A write that does not continue the buffered run flushes
+ * it and starts a new one (it never bypasses the buffer: a frame header that did would lose its
+ * commit flag, and the page behind it would wait in user space after COMMIT returned); any other
+ * call on the file flushes the buffer first and goes straight through, so the bytes and their
+ * order are SQLite's. Readers find frames only through the wal-index, so none can see a
+ * buffered one. (After c-iouring-pavlyhalim #245 and c-iouring-shivanshthapliyal #250.) */
 #define WAL_FRAME_HDR 24
 #define WAL_BUF_CAP 0x1ffff /* the unix VFS passes at most 17 bits of a write's length */
 struct wfile {
@@ -197,11 +201,16 @@ static int wf_read(sqlite3_file *p, void *b, int n, sqlite3_int64 off) { WF_FLUS
 static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
   struct wfile *f = WF(p);
   if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
-  int append = off == f->last_end;
-  f->last_end = off + n;
-  if (f->len + n > WAL_BUF_CAP) WF_FLUSH(p);
-  if (!append || n > WAL_BUF_CAP || (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))) {
+  /* A write that does not continue the buffered run (the first after open, the first after
+   * another connection restarted the log, a header rewrite) starts a new run: the old one goes
+   * out first. It must not bypass the buffer, or a frame header would lose its commit flag and
+   * the page behind it would wait in user space after COMMIT returned. */
+  if (off != f->last_end || f->len + n > WAL_BUF_CAP) {
     WF_FLUSH(p);
+    f->commit = 0;
+  }
+  f->last_end = off + n;
+  if (n > WAL_BUF_CAP || (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))) {
     f->commit = 0;
     return f->real->pMethods->xWrite(f->real, b, n, off);
   }
@@ -319,19 +328,58 @@ struct ck_thread {
   int nice;
   int wal_fd;        /* the bulk thread's own descriptor on the log, for writeback kicks */
   int64_t wb_kicked; /* log offset up to which writeback has been started */
+  int uv;            /* the tail thread's user_version toggle: its restart transactions */
+  int last_frames;   /* log size after the tail thread's last commit (1 = it restarted the log) */
 };
+static int tail_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
+  (void)c; (void)name;
+  ((struct ck_thread *)ud)->last_frames = frames;
+  return SQLITE_OK;
+}
+/* The log is fully copied and writes are held: restart it from the tail thread with a one-frame
+ * transaction, so the header sync SQLite does on a restart (synchronous=NORMAL) lands here and
+ * never on the loop. The loop's reads go on meanwhile; they read the database file (read mark 0),
+ * which a restart does not disturb. A read that began earlier holds another mark and makes the
+ * attempt BUSY, so it is retried; if the hold ends first, the loop's next write restarts the log
+ * itself, as before. Returns 1 when the log restarted. */
+static int tail_restart(struct ck_thread *t) {
+  struct db *d = t->d;
+  for (int tries = 0; tries < 400 && atomic_load_explicit((_Atomic int *)&d->writes_held, memory_order_relaxed); tries++) {
+    t->last_frames = 0;
+    int rc = sqlite3_exec(t->c, t->uv ? "PRAGMA user_version=1" : "PRAGMA user_version=0", NULL, NULL, NULL);
+    if (rc == SQLITE_OK) { t->uv ^= 1; return t->last_frames == 1; }
+    if ((rc & 0xff) != SQLITE_BUSY) return 0;
+    usleep(250);
+  }
+  return 0;
+}
 /* Starts (does not wait for) the writeback of the log frames written since the last kick, so the
  * log's dirty pages reach the disk continuously instead of in one burst at the next fsync: the
  * tail's sync, which writes wait for, then finds little left. Runs on the bulk thread while idle. */
-static void wb_kick(struct ck_thread *t) {
-  struct db *d = t->d;
+static int wal_fd_open(struct ck_thread *t) {
   if (t->wal_fd < 0) {
     char p[512];
-    snprintf(p, sizeof p, "%s-wal", d->path);
+    snprintf(p, sizeof p, "%s-wal", t->d->path);
     t->wal_fd = open(p, O_RDONLY | O_CLOEXEC);
-    if (t->wal_fd < 0) return;
   }
-  int64_t end = 32 + (int64_t)atomic_load_explicit((_Atomic int *)&d->wal_frames, memory_order_relaxed) * (24 + 4096);
+  return t->wal_fd;
+}
+static int64_t wal_end(struct db *d) {
+  return 32 + (int64_t)atomic_load_explicit((_Atomic int *)&d->wal_frames, memory_order_relaxed) * (24 + 4096);
+}
+/* Before a pass: the pass reads the log's frames in page order, which is random in the file; if
+ * the box's memory pressure has evicted them (they are clean once written back), that is one disk
+ * seek per frame. A sequential read-ahead of the log first is what a disk does fastest, and it
+ * costs nothing for pages still cached. On this thread; the loop never waits for it. */
+static void wal_readahead(struct ck_thread *t) {
+  int64_t end = wal_end(t->d);
+  if (end > (int64_t)256 << 20) end = (int64_t)256 << 20; /* a log that long is a disk that cannot keep up: the pass reads the rest itself */
+  if (wal_fd_open(t) >= 0) (void)readahead(t->wal_fd, 0, (size_t)end);
+}
+static void wb_kick(struct ck_thread *t) {
+  struct db *d = t->d;
+  if (wal_fd_open(t) < 0) return;
+  int64_t end = wal_end(d);
   if (end < t->wb_kicked) t->wb_kicked = 0; /* the log restarted */
   if (end - t->wb_kicked < (int64_t)(64 * 4120)) return;
   if (sync_file_range(t->wal_fd, t->wb_kicked, end - t->wb_kicked, SYNC_FILE_RANGE_WRITE) == 0) t->wb_kicked = end;
@@ -355,9 +403,12 @@ static void *ck_main(void *arg) {
       }
     }
     pthread_mutex_unlock(&d->mu);
+    if (t->state == CK_BULK) wal_readahead(t);
     int nlog = -1, ndone = -2;
     int rc = sqlite3_wal_checkpoint_v2(t->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    int restarted = t->state == CK_TAIL && rc == SQLITE_OK && nlog > 0 && nlog == ndone && tail_restart(t);
     pthread_mutex_lock(&d->mu);
+    d->tail_restarted = restarted;
     d->ck_left = rc == SQLITE_OK && nlog >= ndone ? nlog - ndone : CKPT_FORCE;
     d->ck_nlog = nlog;
     d->n_ckpt++;
@@ -374,6 +425,7 @@ static int ck_start(struct db *d, const char *path, int state, int nice) {
   t->nice = nice;
   t->wal_fd = -1;
   if (db_open_conn(&t->c, path, 64) < 0) return -1;
+  if (state == CK_TAIL) sqlite3_wal_hook(t->c, tail_wal_hook, t);
   pthread_t th;
   pthread_attr_t a;
   pthread_attr_init(&a);
@@ -435,11 +487,13 @@ static void db_tick(struct db *d) {
       if (dt > d->hold_max_ns) d->hold_max_ns = dt;
       d->writes_held = 0;
     }
+    if (d->tail_restarted) d->n_tail_restart++;
     if (ckpt_log)
-      fprintf(stderr, "ckpt: cycle %llu: %d passes, tail %d frames, hold %.1f ms%s%s\n", (unsigned long long)d->n_cycles, d->ck_passes,
-              d->ck_tail_frames, (double)(now_ns() - d->hold_t0) / 1e6, clean ? "" : " TIMED OUT", d->ck_left ? " SHORT" : "");
+      fprintf(stderr, "ckpt: cycle %llu: %d passes, tail %d frames, hold %.1f ms%s%s%s\n", (unsigned long long)d->n_cycles, d->ck_passes,
+              d->ck_tail_frames, (double)(now_ns() - d->hold_t0) / 1e6, clean ? "" : " TIMED OUT", d->ck_left ? " SHORT" : "",
+              d->tail_restarted ? ", restarted by the tail thread" : "");
     if (clean) {
-      d->wal_frames = 0;
+      d->wal_frames = d->tail_restarted ? 1 : 0;
       d->ck_min_frames = ckpt_frames;
     } else { /* the log may not restart: the next cycle waits for half a log more, so a slow disk never gives back-to-back holds */
       d->ck_min_frames = d->wal_frames + ckpt_frames / 2;
@@ -451,6 +505,7 @@ static void db_tick(struct db *d) {
     /* The limit grows with the log: a log that has missed restarts (the disk made the last tails
      * slow) must restart before it reaches the inline last resort, whatever the sync costs. */
     uint64_t limit = hold_max_ns * (uint64_t)(1 + d->wal_frames / (2 * ckpt_frames));
+    if (limit > 2 * hold_max_ns) limit = 2 * hold_max_ns; /* never a hold a POST would count as a failure */
     if (d->writes_held && now_ns() - d->hold_t0 > limit) { /* a slow sync: writes resume, the log restarts next cycle */
       d->writes_held = 0;
       d->n_hold_timeout++;
@@ -514,7 +569,8 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
     return -1;
   }
   sqlite3_finalize(jm);
-  if (db_prep(d->c, &d->st_begin, "BEGIN") || db_prep(d->c, &d->st_commit, "COMMIT") || db_prep(d->c, &d->st_rollback, "ROLLBACK") ||
+  if (db_prep(d->c, &d->st_begin, "BEGIN") || db_prep(d->c, &d->st_begin_imm, "BEGIN IMMEDIATE") || db_prep(d->c, &d->st_commit, "COMMIT") ||
+      db_prep(d->c, &d->st_rollback, "ROLLBACK") ||
       db_prep(d->c, &d->st_health, "SELECT 1") ||
       db_prep(d->c, &d->st_ins_post, "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at") ||
       db_prep(d->c, &d->st_ins_like, "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING") ||
@@ -557,6 +613,23 @@ static inline int db_begin(struct db *d) {
   int rc = sqlite3_step(d->st_begin);
   sqlite3_reset(d->st_begin);
   if (rc != SQLITE_DONE) return -1;
+  d->in_tx = 1;
+  d->wrote = 0;
+  if (d->bt.ok && bt_open(&d->bt) < 0) {
+    fprintf(stderr, "btree: could not open cursors; reads use SQL\n");
+    d->bt.ok = 0;
+  }
+  return 0;
+}
+/* Opens a batch's transaction as a writer (BEGIN IMMEDIATE) when the batch may write. The lock is
+ * free unless the tail thread is just then restarting the log; then this returns -1 at once, the
+ * batch reads from a deferred transaction and its writes wait a batch. Without this, a restart
+ * committed between a batch's reads and its first write would make that write BUSY_SNAPSHOT. */
+static inline int db_begin_write(struct db *d) {
+  if (d->in_tx) return 0;
+  int rc = sqlite3_step(d->st_begin_imm);
+  sqlite3_reset(d->st_begin_imm);
+  if (rc != SQLITE_DONE) { d->n_begin_busy++; return -1; }
   d->in_tx = 1;
   d->wrote = 0;
   if (d->bt.ok && bt_open(&d->bt) < 0) {
@@ -620,7 +693,11 @@ static int db_feed(struct db *d, struct ob *o) {
     ob_post_row(o, d->st_feed_ref);
   }
   sqlite3_reset(d->st_feed_ref);
-  if (rc != SQLITE_DONE) return -1;
+  if (rc != SQLITE_DONE) {
+    static int printed;
+    if (printed < 8) { printed++; fprintf(stderr, "feed: %s\n", sqlite3_errmsg(d->c)); }
+    return -1;
+  }
   ob_lit(o, "]}");
   return 0;
 }

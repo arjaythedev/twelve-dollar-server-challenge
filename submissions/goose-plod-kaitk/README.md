@@ -8,8 +8,8 @@ no C: `app.goose` is the whole application, about 250 lines.
 | | |
 |---|---|
 | Language | [Goose](https://github.com/aardappel/goose) release `v2026.4`, which compiles to C; the official release, checked against its SHA-256 by `install.sh` |
-| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.11`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) (io_uring), at its `direct-descriptors` branch until a release has it |
-| SQLite | [goose-sqlite](https://github.com/kaitk/goose-sqlite), which builds SQLite 3.54.1's amalgamation, unmodified, into the program |
+| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.12`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.19` (io_uring) |
+| SQLite | [goose-sqlite](https://github.com/kaitk/goose-sqlite) `v0.0.4`, which builds SQLite 3.54.1's amalgamation, unmodified, into the program |
 | JWT | Plod's HS256 verifier, over [goose-hash](https://github.com/kaitk/goose-hash) `v0.0.4` |
 | C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`) |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
@@ -63,8 +63,20 @@ in another, with `bench/load.js`'s think times divided by 20 so that 4,000 users
 | this entry (`start.sh`) | 21.4 to 22.0 | 4.3 to 9.5 ms |
 | this entry before direct descriptors, 3 processes | 42.0 to 42.7 | 1.6 to 5.3 ms |
 
-These are not the box's numbers, and the box is x86-64. Scaled by the ratio to
-kensac, the entry estimates about 225,000 users.
+On x86-64, in Docker on WSL2 (Linux 6.18) on a Ryzen 7 5800X3D, the same setup, three
+alternating runs each:
+
+| Server | µs a request | user | kernel | p99 |
+|---|---:|---:|---:|---:|
+| rust-iouring-kensac | 27.2 to 27.5 | 4.6 to 4.7 | 22.5 to 22.9 | 1.9 to 2.3 ms |
+| this entry (`start.sh`) | 32.5 to 33.3 | 10.1 to 10.3 | 22.3 to 23.2 | 52 to 118 ms |
+
+Kernel time there is mostly Docker's bridge, the same for both. Most of the entry's user
+time is SQLite running the SQL, about 7.6 µs a request. The p99 comes from writes:
+without them it is 2 ms.
+
+These are not the box's numbers. Scaled by the ratio to kensac, the entry estimates
+between 225,000 and 260,000 users.
 
 ## Running it
 

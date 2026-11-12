@@ -2,10 +2,10 @@
 // SPEC.md's environment, and one worker that serves app.goose's routes.
 import std;
 import os;
-import http from "github.com/kaitk/goose-http@direct-descriptors";
+import http from "github.com/kaitk/goose-http@v0.5.19";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
-import plod from "github.com/kaitk/plod@v0.5.11";
-import sqlite from "../../../goose-sqlite-query";
+import plod from "github.com/kaitk/plod@v0.5.12";
+import sqlite from "github.com/kaitk/goose-sqlite@v0.0.4";
 import app;
 
 thread_fn worker(cfg: http::Config) {

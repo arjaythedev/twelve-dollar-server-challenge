@@ -577,6 +577,10 @@ Follow-up **#405** (`bb9d938`, `READ_MMAP_MB` default 0 → 128, i.e. `mmap_size
 probe but failed the 5-minute hold on p95/p99 (393 / 2,873 ms at 97 % CPU, 0 errors), 260,000 failed the 2-minute probe on
 p95/p99 (1,712 / 4,586 ms at 98 % CPU), 280,000 on p95/p99 (1,968 / 4,451 ms at 97 % CPU) and 320,000 on connection
 refused (80 % errors). Not merged (below the merged row).
+Follow-up **#407** (`38928a9`, cached `BEGIN IMMEDIATE`/`COMMIT` statements, writer Vec reuse, fewer clones): **250,000**
+(24,074 req/s, p95 203.6 / p99 652.2 ms, 0 err, 94 % CPU, 36 µs/req, 1,253 MB, 2026-11-12); 260,000 failed the 2-minute
+probe on p95/p99 (1,011 / 1,490 ms at 96 % CPU, 0 errors), 280,000 and 320,000 on connection refused (79 % errors). Not
+merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat

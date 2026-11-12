@@ -194,7 +194,7 @@ sudo systemd-run --wait --pipe --collect --uid="$(id -un)" \
   --gateway 192.0.2.1 --mode packet
 ```
 
-The organizer runs `install.sh` as root and later starts the server as `deploy` with `CAP_NET_BIND_SERVICE`. Rule 11 addresses VM tuning and explicitly allows in-process settings. PR #231 requested additional BPF and network-admin capabilities. The organizer's benchmark account held it for an eligibility decision. A userspace TCP stack can run on a VM whose owner grants packet access. Eligibility for such provisioning on the scored VM is unresolved. The default `start.sh` uses the published service permissions. [Challenge rules and installation contract](../../README.md#rules) · [Scoring environment](../../LEADERBOARD.md) · [Organizer's response to PR #231](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/231#issuecomment-6547094174)
+The challenge runs `install.sh` as root to install dependencies, then starts the service as `deploy` with `CAP_NET_BIND_SERVICE`. Plain `start.sh` uses Linux TCP. The optional self-managed service profile supplies the packet, BPF, and network capabilities needed at startup for AF_XDP. [Challenge runtime contract](../../SPEC.md#runtime-contract)
 
 For a **self-managed systemd deployment on one IP**, the installer can grant the startup capabilities itself. Supply the existing service unit that owns this application, its interface, its existing IPv4 address and prefix, and its gateway. Run the following in the submission directory, substituting the actual values. The existing unit supplies `User` and the four application environment variables.
 

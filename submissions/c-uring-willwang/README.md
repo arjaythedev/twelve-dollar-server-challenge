@@ -49,6 +49,6 @@ sudo bash submissions/c-uring-willwang/install.sh --bypass-unit feed.service ens
 sudo systemctl restart feed.service
 ```
 
-The published challenge unit grants `CAP_NET_BIND_SERVICE`. The organizer has held a request for the additional BPF and network-admin capabilities pending an eligibility decision. The ordinary Linux TCP launch works with the published permissions. [Installer and unit details](IMPLEMENTATION.md#installing-packet-access) · [Organizer’s response](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/231#issuecomment-6547094174)
+The challenge service grants `CAP_NET_BIND_SERVICE`. Plain `start.sh` uses Linux TCP under those permissions. The optional AF_XDP profile requires packet access on a self-managed host. [Installer and unit details](IMPLEMENTATION.md#installing-packet-access)
 
 The Ethernet build passed the organizer’s 42 checks over the wire and all 42 again over localhost. Additional tests cover 13 database layouts, TCP retransmission and half-close, and a blocked WAL commit followed by `ENOSPC` and crash recovery. [Correctness and resource tests](tests/bypass/README.md)

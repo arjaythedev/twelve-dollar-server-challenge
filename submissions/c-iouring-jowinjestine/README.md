@@ -42,10 +42,21 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
-  ring 0 waits for 256 completions or 1 ms, whichever comes first, so bigger batches share one
-  commit and a pass never spins. (4 ms batches were tried: they cut the WAL ~40 %, one set of
-  hot-page frames per commit, but under a CPU quota they add 25-50 ms to p95 at high load, so
-  the batches stay short.)
+  ring 0 waits for 64 completions or 2 ms (`WAIT_MIN`, `WAIT_US`), whichever comes first, so
+  bigger batches share one commit and a pass never spins; while a commit group is open the wait
+  ends at the group's deadline, and a batch of fewer than 32 completions (`CG_MIN`) commits at
+  once, so a lone request is answered within its batch (the heads before `2703df3` let it wait
+  for the idle timeout, which starved the PGO training client on the box). The window was 1 ms
+  and the count 256 until `2703df3`: 2 ms is 3-4 % less CPU on the loop thread for the same
+  requests (measured with 300,000 connections, user+sys of the thread), for about 1 ms on p50,
+  which the score does not count. The window must not grow further on this kernel: with
+  deferred task work (`IORING_SETUP_DEFER_TASKRUN`) and a wait for many completions, a window of
+  2.5 ms or more left requests unread in their sockets for over a second (6,000 server sockets
+  with bytes in their receive queue at 300,000 connections, nothing queued in user space; p99
+  1.4 s), a cliff that moves with the product of window and count: 3 ms with 128 completions
+  falls off it, 3 ms with 64 nearly, 2 ms with 64 or 256 does not. The count is 64 for the
+  margin; it costs nothing (the batches are bounded by the window at this load). Cooperative
+  task work instead of deferred has no cliff but costs 13-20 % more CPU, so it is not used.
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per

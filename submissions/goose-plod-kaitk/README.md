@@ -8,7 +8,7 @@ no C: `app.goose` is the whole application, about 250 lines.
 | | |
 |---|---|
 | Language | [Goose](https://github.com/aardappel/goose) release `v2026.4`, which compiles to C; the official release, checked against its SHA-256 by `install.sh` |
-| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.11`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.16` (io_uring) |
+| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.11`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) (io_uring), at its `direct-descriptors` branch until a release has it |
 | SQLite | [goose-sqlite](https://github.com/kaitk/goose-sqlite), which builds SQLite 3.54.1's amalgamation, unmodified, into the program |
 | JWT | Plod's HS256 verifier, over [goose-hash](https://github.com/kaitk/goose-hash) `v0.0.4` |
 | C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`) |
@@ -30,24 +30,26 @@ no C: `app.goose` is the whole application, about 250 lines.
   `INSERT ... SELECT ... ON CONFLICT DO NOTHING` for a like, each its own transaction,
   in WAL with `synchronous=NORMAL` (rule 6). A like that changes nothing is a repeat,
   or a post that doesn't exist, which one more lookup tells apart.
-- **Three processes.** Every k6 user keeps its connection open, and one process can
-  hold only `LimitNOFILE` sockets, 65,535 on the box. `start.sh` starts three
-  processes, one worker each, on the same port through `SO_REUSEPORT`, which take up to
-  192,000 connections between them, and stops them all when one exits. Each process
-  more costs CPU, about 8 µs a request in our runs, so there are as few as the
-  connections need. They share the database as SQLite's WAL lets processes share it.
-  A writer holds the write lock for one statement; another waits for it by yielding
-  the CPU, which on one core is what the holder needs, rather than sleeping a
-  millisecond and stalling its process's other connections.
+- **One process.** Every k6 user keeps its connection open, and a process can hold
+  only `LimitNOFILE` descriptors, 65,535 on the box. goose-http's `ring_direct` keeps
+  connections as io_uring direct descriptors instead, in rings of 65,535 slots that
+  the worker adds as they fill, so one process holds them all. Several processes
+  sharing the database cost twice the CPU: each commit in one throws away the others'
+  page caches.
+- **Batched waits.** `ring_batch_us: 1000` lets a wait hold up to 1 ms for more
+  completions, so the worker wakes once for many requests, not once each.
 - **The connection** is opened `NO_MUTEX`, since only its worker uses it: a feed
   request reads 100 columns, and each read would otherwise take a lock.
 - **The single post's query** reads the author with a subquery, not a join. With the
   join, SQLite's constant propagation reads the bound id while planning, and
   re-prepares the statement for every request.
-- **Pragmas**: `cache_size` 16 MB a process, and `wal_autocheckpoint` 4,000 pages, so
-  a checkpoint's `fsync` comes about once every 1,000 writes rather than every 250. No
-  `mmap`: with it, every page read looks the page up in the WAL index, which was a
-  third of the instructions in a profile.
+- **Pragmas**: `locking_mode = EXCLUSIVE`, as the one process holds the database
+  alone: its lock is taken once, and the WAL index lives in memory, not in a shared
+  file. `cache_size` 16 MB, which leaves page reads at 0.03 a request, and
+  `wal_autocheckpoint` 16,000 pages. No `mmap`: with it, every page read looks the
+  page up in the WAL index, which was a third of the instructions in a profile.
+- **JSON strings** go through `http::json_string`, which finds what to escape with
+  std's `find_any`, not a byte-at-a-time loop.
 
 ## Measured
 
@@ -57,12 +59,12 @@ in another, with `bench/load.js`'s think times divided by 20 so that 4,000 users
 
 | Server | µs a request | p99 |
 |---|---:|---:|
-| rust-iouring-kensac, the board's first | 16.0 | 2.5 ms |
-| this entry, 1 process | 28.6 | 5.8 ms |
-| this entry, 3 processes (`start.sh`) | 44.4 | 4.7 ms |
+| rust-iouring-kensac, the board's first | 15.6 to 16.2 | 2.4 to 2.6 ms |
+| this entry (`start.sh`) | 21.4 to 22.0 | 4.3 to 9.5 ms |
+| this entry before direct descriptors, 3 processes | 42.0 to 42.7 | 1.6 to 5.3 ms |
 
-These are not the box's numbers. Scaled by the ratio to kensac, three processes
-estimate about 110,000 users.
+These are not the box's numbers, and the box is x86-64. Scaled by the ratio to
+kensac, the entry estimates about 225,000 users.
 
 ## Running it
 
@@ -71,5 +73,3 @@ sudo bash install.sh
 bash build.sh
 SQLITE_PATH=/tmp/feed.db JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT=3000 bash start.sh
 ```
-
-`PROCS` sets the number of processes, 6 by default.

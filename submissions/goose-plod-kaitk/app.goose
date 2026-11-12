@@ -74,7 +74,7 @@ fn health(cx) {
     var out: u8[>..] = [];
     for e in failed {
         out.append("{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":");
-        json::format_string(out, e.message);
+        http::json_string(out,e.message);
         out.push('}');
         plod::json_bytes(cx, 503, out);
         return;
@@ -118,11 +118,11 @@ fn create(cx, user: i64, name: const u8[:]) {
             out.append("{\"post\":{\"id\":");
             format(out, sqlite::int(r, 0));
             out.append(",\"body\":");
-            json::format_string(out, text);
+            http::json_string(out,text);
             out.append(",\"created_at\":");
-            json::format_string(out, sqlite::text(r, 1));
+            http::json_string(out,sqlite::text(r, 1));
             out.append(",\"author\":");
-            json::format_string(out, name);
+            http::json_string(out,name);
             out.append(",\"like_count\":0}}");
         };
     };
@@ -151,11 +151,11 @@ fn post(out: u8[>..]&, r) {
     out.append("{\"id\":");
     format(out, sqlite::int(r, 0));
     out.append(",\"body\":");
-    json::format_string(out, sqlite::text(r, 1));
+    http::json_string(out,sqlite::text(r, 1));
     out.append(",\"created_at\":");
-    json::format_string(out, sqlite::text(r, 2));
+    http::json_string(out,sqlite::text(r, 2));
     out.append(",\"author\":");
-    json::format_string(out, sqlite::text(r, 3));
+    http::json_string(out,sqlite::text(r, 3));
     out.append(",\"like_count\":");
     format(out, sqlite::int(r, 4));
     out.push('}');
@@ -259,8 +259,8 @@ fn characters(s: const u8[:]) -> i64 {
 fn plod::error_body(body: u8[>..]&, st: const St&, status: i32, code: const u8[:],
                     detail: const u8[:], at: i64) {
     body.append("{\"error\":");
-    if code == "not_found" { json::format_string(body, "not found"); }
-    else if status >= 500 { json::format_string(body, "internal server error"); }
-    else { json::format_string(body, code); }
+    if code == "not_found" { http::json_string(body,"not found"); }
+    else if status >= 500 { http::json_string(body,"internal server error"); }
+    else { http::json_string(body,code); }
     body.push('}');
 }

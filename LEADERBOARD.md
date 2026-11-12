@@ -90,7 +90,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 16 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
 | 16 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
 | 16 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
-| 16 | c-iouring-jowinjestine | #396 | C (io_uring, SQLite B-tree reads) | **270,000** | 25,692 | 114.3 | 550.7 | 0.00 | 77 | 27 | 904 | 2026-11-12 |
+| 16 | c-iouring-jowinjestine | #396 | C (io_uring, SQLite B-tree reads) | **270,000** ᴸ | 25,692 | 114.3 | 550.7 | 0.00 | 77 | 27 | 904 | 2026-11-12 |
 | 25 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 26 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 27 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
@@ -592,6 +592,12 @@ so not merged. 120,000 failed the 2-minute probe on p95/p99 (943 / 1,662 ms at 9
 didn't beat the merged row) scored **230,000** (22,354 req/s, p95 32.6 / p99 285.6 ms, 0 err, 67 % CPU, 28 µs/req,
 999 MB, 2026-11-11). 240,000 failed the 2-minute probe on p95/p99 (241 / 1,475 ms at 72 % CPU, 0 errors) and 320,000
 on p95/p99 (2,285 / 2,524 ms at 97 % CPU).
+
+ᴸ **c-iouring-jowinjestine** stays on its merged #396 row (`c3fdb10`). Its follow-up **#402** was scored at commit
+**`f2f9227`** (held, not merged: it didn't beat the merged row): **253,000** (24,302 req/s, p95 285.6 / p99 665.4 ms,
+0 err, 73 % CPU, 27 µs/req, 1,216 MB, 2026-11-12). 280,000 passed the 2-minute probe but failed the 5-minute hold on
+p99 (1.76 s at 83 % CPU, 0 errors), 266,000 failed the 5-minute hold on p99 (3.47 s at 79 % CPU), and 320,000 failed the 2-minute probe (0.59 % connection
+refused, 94 % CPU). #402's head moved to `9caa0a5` during the run; that commit is queued for its own run.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

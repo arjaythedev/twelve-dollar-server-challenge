@@ -1,0 +1,601 @@
+/* db.h: SQLite. One connection on the event loop serves every request of a batch inside one
+ * transaction (group commit); a second connection on a low-priority thread runs PASSIVE
+ * checkpoints. The database is opened through a small VFS shim over SQLite's own `unix-excl`
+ * (this process is the only one that opens the file, so the wal-index lives in heap memory and
+ * no fcntl() lock is taken per transaction) that writes each commit's WAL frames with one
+ * pwrite. */
+#ifndef DB_H
+#define DB_H
+
+#include <pthread.h>
+#include <stdatomic.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+
+#include "json.h"
+#include "btree.h"
+
+#define VFS_NAME "feed-wal"
+#define CKPT_FRAMES 4096  /* WAL frames (16 MB) after which the thread copies the log back */
+#define CKPT_FORCE 65536  /* last resort: the loop checkpoints itself */
+#define HOLD_MAX_NS 250000000ULL
+#define CKPT_NICE 19
+
+enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
+
+struct db {
+  sqlite3 *c;
+  Btree *btree;
+  sqlite3_stmt *st_begin, *st_commit, *st_rollback, *st_health;
+  sqlite3_stmt *st_ins_post, *st_ins_like, *st_post_exists;
+  sqlite3_stmt *st_feed_ref, *st_post_ref;
+  int in_tx;  /* the batch's transaction is open */
+  int broken; /* SQLite ended it by itself (SQLITE_FULL, an I/O error): the batch is lost */
+  int wrote;
+  struct bt bt;
+  /* checkpoints */
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+  int ck_state; /* written under mu, read with an atomic load on the loop */
+  int ck_full;
+  int wal_frames; /* from the wal hook, on the loop thread */
+  int writes_held;
+  uint64_t hold_t0;
+  /* stats */
+  uint64_t n_ckpt, n_hold, n_force, n_fallback;
+};
+
+static int db_open_conn(sqlite3 **out, const char *path, int cache_kib);
+
+static int db_exec(sqlite3 *c, const char *sql) {
+  char *err = NULL;
+  int rc = sqlite3_exec(c, sql, NULL, NULL, &err);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "sqlite: %s: %s\n", sql, err ? err : sqlite3_errstr(rc));
+    sqlite3_free(err);
+  }
+  return rc;
+}
+static int db_prep(sqlite3 *c, sqlite3_stmt **st, const char *sql) {
+  int rc = sqlite3_prepare_v3(c, sql, -1, SQLITE_PREPARE_PERSISTENT, st, NULL);
+  if (rc != SQLITE_OK) fprintf(stderr, "sqlite prepare: %s: %s\n", sql, sqlite3_errmsg(c));
+  return rc;
+}
+
+/* ---- page cache wrapper ----
+ * SQLite's default page cache (pcache1) behind its plugin interface (SQLITE_CONFIG_PCACHE2),
+ * with one decision changed: at commit, when no page past the end of the file can be in the
+ * cache, the truncate does not walk the whole hash table. pcache1 remembers the largest page
+ * number it ever held and never lowers it; a B-tree page split briefly renames a page to the
+ * lock-byte page's number (1 GiB / page size + 1), after which every commit's truncate scans
+ * every slot to find nothing. The wrapper tracks the largest real key and the pages parked at
+ * that number. Pages that leave the cache only make the record an overestimate (safe). The idea
+ * is from c-iouring-pavlyhalim (#245). */
+#define LOCK_BYTE_OFFSET 0x40000000u
+struct wcache {
+  sqlite3_pcache *base;
+  unsigned max_key, lock_page, n_parked;
+};
+static sqlite3_pcache_methods2 pcache_base;
+static int wc_init(void *arg) { (void)arg; return pcache_base.xInit(pcache_base.pArg); }
+static void wc_shutdown(void *arg) { (void)arg; pcache_base.xShutdown(pcache_base.pArg); }
+static sqlite3_pcache *wc_create(int szPage, int szExtra, int purgeable) {
+  struct wcache *w = sqlite3_malloc(sizeof *w);
+  if (!w) return NULL;
+  w->base = pcache_base.xCreate(szPage, szExtra, purgeable);
+  if (!w->base) { sqlite3_free(w); return NULL; }
+  w->max_key = 0;
+  w->lock_page = LOCK_BYTE_OFFSET / (unsigned)szPage + 1;
+  w->n_parked = 0;
+  return (sqlite3_pcache *)w;
+}
+static void wc_cachesize(sqlite3_pcache *p, int n) { pcache_base.xCachesize(((struct wcache *)p)->base, n); }
+static int wc_pagecount(sqlite3_pcache *p) { return pcache_base.xPagecount(((struct wcache *)p)->base); }
+static sqlite3_pcache_page *wc_fetch(sqlite3_pcache *p, unsigned key, int create) {
+  struct wcache *w = (struct wcache *)p;
+  sqlite3_pcache_page *pg = pcache_base.xFetch(w->base, key, create);
+  if (pg && create) {
+    if (key == w->lock_page) w->n_parked++;
+    else if (key > w->max_key) w->max_key = key;
+  }
+  return pg;
+}
+static void wc_unpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) { pcache_base.xUnpin(((struct wcache *)p)->base, pg, discard); }
+static void wc_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned old_key, unsigned new_key) {
+  struct wcache *w = (struct wcache *)p;
+  pcache_base.xRekey(w->base, pg, old_key, new_key);
+  if (old_key == w->lock_page && w->n_parked) w->n_parked--;
+  if (new_key == w->lock_page) w->n_parked++;
+  else if (new_key > w->max_key) w->max_key = new_key;
+}
+static void wc_truncate(sqlite3_pcache *p, unsigned limit) {
+  struct wcache *w = (struct wcache *)p;
+  if (w->n_parked == 0 && w->max_key < limit) return;
+  pcache_base.xTruncate(w->base, limit);
+  if (limit > 0 && w->max_key >= limit) w->max_key = limit - 1;
+  if (w->lock_page >= limit) w->n_parked = 0;
+}
+static void wc_destroy(sqlite3_pcache *p) {
+  struct wcache *w = (struct wcache *)p;
+  pcache_base.xDestroy(w->base);
+  sqlite3_free(w);
+}
+static void wc_shrink(sqlite3_pcache *p) { pcache_base.xShrink(((struct wcache *)p)->base); }
+static int pcache_install(void) {
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pcache_base) != SQLITE_OK) return -1;
+  static sqlite3_pcache_methods2 m;
+  m = pcache_base;
+  m.pArg = NULL;
+  m.xInit = wc_init;
+  m.xShutdown = wc_shutdown;
+  m.xCreate = wc_create;
+  m.xCachesize = wc_cachesize;
+  m.xPagecount = wc_pagecount;
+  m.xFetch = wc_fetch;
+  m.xUnpin = wc_unpin;
+  m.xRekey = wc_rekey;
+  m.xTruncate = wc_truncate;
+  m.xDestroy = wc_destroy;
+  m.xShrink = wc_shrink;
+  return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) == SQLITE_OK ? 0 : -1;
+}
+
+/* ---- WAL writes ----
+ * SQLite writes a transaction's WAL frames one after another, each as two calls (the 24-byte
+ * frame header, then the page), and the last frame of a commit carries the database size in its
+ * header. This shim keeps writes that continue exactly where the previous write on the WAL
+ * ended in a buffer and writes the buffer with one pwrite when the commit frame's page arrives,
+ * inside SQLite's own xWrite call, so the commit is in the kernel before SQLite updates the
+ * wal-index and before COMMIT returns. Any other call on the file flushes the buffer first and
+ * goes straight through, so the bytes and their order are SQLite's. Readers find frames only
+ * through the wal-index, so none can see a buffered one. (After c-iouring-pavlyhalim #245 and
+ * c-iouring-shivanshthapliyal #250.) */
+#define WAL_FRAME_HDR 24
+#define WAL_BUF_CAP 0x1ffff /* the unix VFS passes at most 17 bits of a write's length */
+struct wfile {
+  sqlite3_file base;
+  sqlite3_file *real;
+  int is_wal, commit, len;
+  sqlite3_int64 off, last_end;
+  unsigned char *buf;
+};
+static sqlite3_vfs *vfs_real;
+static uint64_t wal_frames_written, wal_pwrites;
+
+static int wf_flush(struct wfile *f) {
+  if (!f->len) return SQLITE_OK;
+  int n = f->len;
+  f->len = 0;
+  wal_pwrites++;
+  return f->real->pMethods->xWrite(f->real, f->buf, n, f->off);
+}
+#define WF(p) ((struct wfile *)(p))
+#define WF_FLUSH(p) do { int rc_ = wf_flush(WF(p)); if (rc_ != SQLITE_OK) return rc_; } while (0)
+static int wf_close(sqlite3_file *p) {
+  struct wfile *f = WF(p);
+  int rc = wf_flush(f);
+  int rc2 = f->real->pMethods ? f->real->pMethods->xClose(f->real) : SQLITE_OK;
+  sqlite3_free(f->buf);
+  f->buf = NULL;
+  return rc != SQLITE_OK ? rc : rc2;
+}
+static int wf_read(sqlite3_file *p, void *b, int n, sqlite3_int64 off) { WF_FLUSH(p); return WF(p)->real->pMethods->xRead(WF(p)->real, b, n, off); }
+static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
+  struct wfile *f = WF(p);
+  if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
+  int append = off == f->last_end;
+  f->last_end = off + n;
+  if (f->len + n > WAL_BUF_CAP) WF_FLUSH(p);
+  if (!append || n > WAL_BUF_CAP || (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))) {
+    WF_FLUSH(p);
+    f->commit = 0;
+    return f->real->pMethods->xWrite(f->real, b, n, off);
+  }
+  if (!f->len) f->off = off;
+  memcpy(f->buf + f->len, b, (size_t)n);
+  f->len += n;
+  if (n == WAL_FRAME_HDR) { /* bytes 4-7: the database size after a commit, 0 on other frames */
+    const unsigned char *h = b;
+    f->commit = (h[4] | h[5] | h[6] | h[7]) != 0;
+    wal_frames_written++;
+    return SQLITE_OK;
+  }
+  if (f->commit) {
+    f->commit = 0;
+    return wf_flush(f);
+  }
+  return SQLITE_OK;
+}
+static int wf_truncate(sqlite3_file *p, sqlite3_int64 size) { WF_FLUSH(p); return WF(p)->real->pMethods->xTruncate(WF(p)->real, size); }
+static int wf_sync(sqlite3_file *p, int flags) { WF_FLUSH(p); return WF(p)->real->pMethods->xSync(WF(p)->real, flags); }
+static int wf_filesize(sqlite3_file *p, sqlite3_int64 *size) { WF_FLUSH(p); return WF(p)->real->pMethods->xFileSize(WF(p)->real, size); }
+static int wf_lock(sqlite3_file *p, int l) { WF_FLUSH(p); return WF(p)->real->pMethods->xLock(WF(p)->real, l); }
+static int wf_unlock(sqlite3_file *p, int l) { WF_FLUSH(p); return WF(p)->real->pMethods->xUnlock(WF(p)->real, l); }
+static int wf_check_reserved(sqlite3_file *p, int *out) { return WF(p)->real->pMethods->xCheckReservedLock(WF(p)->real, out); }
+static int wf_file_control(sqlite3_file *p, int op, void *arg) { WF_FLUSH(p); return WF(p)->real->pMethods->xFileControl(WF(p)->real, op, arg); }
+static int wf_sector_size(sqlite3_file *p) { return WF(p)->real->pMethods->xSectorSize(WF(p)->real); }
+static int wf_device_chars(sqlite3_file *p) { return WF(p)->real->pMethods->xDeviceCharacteristics(WF(p)->real); }
+static int wf_shm_map(sqlite3_file *p, int pg, int sz, int extend, void volatile **out) { return WF(p)->real->pMethods->xShmMap(WF(p)->real, pg, sz, extend, out); }
+static int wf_shm_lock(sqlite3_file *p, int off, int n, int flags) { return WF(p)->real->pMethods->xShmLock(WF(p)->real, off, n, flags); }
+static void wf_shm_barrier(sqlite3_file *p) { WF(p)->real->pMethods->xShmBarrier(WF(p)->real); }
+static int wf_shm_unmap(sqlite3_file *p, int del) { return WF(p)->real->pMethods->xShmUnmap(WF(p)->real, del); }
+static int wf_fetch(sqlite3_file *p, sqlite3_int64 off, int n, void **pp) { WF_FLUSH(p); return WF(p)->real->pMethods->xFetch(WF(p)->real, off, n, pp); }
+static int wf_unfetch(sqlite3_file *p, sqlite3_int64 off, void *pg) { return WF(p)->real->pMethods->xUnfetch(WF(p)->real, off, pg); }
+static const sqlite3_io_methods wf_methods = {3, wf_close, wf_read, wf_write, wf_truncate, wf_sync, wf_filesize, wf_lock, wf_unlock,
+                                              wf_check_reserved, wf_file_control, wf_sector_size, wf_device_chars, wf_shm_map,
+                                              wf_shm_lock, wf_shm_barrier, wf_shm_unmap, wf_fetch, wf_unfetch};
+#define WF_REAL_OFFSET ((sizeof(struct wfile) + 7) & ~(size_t)7)
+static int wv_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *p, int flags, int *out_flags) {
+  (void)vfs;
+  struct wfile *f = WF(p);
+  memset(f, 0, sizeof *f);
+  f->last_end = -1;
+  f->real = (sqlite3_file *)((char *)p + WF_REAL_OFFSET);
+  int rc = vfs_real->xOpen(vfs_real, name, f->real, flags, out_flags);
+  if (f->real->pMethods == NULL) return rc;
+  f->is_wal = (flags & SQLITE_OPEN_WAL) != 0;
+  if (f->real->pMethods->iVersion < 3) { f->real->pMethods->xClose(f->real); return SQLITE_CANTOPEN; }
+  p->pMethods = &wf_methods;
+  return rc;
+}
+static int wv_delete(sqlite3_vfs *v, const char *z, int sync) { (void)v; return vfs_real->xDelete(vfs_real, z, sync); }
+static int wv_access(sqlite3_vfs *v, const char *z, int flags, int *out) { (void)v; return vfs_real->xAccess(vfs_real, z, flags, out); }
+static int wv_full_pathname(sqlite3_vfs *v, const char *z, int n, char *out) { (void)v; return vfs_real->xFullPathname(vfs_real, z, n, out); }
+static void *wv_dlopen(sqlite3_vfs *v, const char *z) { (void)v; return vfs_real->xDlOpen(vfs_real, z); }
+static void wv_dlerror(sqlite3_vfs *v, int n, char *z) { (void)v; vfs_real->xDlError(vfs_real, n, z); }
+static void (*wv_dlsym(sqlite3_vfs *v, void *h, const char *z))(void) { (void)v; return vfs_real->xDlSym(vfs_real, h, z); }
+static void wv_dlclose(sqlite3_vfs *v, void *h) { (void)v; vfs_real->xDlClose(vfs_real, h); }
+static int wv_randomness(sqlite3_vfs *v, int n, char *z) { (void)v; return vfs_real->xRandomness(vfs_real, n, z); }
+static int wv_sleep(sqlite3_vfs *v, int us) { (void)v; return vfs_real->xSleep(vfs_real, us); }
+static int wv_current_time(sqlite3_vfs *v, double *t) { (void)v; return vfs_real->xCurrentTime(vfs_real, t); }
+static int wv_last_error(sqlite3_vfs *v, int n, char *z) { (void)v; return vfs_real->xGetLastError(vfs_real, n, z); }
+static int wv_current_time64(sqlite3_vfs *v, sqlite3_int64 *t) { (void)v; return vfs_real->xCurrentTimeInt64(vfs_real, t); }
+static int vfs_install(void) {
+  vfs_real = sqlite3_vfs_find("unix-excl");
+  if (!vfs_real || vfs_real->iVersion < 2) return -1;
+  static sqlite3_vfs v;
+  memset(&v, 0, sizeof v);
+  v.iVersion = 2;
+  v.szOsFile = (int)(WF_REAL_OFFSET + (size_t)vfs_real->szOsFile);
+  v.mxPathname = vfs_real->mxPathname;
+  v.zName = VFS_NAME;
+  v.xOpen = wv_open;
+  v.xDelete = wv_delete;
+  v.xAccess = wv_access;
+  v.xFullPathname = wv_full_pathname;
+  v.xDlOpen = wv_dlopen;
+  v.xDlError = wv_dlerror;
+  v.xDlSym = wv_dlsym;
+  v.xDlClose = wv_dlclose;
+  v.xRandomness = wv_randomness;
+  v.xSleep = wv_sleep;
+  v.xCurrentTime = wv_current_time;
+  v.xGetLastError = wv_last_error;
+  v.xCurrentTimeInt64 = wv_current_time64;
+  return sqlite3_vfs_register(&v, 0) == SQLITE_OK ? 0 : -1;
+}
+
+/* ---- checkpoints (after the design of rust-iouring-kensac #264) ----
+ * Automatic checkpoints are off. Past CKPT_FRAMES frames a thread at nice 19 runs a PASSIVE
+ * checkpoint on its own connection in the loop's idle time (the bulk). Under steady writes that
+ * pass cannot copy the frames written meanwhile, and the log only restarts once it is fully
+ * copied. So when the bulk is done, writes are held (reads go on) while a second thread at the
+ * normal priority copies the rest (the tail): at nice 19 the tail would wait for idle time that
+ * a loaded loop does not have, and the hold would last as long as its limit. Then the next
+ * write restarts the log. A hold starts and ends only between batches and lasts at most
+ * HOLD_MAX_NS. Past CKPT_FORCE frames the loop checkpoints by itself, as a last resort. */
+static void ck_set(struct db *d, int s) {
+  pthread_mutex_lock(&d->mu);
+  atomic_store_explicit((_Atomic int *)&d->ck_state, s, memory_order_release);
+  pthread_cond_broadcast(&d->cv);
+  pthread_mutex_unlock(&d->mu);
+}
+struct ck_thread {
+  struct db *d;
+  sqlite3 *c;
+  int state; /* the state this thread acts on: CK_BULK or CK_TAIL */
+  int nice;
+};
+static void *ck_main(void *arg) {
+  struct ck_thread *t = arg;
+  struct db *d = t->d;
+  if (t->nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), t->nice);
+  for (;;) {
+    pthread_mutex_lock(&d->mu);
+    while (d->ck_state != t->state) pthread_cond_wait(&d->cv, &d->mu);
+    pthread_mutex_unlock(&d->mu);
+    int nlog = -1, ndone = -2;
+    int rc = sqlite3_wal_checkpoint_v2(t->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    pthread_mutex_lock(&d->mu);
+    d->ck_full = rc == SQLITE_OK && nlog == ndone;
+    d->n_ckpt++;
+    atomic_store_explicit((_Atomic int *)&d->ck_state, t->state + 1, memory_order_release);
+    pthread_mutex_unlock(&d->mu);
+  }
+  return NULL;
+}
+static int ck_start(struct db *d, const char *path, int state, int nice) {
+  struct ck_thread *t = calloc(1, sizeof *t);
+  if (!t) return -1;
+  t->d = d;
+  t->state = state;
+  t->nice = nice;
+  if (db_open_conn(&t->c, path, 64) < 0) return -1;
+  pthread_t th;
+  pthread_attr_t a;
+  pthread_attr_init(&a);
+  pthread_attr_setstacksize(&a, 256 << 10);
+  int rc = pthread_create(&th, &a, ck_main, t);
+  pthread_attr_destroy(&a);
+  return rc ? -1 : 0;
+}
+static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
+  (void)c; (void)name;
+  ((struct db *)ud)->wal_frames = frames;
+  return SQLITE_OK;
+}
+/* Between batches, with no transaction open: drives the checkpoint thread. */
+static void db_tick(struct db *d) {
+  switch (atomic_load_explicit((_Atomic int *)&d->ck_state, memory_order_acquire)) {
+  case CK_IDLE:
+    if (d->wal_frames >= CKPT_FORCE) {
+      int nlog = 0, ndone = 0;
+      d->n_force++;
+      if (sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK && nlog == ndone)
+        d->wal_frames = 0;
+    } else if (d->wal_frames >= CKPT_FRAMES) {
+      ck_set(d, CK_BULK);
+    }
+    break;
+  case CK_BULK_DONE:
+    d->writes_held = 1;
+    d->hold_t0 = now_ns();
+    d->n_hold++;
+    ck_set(d, CK_TAIL);
+    break;
+  case CK_TAIL_DONE:
+    if (d->ck_full) d->wal_frames = 0;
+    d->writes_held = 0;
+    ck_set(d, CK_IDLE);
+    break;
+  default:
+    if (d->writes_held && now_ns() - d->hold_t0 > HOLD_MAX_NS) d->writes_held = 0;
+    break;
+  }
+}
+
+static int db_open_conn(sqlite3 **out, const char *path, int cache_kib) {
+  int rc = sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE, VFS_NAME);
+  if (rc != SQLITE_OK) {
+    fprintf(stderr, "sqlite open %s: %s\n", path, *out ? sqlite3_errmsg(*out) : sqlite3_errstr(rc));
+    return -1;
+  }
+  char sql[96];
+  snprintf(sql, sizeof sql, "PRAGMA cache_size=-%d", cache_kib);
+  db_exec(*out, sql);
+  db_exec(*out, "PRAGMA mmap_size=0");
+  db_exec(*out, "PRAGMA synchronous=NORMAL");
+  db_exec(*out, "PRAGMA temp_store=MEMORY");
+  db_exec(*out, "PRAGMA wal_autocheckpoint=0");
+  return 0;
+}
+
+/* Hands SQLite a page-cache arena backed (where available) by transparent huge pages: the
+ * pages the requests touch then cost few TLB misses. SQLite's own allocator still decides
+ * what goes in it. */
+static void pagecache_arena(int cache_kib) {
+  int hdr = 0;
+  if (sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &hdr) != SQLITE_OK) return;
+  int sz = 4096 + hdr;
+  sz = (sz + 63) & ~63;
+  int n = cache_kib / 4 + 64;
+  size_t bytes = ((size_t)sz * (size_t)n + (2u << 20) - 1) & ~((size_t)(2u << 20) - 1);
+  void *m = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (m == MAP_FAILED) return;
+#ifdef MADV_HUGEPAGE
+  madvise(m, bytes, MADV_HUGEPAGE);
+#endif
+  prefault(m, bytes); /* faulted in now, while memory is plentiful */
+  if (sqlite3_config(SQLITE_CONFIG_PAGECACHE, m, sz, n) != SQLITE_OK) munmap(m, bytes);
+}
+
+static int db_open(struct db *d, const char *path, int cache_kib) {
+  memset(d, 0, sizeof *d);
+  if (pcache_install() < 0) { fprintf(stderr, "sqlite: could not install the page cache\n"); return -1; }
+  pagecache_arena(cache_kib);
+  if (sqlite3_initialize() != SQLITE_OK) { fprintf(stderr, "sqlite3_initialize failed\n"); return -1; }
+  if (vfs_install() < 0) { fprintf(stderr, "sqlite: could not register the VFS\n"); return -1; }
+  if (db_open_conn(&d->c, path, cache_kib) < 0) return -1;
+  sqlite3_stmt *jm;
+  if (db_prep(d->c, &jm, "PRAGMA journal_mode=WAL") != SQLITE_OK) return -1;
+  int rc = sqlite3_step(jm);
+  if (rc != SQLITE_ROW || strcmp((const char *)sqlite3_column_text(jm, 0), "wal") != 0) {
+    fprintf(stderr, "sqlite: could not enable WAL\n");
+    return -1;
+  }
+  sqlite3_finalize(jm);
+  if (db_prep(d->c, &d->st_begin, "BEGIN") || db_prep(d->c, &d->st_commit, "COMMIT") || db_prep(d->c, &d->st_rollback, "ROLLBACK") ||
+      db_prep(d->c, &d->st_health, "SELECT 1") ||
+      db_prep(d->c, &d->st_ins_post, "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at") ||
+      db_prep(d->c, &d->st_ins_like, "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING") ||
+      db_prep(d->c, &d->st_post_exists, "SELECT 1 FROM posts WHERE id = ?1") ||
+      db_prep(d->c, &d->st_feed_ref,
+              "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) "
+              "FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20") ||
+      db_prep(d->c, &d->st_post_ref,
+              "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) "
+              "FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?1"))
+    return -1;
+  /* warm the pages the feed touches */
+  while (sqlite3_step(d->st_feed_ref) == SQLITE_ROW) {}
+  sqlite3_reset(d->st_feed_ref);
+  d->btree = d->c->aDb[0].pBt;
+  if (!bt_init(&d->bt, d->c)) fprintf(stderr, "btree read plans: off (schema differs); reads use SQL\n");
+  sqlite3_wal_hook(d->c, db_wal_hook, d);
+  pthread_mutex_init(&d->mu, NULL);
+  pthread_cond_init(&d->cv, NULL);
+  if (ck_start(d, path, CK_BULK, CKPT_NICE) || ck_start(d, path, CK_TAIL, 0)) {
+    fprintf(stderr, "checkpoint threads: %s\n", strerror(errno));
+    return -1;
+  }
+  return 0;
+}
+
+/* ---- transactions: one per batch ---- */
+
+static inline int db_begin(struct db *d) {
+  if (d->broken) return -1;
+  if (d->in_tx) {
+    if (!sqlite3_get_autocommit(d->c)) return 0;
+    d->in_tx = 0; /* SQLite ended it by itself */
+    d->broken = 1;
+    return -1;
+  }
+  int rc = sqlite3_step(d->st_begin);
+  sqlite3_reset(d->st_begin);
+  if (rc != SQLITE_DONE) return -1;
+  d->in_tx = 1;
+  d->wrote = 0;
+  if (d->bt.ok && bt_open(&d->bt) < 0) {
+    fprintf(stderr, "btree: could not open cursors; reads use SQL\n");
+    d->bt.ok = 0;
+  }
+  return 0;
+}
+/* 0 once the batch is committed, -1 if it was rolled back (its writes did not land). */
+static int db_commit(struct db *d) {
+  if (d->broken) {
+    d->broken = 0;
+    bt_close(&d->bt);
+    if (!sqlite3_get_autocommit(d->c)) { sqlite3_step(d->st_rollback); sqlite3_reset(d->st_rollback); }
+    d->in_tx = 0;
+    return -1;
+  }
+  if (!d->in_tx) return 0;
+  d->in_tx = 0;
+  bt_close(&d->bt);
+  int rc = sqlite3_step(d->st_commit);
+  sqlite3_reset(d->st_commit);
+  if (rc == SQLITE_DONE) return 0;
+  fprintf(stderr, "sqlite commit: %s\n", sqlite3_errmsg(d->c));
+  sqlite3_step(d->st_rollback);
+  sqlite3_reset(d->st_rollback);
+  return -1;
+}
+static inline void db_check_tx(struct db *d) {
+  if (d->in_tx && sqlite3_get_autocommit(d->c)) { d->in_tx = 0; d->broken = 1; }
+}
+
+/* ---- the queries ---- */
+
+static inline int db_health(struct db *d) {
+  if (db_begin(d) < 0) return -1;
+  int rc = sqlite3_step(d->st_health);
+  int ok = rc == SQLITE_ROW && sqlite3_column_int(d->st_health, 0) == 1;
+  sqlite3_reset(d->st_health);
+  return ok ? 0 : -1;
+}
+
+static inline void ob_post_row(struct ob *o, sqlite3_stmt *st) {
+  ob_post_obj(o, sqlite3_column_int64(st, 0), sqlite3_column_text(st, 1), (u32)sqlite3_column_bytes(st, 1), sqlite3_column_text(st, 2),
+              (u32)sqlite3_column_bytes(st, 2), sqlite3_column_text(st, 3), (u32)sqlite3_column_bytes(st, 3), sqlite3_column_int64(st, 4));
+}
+
+static int db_feed(struct db *d, struct ob *o) {
+  if (db_begin(d) < 0) return -1;
+  if (d->bt.open) {
+    size_t mark = o->n;
+    if (bt_feed(&d->bt, o) == 0 && !o->err) return 0;
+    o->n = mark;
+    o->err = 0;
+    d->n_fallback++;
+  }
+  ob_lit(o, "{\"posts\":[");
+  int n = 0, rc;
+  while ((rc = sqlite3_step(d->st_feed_ref)) == SQLITE_ROW) {
+    if (n++) ob_char(o, ',');
+    ob_post_row(o, d->st_feed_ref);
+  }
+  sqlite3_reset(d->st_feed_ref);
+  if (rc != SQLITE_DONE) return -1;
+  ob_lit(o, "]}");
+  return 0;
+}
+
+/* 1 written, 0 no such post, -1 error */
+static int db_post(struct db *d, struct ob *o, i64 id) {
+  if (db_begin(d) < 0) return -1;
+  if (d->bt.open) {
+    size_t mark = o->n;
+    int rc = bt_post(&d->bt, o, id);
+    if (rc >= 0 && !o->err) return rc;
+    o->n = mark;
+    o->err = 0;
+    d->n_fallback++;
+  }
+  sqlite3_bind_int64(d->st_post_ref, 1, id);
+  int rc = sqlite3_step(d->st_post_ref), ret;
+  if (rc == SQLITE_ROW) {
+    ob_lit(o, "{\"post\":");
+    ob_post_row(o, d->st_post_ref);
+    ob_char(o, '}');
+    ret = 1;
+  } else {
+    ret = rc == SQLITE_DONE ? 0 : -1;
+  }
+  sqlite3_reset(d->st_post_ref);
+  return ret;
+}
+
+/* 1 exists, 0 absent, -1 error */
+static int db_post_exists(struct db *d, i64 id) {
+  if (db_begin(d) < 0) return -1;
+  if (d->bt.open) {
+    int rc = bt_post_exists(&d->bt, id);
+    if (rc >= 0) return rc;
+  }
+  sqlite3_bind_int64(d->st_post_exists, 1, id);
+  int rc = sqlite3_step(d->st_post_exists);
+  sqlite3_reset(d->st_post_exists);
+  return rc == SQLITE_ROW ? 1 : rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* Inserts the post; fills id and created_at (as stored). 0 ok, -1 error. */
+static int db_insert_post(struct db *d, i64 user_id, const uint8_t *body, uint32_t body_n, i64 *id, uint8_t *created, uint32_t *created_n) {
+  if (db_begin(d) < 0) return -1;
+  sqlite3_bind_int64(d->st_ins_post, 1, user_id);
+  sqlite3_bind_text(d->st_ins_post, 2, (const char *)body, (int)body_n, SQLITE_STATIC);
+  int rc = sqlite3_step(d->st_ins_post);
+  if (rc != SQLITE_ROW) {
+    sqlite3_reset(d->st_ins_post);
+    sqlite3_clear_bindings(d->st_ins_post);
+    db_check_tx(d);
+    return -1;
+  }
+  *id = sqlite3_column_int64(d->st_ins_post, 0);
+  int n = sqlite3_column_bytes(d->st_ins_post, 1);
+  const unsigned char *t = sqlite3_column_text(d->st_ins_post, 1);
+  if (!t || n > 63) { sqlite3_reset(d->st_ins_post); sqlite3_clear_bindings(d->st_ins_post); return -1; }
+  memcpy(created, t, (size_t)n);
+  *created_n = (uint32_t)n;
+  rc = sqlite3_step(d->st_ins_post);
+  sqlite3_reset(d->st_ins_post);
+  sqlite3_clear_bindings(d->st_ins_post);
+  if (rc != SQLITE_DONE) { db_check_tx(d); return -1; }
+  d->wrote = 1;
+  return 0;
+}
+
+/* 1 liked now, 0 already liked, -1 error. The caller has checked that the post exists. */
+static int db_insert_like(struct db *d, i64 user_id, i64 post_id) {
+  if (db_begin(d) < 0) return -1;
+  sqlite3_bind_int64(d->st_ins_like, 1, user_id);
+  sqlite3_bind_int64(d->st_ins_like, 2, post_id);
+  int rc = sqlite3_step(d->st_ins_like);
+  sqlite3_reset(d->st_ins_like);
+  if (rc != SQLITE_DONE) { db_check_tx(d); return -1; }
+  if (sqlite3_changes(d->c) > 0) { d->wrote = 1; return 1; }
+  return 0;
+}
+
+#endif

@@ -28,11 +28,12 @@ int twelve_readers_open(sqlite3 *db);
 void twelve_readers_close(void);
 int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch);
 int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out);
+void twelve_readers_end(void);
 int twelve_reader_reason(void);
 
 enum {
     FEED_REF, POST, FEED_IDS, RANGE_LIKES, RANGE_ROWS, RANGE_DESC, HEALTH,
-    CREATE, CREATED, LIKE, STMT_EXISTS, BEGIN_READ, BEGIN_WRITE, COMMIT, ROLLBACK,
+    CREATE, LIKE, STMT_EXISTS, BEGIN_READ, BEGIN_WRITE, COMMIT, ROLLBACK,
     PERSISTENT_COUNT
 };
 static const char *const release_sql[PERSISTENT_COUNT] = {
@@ -43,8 +44,7 @@ static const char *const release_sql[PERSISTENT_COUNT] = {
     [RANGE_ROWS] = "SELECT posts.id, posts.body, posts.created_at, users.username FROM posts INNER JOIN users ON users.id = posts.user_id WHERE posts.id BETWEEN ?1 AND ?2;",
     [RANGE_DESC] = "SELECT posts.id, posts.body, posts.created_at, users.username FROM posts INNER JOIN users ON users.id = posts.user_id WHERE posts.id BETWEEN ?1 AND ?2 ORDER BY posts.id DESC;",
     [HEALTH] = "SELECT 1;",
-    [CREATE] = "INSERT INTO posts (user_id, body) VALUES (?1, ?2);",
-    [CREATED] = "SELECT posts.created_at FROM posts WHERE posts.id = ?1;",
+    [CREATE] = "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at;",
     [LIKE] = "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE posts.id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING;",
     [STMT_EXISTS] = "SELECT 1 FROM posts WHERE posts.id = ?1;",
     [BEGIN_READ] = "BEGIN;",
@@ -60,20 +60,22 @@ static const char *const startup_sql[] = {
     [4] = "PRAGMA journal_size_limit = 41943040;",
     [5] = "PRAGMA busy_timeout = 0;",
     [6] = "PRAGMA trusted_schema = OFF;",
-    [7] = "PRAGMA cache_size = -32768;",
-    [8] = "PRAGMA mmap_size = 0;",
-    [9] = "PRAGMA foreign_keys;",
-    [10] = "PRAGMA synchronous;",
-    [11] = "PRAGMA wal_autocheckpoint;",
-    [12] = "PRAGMA journal_size_limit;",
-    [13] = "PRAGMA busy_timeout;",
-    [14] = "PRAGMA trusted_schema;",
-    [15] = "PRAGMA cache_size;",
-    [16] = "PRAGMA mmap_size;",
+    [7] = "PRAGMA temp_store = MEMORY;",
+    [8] = "PRAGMA cache_size = -32768;",
+    [9] = "PRAGMA mmap_size = 0;",
+    [10] = "PRAGMA foreign_keys;",
+    [11] = "PRAGMA synchronous;",
+    [12] = "PRAGMA wal_autocheckpoint;",
+    [13] = "PRAGMA journal_size_limit;",
+    [14] = "PRAGMA busy_timeout;",
+    [15] = "PRAGMA trusted_schema;",
+    [16] = "PRAGMA temp_store;",
+    [17] = "PRAGMA cache_size;",
+    [18] = "PRAGMA mmap_size;",
 };
-/* The values startup_sql[9] to startup_sql[16] read back. */
+/* The values startup_sql[10] to startup_sql[18] read back. */
 static const sqlite3_int64 startup_expected[] = {
-    [0] = 1, [1] = 1, [2] = 0, [3] = 41943040, [4] = 0, [5] = 0, [6] = -32768, [7] = 0,
+    [0] = 1, [1] = 1, [2] = 0, [3] = 41943040, [4] = 0, [5] = 0, [6] = 2, [7] = -32768, [8] = 0,
 };
 static const char schema[] =
     "CREATE TABLE users (\r\n"
@@ -234,7 +236,14 @@ static int done(sqlite3_stmt *stmt, const char *stage, const char *reset_stage) 
     return status;
 }
 
-static int control(int index, const char *stage) { return done(trainer.statements[index], stage, stage); }
+/* A COMMIT or ROLLBACK first closes the readers' cursors, which stay open across the reader calls of one
+ * transaction, as store.rs does. */
+static int control(int index, const char *stage) {
+    if (index == COMMIT || index == ROLLBACK) {
+        twelve_readers_end();
+    }
+    return done(trainer.statements[index], stage, stage);
+}
 
 static int guard(const char *stage, int autocommit) {
     if (sqlite3_get_autocommit(trainer.db) != autocommit) {
@@ -695,10 +704,10 @@ int main(int argc, char **argv) { // NOLINT(readability-function-size): the trai
             if (status == 0) {
                 step = sqlite3_step(stmt);
             }
-        } else if (i >= 9) {
+        } else if (i >= 10) {
             if (step != SQLITE_ROW) {
                 status = unexpected_step("pragma", step);
-            } else if (sqlite3_column_type(stmt, 0) != SQLITE_INTEGER || sqlite3_column_int64(stmt, 0) != startup_expected[i - 9]) {
+            } else if (sqlite3_column_type(stmt, 0) != SQLITE_INTEGER || sqlite3_column_int64(stmt, 0) != startup_expected[i - 10]) {
                 status = semantic("pragma");
             }
             if (status == 0) {
@@ -890,7 +899,7 @@ int main(int argc, char **argv) { // NOLINT(readability-function-size): the trai
                 }
                 for (size_t i = 0; i < count; ++i) {
                     if (writes[i].create) {
-                        /* Create: the CREATE insert, then the CREATED select for the new row's timestamp. */
+                        /* Create: the CREATE insert, whose RETURNING row holds the new id and timestamp. */
                         char body[sizeof("training create: ") - 1 + 57 + 1]; /* written before read: snprintf fills it */
                         int length = snprintf(body, sizeof(body), "training create: %.57s", training_text);
                         if (length < 0 || size_of_count(length) >= sizeof(body) || length != 74) {
@@ -903,21 +912,12 @@ int main(int argc, char **argv) { // NOLINT(readability-function-size): the trai
                             (void)reset(stmt, "reset", SQLITE_OK); /* the bind failure is already the one reported */
                             goto out_cleanup;
                         }
-                        if (done(stmt, "step", "reset") != 0 || guard("step", 0) != 0) {
-                            goto out_cleanup;
-                        }
-                        sqlite3_int64 id = sqlite3_last_insert_rowid(trainer.db);
-                        stmt = trainer.statements[CREATED];
-                        if (bind_integer(stmt, 1, id, "bind") != 0) {
-                            (void)reset(stmt, "reset", SQLITE_OK); /* the bind failure is already the one reported */
-                            goto out_cleanup;
-                        }
                         int step = sqlite3_step(stmt);
                         int status = 0;
                         if (step != SQLITE_ROW) {
                             status = unexpected_step("step", step);
                         } else {
-                            status = column_text(stmt, 0, "step");
+                            status = column_text(stmt, 1, "step");
                         }
                         if (status == 0) {
                             step = sqlite3_step(stmt);

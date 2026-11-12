@@ -29,6 +29,21 @@ mod settings {
     use std::env;
     use std::net::IpAddr;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum RingSpread {
+        Fill,
+        Spread,
+    }
+
+    impl RingSpread {
+        pub(crate) fn as_str(self) -> &'static str {
+            match self {
+                Self::Fill => "fill",
+                Self::Spread => "spread",
+            }
+        }
+    }
+
     // Validated command-line flags and SPEC.md's environment values; parse_args is the only constructor.
     pub(crate) struct Settings {
         sqlite_path: String,
@@ -47,6 +62,8 @@ mod settings {
         effective_wake_batch: u32,
         poll_recv: bool,
         ckpt_restart: bool,
+        batch_target: u32,
+        ring_spread: RingSpread,
     }
 
     impl Settings {
@@ -98,6 +115,12 @@ mod settings {
         pub(crate) fn ckpt_restart(&self) -> bool {
             self.ckpt_restart
         }
+        pub(crate) fn batch_target(&self) -> u32 {
+            self.batch_target
+        }
+        pub(crate) fn ring_spread(&self) -> RingSpread {
+            self.ring_spread
+        }
     }
 
     fn decimal(text: &str, min: u32, max: u32) -> Option<u32> {
@@ -128,13 +151,38 @@ mod settings {
         let mut check_reads = false;
         let mut poll_recv = false;
         let mut ckpt_restart = false;
-        let mut wal_gate = 8_192;
+        // The gate is the backstop: tail holds restart the WAL at about 5,000 frames, and only a disk too
+        // slow for them lets it reach 32,768 frames (128 MiB), where writes wait without a time limit.
+        let mut wal_gate = 32_768;
         let mut cache_kib = 32_768;
         let mut mmap_mib = 0;
         let mut wake_batch = 128;
         let mut wake_wait_us = 2_000;
         let mut turn_cap = 1_024;
-        for arg in args {
+        let mut batch_target = 64;
+        let mut ring_spread = RingSpread::Fill;
+        let mut args = args;
+        while let Some(arg) = args.next() {
+            if arg == "--batch-target" || arg.starts_with("--batch-target=") {
+                let text = match arg.split_once('=') {
+                    Some((_, text)) => text.to_owned(),
+                    None => args.next().ok_or("invalid --batch-target")?,
+                };
+                batch_target = decimal(&text, 1, 1_024).ok_or("invalid --batch-target")?;
+                continue;
+            }
+            if arg == "--ring-spread" || arg.starts_with("--ring-spread=") {
+                let text = match arg.split_once('=') {
+                    Some((_, text)) => text.to_owned(),
+                    None => args.next().ok_or("invalid --ring-spread")?,
+                };
+                ring_spread = match text.as_str() {
+                    "fill" => RingSpread::Fill,
+                    "spread" => RingSpread::Spread,
+                    _ => return Err("invalid --ring-spread".into()),
+                };
+                continue;
+            }
             match arg.as_str() {
                 "--batch-commit" => batch_commit = true,
                 "--check-reads" => check_reads = true,
@@ -201,6 +249,8 @@ mod settings {
             effective_wake_batch,
             poll_recv,
             ckpt_restart,
+            batch_target,
+            ring_spread,
         })
     }
 }
@@ -353,12 +403,14 @@ fn startup_line(
     )?;
     writeln!(
         out,
-        " safe_build={} small_limits={} fault_inject={} host=\"{}\" port={} backlog=4096",
+        " safe_build={} small_limits={} fault_inject={} host=\"{}\" port={} backlog=4096 batch_target={} ring_spread={}",
         u8::from(cfg!(twelve_safe)),
         u8::from(cfg!(twelve_small_limits)),
         u8::from(cfg!(twelve_fault_inject)),
         settings.host(),
-        settings.port()
+        settings.port(),
+        settings.batch_target(),
+        settings.ring_spread().as_str()
     )
 }
 

@@ -70,7 +70,13 @@ mostly idle sockets under `LimitNOFILE=65535`.
    them (`BEGIN`, then the read transaction and four B-tree cursors). Reads see the batch's earlier
    writes.
 3. `COMMIT`, then every response is handed to the kernel. **No response from a batch is handed to
-   the kernel until its COMMIT returns.** If the commit fails, every response that touched the
+   the kernel until its COMMIT returns.** A transaction that wrote stays open for up to 3 ms
+   (`CG_US`), so the batches of those milliseconds share one commit: every commit rewrites the
+   same hot pages into the log (page 1, the tails of posts, likes and their indexes), and sharing
+   a commit across three or four batches cuts that traffic, and the checkpoint and writeback work
+   behind it, by the same factor. The responses of the batches in a group wait for the group's
+   commit, so a POST or a read in a group answers up to 3 ms later than it would alone; a
+   transaction that has not written commits at once (nothing to group). If the commit fails, every response that touched the
    database becomes a 500 and the connection is closed, so no 201 ever claims a write that did not
    land and no read ever reports a row that rolled back. If SQLite ends the transaction by itself
    mid-batch (`SQLITE_FULL`, an I/O error), the rest of the batch does not write and its commit
@@ -120,7 +126,14 @@ mostly idle sockets under `LimitNOFILE=65535`.
   the tail thread restarted the log) flushes the run and starts a new one; it never bypasses the
   buffer (the earlier heads let it, and a frame header written that way lost its commit flag, so
   the page behind it waited in user space after `COMMIT` had returned; a checkpoint reading that
-  frame in that moment copied garbage, seen once the tail thread began restarting the log). Every other call on
+  frame in that moment copied garbage, seen once the tail thread began restarting the log). A
+  write that continues the run but does not fit the 128 KB buffer (a commit of 32 frames or more:
+  any write batch released after a hold of more than ~13 ms) flushes the run but keeps the commit
+  flag, since the flag belongs to the header that just went out and the page behind it must still
+  go out before `COMMIT` returns (`1e7fb4d` cleared it there, and under CPU contention a
+  checkpoint copied such a page before the loop had written it: "database disk image is
+  malformed" from then on, found with a load generator holding 300,000 connections while a
+  busy process shared the core). Every other call on
   the file flushes first and goes straight through, so the bytes and their order are SQLite's.
   Readers find frames only through the wal-index, so none can see a buffered one. (After
   c-iouring-pavlyhalim #245 and c-iouring-shivanshthapliyal #250.)
@@ -138,7 +151,11 @@ mostly idle sockets under `LimitNOFILE=65535`.
   nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
   writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
   fully copied; so that thread runs pass after pass, each copying what the previous one missed,
-  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). Then
+  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). A
+  nice-19 thread gets no time while the loop is busy at the top of the load, and an unprivileged
+  process cannot raise a thread's priority back, so a second bulk thread at the normal priority
+  waits beside it and takes the passes whenever the log has reached 32,768 frames (128 MB): the
+  log cannot grow unbounded, and the extra priority is spent only when it is needed. Then
   writes are held (reads go on; the next POST on each connection waits in its buffer) while a
   second thread at the normal priority copies that remainder: a few milliseconds of copying plus
   the syncs of the log and of the database, on a thread. That thread then restarts the log itself
@@ -213,7 +230,7 @@ cursors through SQLite's pager; writes use SQL.
 5. No caching across requests: no response, query-result or token caches. Every request reads SQLite
 pages while it is served. Kept between batches: prepared statements, cursors, root page numbers and
 column layout (schema metadata, read at open), and the HMAC key schedule.
-6. WAL + `synchronous=NORMAL`; group commit; each response waits for its batch's commit.
+6. WAL + `synchronous=NORMAL`; group commit (one commit per up to 3 ms of batches); each response waits for its commit.
 7. Nothing detects the load test: every route works for any request, and the server never sheds
 load, never closes a healthy connection and never looks at who is asking.
 8–9. Direct on `0.0.0.0:80`. Direct descriptors need no file descriptors beyond the listeners.

@@ -3,7 +3,7 @@
 One event-loop thread serves every connection through io_uring and every request of a batch
 through one SQLite transaction. Reads walk SQLite's own B-tree cursors inside that transaction and
 are written straight from the pages into the response; writes are prepared SQL with group commit.
-Nothing on the request path allocates. Two more threads only run WAL checkpoints.
+Nothing on the request path allocates. One more thread, at nice 19, only runs WAL checkpoints.
 
 | | |
 |---|---|
@@ -39,7 +39,9 @@ mostly idle sockets under `LimitNOFILE=65535`.
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
   ring 0 waits for 256 completions or 1 ms, whichever comes first, so bigger batches share one
-  commit and a pass never spins.
+  commit and a pass never spins. (4 ms batches were tried: they cut the WAL ~40 %, one set of
+  hot-page frames per commit, but under a CPU quota they add 25-50 ms to p95 at high load, so
+  the batches stay short.)
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per
@@ -120,17 +122,21 @@ mostly idle sockets under `LimitNOFILE=65535`.
   every slot). The idea is from c-iouring-pavlyhalim #245. The cache's memory comes from one arena
   handed to SQLite with `SQLITE_CONFIG_PAGECACHE`, backed by transparent huge pages where the kernel
   offers them.
-- WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 48 MB page cache, no `mmap` (a page in
+- WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 96 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
-- **Checkpoints never fsync on the loop** (the design of rust-iouring-kensac #264, with one
-  change). Past 4,096 WAL frames a thread at nice 19 runs a PASSIVE checkpoint on its own
-  connection in the loop's idle time. Under steady writes that pass cannot copy the frames written
-  meanwhile, and the log only restarts once it is fully copied. So when it is done, writes are held
-  (reads go on; the next POST on each connection stays in its buffer) while a second thread at the
-  normal priority copies the rest: at nice 19 the tail would wait for idle time that a loaded loop
-  does not have, and the hold would last as long as its limit. Then the next write restarts the log.
-  A hold starts and ends only between batches and lasts at most 250 ms. Past 65,536 frames the
-  loop checkpoints by itself, as a last resort.
+- **Checkpoints converge in the background and finish on the loop** (after rust-iouring-kensac
+  #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at nice 19 runs PASSIVE
+  checkpoints on its own connection in the loop's idle time. Under steady writes a pass cannot
+  copy the frames written meanwhile, and the log only restarts once it is fully copied; so the
+  thread runs pass after pass, each copying what the previous one missed, until fewer than 512
+  frames remain (it converges: the thread copies faster than the loop writes). The loop then
+  copies that remainder itself between two batches, a few milliseconds, and since no writer runs
+  meanwhile it always completes; the next write restarts the log. The first version of this entry
+  (`c3fdb10`, 270,000 users) instead held writes while a second thread at the normal priority
+  copied a tail that, on one vCPU, had grown to tens of MB during the slow bulk: that thread
+  competed with the loop for the single core, and the holds ran into their 250 ms limit, so
+  every request saw the cycle (p95 114 ms, p99 551 ms at 77 % CPU). Past 131,072 frames the loop
+  checkpoints by itself, as a last resort.
 - Build options: `THREADSAFE=2` (each connection is used by one thread), `DEFAULT_MEMSTATUS=0`,
   `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`,
   `USE_ALLOCA`, `TEMP_STORE=3`, `OMIT_` deprecated/progress-callback/shared-cache/load-extension/

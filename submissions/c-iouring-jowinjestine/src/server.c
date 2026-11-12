@@ -21,10 +21,10 @@
 #define ARENA_CAP (1u << 20)
 #define ARENA_POOL 64
 #define READS_PER_PASS 16384
-#define ANSWERS_PER_PASS 2048
-#define WAIT_MIN 256
-#define WAIT_NS 1000000ULL
 #define IDLE_NS 100000000ULL
+/* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
+static unsigned answers_per_pass = 2048, wait_min = 256;
+static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
 
@@ -602,16 +602,20 @@ static void stats(uint64_t dt_ns) {
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_MISS, &c_miss, &hw, 1);
   fprintf(stderr,
           " total_reqs=%llu req/s=%.0f batches/s=%.0f avg_batch=%.1f max_batch=%llu accepts=%llu closes=%llu enobufs=%llu reads=%llu "
-          "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt=%llu holds=%llu force=%llu fallback=%llu "
-          "errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu\n",
+          "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
+          "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
+          "bulk_max=%.0fms tail_max=%.1fms tail_total=%.1fms tail_frames_max=%llu tail_short=%llu passes_max=%llu\n",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
           (unsigned long long)S.cq_overflow, (unsigned long long)S.cancels, A.db.wal_frames, (unsigned long long)A.db.n_ckpt,
-          (unsigned long long)A.db.n_hold, (unsigned long long)A.db.n_force, (unsigned long long)A.db.n_fallback,
+          (unsigned long long)A.db.n_cycles, (unsigned long long)A.db.n_force, (unsigned long long)A.db.n_fallback,
           (unsigned long long)A.n_err, c_miss, ru.ru_maxrss / 1024, cpu, (double)S.max_turn_ns / 1e6, (double)S.max_commit_ns / 1e6,
-          (unsigned long long)wal_pwrites);
+          (unsigned long long)wal_pwrites, (double)A.db.bulk_max_ns / 1e6, (double)A.db.tail_max_ns / 1e6,
+          (double)A.db.tail_total_ns / 1e6, (unsigned long long)A.db.tail_frames_max, (unsigned long long)A.db.n_tail_short,
+          (unsigned long long)A.db.n_passes_max);
   memset(&S, 0, sizeof S);
+  A.db.bulk_max_ns = A.db.tail_max_ns = A.db.tail_total_ns = A.db.tail_frames_max = 0;
 }
 
 static long env_long(const char *name, long def) {
@@ -826,11 +830,19 @@ int main(int argc, char **argv) {
   if (accept_stop < 16) accept_stop = 16;
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 1024);
+  answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
+  /* 1 ms batches. Longer ones (4 ms) would cut the WAL ~40 % (one set of hot-page frames per
+   * commit), but measured under a CPU quota they add 25-50 ms to p95 at high load: bigger
+   * service bursts, more queueing variance. The tail is what the score is made of. */
+  wait_min = (unsigned)env_long("WAIT_MIN", 256);
+  wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
+  ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
+  ckpt_tail = (int)env_long("CKPT_TAIL", 512);
   long want = env_long("MAX_CONNS", 600000);
   NR_MAX = (unsigned)((want + nslots - 1) / nslots);
   if (NR_MAX < 1) NR_MAX = 1;
   if (NR_MAX > MAX_RINGS) NR_MAX = MAX_RINGS;
-  int cache_kib = (int)env_long("CACHE_KIB", 49152);
+  int cache_kib = (int)env_long("CACHE_KIB", 98304); /* 96 MB: the likes index, the post tails and their indexes stay resident */
 
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
 
@@ -855,7 +867,7 @@ int main(int argc, char **argv) {
     int busy = nready || (nrq > rq_head) || (nheld && !A.db.writes_held);
     long rc;
     if (busy) rc = ring_enter(&R[0].r, 0, 0);
-    else rc = ring_enter(&R[0].r, last_cqes >= 16 ? WAIT_MIN : 1, last_cqes ? WAIT_NS : IDLE_NS);
+    else rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, last_cqes ? wait_ns : IDLE_NS);
     if (rc < 0 && rc != -ETIME && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN) {
       fprintf(stderr, "io_uring_enter: %s\n", strerror((int)-rc));
       return 1;
@@ -864,7 +876,7 @@ int main(int argc, char **argv) {
     uint64_t t = now_ns();
     A.now = (int64_t)time(NULL);
     writes_ok = !A.db.writes_held;
-    answers_left = ANSWERS_PER_PASS;
+    answers_left = answers_per_pass;
     unsigned ncq = reap_all();
     run_ready(); /* oldest first: what earlier batches read */
     ncq += read_rounds();

@@ -201,6 +201,8 @@ inline fn author<F>(cx) {
             }
         };
         guard user > 0 && named else { plod::fail(cx, 401, "invalid token payload"); }
+        // jwt_verify checks exp when a token has one; SPEC.md requires it.
+        guard t.exp >= 0 else { plod::fail(cx, 401, "invalid or expired token"); }
         F(user, name);
     };
     guard e == plod::JwtError.None else { plod::fail(cx, 401, "invalid or expired token"); }

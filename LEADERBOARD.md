@@ -76,23 +76,23 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 6 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
 | 6 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
 | 6 | fsharp-uring-delneg | #394 | F# (.NET 11, io_uring, SQLite B-tree reads) | **290,000** ᴱ | 27,523 | 55.3 | 498.6 | 0.00 | 87 | 28 | 751 | 2026-11-11 |
-| 9 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
-| 9 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** ᴺ | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
-| 9 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
-| 9 | asm-btree-ninhnv | #388 | x86-64 asm (NASM, io_uring, SQLite B-tree reads) | **280,000** ᴮ | 26,699 | 195.7 | 396.6 | 0.00 | 82 | 28 | 794 | 2026-11-10 |
-| 9 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** ᵁ | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
-| 14 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
-| 14 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
-| 16 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
-| 17 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 17 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
-| 17 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
-| 17 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
-| 17 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
-| 17 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
-| 17 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
-| 17 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
-| 17 | c-iouring-jowinjestine | #396 | C (io_uring, SQLite B-tree reads) | **270,000** ᴸ | 25,692 | 114.3 | 550.7 | 0.00 | 77 | 27 | 904 | 2026-11-12 |
+| 6 | c-iouring-jowinjestine | #404 | C (io_uring, SQLite B-tree reads) | **290,000** ᴸ | 27,567 | 77.6 | 271.7 | 0.00 | 80 | 26 | 1,146 | 2026-11-12 |
+| 10 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
+| 10 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** ᴺ | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
+| 10 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
+| 10 | asm-btree-ninhnv | #388 | x86-64 asm (NASM, io_uring, SQLite B-tree reads) | **280,000** ᴮ | 26,699 | 195.7 | 396.6 | 0.00 | 82 | 28 | 794 | 2026-11-10 |
+| 10 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** ᵁ | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
+| 15 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
+| 15 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
+| 17 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
+| 18 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
+| 18 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
+| 18 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
+| 18 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
+| 18 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
+| 18 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
+| 18 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
+| 18 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
 | 26 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 27 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 28 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
@@ -607,7 +607,11 @@ didn't beat the merged row) scored **230,000** (22,354 req/s, p95 32.6 / p99 285
 999 MB, 2026-11-11). 240,000 failed the 2-minute probe on p95/p99 (241 / 1,475 ms at 72 % CPU, 0 errors) and 320,000
 on p95/p99 (2,285 / 2,524 ms at 97 % CPU).
 
-ᴸ **c-iouring-jowinjestine** stays on its merged #396 row (`c3fdb10`). Its follow-up **#402** was scored at commit
+ᴸ **c-iouring-jowinjestine** is scored at its follow-up PR **#404** (`1e7fb4d`, merged 2026-11-12: the tail
+checkpoint thread restarts the log itself, `BEGIN IMMEDIATE` batches, WAL-coalescing shim fix, rings created at
+startup): 290,000 held at 80 % CPU, 0 errors; 300,000 failed the 2-minute probe on p99 (3.83 s at 83 % CPU), 320,000 on
+p99 (21.7 s at 89 % CPU). Its first merged code, #396 (`c3fdb10`), held **270,000** (25,692 req/s, p95 114.3 / p99
+550.7 ms, 0 err, 77 % CPU, 27 µs/req, 904 MB, 2026-11-12). Its follow-up **#402** was scored at commit
 **`f2f9227`** (held, not merged: it didn't beat the merged row): **253,000** (24,302 req/s, p95 285.6 / p99 665.4 ms,
 0 err, 73 % CPU, 27 µs/req, 1,216 MB, 2026-11-12). 280,000 passed the 2-minute probe but failed the 5-minute hold on
 p99 (1.76 s at 83 % CPU, 0 errors), 266,000 failed the 5-minute hold on p99 (3.47 s at 79 % CPU), and 320,000 failed the 2-minute probe (0.59 % connection
@@ -616,8 +620,8 @@ refused, 94 % CPU). #402's head moved to `9caa0a5` during the run; that commit w
 row, so not merged (280,000 failed the 2-minute probe on p99, 1.68 s at 80 % CPU). The head moved again to `42abbf3`
 during that run; `42abbf3` was then scored too: **270,000** (25,859 req/s, p95 52.6 / p99 178.9 ms, 0 err, 74 % CPU,
 26 µs/req, 1,314 MB, 2026-11-12), again level with the merged row, so not merged (280,000 failed the 2-minute probe on
-p99, 1.40 s at 78 % CPU; 320,000 failed it on p99, 7.39 s at 96 % CPU). A second follow-up, **#404**, was scored at
-commit **`90e3bf6`**: **270,000** (25,879 req/s, p95 29.5 / p99 146.6 ms, 0 err, 73 % CPU, 26 µs/req, 1,004 MB,
+p99, 1.40 s at 78 % CPU; 320,000 failed it on p99, 7.39 s at 96 % CPU). #402 stays open, unmerged. An earlier head of
+#404, **`90e3bf6`**, held **270,000** (25,879 req/s, p95 29.5 / p99 146.6 ms, 0 err, 73 % CPU, 26 µs/req, 1,004 MB,
 2026-11-12), level with the merged row, so not merged (280,000 failed the 2-minute probe on p99, 1.31 s at 75 % CPU;
 320,000 failed it with 76 % connection refused).
 

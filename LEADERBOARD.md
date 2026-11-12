@@ -801,7 +801,10 @@ checkpoint rounds and the explicit WAL sync removed, one passive checkpoint per 
 (22,374 req/s, p95 17.3 / p99 155.6 ms, 0 errors; 240k failed the 2-minute probe on p99 1.16 s). Its next head
 `4853419` (2026-11-11: #388's bounded checkpoint rounds back, `journal_size_limit` 1 MB) held **260,000** at 77 % CPU
 (24,995 req/s, p95 76.0 / p99 250.9 ms, 0 errors, 659 MB; 270k failed the 2-minute probe on p99 1.84 s, 280k on p99
-3.17 s). Both are below #388's 280,000, so #390 is not merged and the row stays at #388.
+3.17 s). Head `73c09c9` (2026-11-12: both checkpoint threads at nice 5, database file grown in 64 MiB chunks) held
+**240,000** at 70 % CPU (23,221 req/s, p95 29.8 / p99 853.3 ms, 0 errors, 617 MB; 250k failed the 2-minute probe on
+p99 1.25 s, 260k on p99 1.05 s, 280k on p99 1.85 s). All three are below #388's 280,000, so #390 is not merged and the
+row stays at #388.
 
 ᴱ **fsharp-uring-delneg** is scored at its follow-up PR **#394** (`bbc1c39`, merged 2026-11-11: held writes in their
 own queue, drained in bulk after a hold; `CKPASS` 4000 and `HOLD` 16384, checkpoint thread at nice 19): 290,000 held

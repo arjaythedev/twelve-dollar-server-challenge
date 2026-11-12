@@ -6,11 +6,17 @@
 %define SYS_write           1
 %define SYS_close           3
 %define SYS_writev          20
+%define SYS_recvfrom        45
 %define SYS_socket          41
 %define SYS_accept          43
+%define SYS_accept4         288
 %define SYS_bind            49
 %define SYS_listen          50
 %define SYS_setsockopt      54
+%define SYS_fcntl           72
+%define SYS_epoll_create1   291
+%define SYS_epoll_ctl       233
+%define SYS_epoll_wait      232
 %define SYS_clock_gettime   228
 
 %define CLOCK_REALTIME      0
@@ -21,11 +27,44 @@
 %define SOL_SOCKET          1
 %define SO_REUSEADDR        2
 %define SO_RCVTIMEO         20
+%define SO_SNDTIMEO         21
 %define IPPROTO_TCP         6
 %define TCP_NODELAY         1
 
+%define F_SETFL             4
+%define O_NONBLOCK          0x800
+%define MSG_DONTWAIT        0x40
+
+%define EPOLLIN             0x001
+%define EPOLLOUT            0x004
+%define EPOLLERR            0x008
+%define EPOLLHUP            0x010
+%define EPOLLRDHUP          0x2000
+%define EPOLL_CTL_ADD       1
+%define EPOLL_CTL_DEL       2
+%define EPOLL_CTL_MOD       3
+
 %define EINTR               -4
 %define EAGAIN              -11
+
+; ---- event loop ----
+%define MAX_CONN            65536
+%define MAX_EVENTS          256
+%define CONN_INIT_CAP       2048
+%define IDLE_TIMEOUT_MS     75000
+%define SWEEP_INTERVAL_MS   2000
+
+; one live connection, indexed by file descriptor (CONN_ prefix: C_* is taken
+; by the db_create_post argument block below)
+%define CONN_BUF            0
+%define CONN_LEN            8
+%define CONN_CAP            16
+%define CONN_LAST           24
+%define CONN_OUTBUF         32
+%define CONN_OUTOFF         40
+%define CONN_OUTLEN         48
+%define CONN_OUTCAP         56
+%define CONN_SIZE           64
 
 ; ---- HTTP ----
 %define REQ_SIZE            65536

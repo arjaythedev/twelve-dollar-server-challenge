@@ -924,6 +924,7 @@ int main(int argc, char **argv) {
   unsigned last_cqes = 0;
   uint64_t tx_write_ns = 0; /* when the open transaction first wrote; 0 when it has not */
   uint64_t cg_ns = (uint64_t)env_long("CG_US", 3000) * 1000ULL;
+  unsigned cg_min = (unsigned)env_long("CG_MIN", 32); /* a batch smaller than this commits at once: grouping pays only under load */
   for (;;) {
     /* 1. the other rings: submit what the last batch queued and collect their completions */
     for (unsigned i = 1; i < NR; i++) ring_enter(&R[i].r, 0, 0);
@@ -931,7 +932,14 @@ int main(int argc, char **argv) {
     int busy = nready || (nrq > rq_head) || (nheld && !A.db.writes_held);
     long rc;
     if (busy) rc = ring_enter(&R[0].r, 0, 0);
-    else rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, last_cqes ? wait_ns : IDLE_NS);
+    else {
+      uint64_t to = last_cqes ? wait_ns : IDLE_NS;
+      if (tx_write_ns) { /* a group is open: wake for its commit, whatever else arrives */
+        uint64_t n0 = now_ns(), left = tx_write_ns + cg_ns > n0 ? tx_write_ns + cg_ns - n0 : 1;
+        if (left < to) to = left;
+      }
+      rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, to);
+    }
     if (rc < 0 && rc != -ETIME && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN) {
       fprintf(stderr, "io_uring_enter: %s\n", strerror((int)-rc));
       return 1;
@@ -954,7 +962,7 @@ int main(int argc, char **argv) {
      * batches in a group wait for its commit, as before: no reply ever reports a row that
      * rolled back. A transaction that has not written commits at once (nothing to group, and
      * it may be a deferred one that must not write). */
-    int commit_now = !A.db.wrote || !cg_ns || t - tx_write_ns >= cg_ns || nrep >= 16384 || n_batch_arenas >= 448 || stop_requested;
+    int commit_now = !A.db.wrote || !cg_ns || t - tx_write_ns >= cg_ns || ncq < cg_min || nrep >= 16384 || n_batch_arenas >= 448 || stop_requested;
     if (commit_now) {
       uint64_t tc = now_ns();
       int failed = db_commit(&A.db) < 0;

@@ -24,7 +24,7 @@ for _ in 1 2 3; do
 done
 [ "$started" = 1 ] || { echo "training server did not start"; cat "$DIR/server.log"; exit 1; }
 rc=0
-timeout 300 "$TRAIN" 127.0.0.1 "$PORT" training-secret "${TRAIN_REQUESTS:-60000}" || rc=$?
+timeout "${TRAIN_TIMEOUT:-900}" "$TRAIN" 127.0.0.1 "$PORT" training-secret "${TRAIN_REQUESTS:-60000}" || rc=$?
 if [ "$rc" != 0 ]; then
   echo "training client failed (rc=$rc); server log:" >&2
   tail -20 "$DIR/server.log" >&2 || true

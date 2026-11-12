@@ -9,8 +9,8 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get update
 apt-get install -y --no-install-recommends build-essential liburing-dev git curl ca-certificates
 
-GOOSE_RELEASE=v2026.3
-GOOSE_SHA256=06ac30284338269d3996d457412bf4f2b47c1f9a5601de65b6317187fe78d5c9
+GOOSE_RELEASE=v2026.4
+GOOSE_SHA256=559ad7572df89fcd1273512d8679528bcdf876c252ec1f31608d3808b24125b3
 
 case "$(uname -m)" in
 x86_64)

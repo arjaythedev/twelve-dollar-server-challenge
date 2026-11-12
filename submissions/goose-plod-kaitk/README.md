@@ -7,7 +7,7 @@ no C: `app.goose` is the whole application, about 250 lines.
 
 | | |
 |---|---|
-| Language | [Goose](https://github.com/aardappel/goose) release `v2026.3`, which compiles to C; the official release, checked against its SHA-256 by `install.sh` |
+| Language | [Goose](https://github.com/aardappel/goose) release `v2026.4`, which compiles to C; the official release, checked against its SHA-256 by `install.sh` |
 | Framework | [Plod](https://github.com/kaitk/plod) `v0.5.11`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.16` (io_uring) |
 | SQLite | [goose-sqlite](https://github.com/kaitk/goose-sqlite), which builds SQLite 3.54.1's amalgamation, unmodified, into the program |
 | JWT | Plod's HS256 verifier, over [goose-hash](https://github.com/kaitk/goose-hash) `v0.0.4` |

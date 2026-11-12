@@ -251,7 +251,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 180 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
 | 182 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
 | 183 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
-| 183 | typescript-tinyjs-animuni-express | #382 | TypeScript (TinyJS on Bun) | **43,000** | 4,219 | 138.1 | 584.6 | 0.00 | 86 | 189 | 489 | 2026-11-11 |
+| 183 | typescript-tinyjs-animuni-express | #382 | TypeScript (TinyJS on Bun) | **43,000** ᵀ | 4,219 | 138.1 | 584.6 | 0.00 | 86 | 189 | 489 | 2026-11-11 |
 | 185 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
 | 186 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
 | 187 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
@@ -840,6 +840,12 @@ AF_XDP + lwIP transport behind `start.sh --bypass`, which the rig doesn't use, s
 the PR was closed by its author during the run, so it can't be merged) held **270,000** (25,882 req/s, p95 31.4 / p99
 266.4 ms, 0 err, 80 % CPU, 28 µs/req, 1,467 MB, 2026-11-12): 280,000 failed the 2-minute probe on p99 (1.08 s at 82 %
 CPU, 0 errors) and 320,000 on p95/p99 (1.30 / 2.31 s at 93 % CPU).
+
+ᵀ **typescript-tinyjs-animuni-express** is scored at its merged #382 code (`e6a08ba`). Its follow-up **#410**
+(`3b3c64f`, a native `Bun.serve` transport feeding TinyJS's handler; held, not merged yet: it conflicts with `main`, so
+CI hasn't run) held **71,000** (6,553 req/s, p95 45.8 / p99 59.3 ms, 0.93 % err, 92 % CPU, 131 µs/req, 211 MB,
+2026-11-12), 42/42 tests: 75,000 failed the 5-minute hold on timeouts (1.59 % err) and 78,000 the 2-minute probe (1.36 %).
+The row moves to #410's score once it's rebased on `main`, CI is green and that head is re-run.
 
 ## Patches (ᵖ) and failures
 

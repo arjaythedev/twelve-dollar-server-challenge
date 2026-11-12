@@ -298,10 +298,15 @@ impl ReadDb {
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(64)
             .max(1);
+        // The B-tree shim serves payloads as pointers into the pager's page
+        // cache, so a mapping only removes work on a cache miss, where the
+        // pager would otherwise pread into the cache page. Half the seed
+        // database bounds the mapped RSS (~128 MB) while covering the hot
+        // working set. mmap is explicitly allowed by rule 5.
         let mmap_mb = std::env::var("READ_MMAP_MB")
             .ok()
             .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0)
+            .unwrap_or(128)
             .max(0);
         db.exec(&format!("PRAGMA cache_size=-{}", cache_mb * 1024))?;
         db.exec(&format!("PRAGMA mmap_size={}", mmap_mb * 1024 * 1024))?;

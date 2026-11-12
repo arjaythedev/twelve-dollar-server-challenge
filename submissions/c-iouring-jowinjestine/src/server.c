@@ -87,6 +87,7 @@ static unsigned NR, NR_MAX, acc_ring;
 static unsigned ring_slots, accept_next, accept_stop, recv_bufs;
 static int ring_grow_failed;
 static int LFD[NLISTEN];
+static uint64_t acc_ok[NLISTEN], acc_nofile, acc_cancel, acc_err; /* accepts per listener; the error kinds */
 static struct app A;
 static int writes_ok = 1;
 
@@ -380,8 +381,9 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   struct rs *rs = &R[ri];
   if (!(cqe->flags & IORING_CQE_F_MORE)) rs->accept_armed &= (uint8_t)~(1u << UD_SLOT(cqe->user_data));
   if (cqe->res < 0) {
-    if (cqe->res != -ECANCELED && cqe->res != -ENFILE && cqe->res != -EMFILE)
-      fprintf(stderr, "accept ring %u: %s\n", ri, strerror(-cqe->res));
+    if (cqe->res == -ECANCELED) acc_cancel++;
+    else if (cqe->res == -ENFILE || cqe->res == -EMFILE) acc_nofile++;
+    else { acc_err++; fprintf(stderr, "accept ring %u: %s\n", ri, strerror(-cqe->res)); }
     return;
   }
   uint32_t slot = (uint32_t)cqe->res;
@@ -393,6 +395,7 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   c->send_arena = NULL;
   rs->open++;
   S.accepts++;
+  acc_ok[UD_SLOT(cqe->user_data)]++;
   arm_multishot(ri, slot, c);
 }
 
@@ -588,6 +591,51 @@ static void flush_replies(int commit_failed) {
 
 /* ---------- housekeeping ---------- */
 
+/* kernel-side counters the box's log should carry: accept-queue overflows and drops, TCP memory aborts and
+   pressure events (deltas per interval), TCP memory in pages and MemAvailable (snapshots) */
+static long kst_prev[4];
+static void kstats(void) {
+  static const char *names[4] = {"ListenOverflows", "ListenDrops", "TCPAbortOnMemory", "TCPMemoryPressures"};
+  long cur[4] = {0, 0, 0, 0};
+  char head[4096], vals[4096];
+  FILE *f = fopen("/proc/net/netstat", "r");
+  if (f) {
+    while (fgets(head, sizeof head, f) && fgets(vals, sizeof vals, f))
+      if (!strncmp(head, "TcpExt:", 7)) {
+        char *h = head + 7, *v = vals + 7, *hs, *vs, *ht, *vt;
+        while ((ht = strtok_r(h, " \n", &hs)) && (vt = strtok_r(v, " \n", &vs))) {
+          h = v = NULL;
+          for (int i = 0; i < 4; i++) if (!strcmp(ht, names[i])) cur[i] = atol(vt);
+        }
+        break;
+      }
+    fclose(f);
+  }
+  long tcp_mem = -1, avail = -1, inuse = -1, tw = -1, orphan = -1;
+  if ((f = fopen("/proc/net/sockstat", "r"))) {
+    while (fgets(head, sizeof head, f))
+      if (!strncmp(head, "TCP:", 4)) {
+        char *m;
+        if ((m = strstr(head, " mem "))) tcp_mem = atol(m + 5);
+        if ((m = strstr(head, " inuse "))) inuse = atol(m + 7);
+        if ((m = strstr(head, " tw "))) tw = atol(m + 4);
+        if ((m = strstr(head, " orphan "))) orphan = atol(m + 8);
+      }
+    fclose(f);
+  }
+  if ((f = fopen("/proc/meminfo", "r"))) {
+    while (fgets(head, sizeof head, f)) if (!strncmp(head, "MemAvailable:", 13)) avail = atol(head + 13) / 1024;
+    fclose(f);
+  }
+  fprintf(stderr, " listen_overflows=%ld listen_drops=%ld abort_on_mem=%ld mem_pressure=%ld tcp_mem_pages=%ld tcp_inuse=%ld tcp_tw=%ld "
+          "tcp_orphan=%ld mem_avail=%ldMB accepts_per_listener=",
+          cur[0] - kst_prev[0], cur[1] - kst_prev[1], cur[2] - kst_prev[2], cur[3] - kst_prev[3], tcp_mem, inuse, tw, orphan, avail);
+  for (unsigned l = 0; l < NLISTEN; l++) fprintf(stderr, "%s%llu", l ? "," : "", (unsigned long long)acc_ok[l]);
+  fprintf(stderr, " accept_nofile=%llu accept_cancelled=%llu accept_errors=%llu\n", (unsigned long long)acc_nofile,
+          (unsigned long long)acc_cancel, (unsigned long long)acc_err);
+  memcpy(kst_prev, cur, sizeof cur);
+}
+
 static uint64_t T_reqs, T_accepts, T_closes;
 static long majflt_prev;
 static void stats(uint64_t dt_ns) {
@@ -607,7 +655,7 @@ static void stats(uint64_t dt_ns) {
           "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
           "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
           "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu "
-          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu\n",
+          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
@@ -618,6 +666,7 @@ static void stats(uint64_t dt_ns) {
           (double)A.db.hold_total_ns / 1e6, (unsigned long long)A.db.n_hold_timeout, (unsigned long long)A.db.tail_frames_max,
           (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max, (double)S.max_gap_ns / 1e6, ru.ru_majflt - majflt_prev,
           (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy);
+  kstats();
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;

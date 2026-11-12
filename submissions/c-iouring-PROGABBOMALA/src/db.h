@@ -1,6 +1,7 @@
 #ifndef DB_H
 #define DB_H
 
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -19,7 +20,9 @@ enum { CK_IDLE = 0, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 
 struct db_engine {
   sqlite3 *db;
-  sqlite3 *ckpt_db;
+  sqlite3 *ckpt_db; /* bulk copies, low priority thread */
+  sqlite3 *tail_db; /* the copy made while writes are held */
+  int sync_fd;      /* the database file, for syncing between copies */
   struct btree_state bt;
 
   sqlite3_stmt *st_begin, *st_commit, *st_rollback;
@@ -29,7 +32,7 @@ struct db_engine {
   int in_txn;
   int broken; /* SQLite rolled the pass's transaction back by itself */
 
-  pthread_t ckpt_thread;
+  pthread_t ckpt_thread, tail_thread;
   pthread_mutex_t ckpt_mu;
   pthread_cond_t ckpt_cv;
   _Atomic int ck_state;
@@ -41,24 +44,37 @@ struct db_engine {
   int64_t hold_since_ms;
 };
 
+static int db_exec_fwd(sqlite3 *db, const char *sql);
+
+static void db_ckpt_wait(struct db_engine *d, int state) {
+  pthread_mutex_lock(&d->ckpt_mu);
+  while (atomic_load(&d->ck_state) != state) pthread_cond_wait(&d->ckpt_cv, &d->ckpt_mu);
+  pthread_mutex_unlock(&d->ckpt_mu);
+}
+
 static void *db_ckpt_main(void *arg) {
   struct db_engine *d = arg;
-  /* Per-thread on Linux: the request loop keeps its priority. */
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19); /* this thread only */
   for (;;) {
-    pthread_mutex_lock(&d->ckpt_mu);
-    int s;
-    while ((s = atomic_load(&d->ck_state)) != CK_BULK && s != CK_TAIL) pthread_cond_wait(&d->ckpt_cv, &d->ckpt_mu);
-    pthread_mutex_unlock(&d->ckpt_mu);
-
-    int nlog = 0, ndone = 0;
-    int rc = sqlite3_wal_checkpoint_v2(d->ckpt_db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-    if (s == CK_BULK) {
-      atomic_store(&d->ck_state, CK_BULK_DONE);
-    } else {
-      atomic_store(&d->ck_full, rc == SQLITE_OK && nlog == ndone);
-      atomic_store(&d->ck_state, CK_TAIL_DONE);
+    db_ckpt_wait(d, CK_BULK);
+    for (int round = 0; round < 2; round++) {
+      int nlog = 0, ndone = 0;
+      sqlite3_wal_checkpoint_v2(d->ckpt_db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+      if (d->sync_fd >= 0) fdatasync(d->sync_fd);
     }
+    atomic_store(&d->ck_state, CK_BULK_DONE);
+  }
+  return NULL;
+}
+
+static void *db_tail_main(void *arg) {
+  struct db_engine *d = arg;
+  for (;;) {
+    db_ckpt_wait(d, CK_TAIL);
+    int nlog = 0, ndone = 0;
+    int rc = sqlite3_wal_checkpoint_v2(d->tail_db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    atomic_store(&d->ck_full, rc == SQLITE_OK && nlog == ndone);
+    atomic_store(&d->ck_state, CK_TAIL_DONE);
   }
   return NULL;
 }
@@ -66,8 +82,18 @@ static void *db_ckpt_main(void *arg) {
 static void db_ckpt_kick(struct db_engine *d, int state) {
   pthread_mutex_lock(&d->ckpt_mu);
   atomic_store(&d->ck_state, state);
-  pthread_cond_signal(&d->ckpt_cv);
+  pthread_cond_broadcast(&d->ckpt_cv);
   pthread_mutex_unlock(&d->ckpt_mu);
+}
+
+static int db_open_ckpt(const char *path, sqlite3 **out) {
+  if (sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl") != SQLITE_OK) {
+    fprintf(stderr, "db: open checkpoint connection: %s\n", sqlite3_errmsg(*out));
+    return 0;
+  }
+  sqlite3_busy_timeout(*out, 2000);
+  return db_exec_fwd(*out, "PRAGMA synchronous=NORMAL") && db_exec_fwd(*out, "PRAGMA wal_autocheckpoint=0") &&
+         db_exec_fwd(*out, "PRAGMA cache_size=-2048") && db_exec_fwd(*out, "SELECT 1 FROM sqlite_schema LIMIT 1");
 }
 
 static int db_wal_hook(void *arg, sqlite3 *db, const char *name, int frames) {
@@ -121,6 +147,9 @@ static int db_tick(struct db_engine *d, int64_t now_ms) {
 
 static inline int db_ckpt_active(struct db_engine *d) { return atomic_load(&d->ck_state) != CK_IDLE; }
 
+static int db_exec(sqlite3 *db, const char *sql);
+static int db_exec_fwd(sqlite3 *db, const char *sql) { return db_exec(db, sql); }
+
 static int db_exec(sqlite3 *db, const char *sql) {
   char *err = NULL;
   if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
@@ -172,7 +201,7 @@ static int db_init(struct db_engine *d, const char *path) {
   }
   if (!db_exec(d->db, "PRAGMA synchronous=NORMAL") || !db_exec(d->db, "PRAGMA temp_store=MEMORY") ||
       !db_exec(d->db, "PRAGMA cache_size=-65536") || !db_exec(d->db, "PRAGMA mmap_size=0") ||
-      !db_exec(d->db, "PRAGMA wal_autocheckpoint=0"))
+      !db_exec(d->db, "PRAGMA wal_autocheckpoint=0") || !db_exec(d->db, "PRAGMA journal_size_limit=1048576"))
     return 0;
 
   if (!db_prep(d, "BEGIN", &d->st_begin) || !db_prep(d, "COMMIT", &d->st_commit) ||
@@ -193,19 +222,14 @@ static int db_init(struct db_engine *d, const char *path) {
   d->ck_next = d->ck_frames;
   sqlite3_wal_hook(d->db, db_wal_hook, d);
 
-  if (sqlite3_open_v2(path, &d->ckpt_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl") != SQLITE_OK) {
-    fprintf(stderr, "db: open checkpoint connection: %s\n", sqlite3_errmsg(d->ckpt_db));
-    return 0;
-  }
-  sqlite3_busy_timeout(d->ckpt_db, 2000);
-  if (!db_exec(d->ckpt_db, "PRAGMA synchronous=NORMAL") || !db_exec(d->ckpt_db, "PRAGMA wal_autocheckpoint=0") ||
-      !db_exec(d->ckpt_db, "PRAGMA cache_size=-2048") || !db_exec(d->ckpt_db, "SELECT 1 FROM sqlite_schema LIMIT 1"))
-    return 0;
+  if (!db_open_ckpt(path, &d->ckpt_db) || !db_open_ckpt(path, &d->tail_db)) return 0;
+  d->sync_fd = open(path, O_RDWR | O_CLOEXEC);
   pthread_attr_t at;
   pthread_attr_init(&at);
   pthread_attr_setstacksize(&at, 512 * 1024);
-  if (pthread_create(&d->ckpt_thread, &at, db_ckpt_main, d) != 0) {
-    fprintf(stderr, "db: could not start the checkpoint thread\n");
+  if (pthread_create(&d->ckpt_thread, &at, db_ckpt_main, d) != 0 ||
+      pthread_create(&d->tail_thread, &at, db_tail_main, d) != 0) {
+    fprintf(stderr, "db: could not start the checkpoint threads\n");
     return 0;
   }
   pthread_attr_destroy(&at);

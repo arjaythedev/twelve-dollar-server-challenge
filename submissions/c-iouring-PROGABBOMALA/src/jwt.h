@@ -244,7 +244,9 @@ static int jwt_verify(const struct jwt_hmac_state *h, const char *auth, size_t a
   char want[43];
   jwt_hmac_compute(h, (const uint8_t *)tok, (size_t)(d2 - tok), mac);
   b64url_encode_32(mac, want);
-  if (memcmp(sig, want, 43) != 0) return JWT_INVALID;
+  unsigned diff = 0; /* every byte is compared, whatever the first mismatch */
+  for (int i = 0; i < 43; i++) diff |= (unsigned char)sig[i] ^ (unsigned char)want[i];
+  if (diff) return JWT_INVALID;
 
   /* header: {"alg":"HS256", ...} */
   int hn = b64url_decode(tok, (size_t)(d1 - tok), work, cap);

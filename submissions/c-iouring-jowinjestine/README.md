@@ -3,7 +3,8 @@
 One event-loop thread serves every connection through io_uring and every request of a batch
 through one SQLite transaction. Reads walk SQLite's own B-tree cursors inside that transaction and
 are written straight from the pages into the response; writes are prepared SQL with group commit.
-Nothing on the request path allocates. One more thread, at nice 19, only runs WAL checkpoints.
+Nothing on the request path allocates, and nothing on the loop ever fsyncs: two more threads only
+run WAL checkpoints.
 
 | | |
 |---|---|
@@ -124,18 +125,22 @@ mostly idle sockets under `LimitNOFILE=65535`.
   offers them.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 96 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
-- **Checkpoints converge in the background and finish on the loop** (after rust-iouring-kensac
-  #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at nice 19 runs PASSIVE
-  checkpoints on its own connection in the loop's idle time. Under steady writes a pass cannot
-  copy the frames written meanwhile, and the log only restarts once it is fully copied; so the
-  thread runs pass after pass, each copying what the previous one missed, until fewer than 512
-  frames remain (it converges: the thread copies faster than the loop writes). The loop then
-  copies that remainder itself between two batches, a few milliseconds, and since no writer runs
-  meanwhile it always completes; the next write restarts the log. The first version of this entry
-  (`c3fdb10`, 270,000 users) instead held writes while a second thread at the normal priority
-  copied a tail that, on one vCPU, had grown to tens of MB during the slow bulk: that thread
-  competed with the loop for the single core, and the holds ran into their 250 ms limit, so
-  every request saw the cycle (p95 114 ms, p99 551 ms at 77 % CPU). Past 131,072 frames the loop
+- **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
+  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
+  nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
+  writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
+  fully copied; so that thread runs pass after pass, each copying what the previous one missed,
+  until fewer than 512 frames remain (it converges: it copies faster than the loop writes). Then
+  writes are held (reads go on; the next POST on each connection waits in its buffer) while a
+  second thread at the normal priority copies that remainder: a few milliseconds of copying plus
+  the syncs of the log and of the database, on a thread. The next write restarts the log. A hold
+  starts and ends only between batches and lasts at most 100 ms: if the disk makes the tail's
+  sync slow, writes resume and the log restarts a cycle later. Two earlier designs scored worse
+  on the box. `c3fdb10` (270,000 users) copied the tail without the convergence: on one vCPU it
+  had grown to tens of MB during the slow bulk, the thread competed with the loop for the core and
+  the holds ran into their limit, so every request saw the cycle (p95 114 ms, p99 551 ms at 77 %
+  CPU). `f2f9227` (253,000) copied the small tail on the loop itself: its two fsyncs stalled the
+  loop for seconds on the droplet's disk (p99 3.5 s on a hold). Past 131,072 frames the loop
   checkpoints by itself, as a last resort.
 - Build options: `THREADSAFE=2` (each connection is used by one thread), `DEFAULT_MEMSTATUS=0`,
   `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`,

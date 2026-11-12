@@ -16,13 +16,14 @@
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
-static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the thread copies the log back */
-static int ckpt_tail = 512;      /* once this few frames remain, the loop copies them itself */
-#define CKPT_PASSES_MAX 8        /* bulk passes before the loop takes the rest regardless */
+static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
+static int ckpt_tail = 512;      /* once this few frames remain, the tail thread takes them under a hold */
+static uint64_t hold_max_ns = 100000000ULL; /* a hold's limit */
+#define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 131072        /* last resort (512 MB): the loop checkpoints by itself */
 #define CKPT_NICE 19
 
-enum { CK_IDLE, CK_BULK, CK_BULK_DONE };
+enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 
 struct db {
   sqlite3 *c;
@@ -38,13 +39,15 @@ struct db {
   pthread_mutex_t mu;
   pthread_cond_t cv;
   int ck_state; /* written under mu, read with an atomic load on the loop */
-  int ck_left;  /* frames the last bulk pass could not copy (written meanwhile) */
+  int ck_left;  /* frames the last pass could not copy (written meanwhile) */
+  int ck_nlog;  /* frames the log held when that pass ended */
   int ck_passes;
   int wal_frames;  /* from the wal hook, on the loop thread */
-  int writes_held; /* always 0 now: writes are never held (kept for the loop's bookkeeping) */
+  int writes_held; /* the tail is being copied: writes wait (reads go on) */
+  uint64_t hold_t0;
   /* stats */
-  uint64_t n_ckpt, n_cycles, n_force, n_fallback, n_tail_short, n_passes_max;
-  uint64_t bulk_t0, bulk_max_ns, tail_max_ns, tail_total_ns, tail_frames_max;
+  uint64_t n_ckpt, n_cycles, n_force, n_fallback, n_tail_short, n_passes_max, n_hold_timeout;
+  uint64_t bulk_t0, bulk_max_ns, hold_max_ns, hold_total_ns, tail_frames_max;
 };
 
 static int db_open_conn(sqlite3 **out, const char *path, int cache_kib);
@@ -278,17 +281,22 @@ static int vfs_install(void) {
 }
 
 /* ---- checkpoints (after the design of rust-iouring-kensac #264) ----
- * Automatic checkpoints are off. Past CKPT_FRAMES frames a thread at nice 19 runs PASSIVE
- * checkpoints on its own connection in the loop's idle time (the bulk). Under steady writes a
- * pass cannot copy the frames written meanwhile, and the log only restarts once it is fully
- * copied; so the thread runs pass after pass, each copying what the previous one missed, until
- * fewer than CKPT_TAIL frames remain (this converges: the thread copies faster than the loop
- * writes). Then the loop copies that remainder itself between two batches: with no writer
- * running meanwhile that always completes, and the next write restarts the log. It costs the
- * loop a few milliseconds per cycle; on one vCPU any other scheme (a second thread at the normal
- * priority, or holding writes while it runs) competes with the loop for the single core and
- * shows up as a stall of every request. Past CKPT_FORCE frames the loop checkpoints by itself
- * whatever the state, as a last resort. */
+ * Automatic checkpoints are off. Nothing on the loop ever fsyncs: every checkpoint, and so every
+ * sync of the log and of the database, runs on a thread. Past CKPT_FRAMES frames a thread at
+ * nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time (the bulk).
+ * Under steady writes a pass cannot copy the frames written meanwhile, and the log only restarts
+ * once it is fully copied; so that thread runs pass after pass, each copying what the previous
+ * one missed, until fewer than CKPT_TAIL frames remain (this converges: it copies faster than
+ * the loop writes). Then writes are held (reads go on; the next POST on each connection waits in
+ * its buffer) while a second thread at the normal priority copies that remainder (the tail): a
+ * few milliseconds of copying plus the syncs, on a thread. With no writer running meanwhile it
+ * completes, and the next write restarts the log. A hold starts and ends only between batches
+ * and lasts at most HOLD_MAX_NS: if the disk makes the tail's sync slow, writes resume and the
+ * log restarts a cycle later instead. (Two things were tried and scored worse on the box: a tail
+ * copied without the convergence, which on one vCPU had grown to tens of MB and competed with
+ * the loop, 270,000 users; and the small tail copied inline on the loop, whose syncs stalled the
+ * loop for seconds on the droplet's disk, 253,000.) Past CKPT_FORCE frames the loop checkpoints
+ * by itself, as a last resort. */
 static void ck_set(struct db *d, int s) {
   pthread_mutex_lock(&d->mu);
   atomic_store_explicit((_Atomic int *)&d->ck_state, s, memory_order_release);
@@ -298,6 +306,7 @@ static void ck_set(struct db *d, int s) {
 struct ck_thread {
   struct db *d;
   sqlite3 *c;
+  int state; /* the state this thread acts on: CK_BULK or CK_TAIL */
   int nice;
 };
 static void *ck_main(void *arg) {
@@ -306,22 +315,24 @@ static void *ck_main(void *arg) {
   if (t->nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), t->nice);
   for (;;) {
     pthread_mutex_lock(&d->mu);
-    while (d->ck_state != CK_BULK) pthread_cond_wait(&d->cv, &d->mu);
+    while (d->ck_state != t->state) pthread_cond_wait(&d->cv, &d->mu);
     pthread_mutex_unlock(&d->mu);
     int nlog = -1, ndone = -2;
     int rc = sqlite3_wal_checkpoint_v2(t->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
     pthread_mutex_lock(&d->mu);
     d->ck_left = rc == SQLITE_OK && nlog >= ndone ? nlog - ndone : CKPT_FORCE;
+    d->ck_nlog = nlog;
     d->n_ckpt++;
-    atomic_store_explicit((_Atomic int *)&d->ck_state, CK_BULK_DONE, memory_order_release);
+    atomic_store_explicit((_Atomic int *)&d->ck_state, t->state + 1, memory_order_release);
     pthread_mutex_unlock(&d->mu);
   }
   return NULL;
 }
-static int ck_start(struct db *d, const char *path, int nice) {
+static int ck_start(struct db *d, const char *path, int state, int nice) {
   struct ck_thread *t = calloc(1, sizeof *t);
   if (!t) return -1;
   t->d = d;
+  t->state = state;
   t->nice = nice;
   if (db_open_conn(&t->c, path, 64) < 0) return -1;
   pthread_t th;
@@ -337,25 +348,16 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
   ((struct db *)ud)->wal_frames = frames;
   return SQLITE_OK;
 }
-/* The loop's own checkpoint, between two batches (no transaction open, the thread idle). */
-static void db_ckpt_inline(struct db *d, int frames_left) {
-  uint64_t t0 = now_ns();
-  int nlog = 0, ndone = 0;
-  int rc = sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-  uint64_t dt = now_ns() - t0;
-  d->tail_total_ns += dt;
-  if (dt > d->tail_max_ns) d->tail_max_ns = dt;
-  if ((uint64_t)frames_left > d->tail_frames_max) d->tail_frames_max = (uint64_t)frames_left;
-  if (rc == SQLITE_OK && nlog == ndone) d->wal_frames = 0;
-  else d->n_tail_short++;
-}
-/* Between batches, with no transaction open: drives the checkpoint cycle. */
+/* Between batches, with no transaction open: drives the checkpoint cycle. The only place a hold
+ * starts or ends. */
 static void db_tick(struct db *d) {
   switch (atomic_load_explicit((_Atomic int *)&d->ck_state, memory_order_acquire)) {
   case CK_IDLE:
     if (d->wal_frames >= CKPT_FORCE) {
+      int nlog = 0, ndone = 0;
       d->n_force++;
-      db_ckpt_inline(d, d->wal_frames);
+      if (sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK && nlog == ndone)
+        d->wal_frames = 0;
     } else if (d->wal_frames >= ckpt_frames) {
       d->bulk_t0 = now_ns();
       d->ck_passes = 0;
@@ -367,16 +369,38 @@ static void db_tick(struct db *d) {
     d->ck_passes++;
     if (d->ck_left > ckpt_tail && d->ck_passes < CKPT_PASSES_MAX) { ck_set(d, CK_BULK); break; } /* another pass */
     if (d->ck_passes >= CKPT_PASSES_MAX) d->n_passes_max++;
-    uint64_t dt = now_ns() - d->bulk_t0;
+    uint64_t t = now_ns(), dt = t - d->bulk_t0;
     if (dt > d->bulk_max_ns) d->bulk_max_ns = dt;
-    db_ckpt_inline(d, d->ck_left); /* the tail */
+    if (d->ck_left == 0 && d->wal_frames == d->ck_nlog) { /* nothing written since: the next write restarts the log by itself */
+      d->wal_frames = 0;
+      ck_set(d, CK_IDLE);
+      break;
+    }
+    uint64_t tail = (uint64_t)(d->ck_left + (d->wal_frames - d->ck_nlog)); /* missed by the pass, plus written since */
+    if (tail > d->tail_frames_max) d->tail_frames_max = tail;
+    d->writes_held = 1; /* the tail: writes wait so that it completes and the log restarts */
+    d->hold_t0 = t;
+    ck_set(d, CK_TAIL);
+    break;
+  }
+  case CK_TAIL_DONE: {
+    if (d->ck_left == 0) d->wal_frames = 0;
+    else d->n_tail_short++;
+    if (d->writes_held) { /* the hold lasted the whole tail */
+      uint64_t dt = now_ns() - d->hold_t0;
+      d->hold_total_ns += dt;
+      if (dt > d->hold_max_ns) d->hold_max_ns = dt;
+      d->writes_held = 0;
+    }
     ck_set(d, CK_IDLE);
     break;
   }
-  default:
-    if (d->wal_frames >= CKPT_FORCE) { /* the thread is starved: the loop takes over */
-      d->n_force++;
-      db_ckpt_inline(d, d->wal_frames);
+  default: /* a thread is working */
+    if (d->writes_held && now_ns() - d->hold_t0 > hold_max_ns) { /* a slow sync: writes resume, the log restarts next cycle */
+      d->writes_held = 0;
+      d->n_hold_timeout++;
+      d->hold_total_ns += hold_max_ns;
+      if (hold_max_ns > d->hold_max_ns) d->hold_max_ns = hold_max_ns;
     }
     break;
   }
@@ -391,7 +415,7 @@ static int db_open_conn(sqlite3 **out, const char *path, int cache_kib) {
   char sql[96];
   snprintf(sql, sizeof sql, "PRAGMA cache_size=-%d", cache_kib);
   db_exec(*out, sql);
-  db_exec(*out, "PRAGMA mmap_size=0");
+  db_exec(*out, "PRAGMA mmap_size=0"); /* the B-tree reader pins pages through the cache; mapped pages have none */
   db_exec(*out, "PRAGMA synchronous=NORMAL");
   db_exec(*out, "PRAGMA temp_store=MEMORY");
   db_exec(*out, "PRAGMA wal_autocheckpoint=0");
@@ -455,8 +479,8 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
   sqlite3_wal_hook(d->c, db_wal_hook, d);
   pthread_mutex_init(&d->mu, NULL);
   pthread_cond_init(&d->cv, NULL);
-  if (ck_start(d, path, CKPT_NICE)) {
-    fprintf(stderr, "checkpoint thread: %s\n", strerror(errno));
+  if (ck_start(d, path, CK_BULK, CKPT_NICE) || ck_start(d, path, CK_TAIL, 0)) {
+    fprintf(stderr, "checkpoint threads: %s\n", strerror(errno));
     return -1;
   }
   return 0;

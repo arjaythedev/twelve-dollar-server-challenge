@@ -604,18 +604,18 @@ static void stats(uint64_t dt_ns) {
           " total_reqs=%llu req/s=%.0f batches/s=%.0f avg_batch=%.1f max_batch=%llu accepts=%llu closes=%llu enobufs=%llu reads=%llu "
           "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
           "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
-          "bulk_max=%.0fms tail_max=%.1fms tail_total=%.1fms tail_frames_max=%llu tail_short=%llu passes_max=%llu\n",
+          "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu\n",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
           (unsigned long long)S.cq_overflow, (unsigned long long)S.cancels, A.db.wal_frames, (unsigned long long)A.db.n_ckpt,
           (unsigned long long)A.db.n_cycles, (unsigned long long)A.db.n_force, (unsigned long long)A.db.n_fallback,
           (unsigned long long)A.n_err, c_miss, ru.ru_maxrss / 1024, cpu, (double)S.max_turn_ns / 1e6, (double)S.max_commit_ns / 1e6,
-          (unsigned long long)wal_pwrites, (double)A.db.bulk_max_ns / 1e6, (double)A.db.tail_max_ns / 1e6,
-          (double)A.db.tail_total_ns / 1e6, (unsigned long long)A.db.tail_frames_max, (unsigned long long)A.db.n_tail_short,
-          (unsigned long long)A.db.n_passes_max);
+          (unsigned long long)wal_pwrites, (double)A.db.bulk_max_ns / 1e6, (double)A.db.hold_max_ns / 1e6,
+          (double)A.db.hold_total_ns / 1e6, (unsigned long long)A.db.n_hold_timeout, (unsigned long long)A.db.tail_frames_max,
+          (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max);
   memset(&S, 0, sizeof S);
-  A.db.bulk_max_ns = A.db.tail_max_ns = A.db.tail_total_ns = A.db.tail_frames_max = 0;
+  A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
 }
 
 static long env_long(const char *name, long def) {
@@ -838,6 +838,7 @@ int main(int argc, char **argv) {
   wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
   ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
   ckpt_tail = (int)env_long("CKPT_TAIL", 512);
+  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 100) * 1000000ULL;
   long want = env_long("MAX_CONNS", 600000);
   NR_MAX = (unsigned)((want + nslots - 1) / nslots);
   if (NR_MAX < 1) NR_MAX = 1;

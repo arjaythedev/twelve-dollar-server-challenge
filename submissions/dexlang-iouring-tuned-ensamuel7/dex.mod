@@ -1,5 +1,5 @@
 module github.com/ensamuel7/dexlang-iouring
 
-dex 0.9.33
+dex 0.9.40
 
 require github.com/ensamuel7/dex-modules/dexqu v0.1.0

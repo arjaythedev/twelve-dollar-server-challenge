@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.33`: statically typed, compiles to C, which `cc` builds into a native binary |
+| **Language** | [DexLang](https://github.com/ensamuel7/dex) `v0.9.40`: statically typed, compiles to C, which `cc` builds into a native binary |
 | **Framework** | None. DexLang's own `http` and `db` standard library modules |
 | **Server** | The `http` module's io_uring backend (`http.uring()`), with handlers run on the ring's thread |
 | **SQL** | Built with [dexqu](https://github.com/ensamuel7/dex-modules/tree/main/dexqu) `v0.1.0` at startup, prepared once; used for every write |
@@ -161,6 +161,14 @@ fixes on top, so it was run again against that build, on a noisier day: v0.9.33
 gave p99 22 ms and 144 ms (p95 4.2 and 23 ms, CPU 73 and 78 %), the older build
 87 ms (p95 4.7 ms, CPU 73 %). Each run had a few bad 5-second windows, none of
 them repeating, and the checker again found no bad writes.
+
+**Fifth revision (dex v0.9.40): one receive per connection.** Under io_uring
+each connection now keeps a single multishot receive armed for its whole life,
+rather than queuing a new receive (and a poll) after every response. The
+program is unchanged. Against a database-free server on the same loop, 100,000
+users at about 10,600 req/s, the server's time in `io_submit_sqes` fell from
+7.5 % to 2.3 % and the per-request poll setup disappeared from the profile; its
+total CPU fell by about 2 %. The entry passes the test suite, 42/42.
 
 **Tried, not kept:**
 - `http.batchWindow(1)` (dex v0.9.28 and later), which holds a batch open for
@@ -369,10 +377,10 @@ queries.dx   the SQL statements, built with dexqu
 btree.c      the read engine: /feed, /posts/:id and the like check on B-tree cursors,
              and the checkpointer's file sync and chunk size
 btree.h      its interface, as server.dx's `external module bt` sees it
-dex.mod      module file: dex 0.9.33, dexqu v0.1.0 (pinned in dex.sum)
+dex.mod      module file: dex 0.9.40, dexqu v0.1.0 (pinned in dex.sum)
 install.sh   root, once: build-essential, git, pkg-config, libsqlite3-dev,
              libssl-dev, libcurl, and Go 1.27.2 (sha256-checked)
-build.sh     builds the dex compiler from the pinned v0.9.33 tag through the Go
+build.sh     builds the dex compiler from the pinned v0.9.40 tag through the Go
              module proxy (checksum-verified), fetches dexqu and the SQLite
              3.54.1 amalgamation (sha256-checked), writes the sqlite3.c that
              includes it and btree.c, compiles server.dx

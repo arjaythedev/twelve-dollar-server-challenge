@@ -61,7 +61,8 @@ in another, with `bench/load.js`'s think times divided by 20 so that 4,000 users
 | this entry, 1 process | 28.6 | 5.8 ms |
 | this entry, 3 processes (`start.sh`) | 44.4 | 4.7 ms |
 
-These are not the box's numbers; the ratio to kensac is the estimate.
+These are not the box's numbers. Scaled by the ratio to kensac, three processes
+estimate about 110,000 users.
 
 ## Running it
 

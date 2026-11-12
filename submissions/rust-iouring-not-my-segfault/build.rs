@@ -13,9 +13,9 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-/// `SQLITE_SOURCE_ID` of SQLite 3.53.4's amalgamation, the only one the C modules may compile against.
+/// `SQLITE_SOURCE_ID` of SQLite 3.54.1's amalgamation, the only one the C modules may compile against.
 const SOURCE_ID: &str =
-    "2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc";
+    "2026-10-16 14:45:20 555e07ef33f69a0957d24d8e555b702464a131d6f1607f4c3c1e4551e8e6ca76";
 
 /// SQLite compile options, in the order the compiler receives them.
 const SQLITE_DEFINES: [&str; 10] = [
@@ -88,6 +88,20 @@ const HARDENING_FLAGS: [&str; 8] = [
     "-D_FORTIFY_SOURCE=3",
     "-fstack-protector-strong",
     "-fstack-clash-protection",
+];
+
+/// The vector width bound of both builds, right after -march: no 512-bit instructions whatever -march
+/// names, since a Cascade Lake core lowers its clock while it runs them and for about 2 ms after; build.sh
+/// passes Rust's equal, -C target-feature=-avx512f.
+const VECTOR_FLAGS: [&str; 1] = ["-mno-avx512f"];
+
+/// The switches that turn off the hardening Ubuntu's GCC enables by default (stack protector,
+/// _FORTIFY_SOURCE, stack-clash protection, control-flow protection), passed in the fast build only.
+const DEFAULT_HARDENING_OFF: [&str; 4] = [
+    "-fno-stack-protector",
+    "-U_FORTIFY_SOURCE",
+    "-fno-stack-clash-protection",
+    "-fcf-protection=none",
 ];
 
 /// The sanitizer kinds GCC builds, each selected by a -Zsanitizer=<kind> of the effective Rust flags.
@@ -380,7 +394,7 @@ fn check_source_id(manifest_dir: &Path) -> Result<(), BuildFailure> {
     }
     File::open(&header).map_err(|error| BuildFailure::io("source-id", "open", &header, error))?;
 
-    let refused = || BuildFailure::refusal("source-id", "SQLite 3.53.4 source id required");
+    let refused = || BuildFailure::refusal("source-id", "SQLite 3.54.1 source id required");
     let source = manifest_dir.join("vendor/sqlite3.c");
     let file = File::open(&source)
         .map_err(|error| BuildFailure::io("source-id", "open", &source, error))?;
@@ -583,6 +597,7 @@ fn compile_unit(config: &Config) -> Result<PathBuf, BuildFailure> {
         .arg("-g")
         .arg("-fno-semantic-interposition")
         .arg(format!("-march={}", config.c_target))
+        .args(VECTOR_FLAGS)
         .args(WARNING_FLAGS)
         .arg(format!("-Wframe-larger-than={STACK_BUFFER_MAX_BYTES}"))
         .args(GCC_WARNING_FLAGS)
@@ -600,6 +615,9 @@ fn compile_unit(config: &Config) -> Result<PathBuf, BuildFailure> {
             // UNSAFE PATH (speed): no C hardening flags; the fast build compiles the C unit without the release hardening flags, which change the generated code of SQLite's hot paths, and readers.c and checkpointer.c are written to be correct without them.
             command.args(HARDENING_FLAGS);
         }
+    } else {
+        // UNSAFE PATH (speed): GCC's default hardening off; the fast build compiles the C unit without the stack protector, _FORTIFY_SOURCE, stack-clash protection and control-flow protection that Ubuntu's GCC turns on by default, which add checks to SQLite's hot paths, and readers.c and checkpointer.c are written to be correct without them.
+        command.args(DEFAULT_HARDENING_OFF);
     }
     if sanitized {
         for kind in &config.sanitizers {
@@ -614,7 +632,13 @@ fn compile_unit(config: &Config) -> Result<PathBuf, BuildFailure> {
             .arg(format!("-fprofile-use={dir}"))
             .arg("-fprofile-correction")
             .arg("-fprofile-partial-training")
-            .arg("-Werror=missing-profile");
+            .arg("-Werror=missing-profile")
+            // Under the training profile GCC inlines sqlite3Strlen30 into the vendored
+            // sqlite3ColumnSetColl and reports -Wstringop-overread there, a warning
+            // GCC raises in the optimizer after inlining, which -isystem cannot scope (as with
+            // -Wnull-dereference above). The finding is in vendored code, and our C keeps the
+            // warning in every compile without a profile, from the same source.
+            .arg("-Wno-stringop-overread");
     }
     command
         .arg("-c")

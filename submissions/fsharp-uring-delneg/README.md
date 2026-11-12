@@ -11,7 +11,8 @@
 ## Design
 
 - **One thread drives everything** (the box has one CPU): an io_uring loop over several rings, the HTTP parser, the
-  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own.
+  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, at nice 19, so it takes
+  the CPU only when the loop leaves it.
 - **io_uring in F#.** `Ring.fs` maps the rings and writes submission entries in place; the rings are
   `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN`, so completions are posted in batches when the loop enters a ring.
   Accepted sockets are fixed (direct) descriptors from multishot accepts. A table may hold up to `RLIMIT_NOFILE`
@@ -37,13 +38,18 @@
   is handed to the kernel before its `COMMIT` returns (rule 6). If a commit fails, the pass's connections close
   without an answer, so no response claims a write that didn't land. Writes commit at most once per 10 ms (reads
   aren't held), so a commit carries more writes and fewer WAL frames per write.
+- **Held writes.** A write that must wait (the write window, or a checkpoint hold) moves once to a queue of its own,
+  with every later request on its connection and a copy of a new post's text, and passes don't walk it again. The
+  first pass after the hold answers up to 4,096 of them, oldest first, in its one commit. Releasing at most a pass's
+  64 answers per write window let the held set outgrow the release rate after a checkpoint hold under load: every pass
+  then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
   waits without bound.
-- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 2,000 new frames the loop
+- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
-  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 8,192 frames, writes wait
+  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
   most 250 ms. After each pass the thread drops the database file's pages from the kernel's cache (the server reads
   through SQLite's own page cache).
@@ -80,7 +86,7 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 | | |
 |---|---|
 | `src/Ring.fs` | io_uring: setup, mmap, submission entries, completions |
-| `src/Server.fs` | the loop: rings, accept, receive, send, close, HTTP, the batch and its transaction, checkpoint holds |
+| `src/Server.fs` | the loop: rings, accept, receive, send, close, HTTP, the batch and its transaction, held writes, checkpoint holds |
 | `src/Db.fs` | statements, writes, record decoding, the feed and post reads, the self-test, the checkpoint thread |
 | `src/Sqlite.fs` | P/Invoke declarations for SQLite's API and its B-tree functions |
 | `src/Json.fs`, `src/Jwt.fs` | response JSON, HS256 |

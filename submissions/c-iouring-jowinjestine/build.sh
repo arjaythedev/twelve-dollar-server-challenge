@@ -9,7 +9,9 @@ SQLITE=sqlite-amalgamation-3540100
 SQLITE_SHA256=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
 mkdir -p vendor bin
 if [ ! -f "vendor/$SQLITE/sqlite3.c" ]; then
-  curl -fsSL --retry 3 -o "vendor/$SQLITE.zip" "https://sqlite.org/2026/$SQLITE.zip"
+  # bounded: a stalled download must fail, not hang the build
+  curl -fsSL --connect-timeout 20 --max-time 300 --retry 5 --retry-all-errors --retry-delay 5 \
+    -o "vendor/$SQLITE.zip" "https://sqlite.org/2026/$SQLITE.zip"
   echo "$SQLITE_SHA256  vendor/$SQLITE.zip" | sha256sum -c -
   unzip -q -o "vendor/$SQLITE.zip" -d vendor
   rm -f "vendor/$SQLITE.zip"

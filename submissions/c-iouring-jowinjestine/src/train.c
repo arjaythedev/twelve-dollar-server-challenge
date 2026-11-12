@@ -62,15 +62,16 @@ static int dial(const char *host, int port) {
   if (connect(fd, (struct sockaddr *)&a, sizeof a) < 0) { perror("connect"); exit(1); }
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+  struct timeval tv = {.tv_sec = 30, .tv_usec = 0}; /* a lost reply fails the training; it never hangs the build */
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
   return fd;
 }
 
 struct c {
   int fd;
-  char in[262144];
+  char in[262144]; /* bytes received and not yet consumed: a read may bring more than one response */
   size_t n;
-  int want_len; /* -1 until the head is parsed */
-  size_t head_len;
 };
 
 static int send_all(int fd, const char *p, size_t n) {
@@ -83,23 +84,31 @@ static int send_all(int fd, const char *p, size_t n) {
   return 0;
 }
 
-/* Reads one full response. Returns the status code. */
+/* Reads one full response and returns its status code; whatever follows it in the same read
+ * (the next pipelined response) stays in the buffer for the next call. -1 on EOF, error or
+ * timeout. */
 static int read_response(struct c *c) {
-  c->n = 0;
-  c->want_len = -1;
   for (;;) {
+    if (c->n) {
+      c->in[c->n] = 0;
+      char *he = strstr(c->in, "\r\n\r\n");
+      if (he) {
+        size_t head_len = (size_t)(he + 4 - c->in);
+        char *cl = strcasestr(c->in, "content-length:");
+        size_t want = cl && cl < he ? (size_t)atoi(cl + 15) : 0;
+        if (c->n >= head_len + want) {
+          int st = atoi(c->in + 9);
+          size_t used = head_len + want;
+          memmove(c->in, c->in + used, c->n - used);
+          c->n -= used;
+          return st;
+        }
+      }
+    }
+    if (c->n >= sizeof c->in - 1) return -1;
     ssize_t k = recv(c->fd, c->in + c->n, sizeof c->in - c->n - 1, 0);
     if (k <= 0) return -1;
     c->n += (size_t)k;
-    c->in[c->n] = 0;
-    if (c->want_len < 0) {
-      char *he = strstr(c->in, "\r\n\r\n");
-      if (!he) continue;
-      c->head_len = (size_t)(he + 4 - c->in);
-      char *cl = strcasestr(c->in, "content-length:");
-      c->want_len = cl ? atoi(cl + 15) : 0;
-    }
-    if (c->n >= c->head_len + (size_t)c->want_len) return atoi(c->in + 9);
   }
 }
 
@@ -192,8 +201,7 @@ int main(int argc, char **argv) {
     read_response(c);
     const char *two = "GET /health HTTP/1.1\r\nHost: t\r\n\r\nGET /health HTTP/1.1\r\nHost: t\r\n\r\n";
     send_all(c->fd, two, strlen(two));
-    read_response(c);
-    read_response(c);
+    if (read_response(c) != 200 || read_response(c) != 200) { fprintf(stderr, "pipelined replies missing\n"); return 1; }
   }
   for (int i = 0; i < NCONN; i++) close(conns[i].fd);
   fprintf(stderr, "train: %ld ok, %ld unexpected\n", ok, bad);

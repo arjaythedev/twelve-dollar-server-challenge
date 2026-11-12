@@ -15,7 +15,13 @@ for _ in $(seq 100); do
   sleep 0.1
 done
 curl -sf "http://127.0.0.1:$PORT/health" > /dev/null || { echo "training server did not start"; cat "$DIR/server.log"; exit 1; }
-"$TRAIN" 127.0.0.1 "$PORT" training-secret "${TRAIN_REQUESTS:-60000}"
+rc=0
+timeout 300 "$TRAIN" 127.0.0.1 "$PORT" training-secret "${TRAIN_REQUESTS:-60000}" || rc=$?
+if [ "$rc" != 0 ]; then
+  echo "training client failed (rc=$rc); server log:" >&2
+  tail -20 "$DIR/server.log" >&2 || true
+  exit 1
+fi
 kill -TERM "$PID"
 for _ in $(seq 100); do
   kill -0 "$PID" 2>/dev/null || break

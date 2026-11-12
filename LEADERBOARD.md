@@ -80,7 +80,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 9 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** ᴺ | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
 | 9 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
 | 9 | asm-btree-ninhnv | #388 | x86-64 asm (NASM, io_uring, SQLite B-tree reads) | **280,000** ᴮ | 26,699 | 195.7 | 396.6 | 0.00 | 82 | 28 | 794 | 2026-11-10 |
-| 9 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
+| 9 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** ᵁ | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
 | 14 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
 | 14 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
 | 16 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
@@ -834,6 +834,12 @@ an open rule 2 / ruling 8 question for Arjay) held **270,000** (25,856 req/s, p9
 2 → 4; held, not merged: it scored below the merged row) held **120,000** (11,712 req/s, p95 272 / p99 627 ms, 0 err,
 90 % CPU, 71 µs/req, 672 MB, 2026-11-04): 125,000 and 130,000 failed on p99 (1.2 s / 2.8 s, 0 err, 90–91 % CPU), 140,000
 on p99 (4.0 s) and 160,000 on timeouts (1.6 % err).
+
+ᵁ **c-uring-willwang** is scored at its merged #403 code (`0142ba2`). Its follow-up **#409** (`3bee708`, an optional
+AF_XDP + lwIP transport behind `start.sh --bypass`, which the rig doesn't use, so the benchmarked binary is #403's code;
+the PR was closed by its author during the run, so it can't be merged) held **270,000** (25,882 req/s, p95 31.4 / p99
+266.4 ms, 0 err, 80 % CPU, 28 µs/req, 1,467 MB, 2026-11-12): 280,000 failed the 2-minute probe on p99 (1.08 s at 82 %
+CPU, 0 errors) and 320,000 on p95/p99 (1.30 / 2.31 s at 93 % CPU).
 
 ## Patches (ᵖ) and failures
 

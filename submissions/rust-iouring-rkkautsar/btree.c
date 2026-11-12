@@ -238,7 +238,6 @@ struct BtreeReader {
   KeyInfo *feedKey;
   KeyInfo *likeKey;
   UnpackedRecord *likeFind;
-  char *feed_scratch;
   Pgno feed_root;
   Pgno post_root;
   Pgno user_root;
@@ -277,7 +276,6 @@ static void reader_free(BtreeReader *r) {
   if (r->likeFind) sqlite3DbFree(r->db, r->likeFind);
   if (r->feedKey) sqlite3KeyInfoUnref(r->feedKey);
   if (r->likeKey) sqlite3KeyInfoUnref(r->likeKey);
-  sqlite3_free(r->feed_scratch);
   sqlite3_free(r);
 }
 
@@ -290,8 +288,6 @@ BtreeReader *btree_reader_new(sqlite3 *db, unsigned posts_root,
   r->db = db;
   r->bt = db->aDb[0].pBt;
   if (!r->bt) goto fail;
-  r->feed_scratch = (char *)sqlite3_malloc64(64 * 1024);
-  if (!r->feed_scratch) goto fail;
 
   r->feedKey = sqlite3KeyInfoAlloc(db, 2, 1);
   r->likeKey = sqlite3KeyInfoAlloc(db, 1, 1);
@@ -559,16 +555,31 @@ static int like_count(BtreeReader *r, sqlite3_int64 post_id, jout *o) {
   return rc;
 }
 
+/* direction: 0 = seek, 1 = step forward from the current row, 2 = step
+   backward.  The feed walks backwards because its ids arrive in the order the
+   response needs, so no sort or re-ordering pass is required.  A backward step
+   that does not land on the wanted id (non-adjacent ids, or a cursor that was
+   just repositioned) falls back to a seek. */
 static int emit_post(BtreeReader *r, sqlite3_int64 id, sqlite3_int64 likes,
-                     int next_post, jout *o) {
+                     int direction, jout *o) {
   int rc, res = 0;
-  if (next_post) {
+  int positioned = 0;
+  if (direction == 1) {
     rc = sqlite3BtreeNext(r->post, 0);
     if (rc == SQLITE_DONE) return SQLITE_NOTFOUND;
     if (rc != SQLITE_OK) return rc;
     if (sqlite3BtreeEof(r->post) || sqlite3BtreeIntegerKey(r->post) != id)
       return SQLITE_NOTFOUND;
-  } else {
+    positioned = 1;
+  } else if (direction == 2) {
+    rc = sqlite3BtreePrevious(r->post, 0);
+    if (rc != SQLITE_OK && rc != SQLITE_DONE) return rc;
+    if (rc == SQLITE_OK && !sqlite3BtreeEof(r->post) &&
+        sqlite3BtreeIntegerKey(r->post) == id) {
+      positioned = 1;
+    }
+  }
+  if (!positioned) {
     rc = sqlite3BtreeTableMoveto(r->post, id, 0, &res);
     if (rc != SQLITE_OK) return rc;
     if (res != 0) return SQLITE_NOTFOUND;
@@ -678,39 +689,17 @@ int feed_btree(BtreeReader *r, char *out, int cap, int *outlen) {
   }
   uint64_t p2 = parts ? mono_ns() : 0;
   if (rc == SQLITE_OK && nfeed > 0) {
-    int order[20];
-    int starts[20];
-    int lens[20];
-    for (int i = 0; i < nfeed; i++) order[i] = i;
-    for (int i = 1; i < nfeed; i++) {
-      int key = order[i];
-      int j = i - 1;
-      while (j >= 0 && feed_ids[order[j]] > feed_ids[key]) {
-        order[j + 1] = order[j];
-        j--;
-      }
-      order[j + 1] = key;
-    }
-    jout to = {r->feed_scratch, cap < 64 * 1024 ? cap : 64 * 1024, 0, 0};
-    for (int k = 0; k < nfeed; k++) {
-      int idx = order[k];
-      starts[idx] = to.n;
-      sqlite3_int64 id = feed_ids[idx];
-      int next_post = k > 0 && feed_ids[order[k - 1]] < INT64_MAX &&
-                      id == feed_ids[order[k - 1]] + 1;
-      rc = emit_post(r, id, feed_likes[idx], next_post, &to);
+    // The index yields ids in created_at DESC order, which is exactly the
+    // order the response needs, so emit as we walk instead of sorting the ids,
+    // staging the fragments and copying them into place afterwards.  The post
+    // cursor moves backwards; the first post is seeked.
+    jch(&o, '[');
+    for (int i = 0; i < nfeed; i++) {
+      if (i) jch(&o, ',');
+      rc = emit_post(r, feed_ids[i], feed_likes[i], i == 0 ? 0 : 2, &o);
       if (rc != SQLITE_OK) break;
-      lens[idx] = to.n - starts[idx];
     }
-    if (rc == SQLITE_OK && to.err) rc = SQLITE_TOOBIG;
-    if (rc == SQLITE_OK) {
-      jch(&o, '[');
-      for (int i = 0; i < nfeed; i++) {
-        if (i) jch(&o, ',');
-        jraw(&o, r->feed_scratch + starts[i], lens[i]);
-      }
-      jch(&o, ']');
-    }
+    if (rc == SQLITE_OK) jch(&o, ']');
   }
   if (rc == SQLITE_OK && nfeed == 0) {
     jch(&o, '[');

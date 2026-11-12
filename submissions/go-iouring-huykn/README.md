@@ -58,9 +58,10 @@ query and skip a write transaction if already present.
 
 ## Transactions and checkpoints
 
-The loop wakes on the first completion on ring 0, then drains ready completions.
-An idle wait lasts at most 1 ms before polling the other rings. Each pass stages
-up to 2,048 receive answers without waiting for a full batch.
+When no request work is queued, ring 0 waits for up to four completions or 1 ms.
+The target is capped by its open connection count, with a minimum of one, so a
+single connection wakes on its first completion. Each pass drains ready
+completions and stages up to 2,048 receive answers.
 Writes and indexed reads start a deferred transaction on
 demand. Later requests in the same pass can see
 its writes. Responses remain staged until commit succeeds; commit failure turns
@@ -92,12 +93,6 @@ force reference SQL reads, `HKN_VFS=unix` to use SQLite's default Unix VFS, and
 server's own database configuration; none detect benchmark traffic.
 
 ## Build and validation
-
-The runtime is restored to exact PR369 (`e7c9291`). Isolated nonwaiting and
-task-work-aware polling candidates passed correctness checks but showed no
-repeatable ARM performance gain, so they were not promoted. See the
-[application comparison](bench/poll-implementation-comparison.md). Native x86
-300k capacity remains unverified.
 
 From the repository root on Linux:
 

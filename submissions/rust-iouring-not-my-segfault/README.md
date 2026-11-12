@@ -10,7 +10,7 @@ Every write is committed before its reply, and the server reads nothing box-wide
 | Language | Rust 1.94.0 (edition 2024) and C (GCC from Ubuntu 24.04's `build-essential`) |
 | Framework | None: our own HTTP/1.1 server on io_uring; the `httparse` crate parses request heads |
 | SQLite driver | SQLite's C API called from Rust through a small hand-written binding (no wrapper crate) |
-| SQLite | 3.53.4, the official amalgamation, compiled unmodified in one C unit with our two C files |
+| SQLite | 3.54.1, the official amalgamation, compiled unmodified in one C unit with our two C files |
 | Crates | `io-uring` 0.7.15, `libc` 0.2.183, `httparse` 1.10.1, `hmac` 0.12.1, `sha2` 0.10.9; exact versions locked in `Cargo.lock`, built with `--locked` |
 | Nginx or direct | **Direct.** The server listens on `HOST:PORT` itself (`0.0.0.0:80` on the box) |
 | Threads | Two: the event loop, and a watchdog that only prints a line when the loop stalls for 2 s |
@@ -19,30 +19,44 @@ Every write is committed before its reply, and the server reads nothing box-wide
 
 - `install.sh`, as root, once: installs `build-essential`, `curl` and `ca-certificates` with apt, then rustup-init 1.28.2, checked against its pinned SHA-256 before it runs, which installs Rust 1.94.0 (minimal profile plus rustfmt and clippy) under `/opt/rust`.
   - It writes small proxies for `cargo`, `rustc` and the other tools into `/usr/local/bin`, so `build.sh` runs as the normal build user without access to root's home (see "Toolchain install" under the rules).
-- `build.sh`, as the normal user: downloads SQLite 3.53.4's autoconf tarball, checks its pinned SHA-256, puts `sqlite3.c` and `sqlite3.h` into `vendor/`, then runs `cargo build --release --locked`.
-  - `build.rs` refuses any SQLite whose source id is not 3.53.4's, compiles `src/sqlite_unit.c` (the amalgamation, then `readers.c` and `checkpointer.c`) with GCC and every warning an error, and links it statically.
+- `build.sh`, as the normal user: downloads SQLite 3.54.1's autoconf tarball, checks its pinned SHA-256, puts `sqlite3.c` and `sqlite3.h` into `vendor/`, then runs `cargo build --release --locked`.
+  - `build.rs` refuses any SQLite whose source id is not 3.54.1's, compiles `src/sqlite_unit.c` (the amalgamation, then `readers.c` and `checkpointer.c`) with GCC and every warning an error, and links it statically.
 - `start.sh`: replaces itself (`exec`) with `target/release/twelve-loop` in the foreground, with no arguments. The server is configured only by `SQLITE_PATH`, `JWT_SECRET`, `HOST` and `PORT`, as SPEC.md gives them.
 
 ### The three builds
 
 | Build | How | What it is |
 |---|---|---|
-| Fast (default) | `bash build.sh` | What the contest builds. Rust with `-C target-cpu=native`, opt-level 3, fat LTO, one codegen unit, `panic = "abort"`, overflow checks off; the C unit with `-O3 -march=native`. It ships the unsafe paths listed below. |
+| Fast (default) | `bash build.sh` | What the contest builds. Rust with `-C target-cpu=native -C target-feature=-avx512f`, opt-level 3, fat LTO, one codegen unit, `panic = "abort"`, overflow checks off; the C unit with `-O3 -march=native -mno-avx512f` and Ubuntu GCC's default hardening switched off (`-fno-stack-protector -U_FORTIFY_SOURCE -fno-stack-clash-protection -fcf-protection=none`). It ships the unsafe paths listed below. |
 | Fast with the C profile | `TWELVE_PGO=1 bash build.sh` | The fast build, with the C unit (SQLite and our C) compiled from a GCC profile. `build.sh` first builds an instrumented C unit and `bench/pgo_train.c`, runs the trainer on a synthetic database in a private folder, then compiles with `-fprofile-use` (and `-Werror=missing-profile`). Fast build only. |
 | Safe | `TWELVE_BUILD=safe bash build.sh` | Follows every rule the fast build's unsafe paths skip: overflow checks on, LTO off with 16 codegen units, frame pointers in Rust and C, and the C hardening flags `-fno-strict-overflow -fno-strict-aliasing -fno-delete-null-pointer-checks -ftrivial-auto-var-init=zero -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection`. Each unsafe path takes its checked form. |
 
-Other switches `build.sh` reads: `RUSTFLAGS` (passed unchanged when set; the safe build appends its flags), `TWELVE_C_TARGET` (the GCC `-march` value, default `native`) and `CC` (default `/usr/bin/gcc`).
+Other switches `build.sh` reads: `RUSTFLAGS` (kept when set; both builds append `-C target-feature=-avx512f`, and the safe build its own flags), `TWELVE_C_TARGET` (the GCC `-march` value, default `native`) and `CC` (default `/usr/bin/gcc`).
+No build emits a 512-bit (AVX-512) instruction, whatever the CPU target: a Cascade Lake core lowers its clock while it runs them.
 `start.sh` passes no flags, so the server always runs its defaults; the optional flags exist for our own experiments, and the startup line on stderr prints every setting the process runs with.
+
+- `--batch-target N` or `--batch-target=N`: request target 1 through 1,024, default 64; ASCII decimal, leading zeros accepted, repeated last value wins.
+- `--ring-spread fill` or `--ring-spread=fill`: exactly `fill` (default) or `spread`, repeated last value wins.
+- A missing or invalid value exits 2 with `startup refused: invalid --batch-target` or `startup refused: invalid --ring-spread`, followed by LF.
+- The startup line appends `batch_target` and `ring_spread` after `backlog`; the stats line appends cumulative `rearm_buffer_wait` after `linger_errors`.
 
 ## How a request is served
 
 - Accept: a multishot accept on one ring at a time installs each new socket straight into that ring's fixed-descriptor table, so a connection costs no process descriptor. Each ring's table is as large as the hard file limit allows, at most 65,535 slots, so eight rings hold up to 524,280 connections.
-  - When the accepting ring's free slots fall to h = max(slots / 10, min(1,024, slots / 8)), accept moves to the next ring with more than h free, or pauses until a ring has 2h free.
-- Receive: a multishot receive per connection into a ring of provided buffers (1,024 buffers of 2 KiB per ring); each turn waits for up to 128 completions or 2 ms.
+  - With `fill`, when the accepting ring's free slots fall to h = max(slots / 10, min(1,024, slots / 8)), accept moves to the next ring with more than h free, or pauses until a ring has 2h free.
+  - With `spread`, accept moves to the least occupied eligible ring once its owner has more live connections than the least occupied ring plus the turn cap. In-flight accepts during cancellation can exceed that skew; connections never move.
+- Receive: a multishot receive per connection into a ring of provided buffers (1,024 buffers of 2 KiB per ring).
+  - After a turn that reaped or advanced work, ring 0 waits for the ceiling of its live-connection share of twice `--batch-target` completions, approximately one receive and one send per request, for at most 1 ms.
+  - After a turn that did neither, ring 0 waits for one completion, bounded only by its deadlines: an idle loop, or one whose only work waits on a held sync, does not wake every 1 ms.
+  - The 1 ms cap also applies while rings 1 to 7 hold connections or operations, since their completions cannot wake ring 0's wait.
+  - A receive that ends while its connection has room in its input reservation is re-armed into that reservation, which takes no provided buffer.
+  - Any other ended receive, buffer exhaustion included, joins its ring's FIFO. Each round limits buffer-select receive submissions to the free buffers observed after processing receives; a full SQ retains its operation for the next round.
+  - `rearm_buffer_wait` counts deferred connection-rounds or retained receive attempts without buffer credit, not unique connections.
 - Parse: `httparse` reads the head (at most 64 KiB); bodies by `Content-Length` or chunked, at most 64 KiB; `Expect: 100-continue`, HTTP/1.0, keep-alive and pipelined requests, answered in order.
 - Auth: every token is verified on every request: HS256 only, the 43-character signature compared in constant time, `exp` and `nbf` checked, `sub` a positive integer and `username` a string.
 - Reads (`GET /feed`, `GET /posts/:id`): inside one SQLite read transaction per turn, through SQLite's own B-tree cursors (`readers.c`), with the SQL statements as the fallback.
 - Writes (`POST /posts`, `POST /posts/:id/like`): queued and committed in groups; each reply leaves only after its own `COMMIT` returned.
+- A request that meets a full read batch (1,024 a turn) or a full write queue stays on its connection with its receive armed and is admitted on a later turn. Output pressure, a client that does not read its replies, still pauses the connection and cancels its receive.
 - Send: each reply is written into the connection's output buffer with room kept in front for the head, then handed to the ring as a Send operation.
 - Every 10 s the server prints one `stats` line of counters on stderr.
 
@@ -50,27 +64,31 @@ Other switches `build.sh` reads: `RUSTFLAGS` (passed unchanged when set; the saf
 
 ### One thread, eight io_uring rings
 
-- On one vCPU a second worker thread only adds context switches and locks, so one loop does all the work and batches its system calls into one `io_uring_enter` per ring per turn.
+- On one vCPU a second worker thread only adds context switches and locks, so one loop batches its system calls: each round enters active nonzero rings once, then submits ring 0 and waits in one enter. Queued completions do not bypass batching. Ready backlog and eligible queued work use zero timeout; deadlines can shorten the 1 ms cap.
 - Fixed (direct) descriptors skip the process file table on every operation; provided buffer rings let a receive land in a shared 2 KiB buffer instead of one buffer per idle connection.
 - Eight rings, because one ring's fixed-descriptor table can be no larger than the file limit: eight tables cover more connections than the box has memory for.
 
 ### SQLite reads through its own B-tree cursors
 
-- `GET /feed` and `GET /posts/:id` skip SQL parsing and bytecode: `readers.c` opens SQLite's own read-only B-tree cursors on the tables and indexes, inside the same open SQL read transaction, and decodes the record bytes SQLite's payload functions return.
+- `GET /feed` and `GET /posts/:id` skip SQL parsing and bytecode: `readers.c` opens SQLite's own read-only B-tree cursors on the tables and indexes, inside the same open SQL read transaction, and decodes the record bytes SQLite's payload functions return. The cursors stay open across a turn's reads and close before the turn's `COMMIT`.
 - The SQL statements stay as the fallback and answer every read the cursors decline: no open transaction, a schema change since open, a feed span of 256 or more ids, a missing row or author, or a record it cannot decode. At open, the readers check the two indexes' shapes and stay off when they differ.
 - The optional `--check-reads` flag compares each fast-path answer with the SQL answer when both exist; fallbacks, and every read while the readers are off, run SQL only.
 
 ### Group commit with an adaptive window
 
-- Writes queue (up to 4,096) and commit in groups of up to 64 in one transaction: when 64 are waiting, when the oldest has waited the window, or when the loop has nothing else to do.
-- The window moves between 2 and 5 ms every 250 ms, from the server's own CPU time per request and its write latency.
+- Writes queue (up to 4,096) and commit in groups of up to 64 in one transaction: when 64 are waiting, when the oldest has waited the window, or on a quiet turn with nothing else to do. A quiet turn received at most one request, or saw no write join the queue.
+  - Under load the window decides, so a commit carries the writes of several turns and writes each page they share once: fewer WAL frames, `pwrite` calls and checkpoint passes per write. A lone write at low load commits in the turn that received it.
+- The window moves between 4 and 10 ms every 250 ms, from the server's own CPU time per request and its write latency.
 - A failed commit rolls back, and every write of that group that changed the database is answered 500; no reply leaves before its commit.
 
 ### Checkpoints that never stall the loop
 
 - Automatic checkpoints are off. A second SQLite connection runs PASSIVE checkpoints on a fiber inside the loop thread, through a VFS shim over SQLite's `unix-excl` VFS registered with `sqlite3_vfs_register`.
 - Each sync SQLite asks for during a checkpoint is submitted as an io_uring fsync; the loop keeps serving until it completes, then the fiber resumes with the real result. Only the connection's first WAL sync, with its one-time directory sync, runs inline. Page writes yield to the loop every 1 ms.
-- A write gate keeps the WAL bounded: at 8,192 frames, new writes wait (reads continue) until a checkpoint pass has copied the WAL; passes start at every 4,096 new frames.
+- A checkpoint cycle is two passes. A bulk pass starts at every 4,096 new frames and copies the WAL while writes go on. When it ends with frames committed beside it, new writes wait (reads continue) while a tail pass copies only those frames and makes the cycle's database sync; the next write then restarts the WAL.
+  - SQLite syncs the database file only in a pass that reaches the WAL's end. The bulk pass, with commits beside it, syncs the WAL and writes its pages; the held tail pass's database sync puts the whole cycle's pages on disk.
+  - A tail hold lasts 250 ms at most, half the contest's p95 bar: if the tail pass's syncs take longer, writes go on, the pass ends uncovered, and the next cycle starts with an unheld pass.
+  - The backstop is the write gate: at 32,768 frames (128 MiB) new writes wait without a time limit until a pass has copied the whole WAL.
 
 ### The close path: reads before closes, nothing allocated, reset when safe
 
@@ -88,10 +106,15 @@ Other switches `build.sh` reads: `RUSTFLAGS` (passed unchanged when set; the saf
 
 ### Smaller things
 
-- Requests and replies reuse per-connection and per-loop buffers; the JWT check decodes and validates its JSON into reused scratch buffers.
-- JSON escaping checks 16 bytes at a time with SSE2 (in Rust for replies, in C inside the readers).
+- Requests and replies reuse per-connection and per-loop buffers. JWT base64url decoding recognizes common flat ASCII JSON during decoding; escapes, Unicode and nested values use the full validator. HMAC clones the library's precomputed key state.
+- Token expiry derives wall seconds from monotonic time plus a UTC offset refreshed every 100 ms. The write window reads a fresh completion clock only at its 250 ms adaptation boundary; counters are gathered every 100 ms and before each stats line.
+- Each connection's record is read for its flags alone wherever the flags decide, and prefetched when its completion is reaped. Its metadata cell index lives inside the same 64-byte record, without a separate lookup allocation. A complete unauthenticated read with credit enters the read batch directly.
+- A create reads its new row's `id` and `created_at` from the insert itself (`INSERT ... RETURNING`); temporary tables live in memory (`PRAGMA temp_store = MEMORY`).
+- JSON escaping takes 16 bytes at a time with SSE2 (in Rust for replies, in C inside the readers). The readers load 16 text bytes, store them to the output and test the loaded bytes in one step; a text's last bytes take one more step over its final 16.
+- A feed of contiguous ids writes each row straight into the output: before a row it checks room for the row's fixed bytes plus six times its text bytes, then stores without per-fragment checks. A feed of scattered ids reads its rows in id order, encodes their text once into reused scratch and copies the fragments in feed order.
+- Input reservations keep their actual allocation charged rather than shrinking it. Pools search newest-first for sufficient capacity, and cached usernames retain bounded slack rather than shrinking on each request.
 - SQLite is compiled with `SQLITE_THREADSAFE=0`, `SQLITE_DEFAULT_MEMSTATUS=0`, `SQLITE_DQS=0`, `HAVE_FDATASYNC=1`, `SQLITE_ENABLE_QPSG`, `SQLITE_OMIT_LOAD_EXTENSION`, `SQLITE_OMIT_DEPRECATED`, `SQLITE_OMIT_SHARED_CACHE`, `SQLITE_OMIT_PROGRESS_CALLBACK` and `SQLITE_LIKE_DOESNT_MATCH_BLOBS`.
-- Fat LTO, one codegen unit and the native CPU target; the optional C profile trains SQLite's and our C's branches. These settings carry no benchmark of their own.
+- Fat LTO, one codegen unit and the native CPU target without 512-bit instructions; the optional C profile trains SQLite's and our C's branches. These settings carry no benchmark of their own.
 
 ## The rules, in the organizer's words
 
@@ -100,7 +123,7 @@ Other switches `build.sh` reads: `RUSTFLAGS` (passed unchanged when set; the saf
 - "**The database is SQLite**: the file at `$SQLITE_PATH`, used in-process." (README, rule 2)
 - The organizer's rulings (LEADERBOARD.md, "Arjay's rulings on SQLite (2026-10-31)"): "Reading `/feed` and `/posts/:id` through SQLite's own B-tree/cursor API is allowed (rules 2/3)", and so are "SQLite's public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custom VFS)". Not allowed: "**an own engine for SQLite's file format**" and "**patching SQLite's source**".
 - This server reaches the database only through SQLite:
-  - `src/sqlite_unit.c` includes the official 3.53.4 amalgamation unmodified; `build.sh` checks the tarball's SHA-256 and `build.rs` its source id.
+  - `src/sqlite_unit.c` includes the official 3.54.1 amalgamation unmodified; `build.sh` checks the tarball's SHA-256 and `build.rs` its source id.
   - Writes and transactions are prepared SQL run by `sqlite3_step`.
   - The fast reads use SQLite's own B-tree cursors, transaction state and payload functions inside SQLite's open read transaction; SQLite's pager, page cache, WAL and B-tree traversal do all the work below them. `readers.c` makes no file call of its own (no open, read, write or mmap) and never writes to the database.
   - The checkpointer is a VFS registered with the public `sqlite3_vfs_register` that forwards every file call to SQLite's own `unix-excl`; the checkpoint itself is `sqlite3_wal_checkpoint_v2`.
@@ -154,13 +177,18 @@ The safe build (`TWELVE_BUILD=safe`) follows the rule each one skips.
 
 | Group | Places | What it skips | Why the fast build skips it | What the safe build does |
 |---|---|---|---|---|
-| Unchecked arithmetic | 49: `src/conn.rs` 28, `src/server.rs` 16, `src/ring.rs` 5 | Checked or overflow-trapping integer arithmetic | Each plain operation sits under a comment naming the bound that keeps it in range: counts bounded by the 524,280 records, offsets within a buffer's start, length and capacity, budget sums at most 32 MiB, in-flight counts bounded by live kernel requests | Overflow checks on: any overflow aborts the process |
+| Unchecked arithmetic | 47: `src/conn.rs` 27, `src/server.rs` 15, `src/ring.rs` 5 | Checked or overflow-trapping integer arithmetic | Each plain operation sits under a comment naming the bound that keeps it in range: counts bounded by the 524,280 records, offsets within a buffer's start, length and capacity, budget sums at most 32 MiB, in-flight counts bounded by live kernel requests | Overflow checks on: any overflow aborts the process |
+| Aggregate output bounds | 3: `src/readers.c` | CX20 per-fragment bounds and checked output-position addition | A whole-feed, whole-row or whole-string reservation proves every fragment fits, a number's fixed 20-byte copy included; at most 20 SQLite records expand at most sixfold below SIZE_MAX on the asserted 64-bit target | Checks every fragment and output-position addition |
 | Unchecked narrowing casts | 4: `src/server.rs` 3, `src/readers.c` 1 | `try_from` or a checked helper for a narrowing conversion | The value was bounded just above: a receive result of at most 2,048 bytes, a feed slot below 20 | `try_from` with a stop on failure in Rust; an active range assert in C |
-| Vector code without a benchmark | 6: `src/json.rs` 1, `src/readers.c` 5 | No `unsafe` or vector code without a recorded benchmark | Each 16-byte SSE2 load comes only after a check that 16 bytes remain, needs no alignment, and SSE2 is part of every x86-64 CPU | The plain byte loop; no vector code and no `no-avx` pragma |
+| Vector code without a benchmark | 2: `src/json.rs` 1, `src/readers.c` 1 | No `unsafe` or vector code without a recorded benchmark | Each 16-byte SSE2 load reads only bytes of the text it copies, after a check that 16 remain or that the text's last 16 are being taken, needs no alignment, and SSE2 is part of every x86-64 CPU | The plain byte loop; no vector code |
 | Varint reads | 2: `src/readers.c` | A length check on every varint read of a record header | SQLite's varint readers read at most 9 bytes from a start below the header end, inside the cell's page image, and a header that runs past the payload is refused before any byte past it is used | A bounded varint decoder that checks every byte |
 | `errno` | 2: `src/readers.c` | Saving and restoring the caller's `errno` in the reader entry points | No caller reads `errno` after a reader call | Saves and restores it |
 | Precondition asserts | 2: `src/readers.c` | Asserting each entry point's preconditions | Both callers call the readers only after a successful open, on that connection, with their own buffers | The asserts run |
 | No orderly close | 6: `src/server.rs` 4, `src/ring.rs` 1, `src/main.rs` 1 | The orderly close: half-close, read to the peer's end of stream, then close | A reset only when `SIOCOUTQ` says every reply byte is acknowledged, otherwise a graceful close; this frees socket memory at once when many clients hang up together | No linger change and no `SIOCOUTQ`; an intentional close stops serving, keeps receiving and discards what arrives, half-closes the write side and closes at the peer's end of stream |
-| Build settings | 5: `Cargo.toml` 3, `build.rs` 2 | Frame pointers in Rust and C, overflow checks, a benchmark beside fat LTO and one codegen unit, the C hardening flags | A frame pointer takes a register from every function and line tables still map addresses to source lines; LTO and codegen units change only inlining and layout; the hardening flags change SQLite's hot code, and our C is written to be correct without them | Frame pointers, overflow checks, LTO off with 16 codegen units, the hardening flags |
+| Build settings | 6: `Cargo.toml` 3, `build.rs` 3 | Frame pointers in Rust and C, overflow checks, a benchmark beside fat LTO and one codegen unit, the C hardening flags, and the hardening Ubuntu's GCC turns on by default (stack protector, `_FORTIFY_SOURCE`, stack-clash and control-flow protection) | A frame pointer takes a register from every function and line tables still map addresses to source lines; LTO and codegen units change only inlining and layout; the hardening flags and GCC's defaults add code to SQLite's hot paths, and our C is written to be correct without them | Frame pointers, overflow checks, LTO off with 16 codegen units, the hardening flags; GCC's defaults stay on |
+| Forced inlining | 1: `src/readers.c` | An inlining hint only with a measured effect | `out_put` costs 0.127 µs and its copy 0.128 µs a request as calls of their own (`RESULT.md` → "Speed profile at 310,000"); inlined into each writer, a literal fragment's copy has a constant length, and the bytes written are the same | No inlining attribute; the compiler decides |
+| First-field record decode | 1: `src/readers.c` | Decoding a likes index entry's whole record header before reading a field | A one-byte header size and a one-byte first serial type locate the first field, the one value the scans read, and the field is checked to lie inside the payload; the whole-header decode costs 0.153 µs a request | Decodes the whole header (`record_read`) first |
+| UTF-8 checked once | 1: `src/server.rs` | A UTF-8 check where a write's name and body are read | Admitting the write checked the same span of the same input, and nothing rewrites it before the reply is released; `from_utf8` costs 0.021 µs a request | Checks it again with `from_utf8` |
+| Cache prefetch | 1: `src/server.rs` | No `unsafe` code without a recorded benchmark | A prefetch never faults and changes no memory, and its address lies inside the live connection table; `Conns::get` costs 0.216 µs a request | No prefetch |
 
-All 76 `UNSAFE PATH` comments in the code fall into these eight groups.
+All 78 `UNSAFE PATH` comments in the code fall into these thirteen groups.

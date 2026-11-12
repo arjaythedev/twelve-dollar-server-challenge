@@ -4,16 +4,19 @@
  * the amalgamation, whose static internals (Btree, KeyInfo, UnpackedRecord) they use.
  *
  * Why C: the readers reach SQLite's B-tree internals inside the amalgamation, which only C text compiled
- * after it can see. External entry points: twelve_readers_open, twelve_feed, twelve_post,
+ * after it can see. External entry points: twelve_readers_open, twelve_feed, twelve_post, twelve_readers_end,
  * twelve_readers_close and twelve_reader_reason; every other name is static. Exception to building
  * alone: the file compiles only inside src/sqlite_unit.c after the amalgamation, whose static internals
  * it uses, so it includes nothing for them.
  * Owns: the one object readers, holding the root pages, the two key descriptors, the probe, the four
- * cursor areas and the last call's reason.
+ * cursor areas, the set of open cursors and the last call's reason.
  * Threading: single owner thread, the loop thread that owns store.rs's request connection, or
  * pgo_train.c's main thread; SQLITE_THREADSAFE=0.
- * Between calls: ready is 0 or 1, the cookie stays as twelve_readers_open read it, no cursor is open,
- * and every twelve_feed or twelve_post call sets the reason. */
+ * Between calls: ready is 0 or 1, the cookie stays as twelve_readers_open read it, a cursor opened by a
+ * twelve_feed or twelve_post call that answered TWELVE_OK, TWELVE_NOT_FOUND or TWELVE_SPACE stays open, inside
+ * the caller's transaction, until twelve_readers_end, which the caller runs before it writes in, commits or
+ * rolls back that transaction (SQL reads beside the open cursors are allowed); a TWELVE_FALLBACK answer leaves
+ * no cursor open, and every twelve_feed or twelve_post call sets the reason. */
 
 /* build.rs passes -DTWELVE_SAFE_BUILD=1 in the safe build, which follows every rule an unsafe path of the
  * fast build skips; code reads the switch as a constant condition, so both forms compile in every build. */
@@ -39,22 +42,8 @@
 #define TWELVE_REASON_SPAN 5
 #define TWELVE_REASON_MISSING 6
 
-/* No vector code wider than 128 bits. Under -march=native GCC widens inlined copies and
- * fills (memset, sqlite3BtreeCursorZero) to ymm or zmm, and prefer-vector-width does not bound
- * them, so these functions are compiled without AVX: SSE2 at most. The fortified memcpy and memset
- * wrappers cannot inline into them, hence the __builtin_ calls below, and the SSE2 intrinsics are
- * declared after the pragma so that they inline. */
-#if defined(__x86_64__) && defined(__GNUC__) && !defined(__clang__) && !TWELVE_SAFE_BUILD
-#pragma GCC push_options
-/* UNSAFE PATH (speed): vector code without a named benchmark; the 128-bit escape scan and the no-avx pragma carry no recorded benchmark, and the escape-scan test proves the scan's bytes equal the byte loop's at every position */
-#pragma GCC target("no-avx")
-#define TWELVE_READERS_PUSHED 1
-#endif
-
 #if defined(__x86_64__)
 #include <emmintrin.h>
-#elif defined(__aarch64__)
-#include <arm_neon.h>
 #endif
 
 /* A caller-owned output area: bytes go to ptr[0..cap); need reports the size a TWELVE_SPACE retry needs. */
@@ -86,6 +75,8 @@ struct reader_state {
   KeyInfo *likes_key;
   UnpackedRecord *probe;
   BtCursor *cursor[4];
+  /* Bit k set while cursor area k holds an open cursor (between calls, see the file comment). */
+  unsigned open;
   int ready;
   /* The latest twelve_feed or twelve_post call's fall-back reason; a diagnostic code, never a row, id,
    * count or output. */
@@ -100,6 +91,16 @@ static struct reader_state readers;
 struct twelve_out {
   struct twelve_buf *buf;
   size_t pos;
+  int reserved;
+};
+
+enum {
+  /* The widest unsigned 64-bit decimal. */
+  OUT_NUMBER_BYTES = 20,
+  /* The bytes of one feed row beside its three texts' own bytes: the separator (1), {"id": (6), ,"body": (8),
+   * ,"created_at": (14), ,"author": (10), ,"like_count": (14), the closing brace (1), six quotes (6) and two
+   * numbers of OUT_NUMBER_BYTES each (40). */
+  FEED_ROW_FIXED_BYTES = 100,
 };
 
 /* One decoded record header: the first four fields' serial types and data offsets, and the last field's. */
@@ -119,6 +120,8 @@ struct twelve_fragment {
   size_t body_len;
   size_t created;
   size_t created_len;
+  size_t name;
+  size_t name_len;
   i64 user;
 };
 
@@ -132,62 +135,82 @@ static struct twelve_span span(const void *bytes, size_t len){
   return (struct twelve_span){.bytes = bytes, .len = len};
 }
 
-#if defined(TWELVE_READERS_PUSHED)
-/* UNSAFE PATH (speed): vector code without a named benchmark; the 128-bit escape scan and the no-avx pragma carry no recorded benchmark, and the escape-scan test proves the scan's bytes equal the byte loop's at every position */
-static void copy_bytes(void *dst, const void *src, size_t n){
-  __builtin_memcpy(dst, src, n);
-}
-
-/* UNSAFE PATH (speed): vector code without a named benchmark; the 128-bit escape scan and the no-avx pragma carry no recorded benchmark, and the escape-scan test proves the scan's bytes equal the byte loop's at every position */
-static void fill_bytes(void *dst, int value, size_t n){
-  __builtin_memset(dst, value, n);
-}
+/* UNSAFE PATH (speed): forced inlining without a measured effect; twelve-dollar-lab RESULT.md's "Speed profile at 310,000" measures out_put at 0.127 and its copy at 0.128 us a request as calls of their own, so the fast build inlines out_put into every writer, where a literal fragment's length is a constant and its copy compiles to plain stores; the bytes written are the same */
+#if TWELVE_SAFE_BUILD
+#define TWELVE_INLINE
 #else
-static void copy_bytes(void *dst, const void *src, size_t n){
-  memcpy(dst, src, n);
-}
-
-static void fill_bytes(void *dst, int value, size_t n){
-  memset(dst, value, n);
-}
+#define TWELVE_INLINE inline __attribute__((always_inline))
 #endif
 
-static void out_put(struct twelve_out *w, struct twelve_span s){
-  if( s.len!=0 && w->pos<w->buf->cap ){
-    size_t room = w->buf->cap - w->pos;
-    copy_bytes(w->buf->ptr + w->pos, s.bytes, s.len<room ? s.len : room);
-  }
-  w->pos += s.len;
+/* One capacity decision covers a whole known output extent. A failed reservation keeps the
+ * bounded counting writer, so need remains the exact size, not a pessimistic escape bound. */
+static void out_reserve(struct twelve_out *w, size_t need){
+  w->reserved = !TWELVE_SAFE_BUILD && w->pos<=w->buf->cap && need<=w->buf->cap - w->pos;
 }
 
-/* 1 when none of the 16 bytes at p needs escaping (json.rs's 16-byte check). */
+/* Reserves one feed row holding `text` text bytes: FEED_ROW_FIXED_BYTES plus six output bytes for each text
+ * byte, the most its escapes take. Without that room the row goes through the bounded counting writer. */
+static void out_row_reserve(struct twelve_out *w, size_t text){
+  size_t bound = 0;
+  w->reserved = 0;
+  if( !__builtin_mul_overflow(text, (size_t)6, &bound)
+      && !__builtin_add_overflow(bound, (size_t)FEED_ROW_FIXED_BYTES, &bound) ){
+    out_reserve(w, bound);
+  }
+}
+
+static TWELVE_INLINE void out_copy(uint8_t *dst, const uint8_t *src, size_t len){
+  /* A literal fragment's constant length compiles to plain stores. An empty span may hold a null pointer,
+   * which memcpy must not get. */
+  if( len!=0 ){
+    memcpy(dst, src, len);
+  }
+}
+
+static TWELVE_INLINE void out_put(struct twelve_out *w, struct twelve_span s){
+  size_t pos = w->pos;
+  if( w->reserved ){
+    /* UNSAFE PATH (speed): CX20 per-fragment bounds omitted; out_reserve proved room for the whole feed or string before its first store, and every fragment is included in that bound */
+    out_copy(w->buf->ptr + pos, s.bytes, s.len);
+  }else if( s.len!=0 && pos<w->buf->cap ){
+    size_t room = w->buf->cap - pos;
+    out_copy(w->buf->ptr + pos, s.bytes, s.len<=room ? s.len : room);
+  }
+  if( TWELVE_SAFE_BUILD ){
+    size_t end = 0;
+    int overflow = __builtin_add_overflow(pos, s.len, &end);
+    assert(!overflow);
+    w->pos = end;
+  }else{
+    /* UNSAFE PATH (speed): CX20 unchecked output offsets; at most 20 SQLite records of at most SQLITE_MAX_LENGTH bytes expand at most sixfold, below SIZE_MAX on this asserted 64-bit target */
+    w->pos = pos + s.len;
+  }
+}
+
+/* Stores the 16 bytes at src to dst and returns 1 when none of them needs escaping (json.rs's 16-byte check).
+ * The check reads the loaded bytes, never the bytes just stored: a 16-byte load over fresh narrower stores
+ * waits for them to leave the store buffer. */
 #if defined(__x86_64__) && !TWELVE_SAFE_BUILD
-/* UNSAFE PATH (speed): vector code without a named benchmark; the 128-bit escape scan and the no-avx pragma carry no recorded benchmark, and the escape-scan test proves the scan's bytes equal the byte loop's at every position */
-static int plain16(const uint8_t *p){
-  __m128i v; /* written before read: copy_bytes fills it */
-  copy_bytes(&v, p, 16);
+/* UNSAFE PATH (speed): vector code without a benchmark against the byte loop; twelve-dollar-lab RESULT.md's "SPD4G profile" measures the two-step copy and check it replaces at 0.685 us a request (plain16 0.420, out_copy 0.265), SSE2 is part of every x86-64 CPU, and the escape-scan test proves the bytes equal the byte loop's at every position */
+static TWELVE_INLINE int copy16_plain(uint8_t *dst, const uint8_t *src){
+  __m128i v; /* written before read: memcpy fills it */
+  memcpy(&v, src, 16);
+  memcpy(dst, &v, 16);
   __m128i bad = _mm_or_si128(
     _mm_or_si128(_mm_cmpeq_epi8(v, _mm_set1_epi8(34)), _mm_cmpeq_epi8(v, _mm_set1_epi8(92))),
     _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(31)), v));
   return _mm_movemask_epi8(bad)==0;
 }
-#elif defined(__aarch64__) && !TWELVE_SAFE_BUILD
-/* UNSAFE PATH (speed): vector code without a named benchmark; the 128-bit escape scan and the no-avx pragma carry no recorded benchmark, and the escape-scan test proves the scan's bytes equal the byte loop's at every position */
-static int plain16(const uint8_t *p){
-  uint8x16_t v = vld1q_u8(p);
-  uint8x16_t bad = vorrq_u8(
-    vorrq_u8(vceqq_u8(v, vdupq_n_u8(34)), vceqq_u8(v, vdupq_n_u8(92))),
-    vcltq_u8(v, vdupq_n_u8(32)));
-  return vmaxvq_u8(bad)==0;
-}
 #else
-static int plain16(const uint8_t *p){
+static int copy16_plain(uint8_t *dst, const uint8_t *src){
+  int plain = 1;
   for(size_t i=0; i<16; i++){
-    if( p[i]<32 || p[i]=='"' || p[i]=='\\' ){
-      return 0;
+    dst[i] = src[i];
+    if( src[i]<32 || src[i]=='"' || src[i]=='\\' ){
+      plain = 0;
     }
   }
-  return 1;
+  return plain;
 }
 #endif
 
@@ -195,16 +218,38 @@ static int plain16(const uint8_t *p){
 static void out_string(struct twelve_out *w, struct twelve_span s){
   static const uint8_t hex[] = "0123456789abcdef";
   size_t i = 0;
-  size_t start = 0;
+  /* run: the text bytes just before i that were stored unchanged, one output byte each.
+   * slow: the bytes from i that the byte loop takes before the 16-byte step is tried again. */
+  size_t run = 0;
+  size_t slow = 0;
+  size_t bound = 0;
+  int saved_reservation = w->reserved;
+  if( !saved_reservation && !__builtin_mul_overflow(s.len, (size_t)6, &bound)
+      && !__builtin_add_overflow(bound, (size_t)2, &bound) ){
+    out_reserve(w, bound);
+  }
   out_put(w, span("\"", 1));
   while( i<s.len ){
-    if( i+16<=s.len && plain16(s.bytes + i) ){
-      i += 16;
-      continue;
+    if( w->reserved && slow==0 ){
+      /* The 16-byte step takes the next 16 bytes, or the text's last 16: the back bytes before i that it
+       * stores again were stored unchanged (run), so it rewrites them with the same values. A step that meets
+       * an escape leaves its bytes to the byte loop, which overwrites the speculative copy before any length
+       * is published; the sixfold reservation includes those stores. */
+      size_t left = s.len - i;
+      size_t back = left>=16 ? 0 : 16 - left;
+      if( back<=run ){
+        size_t step = 16 - back;
+        if( copy16_plain(w->buf->ptr + w->pos - back, s.bytes + i - back) ){
+          w->pos += step;
+          i += step;
+          run += step;
+          continue;
+        }
+        slow = step;
+      }
     }
     uint8_t c = s.bytes[i];
     if( c<32 || c=='"' || c=='\\' ){
-      out_put(w, span(s.bytes + start, i - start));
       switch( c ){
         case '"': out_put(w, span("\\\"", 2)); break;
         case '\\': out_put(w, span("\\\\", 2)); break;
@@ -219,26 +264,55 @@ static void out_string(struct twelve_out *w, struct twelve_span s){
           out_put(w, span(u, 6));
         }
       }
-      start = i + 1;
+      run = 0;
+    }
+    else{
+      out_put(w, span(s.bytes + i, 1));
+      run++;
+    }
+    if( slow!=0 ){
+      slow--;
     }
     i++;
   }
-  out_put(w, span(s.bytes + start, s.len - start));
   out_put(w, span("\"", 1));
+  w->reserved = saved_reservation;
 }
 
 /* The decimal of the value as unsigned 64-bit, as Rust's `as u64` prints it. */
 static void out_number(struct twelve_out *w, u64 v){
-  enum { DECIMAL_DIGITS_BYTES = 20 }; /* the widest unsigned 64-bit decimal */
-  static const uint8_t decimal_digits[] = "0123456789";
-  uint8_t digits[DECIMAL_DIGITS_BYTES]; /* written before read: the loop fills digits[i..] */
-  size_t i = DECIMAL_DIGITS_BYTES;
-  do{
+  static const uint8_t decimal_digits[] =
+    "0001020304050607080910111213141516171819"
+    "2021222324252627282930313233343536373839"
+    "4041424344454647484950515253545556575859"
+    "6061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+  /* Twice the widest decimal: a reserved writer copies OUT_NUMBER_BYTES from the first digit, whatever the
+   * digit count, and the bytes past the digits are these zeros. */
+  uint8_t digits[2 * OUT_NUMBER_BYTES] = {0};
+  size_t i = OUT_NUMBER_BYTES;
+  while( v>=100 ){
+    size_t pair = (size_t)(v % 100U) * 2;
+    i -= 2;
+    digits[i] = decimal_digits[pair];
+    digits[i + 1] = decimal_digits[pair + 1];
+    v /= 100U;
+  }
+  if( v>=10 ){
+    i -= 2;
+    digits[i] = decimal_digits[(size_t)v * 2];
+    digits[i + 1] = decimal_digits[(size_t)v * 2 + 1];
+  }else{
     i--;
-    digits[i] = decimal_digits[v % 10U];
-    v /= 10U;
-  }while( v!=0 );
-  out_put(w, span(digits + i, DECIMAL_DIGITS_BYTES - i));
+    digits[i] = decimal_digits[(size_t)v * 2 + 1];
+  }
+  if( w->reserved ){
+    /* UNSAFE PATH (speed): CX20 per-fragment bounds omitted; every reservation that spans a number counts OUT_NUMBER_BYTES of room from that number's first digit, so this fixed-length copy stays inside it, and the position advances by the digits alone */
+    memcpy(w->buf->ptr + w->pos, digits + i, OUT_NUMBER_BYTES);
+    w->pos += OUT_NUMBER_BYTES - i;
+  }else{
+    out_put(w, span(digits + i, OUT_NUMBER_BYTES - i));
+  }
 }
 
 /* The helpers below return TWELVE_OK, or the TWELVE_REASON_ code of their first failing check. */
@@ -319,7 +393,18 @@ static int record_read(BtCursor *cur, struct twelve_record *r){
       }
     }else{
       /* UNSAFE PATH (speed): varint reads without a per-read length bound; getVarint32 and sqlite3GetVarint read at most 9 bytes from a start below the header end, inside the cell's page image, and a header that runs past the payload is refused before any byte past it is used */
-      n = sqlite3GetVarint(r->p + at, &t);
+      /* A one-byte serial type and a two-byte one, a text of 58 to 8,185 bytes, are decoded here; only longer
+       * ones call sqlite3GetVarint: twelve-dollar-lab RESULT.md's "Speed profile at 310,000" measures that call
+       * at 0.271 us a request. at < hdr <= amt, so each byte read is inside the payload. */
+      if( r->p[at]<0x80U ){
+        t = r->p[at];
+        n = 1;
+      }else if( hdr - at>=2 && r->p[at + 1]<0x80U ){
+        t = ((u64)(r->p[at] & 0x7fU) << 7) | r->p[at + 1];
+        n = 2;
+      }else{
+        n = sqlite3GetVarint(r->p + at, &t);
+      }
     }
     if( n>hdr - at ){
       return TWELVE_REASON_RECORD;
@@ -367,6 +452,29 @@ static int record_int(const struct twelve_record *r, u64 t, u64 offset, i64 *v){
   return TWELVE_OK;
 }
 
+/* The first field of the cursor's current entry as an integer: the likes scans' post_id. */
+static int record_first_int(BtCursor *cur, struct twelve_record *r, i64 *v){
+  if( !TWELVE_SAFE_BUILD ){
+    /* UNSAFE PATH (speed): first field only; a likes index entry whose header size and first serial type are one byte each is checked only as far as that first field, the one value the scans read, inside the payload; the rest of SQLite's own index record is not decoded, and twelve-dollar-lab RESULT.md's "Speed profile at 310,000" measures the whole-header decode, record_read, at 0.153 us a request */
+    u32 payload = sqlite3BtreePayloadSize(cur);
+    r->p = sqlite3BtreePayloadFetch(cur, &r->amt);
+    if( r->amt>=2 && r->amt==payload && r->p[0]<0x80U && r->p[1]<0x80U ){
+      u64 hdr = r->p[0];
+      u64 t = r->p[1];
+      u64 size = 0;
+      if( hdr<2 || hdr>r->amt || serial_size(t, &size)!=TWELVE_OK || size>(u64)r->amt - hdr ){
+        return TWELVE_REASON_RECORD;
+      }
+      return record_int(r, t, hdr, v);
+    }
+  }
+  int why = record_read(cur, r);
+  if( why!=TWELVE_OK ){
+    return why;
+  }
+  return record_int(r, r->type[0], r->offset[0], v);
+}
+
 /* A text field: odd serial types of at least 13; the length comes from the header, never a NUL scan. */
 static int record_text(const struct twelve_record *r, int k, struct twelve_span *text){
   u64 t = r->type[k];
@@ -377,27 +485,28 @@ static int record_text(const struct twelve_record *r, int k, struct twelve_span 
   return TWELVE_OK;
 }
 
-/* Opens read-only cursor k in its zeroed area and records it in *open. */
-static int cursor_open(int k, Pgno root, KeyInfo *key, unsigned *open){
+/* Opens read-only cursor k in its zeroed area, or reuses it when it is open already: cursor k always names
+ * one root and key, and every use positions it first (a First, Last, Moveto or seek). */
+static int cursor_open(int k, Pgno root, KeyInfo *key){
+  if( (readers.open & (1U << k))!=0 ){
+    return TWELVE_OK;
+  }
   sqlite3BtreeCursorZero(readers.cursor[k]);
   if( sqlite3BtreeCursor(readers.bt, root, 0, key, readers.cursor[k])!=SQLITE_OK ){
     return TWELVE_REASON_CURSOR;
   }
-  *open |= 1u<<k;
+  readers.open |= 1U << k;
   return TWELVE_OK;
 }
 
-static void cursor_close(int k, unsigned *open){
-  if( (*open & (1U << k))!=0 ){
-    /* SQLite 3.53.4's sqlite3BtreeCloseCursor returns SQLITE_OK on every path (btree.c). */
-    (void)sqlite3BtreeCloseCursor(readers.cursor[k]);
-    *open &= ~(1u<<k);
-  }
-}
-
-static void cursors_close(unsigned *open){
+/* Closes every open cursor. */
+static void cursors_close(void){
   for(int k=0; k<4; k++){
-    cursor_close(k, open);
+    if( (readers.open & (1U << k))!=0 ){
+      /* SQLite 3.54.1's sqlite3BtreeCloseCursor returns SQLITE_OK on every path (btree.c). */
+      (void)sqlite3BtreeCloseCursor(readers.cursor[k]);
+      readers.open &= ~(1U << k);
+    }
   }
 }
 
@@ -532,10 +641,12 @@ static int finish(int result, struct twelve_out *o, struct twelve_out *s){
 int twelve_readers_open(sqlite3 *db);
 int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch);
 int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out);
+void twelve_readers_end(void);
 void twelve_readers_close(void);
 int twelve_reader_reason(void);
 
 static void readers_free(sqlite3 *db){
+  cursors_close();
   for(int k=0; k<4; k++){
     sqlite3_free(readers.cursor[k]);
     readers.cursor[k] = 0;
@@ -640,7 +751,6 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
   i64 ids[FEED_POSTS_ITEMS]; /* written before read: step 1 fills ids[0..n) */
   u64 likes[FEED_POSTS_ITEMS]; /* written before read: step 3 zeroes likes[0..n) */
   int8_t slots[SLOT_SPAN_ITEMS]; /* written before read: step 3 fills it */
-  unsigned open = 0;
   size_t n = 0;
   int why = TWELVE_OK;
   int result = TWELVE_OK;
@@ -659,7 +769,7 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
     BtCursor *c0 = readers.cursor[0];
     int res = 0;
     int rc = SQLITE_OK;
-    if( (why = cursor_open(0, readers.created_idx, readers.created_key, &open))!=0 ){
+    if( (why = cursor_open(0, readers.created_idx, readers.created_key))!=0 ){
       goto out_close_cursors;
     }
     if( readers.newest_first ){
@@ -697,7 +807,6 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
         }
       }
     }
-    cursor_close(0, &open);
   }
 
   /* Step 2: an empty feed. */
@@ -723,7 +832,7 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
       why = TWELVE_REASON_SPAN;
       goto out_close_cursors;
     }
-    fill_bytes(slots, -1, sizeof(slots));
+    memset(slots, -1, sizeof(slots));
     for(size_t i=0; i<n; i++){
       if( slots[ids[i] - min]>=0 ){
         why = TWELVE_REASON_SPAN;
@@ -737,7 +846,7 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
   /* Step 4: one scan of likes_post_id_idx over [min, max]. */
   {
     BtCursor *c1 = readers.cursor[1];
-    if( (why = cursor_open(1, readers.likes_idx, readers.likes_key, &open))!=0 ){
+    if( (why = cursor_open(1, readers.likes_idx, readers.likes_key))!=0 ){
       goto out_close_cursors;
     }
     if( (why = likes_seek(min))!=0 ){
@@ -745,10 +854,7 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
     }
     while( !sqlite3BtreeEof(c1) ){
       i64 post = 0;
-      if( (why = record_read(c1, &r))!=0 ){
-        goto out_close_cursors;
-      }
-      if( (why = record_int(&r, r.type[0], r.offset[0], &post))!=0 ){
+      if( (why = record_first_int(c1, &r, &post))!=0 ){
         goto out_close_cursors;
       }
       if( post>max ){
@@ -761,7 +867,6 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
         goto out_close_cursors;
       }
     }
-    cursor_close(1, &open);
   }
 
   /* Step 5: rows and authors, directly when the ids prove a contiguous descending layout. */
@@ -775,11 +880,11 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
         contiguous = 0;
       }
     }
-    if( (why = cursor_open(2, readers.posts, 0, &open))!=0 ){
+    if( (why = cursor_open(2, readers.posts, 0))!=0 ){
       goto out_close_cursors;
     }
     if( contiguous ){
-      if( (why = cursor_open(3, readers.users, 0, &open))!=0 ){
+      if( (why = cursor_open(3, readers.users, 0))!=0 ){
         goto out_close_cursors;
       }
       if( sqlite3BtreeTableMoveto(c2, ids[0], 0, &res)!=SQLITE_OK ){
@@ -810,7 +915,6 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
             why = TWELVE_REASON_MISSING;
             goto out_close_cursors;
           }
-          out_put(&o, span(",", 1));
         }
         if( (why = post_row(&r, &user, &body, &created))!=0 ){
           goto out_close_cursors;
@@ -818,13 +922,22 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
         if( (why = author(user, &name, &u))!=0 ){
           goto out_close_cursors;
         }
+        /* The row goes straight to the output. Its texts stay readable until the next row moves the cursors:
+         * the post's lie in cursor 2's page, which stays pinned while cursor 3 seeks, the author's in cursor 3's.
+         * Each text is at most a record's u32 size, so the sum cannot wrap on this asserted 64-bit target. */
+        out_row_reserve(&o, body.len + created.len + name.len);
+        if( i>0 ){
+          out_put(&o, span(",", 1));
+        }
         out_post_head(&o, ids[i]);
         out_string(&o, body);
         out_put(&o, span(",\"created_at\":", 14));
         out_string(&o, created);
         out_post_tail(&o, name, likes[i]);
+        o.reserved = 0;
       }
       out_put(&o, span("]}", 2));
+      goto out_finish;
     }else{
       size_t found = 0;
       if( sqlite3BtreeTableMoveto(c2, min, 0, &res)!=SQLITE_OK ){
@@ -862,30 +975,68 @@ int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch)
         why = TWELVE_REASON_MISSING;
         goto out_close_cursors;
       }
-      if( (why = cursor_open(3, readers.users, 0, &open))!=0 ){
+      if( (why = cursor_open(3, readers.users, 0))!=0 ){
         goto out_close_cursors;
       }
-      out_put(&o, span("{\"posts\":[", 10));
       for(size_t i=0; i<n; i++){
         struct twelve_span name = {0};
         if( (why = author(frag[i].user, &name, &u))!=0 ){
           goto out_close_cursors;
         }
-        if( i>0 ){
-          out_put(&o, span(",", 1));
-        }
-        out_post_head(&o, ids[i]);
-        out_fragment(&o, &s, frag[i].body, frag[i].body_len);
-        out_put(&o, span(",\"created_at\":", 14));
-        out_fragment(&o, &s, frag[i].created, frag[i].created_len);
-        out_post_tail(&o, name, likes[i]);
+        frag[i].name = s.pos;
+        out_string(&s, name);
+        frag[i].name_len = s.pos - frag[i].name;
       }
-      out_put(&o, span("]}", 2));
     }
   }
+  {
+    /* The scattered-id path: every text fragment is encoded exactly once in caller-owned scratch, in id order.
+     * The feed makes one aggregate reservation, then copies those fragments in feed order without rescanning. */
+    size_t need = 12 + n - 1;
+    for(size_t i=0; i<n; i++){
+      struct twelve_buf count_buf = {.ptr = NULL, .cap = 0, .len = 0, .need = 0};
+      struct twelve_out count_out = {.buf = &count_buf, .pos = 0};
+      out_number(&count_out, rowid_bits(ids[i]));
+      out_number(&count_out, likes[i]);
+      size_t row = 6 + 8 + 14 + 10 + 14 + 1 + count_out.pos;
+      size_t text_bytes = frag[i].body_len + frag[i].created_len + frag[i].name_len;
+      if( __builtin_add_overflow(row, text_bytes, &row)
+          || __builtin_add_overflow(need, row, &need) ){
+        why = TWELVE_REASON_RECORD;
+        goto out_close_cursors;
+      }
+    }
+    {
+      /* OUT_NUMBER_BYTES of room past the exact size: out_number's fixed-length copy of the last number. */
+      size_t padded = 0;
+      if( !__builtin_add_overflow(need, (size_t)OUT_NUMBER_BYTES, &padded) ){
+        out_reserve(&o, padded);
+      }
+    }
+    if( s.pos>scratch->cap ){
+      o.pos = need;
+      goto out_finish;
+    }
+    out_put(&o, span("{\"posts\":[", 10));
+    for(size_t i=0; i<n; i++){
+      if( i>0 ){
+        out_put(&o, span(",", 1));
+      }
+      out_post_head(&o, ids[i]);
+      out_fragment(&o, &s, frag[i].body, frag[i].body_len);
+      out_put(&o, span(",\"created_at\":", 14));
+      out_fragment(&o, &s, frag[i].created, frag[i].created_len);
+      out_put(&o, span(",\"author\":", 10));
+      out_fragment(&o, &s, frag[i].name, frag[i].name_len);
+      out_put(&o, span(",\"like_count\":", 14));
+      out_number(&o, likes[i]);
+      out_put(&o, span("}", 1));
+    }
+    out_put(&o, span("]}", 2));
+  }
 
+  /* The cursors stay open for the caller's next reader call, until twelve_readers_end. */
 out_finish:
-  cursors_close(&open);
   result = finish(TWELVE_OK, &o, &s);
   if( TWELVE_SAFE_BUILD ){
     errno = saved_errno;
@@ -893,7 +1044,7 @@ out_finish:
   return result;
 
 out_close_cursors:
-  cursors_close(&open);
+  cursors_close();
   readers.reason = why;
   if( TWELVE_SAFE_BUILD ){
     errno = saved_errno;
@@ -912,8 +1063,7 @@ int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
   struct twelve_out o = {.buf = out, .pos = 0};
   struct twelve_record r; /* written before read: post_row's record_read fills it */
   struct twelve_record u; /* written before read: author's record_read fills it */
-  struct twelve_record l; /* written before read: record_read fills it */
-  unsigned open = 0;
+  struct twelve_record l; /* written before read: record_first_int fills it */
   int res = 0;
   int why = TWELVE_OK;
   int result = TWELVE_OK;
@@ -931,7 +1081,7 @@ int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
     goto out_close_cursors;
   }
 
-  if( (why = cursor_open(2, readers.posts, 0, &open))!=0 ){
+  if( (why = cursor_open(2, readers.posts, 0))!=0 ){
     goto out_close_cursors;
   }
   if( sqlite3BtreeTableMoveto(c2, id, 0, &res)!=SQLITE_OK ){
@@ -939,7 +1089,6 @@ int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
     goto out_close_cursors;
   }
   if( res!=0 || sqlite3BtreeEof(c2) ){
-    cursors_close(&open);
     if( TWELVE_SAFE_BUILD ){
       errno = saved_errno;
     }
@@ -948,14 +1097,14 @@ int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
   if( (why = post_row(&r, &user, &body, &created))!=0 ){
     goto out_close_cursors;
   }
-  if( (why = cursor_open(3, readers.users, 0, &open))!=0 ){
+  if( (why = cursor_open(3, readers.users, 0))!=0 ){
     goto out_close_cursors;
   }
   if( (why = author(user, &name, &u))!=0 ){
     goto out_close_cursors;
   }
 
-  if( (why = cursor_open(1, readers.likes_idx, readers.likes_key, &open))!=0 ){
+  if( (why = cursor_open(1, readers.likes_idx, readers.likes_key))!=0 ){
     goto out_close_cursors;
   }
   if( (why = likes_seek(id))!=0 ){
@@ -963,10 +1112,7 @@ int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
   }
   while( !sqlite3BtreeEof(c1) ){
     i64 post = 0;
-    if( (why = record_read(c1, &l))!=0 ){
-      goto out_close_cursors;
-    }
-    if( (why = record_int(&l, l.type[0], l.offset[0], &post))!=0 ){
+    if( (why = record_first_int(c1, &l, &post))!=0 ){
       goto out_close_cursors;
     }
     if( post!=id ){
@@ -985,7 +1131,6 @@ int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
   out_string(&o, created);
   out_post_tail(&o, name, count);
   out_put(&o, span("}", 1));
-  cursors_close(&open);
   result = finish(TWELVE_OK, &o, 0);
   if( TWELVE_SAFE_BUILD ){
     errno = saved_errno;
@@ -993,12 +1138,19 @@ int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
   return result;
 
 out_close_cursors:
-  cursors_close(&open);
+  cursors_close();
   readers.reason = why;
   if( TWELVE_SAFE_BUILD ){
     errno = saved_errno;
   }
   return TWELVE_FALLBACK;
+}
+
+void twelve_readers_end(void){
+  int saved_errno = errno;
+  assert(readers.ready == 1 || readers.open == 0);
+  cursors_close();
+  errno = saved_errno;
 }
 
 void twelve_readers_close(void){
@@ -1014,8 +1166,3 @@ void twelve_readers_close(void){
 int twelve_reader_reason(void){
   return readers.reason;
 }
-
-#ifdef TWELVE_READERS_PUSHED
-#pragma GCC pop_options
-#undef TWELVE_READERS_PUSHED
-#endif

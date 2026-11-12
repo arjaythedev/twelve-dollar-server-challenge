@@ -1,3 +1,5 @@
+use std::mem::MaybeUninit;
+
 pub(crate) const HEAD_ROOM: usize = 113;
 pub(crate) const HEADER_MAX: usize = 65_536;
 pub(crate) const BODY_MAX: usize = 65_536;
@@ -123,12 +125,14 @@ impl ErrorBody {
 
 pub(crate) fn parse(input: &[u8], body: &mut Vec<u8>) -> Parse {
     body.clear();
-    let mut headers = [httparse::EMPTY_HEADER; MAX_HEADERS];
-    let mut parsed = httparse::Request::new(&mut headers);
+    // The header slots start uninitialized: httparse writes each slot it fills, and parsed.headers
+    // covers exactly those, so no 64-slot array is cleared per request.
+    let mut headers = [const { MaybeUninit::<httparse::Header<'_>>::uninit() }; MAX_HEADERS];
+    let mut parsed = httparse::Request::new(&mut []);
     let window = input
         .get(..input.len().min(HEADER_MAX + 1))
         .expect("the head window ends at most at input.len()");
-    let head = match parsed.parse(window) {
+    let head = match parsed.parse_with_uninit_headers(window, &mut headers) {
         Ok(httparse::Status::Complete(head)) if head <= HEADER_MAX => head,
         Ok(httparse::Status::Partial) if input.len() <= HEADER_MAX => {
             return Parse::Incomplete { need: NEED_PARTIAL };

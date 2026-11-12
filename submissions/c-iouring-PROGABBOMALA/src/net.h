@@ -75,9 +75,10 @@
 #define CQ_ENTRIES 65536
 #define PBUF_COUNT 4096    /* receive buffers per ring; a power of two */
 #define PBUF_SIZE 2048
+#define READ_ROUND 2048    /* single reads in flight per ring, half its buffers */
 #define ACCEPT_DEPTH 512   /* accepts in flight on the accepting ring, 64 per listener */
 
-enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CLOSE, OP_MISC };
+enum { OP_ACCEPT = 1, OP_RECV, OP_READ, OP_SEND, OP_CLOSE, OP_MISC };
 
 /* user_data: op | ring | generation | aux | slot */
 static inline uint64_t ud_make(unsigned op, unsigned ring, unsigned gen, unsigned aux, unsigned slot) {
@@ -95,8 +96,9 @@ enum { C_FREE = 0, C_OPEN, C_CLOSING };
 #define CF_BUSY 0x02  /* a request of this connection is being answered */
 #define CF_HELD 0x04  /* a POST is parked until writes resume */
 #define CF_READY 0x08 /* on the ready list: buffered input to parse */
-#define CF_REARM 0x10 /* on the re-arm list */
+#define CF_RQ 0x10    /* on the read queue */
 #define CF_CLOSE 0x20 /* close once the response is out */
+#define CF_READING 0x40 /* a single read is in flight */
 
 struct conn {
   uint16_t gen;
@@ -127,6 +129,8 @@ struct ring_ctx {
   uint32_t open;              /* slots in use */
   uint32_t acc_inflight;      /* accepts queued here; each one has a slot reserved */
   uint16_t acc_lis[NLIS];     /* ... per listener */
+  uint32_t reads;             /* single reads in flight */
+  uint32_t got;               /* completions the last reap saw */
 };
 
 struct tds_getevents_arg {
@@ -219,7 +223,7 @@ static uint32_t ring_slot_limit(void) {
   return (uint32_t)lim;
 }
 
-static int ring_init(struct ring_ctx *r, int idx, uint32_t nslots) {
+static int ring_init(struct ring_ctx *r, int idx, uint32_t nslots, uint32_t cq_entries) {
   memset(r, 0, sizeof *r);
   r->idx = idx;
   r->fd = -1;
@@ -228,13 +232,13 @@ static int ring_init(struct ring_ctx *r, int idx, uint32_t nslots) {
   memset(&p, 0, sizeof p);
   p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG |
             IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE | IORING_SETUP_CLAMP;
-  p.cq_entries = CQ_ENTRIES;
+  p.cq_entries = cq_entries;
   int fd = sys_io_uring_setup(SQ_ENTRIES, &p);
   if (fd < 0 && errno == EINVAL) { /* a kernel without DEFER_TASKRUN (before 6.1) */
     memset(&p, 0, sizeof p);
     p.flags = IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_SUBMIT_ALL |
               IORING_SETUP_CQSIZE | IORING_SETUP_CLAMP;
-    p.cq_entries = CQ_ENTRIES;
+    p.cq_entries = cq_entries;
     fd = sys_io_uring_setup(SQ_ENTRIES, &p);
   }
   if (fd < 0) return 0;

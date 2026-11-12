@@ -23,6 +23,8 @@
 #define WAIT_BATCH 128              /* completions to wait for when the loop is busy */
 #define WAIT_NS 1000000L            /* ... or this long */
 #define IDLE_NS 1000000000L
+#define READS_PER_PASS 16384        /* single reads issued per pass */
+#define CQES_PER_REAP 32768
 
 enum { ST_DONE = 0, ST_READ, ST_WRITE };
 
@@ -73,7 +75,8 @@ static struct arena g_arena[MAX_ARENAS];
 static int g_narena, g_cur_arena = -1;
 static char *g_scratch;
 static uint32_t g_scratch_off;
-static struct idlist g_ready, g_held, g_rearm;
+static struct idlist g_ready, g_held, g_rq;
+static uint32_t g_reads;
 static struct bt_feed g_feed;
 
 static void list_push(struct idlist *l, uint32_t id) {
@@ -220,6 +223,26 @@ static void conn_arm_recv(struct ring_ctx *r, uint32_t slot) {
   c->flags |= CF_RECV;
 }
 
+static void conn_arm_read(struct ring_ctx *r, uint32_t slot) {
+  struct conn *c = &r->conns[slot];
+  struct io_uring_sqe *s = sqe_get(r);
+  s->opcode = IORING_OP_RECV;
+  s->fd = (int)slot;
+  s->flags = IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
+  s->buf_group = 0;
+  s->msg_flags = MSG_DONTWAIT;
+  s->user_data = ud_make(OP_READ, (unsigned)r->idx, c->gen, 0, slot);
+  c->flags |= CF_READING;
+  r->reads++;
+}
+
+static inline void conn_queue_read(struct ring_ctx *r, uint32_t slot) {
+  struct conn *c = &r->conns[slot];
+  if (c->flags & (CF_RQ | CF_READING | CF_RECV)) return;
+  c->flags |= CF_RQ;
+  list_push(&g_rq, ((uint32_t)r->idx << 16) | slot);
+}
+
 static void conn_close(struct ring_ctx *r, uint32_t slot) {
   struct conn *c = &r->conns[slot];
   if (c->state != C_OPEN) return;
@@ -273,8 +296,20 @@ static inline int is_write_route(const struct http_req *q) {
   return q->route == ROUTE_CREATE_POST || q->route == ROUTE_LIKE_POST;
 }
 
-static void task_add(struct ring_ctx *r, uint32_t slot, const struct http_req *q) {
+/* 0 = no scratch memory left in this pass. */
+static int task_add(struct ring_ctx *r, uint32_t slot, const struct http_req *q) {
   struct conn *c = &r->conns[slot];
+  const char *auth = NULL, *body = NULL;
+  if (q->is_post) { /* a GET needs nothing of its bytes later */
+    char *m = scratch_get(q->auth_len + q->body_len + 1);
+    if (!m) return 0;
+    if (q->auth) {
+      memcpy(m, q->auth, q->auth_len);
+      auth = m;
+    }
+    memcpy(m + q->auth_len, q->body, q->body_len);
+    body = m + q->auth_len;
+  }
   struct task *t = &g_batch[g_nbatch++];
   t->cid = ((uint32_t)r->idx << 16) | slot;
   t->gen = c->gen;
@@ -284,14 +319,15 @@ static void task_add(struct ring_ctx *r, uint32_t slot, const struct http_req *q
   t->keep_alive = q->keep_alive;
   t->state = ST_DONE;
   t->post_id = q->post_id;
-  t->auth = q->auth;
-  t->auth_len = q->auth_len;
-  t->body = q->body;
-  t->body_len = q->body_len;
+  t->auth = auth;
+  t->auth_len = auth ? q->auth_len : 0;
+  t->body = body;
+  t->body_len = body ? q->body_len : 0;
   t->base = NULL;
   t->resp = NULL;
   t->resp_len = 0;
   c->flags |= CF_BUSY;
+  return 1;
 }
 
 static void on_data(struct ring_ctx *r, uint32_t slot, const char *p, uint32_t n) {
@@ -317,11 +353,10 @@ static void on_data(struct ring_ctx *r, uint32_t slot, const char *p, uint32_t n
     }
     return;
   }
-  if (g_nbatch == MAX_BATCH) {
+  if (g_nbatch == MAX_BATCH || !task_add(r, slot, &q)) { /* read now, answered by a later pass */
     if (conn_stash(r, slot, p, n)) conn_ready(r, slot);
     return;
   }
-  task_add(r, slot, &q);
   if ((uint32_t)k < n) conn_stash(r, slot, p + k, n - (uint32_t)k); /* pipelined: after this response */
 }
 
@@ -337,9 +372,9 @@ static void process_ready(void) {
     uint32_t slot = v[i] & 0xffff;
     struct conn *c = &r->conns[slot];
     if (c->state != C_OPEN || !(c->flags & CF_READY)) continue;
-    if (g_nbatch == MAX_BATCH) {
-      list_push(&keep, v[i]);
-      continue;
+    if (g_nbatch == MAX_BATCH) { /* the rest keeps its place in the queue */
+      for (; i < n; i++) list_push(&keep, v[i]);
+      break;
     }
     c->flags &= (uint8_t)~CF_READY;
     if (!c->in_len || (c->flags & (CF_BUSY | CF_HELD))) continue;
@@ -355,16 +390,11 @@ static void process_ready(void) {
       list_push(&g_held, v[i]);
       continue;
     }
-    char *copy = scratch_get((uint32_t)k);
-    if (!copy) {
+    if (!task_add(r, slot, &q)) {
       c->flags |= CF_READY;
       list_push(&keep, v[i]);
       continue;
     }
-    memcpy(copy, c->in, (size_t)k);
-    if (q.auth) q.auth = copy + (q.auth - c->in);
-    q.body = copy + (q.body - c->in);
-    task_add(r, slot, &q);
     c->in_len -= (uint32_t)k;
     if (c->in_len) {
       memmove(c->in, c->in + k, c->in_len);
@@ -418,7 +448,7 @@ static void accept_policy(void) {
     for (int i = 0; i < g_nrings; i++)
       if (ring_free(&g_rings[i]) > ring_free(&g_rings[best])) best = i;
     if (ring_free(&g_rings[best]) < 2 * g_depth && g_nrings < MAX_RINGS && g_now_ms >= retry_at) {
-      if (ring_init(&g_rings[g_nrings], g_nrings, g_slots)) {
+      if (ring_init(&g_rings[g_nrings], g_nrings, g_slots, 8192)) {
         best = g_nrings++;
         fprintf(stderr, "ring %d opened\n", best);
       } else {
@@ -456,10 +486,32 @@ static void on_cqe(struct ring_ctx *r, const struct io_uring_cqe *e) {
           return;
         }
       }
-      if (c->state == C_OPEN && !(c->flags & (CF_RECV | CF_REARM))) {
-        c->flags |= CF_REARM;
-        list_push(&g_rearm, ((uint32_t)r->idx << 16) | slot);
+
+      if (c->state == C_OPEN && !(c->flags & CF_RECV)) conn_queue_read(r, slot);
+      return;
+    }
+    case OP_READ: {
+      if (r->reads) r->reads--;
+      struct conn *c = &r->conns[slot];
+      int has_buf = (e->flags & IORING_CQE_F_BUFFER) != 0;
+      uint16_t bid = (uint16_t)(e->flags >> IORING_CQE_BUFFER_SHIFT);
+      if (c->gen != UD_GEN(u) || c->state != C_OPEN) {
+        if (has_buf) pbuf_put(r, bid);
+        return;
       }
+      c->flags &= (uint8_t)~CF_READING;
+      if (res > 0 && has_buf) {
+        on_data(r, slot, (const char *)(r->bufs + (size_t)bid * PBUF_SIZE), (uint32_t)res);
+        pbuf_put(r, bid);
+        if (c->state != C_OPEN) return;
+        if ((uint32_t)res == PBUF_SIZE) conn_queue_read(r, slot); /* there may be more */
+        else conn_arm_recv(r, slot);                                /* drained */
+        return;
+      }
+      if (has_buf) pbuf_put(r, bid);
+      if (res == -EAGAIN) conn_arm_recv(r, slot);
+      else if (res == -ENOBUFS) conn_queue_read(r, slot);
+      else conn_close(r, slot);
       return;
     }
     case OP_SEND: {
@@ -508,11 +560,39 @@ static void on_cqe(struct ring_ctx *r, const struct io_uring_cqe *e) {
 static void reap(struct ring_ctx *r) {
   uint32_t head = *r->cq_khead;
   uint32_t tail = __atomic_load_n(r->cq_ktail, __ATOMIC_ACQUIRE);
-  while (head != tail && g_nbatch < MAX_BATCH) {
+  if (tail - head > CQES_PER_REAP) tail = head + CQES_PER_REAP;
+  r->got = tail - head;
+  if (head == tail) return;
+  while (head != tail) {
     on_cqe(r, &r->cqes[head & r->cq_mask]);
     head++;
   }
   __atomic_store_n(r->cq_khead, head, __ATOMIC_RELEASE);
+  pbuf_publish(r);
+}
+
+static uint32_t issue_reads(void) {
+  uint32_t n = g_rq.n, issued = 0;
+  if (!n) return 0;
+  uint32_t *v = g_rq.v;
+  g_rq.v = NULL;
+  g_rq.n = g_rq.cap = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    struct ring_ctx *r = cid_ring(v[i]);
+    uint32_t slot = v[i] & 0xffff;
+    struct conn *c = &r->conns[slot];
+    if (c->state != C_OPEN || !(c->flags & CF_RQ)) continue;
+    if (r->reads >= READ_ROUND || g_reads >= READS_PER_PASS) {
+      list_push(&g_rq, v[i]);
+      continue;
+    }
+    c->flags &= (uint8_t)~CF_RQ;
+    conn_arm_read(r, slot);
+    g_reads++;
+    issued++;
+  }
+  free(v);
+  return issued;
 }
 
 static int authenticate(struct task *t) {
@@ -885,31 +965,42 @@ int main(void) {
       return 1;
     }
   }
-  if (!ring_init(&g_rings[0], 0, g_slots)) {
-    fprintf(stderr, "fatal: io_uring setup failed: %s\n", strerror(errno));
-    return 1;
+
+  static const uint32_t cq_try[] = {CQ_ENTRIES, 32768, 16384, 8192};
+  for (int i = 0; i < MAX_RINGS; i++) {
+    int ok = 0;
+    for (unsigned k = 0; k < 4 && !ok; k++) ok = ring_init(&g_rings[i], i, g_slots, cq_try[k]);
+    if (!ok) {
+      if (i == 0) {
+        fprintf(stderr, "fatal: io_uring setup failed: %s\n", strerror(errno));
+        return 1;
+      }
+      fprintf(stderr, "ring %d: %s\n", i, strerror(errno));
+      break;
+    }
+    g_nrings = i + 1;
   }
-  g_nrings = 1;
   accept_policy();
-  fprintf(stderr, "listening on %s:%d: %d listeners, %u direct descriptors per ring, up to %d rings\n", host, port,
-          NLIS, g_slots, MAX_RINGS);
+  fprintf(stderr, "listening on %s:%d: %d listeners, %d rings of %u direct descriptors\n", host, port, NLIS,
+          g_nrings, g_slots);
 
   int last = 0;   /* requests answered by the previous pass */
   unsigned turn = 0;
   for (;;) {
     /* wait */
-    int busy = g_ready.n > 0;
+
+    int busy = g_ready.n > 0 || g_rq.n > 0;
+    int spread = 0; /* connections or accepts on a ring that cannot wake ring 0 */
     for (int i = 1; i < g_nrings; i++) {
       struct ring_ctx *r = &g_rings[i];
-      if (ring_unsubmitted(r) || ring_has_work(r)) ring_flush(r);
-      busy |= ring_has_cqe(r);
+      if (ring_unsubmitted(r) || ring_has_work(r) || r->got >= 16) ring_flush(r);
+      spread |= r->open || r->acc_inflight;
     }
     struct ring_ctx *r0 = &g_rings[0];
-    busy |= ring_has_cqe(r0);
     if (busy) {
-      if (ring_unsubmitted(r0) || ring_has_work(r0)) ring_flush(r0);
+      if (ring_unsubmitted(r0) || ring_has_work(r0) || r0->got >= 16) ring_flush(r0);
     } else {
-      int timed = g_nrings > 1 || last > 0 || g_db.writes_held || db_ckpt_active(&g_db);
+      int timed = spread || last > 0 || g_db.writes_held || db_ckpt_active(&g_db);
       ring_wait(r0, last > 0 ? WAIT_BATCH : 1, timed ? WAIT_NS : IDLE_NS);
     }
 
@@ -917,9 +1008,20 @@ int main(void) {
     clock_update();
     g_nbatch = 0;
     g_scratch_off = 0;
-    process_ready();
+    process_ready(); /* requests read by earlier passes go first */
     turn++;
     for (int k = 0; k < g_nrings; k++) reap(&g_rings[(k + turn) % (unsigned)g_nrings]);
+
+    g_reads = 0;
+    for (int round = 0; round < 8 && g_rq.n; round++) {
+      if (!issue_reads()) break;
+      for (int i = 0; i < g_nrings; i++) {
+        struct ring_ctx *r = &g_rings[i];
+        if (!ring_unsubmitted(r)) continue;
+        ring_flush(r);
+        reap(r);
+      }
+    }
     process_ready();
 
     /* execute, then answer */
@@ -929,18 +1031,6 @@ int main(void) {
       send_batch();
     }
     last = g_nbatch;
-
-    /* The receive buffers of this pass are no longer referenced. */
-    for (int i = 0; i < g_nrings; i++) pbuf_publish(&g_rings[i]);
-    for (uint32_t i = 0; i < g_rearm.n; i++) {
-      struct ring_ctx *r = cid_ring(g_rearm.v[i]);
-      uint32_t slot = g_rearm.v[i] & 0xffff;
-      struct conn *c = &r->conns[slot];
-      if (c->state != C_OPEN || !(c->flags & CF_REARM)) continue;
-      c->flags &= (uint8_t)~CF_REARM;
-      if (!(c->flags & CF_RECV)) conn_arm_recv(r, slot);
-    }
-    g_rearm.n = 0;
 
     if (db_tick(&g_db, g_now_ms)) release_held();
     accept_policy();

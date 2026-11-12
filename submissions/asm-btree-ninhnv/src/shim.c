@@ -67,9 +67,8 @@ static u32 spill_cap;
 #endif
 #define CKPT_GROW 2
 #define HOLD_MS 250
-#ifndef BULK_NICE
-#define BULK_NICE 19
-#endif
+#define CKPT_NICE 5
+#define DB_CHUNK (64 << 20)
 static sqlite3 *ckdb;
 enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 static int ck_state;
@@ -165,12 +164,15 @@ static void ck_sync_db(void) {
 
 /* PASSIVE checkpoints, as the loop asks for them. PASSIVE never waits for the loop's locks and the
  * loop never waits for these threads. Two threads take turns on the one connection (the states
- * are strictly sequential). The bulk thread runs at nice BULK_NICE, so on one vCPU its copying and
- * its syncs stay out of the loop's way. The tail thread runs at normal priority because writes
- * wait for it; after the bulk thread's rounds it has a handful of frames to copy and sync. */
+ * are strictly sequential). Both run at nice CKPT_NICE, about a quarter of the vCPU when the loop
+ * wants all of it. At nice 19 the bulk thread got about 1% of a saturated vCPU: the log grew (to
+ * 21,000 frames at 290,000 users) and the hold at the end of the cycle ran out before the tail
+ * thread was done. At nice 0 the tail thread took half of the vCPU from the loop for as long as
+ * it worked. swift-iouring-akbashev, which ports this design, measured the same and settled on 5
+ * (its #376). */
 static void *ck_main(void *arg) {
   int serve = (int)(long)arg;
-  if (serve == CK_BULK) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), BULK_NICE);
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), CKPT_NICE);
   for (;;) {
     pthread_mutex_lock(&ck_mu);
     while (ck_state != serve) pthread_cond_wait(&ck_cv, &ck_mu);
@@ -183,8 +185,8 @@ static void *ck_main(void *arg) {
        * commit) minus that. */
       rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
       /* Rounds pay off while this thread keeps up: the hold then finds a few frames to copy and
-       * a few pages to flush. When it does not keep up (a busy CPU leaves a nice-19 thread
-       * little, or the disk is slower than the writes), rounds only let the log grow while no
+       * a few pages to flush. When it does not keep up (a busy CPU leaves it too little, or
+       * the disk is slower than the writes), rounds only let the log grow while no
        * hold can start: at 260,000 users on a droplet the log reached 41,000 frames with
        * unbounded rounds and 9,000 without any. So a round starts only while the log is short
        * and the round before it gained. */
@@ -359,16 +361,10 @@ int td_open(const char *path, char *err, int n) {
   if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl"))
     return fail(err, n, "open");
   /* WAL + synchronous=NORMAL (rule 6). No mmap: a page in SQLite's own cache keeps its parsed
-   * header and needs no WAL-index lookup; the pages the requests touch fit in 64 MB.
-   * journal_size_limit: the first commit after a checkpoint cuts the log file back to 1 MB, so
-   * the cycle's frames are appended to it. Without a limit SQLite keeps the file (17 MB and more)
-   * and writes each 4,120-byte frame over the old log; that write covers part of a 4 KB block,
-   * and once the kernel has dropped the old block from its page cache (a few hundred thousand
-   * sockets leave it little room) it is read back from the disk first, inside the loop's COMMIT. */
+   * header and needs no WAL-index lookup; the pages the requests touch fit in 64 MB. */
   if (sqlite3_exec(db,
                    "PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA temp_store = MEMORY;"
                    "PRAGMA cache_size = -65536; PRAGMA mmap_size = 0; PRAGMA wal_autocheckpoint = 0;"
-                   "PRAGMA journal_size_limit = 1048576;"
                    "SELECT count(*) FROM sqlite_schema",
                    0, 0, 0))
     return fail(err, n, "pragmas");
@@ -379,6 +375,13 @@ int td_open(const char *path, char *err, int n) {
     snprintf(err, n, "checkpoint connection: %s", ckdb ? sqlite3_errmsg(ckdb) : "cannot open");
     return -1;
   }
+  /* The database file grows DB_CHUNK at a time, by one posix_fallocate (HAVE_POSIX_FALLOCATE in
+   * build.sh). A checkpoint that copies the whole log sets the file's size and syncs it; when the
+   * size has changed by a few pages, that sync, in the write hold, also waits for the file
+   * system's journal. From swift-iouring-akbashev (#376). */
+  int chunk = DB_CHUNK;
+  sqlite3_file_control(db, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
+  sqlite3_file_control(ckdb, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
   pthread_t t;
   pthread_attr_t a;
   pthread_attr_init(&a);

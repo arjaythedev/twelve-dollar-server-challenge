@@ -15,8 +15,9 @@ application are re-implemented in assembly.
 (PR #264): the `td_*` interface, the cursor helpers, the checkpoint thread's states and the
 overflow (spill) buffer come from there. What this shim changes or adds is listed at the top of
 the file. Ideas taken from other submissions and written anew here: the page-cache wrapper
-(c-iouring-pavlyhalim #245, wat-wasmedge-delneg #272), syncing the database before a write hold
-(swift-iouring-akbashev #376), locking the code in RAM (c-iouring-pavlyhalim #245,
+(c-iouring-pavlyhalim #245, wat-wasmedge-delneg #272), syncing the database before a write hold,
+the checkpoint threads' priority and the 64 MiB file growth (swift-iouring-akbashev #376), locking
+the code in RAM (c-iouring-pavlyhalim #245,
 mojo-iouring-oh-meh #257).
 
 | | |
@@ -81,7 +82,7 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   commit, rule 6). **No response from a pass is handed to the kernel until that `COMMIT` returns.**
   If it fails, every response the pass produced is replaced by a 500 and the connection is closed.
 - **Checkpoints off the request path.** Automatic checkpoints are off. Once the WAL holds 4,096
-  frames, a helper thread (nice 19, own connection) copies it back with PASSIVE checkpoints: the
+  frames, a helper thread (nice 5, own connection) copies it back with PASSIVE checkpoints: the
   cycle's frames first, then, while the log is still under 8,192 frames, rounds of "sync the
   database file, copy what was written meanwhile" until at most 128 frames were written during a
   round or a round stops gaining. Then writes are briefly held: the next
@@ -95,34 +96,40 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
     `fsync` taking 5 ms plus its unsynced bytes at that rate) and 240,000 users of the k6 model,
     hold-phase latency went from p99 89–91 ms and a 290–300 ms maximum (every hold ran its full
     250 ms) to p99 23–24 ms and a 90–116 ms maximum, with no hold running out (two runs each).
-  - *Why the rounds are bounded:* they only pay off while the helper keeps up. On a busy vCPU a
-    nice-19 thread gets little, each round takes longer than the one before, and no hold can
+  - *Why the rounds are bounded:* they only pay off while the helper keeps up. On a busy vCPU the
+    helper (at nice 19 then) gets little, each round takes longer than the one before, and no hold can
     start while rounds run, so the log grows instead of restarting. On a 1 vCPU / 2 GB droplet
     with 260,000 users the log reached 32,625 and 41,550 frames with unbounded rounds (two
     droplets), and 141,927 at 320,000; without any rounds it never passed 9,811 at any level.
     Bounded, it stayed under 14,100 in 2-minute probes up to 280,000 users, and write holds
     added up to 0.1–0.6 s a minute, against 1–2 s a minute without rounds.
-  - *Why two threads:* the second one runs at normal priority because writes wait for it; at
-    nice 19 it got ~1.5% of a busy CPU and holds ran out. After the rounds it has a handful of
-    frames to copy and sync.
+  - *Why nice 5, for both threads:* at nice 19 the copying thread got about 1% of a saturated
+    vCPU, so near the limit the log grew (21,111 frames in a 290,000-user probe on a Synteq
+    machine) and the hold at the end of the cycle ran out. At nice 0 the thread that works in
+    the hold took half of the vCPU from the loop for as long as it worked. At 5 each gets about
+    a quarter of a contended vCPU. swift-iouring-akbashev, a port of this design, found the same:
+    its #376 went from 270,000 to 300,000 users on the benchmark box with this priority, the sync
+    before the hold and the file growth below. On the Synteq machine, in seven probes at 290,000
+    and 300,000 users with both threads at 5, the log stayed under 7,000 frames and no hold ran
+    out. (There are two threads because their priorities used to differ.)
   - The log has a line a minute: holds (the longest, their sum, the extra rounds), holds that ran
     out, copies the loop made itself, the most frames the WAL held; and for the loop its longest
     pass with the CPU time that pass used, the passes over 100 ms and the longest commit. A long
     pass with little CPU time means the loop was blocked or kept off the CPU.
-- **The log file is cut back after every checkpoint** (`PRAGMA journal_size_limit`, 1 MB; many
-  submissions here set it). SQLite otherwise keeps the WAL file at its largest size and writes
-  the next cycle over the old one. A frame is 4,120 bytes, so nearly every one of those writes
-  covers part of a 4 KB block, and the kernel needs the rest of that block first: if the old log
-  has left the page cache, it is read back from the disk before `write` returns. On a 2 GB
-  machine with a few hundred thousand sockets the page cache is small and the old log does leave
-  it. On a Synteq machine of the benchmark box's size with 300,000 users, the loop's kernel
-  stack (sampled every 10 ms) sat in `ext4_block_write_begin` → `__wait_on_buffer` under SQLite's
-  `write` during its long passes, and commits took 50 to 700 ms. With the limit, the first commit
-  after a checkpoint truncates the file to 1 MB and the rest of the cycle is appended to it, so
-  no old block is read; those waits were gone from the samples. The price is a truncate and new
-  block allocations in every cycle: time inside `COMMIT` went from about 34 to about 48 ms a
-  second at that load. Durability is unchanged: the log is only restarted, and so only cut,
-  after a checkpoint has copied every frame and synced the database. Measurements below.
+- **The database file grows 64 MiB at a time** (`SQLITE_FCNTL_CHUNK_SIZE`, one `posix_fallocate`
+  a chunk; from swift-iouring-akbashev's #376). A checkpoint that copies the whole log sets the
+  file's size and syncs it. When the size has changed by a few pages, that sync, which runs while
+  writes are held, waits for the file system's journal as well. In chunks, the size changes once
+  in 64 MiB of new pages.
+- **Tried and withdrawn: cutting the log file back after each checkpoint** (`PRAGMA
+  journal_size_limit`, 1 MB; this PR's second commit). SQLite keeps the WAL file at its largest
+  size and writes the next cycle over the old one in 4,120-byte frames, so nearly every write
+  covers part of a 4 KB block, and a block the kernel has dropped from its page cache is read
+  back from the disk inside `COMMIT`. On a Synteq machine with 300,000 users the loop's kernel
+  stack sat in `ext4_block_write_begin` → `__wait_on_buffer` during its long passes and commits
+  took 50 to 700 ms; with the limit those waits were gone, at the price of a truncate and new
+  blocks in every cycle (34 → 48 ms a second inside `COMMIT`). The benchmark box did not reward
+  it: 260,000 users against #388's 280,000 (below).
 - **Page cache after a split.** When a write splits a B-tree page, SQLite renumbers the new pages
   through a temporary page number far past the end of the file, and its page cache keeps the
   largest number it has seen. Every later commit truncates the cache to the file size, and from
@@ -256,8 +263,14 @@ PR #390 at `8a8c4e1` (the rounds removed, the database synced only during the wr
 230,000 users held for 5 minutes (22,374 req/s, p95 17.3 ms, p99 155.6 ms, 0 errors, 64% CPU,
 1,195 MB peak); 240,000 and 320,000 failed. Not merged, and withdrawn here: droplets had
 favoured it at the top of their range (commits no longer waited behind the helper's syncs), but
-on the box the longer holds cost more than that gained. This version is #388's checkpoint again,
-with the log-size limit as its one change.
+on the box the longer holds cost more than that gained.
+
+PR #390 at `4853419` (#388's checkpoint again, plus the 1 MB log-size limit): 260,000 users held
+for 5 minutes (24,995 req/s, p95 76.0 ms, p99 250.9 ms, 0 errors, 77% CPU, 659 MB peak); 270,000
+failed its 2-minute probe on p99 (1.84 s at 81% CPU), 280,000 too (3.17 s at 83%). Not merged.
+
+This version is #388 with two changes, both described above: the checkpoint threads at nice 5
+and the database file grown in 64 MiB chunks. The log-size limit is gone.
 
 ### On Synteq machines (the box's provider and size, not the box)
 
@@ -270,9 +283,10 @@ twice, 290,000 passed twice and failed once, 300,000 failed five times out of fi
 search had 280,000 pass and 290,000 fail, so the levels agree to within a step. The disk does
 not: #390's first commit passed 240,000 here and failed it on the box, so syncs are faster here.
 
-Probes that passed, out of those run, with and without the log-size limit:
+Probes that passed, out of those run, with and without the log-size limit (commit `4853419`, since
+withdrawn):
 
-| users | #388 as merged | 1 MB limit, any build | of which this commit's code |
+| users | #388 as merged | 1 MB limit, any build | of which `4853419` |
 |---|---|---|---|
 | 290,000, 2 minutes | 2 of 3 | 1 of 2 | 0 of 1 (p99 2.8 s) |
 | 300,000, 2 minutes | 0 of 5 | 3 of 6 | 2 of 2 (p99 221 and 715 ms) |
@@ -286,8 +300,7 @@ Probes that passed, out of those run, with and without the log-size limit:
 fewer accepts in flight, or reading the head of the log ahead of time; the 5-minute holds were
 run only on those. The same build at the same level ranged from a p99 of 26 ms to 3.5 s (#388 at
 290,000), so these counts are small against the noise, and the box's slower disk may weigh the
-limit's extra file work differently. What I take from it: one cause of long commits is gone,
-and 300,000 went from never passing to passing about half the time.
+limit's extra file work differently. It did: the box held 260,000 with the limit.
 
 The limit does not move the ceiling. What the trace, `perf` and the stack samples showed there:
 
@@ -301,6 +314,29 @@ The limit does not move the ceiling. What the trace, `perf` and the stack sample
   backlog then often lasts to the end of the probe.
 - From 320,000 the 2 GB run out: in three of the four 2-minute probes there the kernel killed
   the server for memory (`Result=oom-kill`).
+
+**This version's two settings** (2026-11-12; 2-minute probes alternating with #388 as merged, each
+setting alone and both together):
+
+| users | #388 as merged | nice 5 only | 64 MiB chunks only | both (this version) |
+|---|---|---|---|---|
+| 290,000 | 1 of 2 | 0 of 2 | 0 of 2 | 1 of 2 |
+| 300,000 | 1 of 1 | 1 of 1 | | 2 of 2 |
+
+These counts decide nothing: the last six probes of that run passed whatever they ran and eight
+of the ten before them failed, and over one day the same build cost 20 to 24 µs of CPU a
+request on this machine. What repeated in every probe: with the threads at nice 5 the log stayed
+under 7,000 frames (8,457 to 21,111 as merged) and no hold ran out (two did in one merged
+probe). With nice 5 alone the loop had more passes over 50 ms at 290,000 users (about 150 a minute, 16
+and 83 as merged); with both settings it had the fewest there (1 and 6). The one failure of "both" was a single
+stall of several seconds as the hold ended, while the kernel was compacting memory. So this
+machine cannot rank the settings; I rely on the box's own result for the same change in
+swift-iouring-akbashev (270,000 → 300,000).
+
+Two more things measured in that run and left out: sending the feed's 5 KB responses with
+`IORING_OP_SEND_ZC` (2.2 million zero-copy sends a probe, none refused; the copy saved 0.09 µs a
+request and the extra completions cost 0.47), and `TCP_DEFER_ACCEPT` on the listeners (no fewer
+bad seconds at the end of the ramp, 0.75 µs a request more in the hold).
 
 ### On DigitalOcean droplets (not the benchmark box)
 
@@ -364,8 +400,8 @@ Correctness checks beyond `test/test.sh` (42/42):
   lowered to 64 frames (500 write holds in 10 s, pipelined POSTs), after `kill -9` mid-load
   (three trials; three more on the slow-disk model with the checkpoint rounds, 31,841–42,121
   posts and as many likes each; three more with the bounded rounds, 7,584–19,733 each; three more
-  with the log-size limit and the full 4,096-frame cycle, 62,497–98,235 each, the log file cut
-  back to 1 MB 23 to 37 times a trial), and on a
+  with this version and the full 4,096-frame cycle, 57,676–103,729 each, the file grown in 64 MiB
+  chunks), and on a
   full disk (writes then get 500, never 201; reads and
   `/health` go on).
 - After 2.3 million requests of mixed load with the page-cache wrapper: `integrity_check` ok, and
@@ -382,8 +418,8 @@ Correctness checks beyond `test/test.sh` (42/42):
 - Pipelining, byte-by-byte requests, 100 KB bodies, escaped and Unicode bodies, 19,500
   concurrent connections (a second ring is added), 7,000 connections over 4 rings.
 
-`src/shim.c` has two test-only switches, off in the build: `-DCKPT_FRAMES=n` (checkpoint sooner,
-to exercise write holds) and `-DBULK_NICE=n` (the copying thread's priority).
+`src/shim.c` has one test-only switch, off in the build: `-DCKPT_FRAMES=n` (checkpoint sooner, to
+exercise write holds).
 
 ## Run
 

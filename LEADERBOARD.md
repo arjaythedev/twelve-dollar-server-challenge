@@ -225,65 +225,66 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 146 | java-raw-agrison | #101 | Java (raw NIO, FFM SQLite) | **65,000** | 6,387 | 99 | 443 | 0.00 | 81 | 118 | 731 | 2026-10-27 |
 | 146 | lean-c-iouring-loafecho | #239 | C (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,399 | 32 | 56 | 0.00 | 28 | 41 | 605 | 2026-11-01 |
 | 146 | go-fasthttp-savak1990 | #106 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,397 | 45 | 66 | 0.00 | 66 | 96 | 875 | 2026-11-05 |
-| 158 | bun-elysia-shashishsoni | #59 | Bun (Elysia) | **64,000** | 6,300 | 14 | 75 | 0.00 | 89 | 131 | 1,507 | 2026-10-27 |
-| 159 | csharp-aspnetcore-maks-march | #27 | C# (ASP.NET Core) | **63,000** | 6,136 | 417 | 757 | 0.00 | 87 | 131 | 925 | 2026-10-27 |
-| 159 | csharp-aspnetcore-devv-guru | #195 | C# (ASP.NET Core, Native AOT) | **63,000** | 6,156 | 202 | 679 | 0.00 | 79 | 119 | 1,081 | 2026-10-29 |
-| 161 | pypy-twisted-perkinslr | #79 | PyPy (Twisted) | **62,000** | 6,017 | 474 | 757 | 0.00 | 73 | 113 | 563 | 2026-10-27 |
-| 161 | go-nethttp-rkkautsar | #277 | Go (net/http, cgo SQLite) | **62,000** | 6,059 | 465 | 742 | 0.00 | 93 | 143 | 1,152 | 2026-11-03 |
-| 163 | go-fasthttp-riyaz-ali | #344 | Go (fasthttp, cgo SQLite) | **61,000** ᶳ | 5,984 | 243.6 | 836.5 | 0.00 | 79 | 123 | 1,162 | 2026-11-07 |
-| 164 | java-netty-itsnaveenk | #57 | Java (Netty) | **58,000** | 5,665 | 349 | 519 | 0.00 | 83 | 136 | 879 | 2026-10-27 |
-| 165 | typescript-bun-tbsvttr | #4 | Bun | **57,000** | 5,593 | 103 | 291 | 0.00 | 86 | 143 | 301 | 2026-10-25 |
-| 165 | java-quarkus-panama-raisinsfried | #73 | Java (Quarkus, FFM SQLite) | **57,000** | 5,607 | 9.6 | 359 | 0.00 | 60 | 100 | 725 | 2026-10-27 |
-| 165 | typescript-fastify-melroy89 | #51 | TypeScript (Fastify, Node) | **57,000** | 5,582 | 212 | 614 | 0.00 | 77 | 128 | 1,072 | 2026-10-30 |
-| 168 | haskell-warp-staticfx | #104 | Haskell (Warp) | **55,000** | 5,411 | 2.5 | 198 | 0.00 | 62 | 107 | 1,587 | 2026-10-21 |
-| 168 | go-nethttp-fi5HiE | #99 | Go (net/http) | **55,000** | 5,382 | 425 | 679 | 0.00 | 90 | 156 | 1,465 | 2026-10-21 |
-| 168 | java-jdkhttpserver-razorree | #262 | Java (JDK HttpServer, virtual threads) | **55,000** | 5,384 | 306 | 862 | 0.00 | 92 | 159 | 1,291 | 2026-11-02 |
-| 168 | ecko-stdhttp-sn | #334 | Ecko (std.http) | **55,000** | 5,403 | 68.1 | 227.2 | 0.00 | 81 | 139 | 582 | 2026-11-06 |
-| 172 | go-nethttp-tbsvttr | #18 | Go (net/http) | **53,000** | 5,165 | 374 | 659 | 0.00 | 93 | 168 | 624 | 2026-10-26 |
-| 172 | python-pyrustapi-rajboopathiking | #147 | Python (PyRustAPI, Rust/Hyper core) | **53,000** | 5,185 | 294 | 429 | 0.00 | 90 | 162 | 1,232 | 2026-10-28 |
-| 174 | koru-orisha-denstad | #310 | Koru (Orisha, io_uring, native-compiled) | **50,000** | 4,913 | 66 | 125 | 0.00 | 52 | 98 | 166 | 2026-11-05 |
-| 175 | csharp-aspnetcore-andrexx | #20 | C# (ASP.NET Core) | **49,000** | 4,815 | 84 | 234 | 0.00 | 88 | 170 | 846 | 2026-10-26 |
-| 175 | rust-hyper-dannie203 | #178 | Rust (hyper) | **49,000** | 4,820 | 34 | 370 | 0.00 | 86 | 166 | 1,254 | 2026-11-04 |
-| 177 | python-fastapi-tejasnafde | #10 | Python (FastAPI) | **48,000** | 4,701 | 303 | 465 | 0.00 | 89 | 176 | 583 | 2026-10-21 |
-| 177 | swift-hummingbird-denizak ᵖ | #43 | Swift (Hummingbird) | **48,000** | 4,700 | 210 | 300 | 0.00 | 97 | 191 | 1,269 | 2026-10-21 |
-| 179 | java-helidon-dglynch | #159 | Java (Helidon) | **46,000** | 4,525 | 76 | 121 | 0.00 | 84 | 173 | 1,579 | 2026-10-29 |
-| 180 | python-granian-tbsvttr | #13 | Python (Granian) | **45,000** | 4,400 | 202 | 812 | 0.00 | 93 | 197 | 709 | 2026-10-26 |
-| 180 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
-| 182 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
-| 183 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
-| 183 | typescript-tinyjs-animuni-express | #382 | TypeScript (TinyJS on Bun) | **43,000** ᵀ | 4,219 | 138.1 | 584.6 | 0.00 | 86 | 189 | 489 | 2026-11-11 |
-| 185 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
-| 186 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
-| 187 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
-| 188 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
-| 188 | goose-native-tbsvttr | #143 | Goose (native, epoll) | **32,000** | 3,150 | 0.6 | 148 | 0.00 | 15 | 44 | 384 | 2026-11-02 |
-| 190 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
-| 190 | go-iouring-pmatteo | #168 | Go (io_uring, PGO) | **29,000** ʲ | 2,857 | 2.2 | 42 | 0.00 | 21 | 68 | 326 | 2026-10-29 |
-| 192 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
-| 193 | go-gin-lincolng4 | #103 | Go (Gin) | **27,000** ᵐ | 2,658 | 1.2 | 4.8 | 0.00 | 42 | 147 | 1,600 | 2026-10-27 |
-| 194 | java-flash-relism | #133 | Java (Flash) | **25,000** | 2,449 | 280 | 991 | 0.00 | 38 | 144 | 1,464 | 2026-10-28 |
-| 195 | lua-lunet-simbo1905 | #126 | Lua (lunet), behind Nginx | **24,000** ˡ | 2,362 | 20 | 38 | 0.93 | 93 | 366 | 38 | 2026-10-28 |
-| 195 | crystal-kemal-faustinoaq | #194 | Crystal (Kemal), behind Nginx | **24,000** ʷ | 2,362 | 24 | 70 | 0.96 | 51 | 201 | 126 | 2026-10-29 |
-| 195 | jww-fiber | #328 | Go (Fiber, fasthttp), behind Nginx | **24,000** ᵞ | 2,361 | 28.4 | 76.0 | 0.94 | 49 | 193 | 85 | 2026-11-05 |
-| 198 | typescript-effect-SeeThruHead | #49 | TypeScript (Effect, Node) | **23,000** | 2,229 | 413 | 765 | 0.00 | 96 | 399 | 623 | 2026-10-26 |
-| 199 | d-arsd-hybridcgi-cyrusmsk | #160 | D (arsd hybrid cgi) | **22,000** ʰ | 2,167 | 10 | 97 | 0.00 | 37 | 159 | 1,688 | 2026-10-29 |
-| 200 | php-symfony-pklebba | #40 | PHP (Symfony, FrankenPHP) | **21,000** | 2,061 | 186 | 274 | 0.00 | 95 | 428 | 915 | 2026-10-26 |
-| 201 | pascal-horse-viniabreu | #134 | Pascal (Horse) | **20,000** | 1,966 | 81 | 111 | 0.00 | 90 | 426 | 270 | 2026-10-28 |
-| 202 | csharp-aspnetcore-larsholm | #47 | C# (ASP.NET Core) | **19,000** | 1,854 | 381 | 943 | 0.00 | 57 | 286 | 439 | 2026-10-26 |
-| 202 | crystal-kemal-krthr | #146 | Crystal (Kemal) | **19,000** ᵐ | 1,869 | 27 | 153 | 0.00 | 24 | 119 | 1,631 | 2026-10-28 |
-| 202 | php-symfony-gnugat | #338 | PHP (Symfony, FrankenPHP) | **19,000** | 1,863 | 253 | 608 | 0.00 | 92 | 459 | 1,090 | 2026-11-06 |
-| 205 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
-| 206 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
-| 207 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
-| 208 | kotlin-ktor-graalvm-noamm9 | #53 | Kotlin (Ktor, GraalVM native) | **10,500** | 1,027 | 356 | 906 | 0.00 | 79 | 715 | 314 | 2026-10-26 |
-| 209 | php-codeigniter-melroy89 | #50 | PHP (CodeIgniter, FrankenPHP) | **9,500** | 926 | 332 | 456 | 0.00 | 99 | 995 | 626 | 2026-10-30 |
-| 209 | scala-http4s-sideeffffect | #172 | Scala (http4s Ember, Cats Effect), behind Nginx | **9,500** | 934 | 7.0 | 179 | 0.00 | 50 | 498 | 1,392 | 2026-11-01 |
-| 211 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
-| 211 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
-| 213 | sql-sqlite3cli-public | #232 | SQL (sqlite3 CLI, Bash accept), behind Nginx | **7,000** | 688 | 167 | 309 | 0.80 | 96 | 1,298 | 258 | 2026-10-31 |
-| 214 | c-dreamcast-public | #221 | C (KallistiOS on an emulated Dreamcast in Flycast, SQLite on the SH-4), behind Nginx | **6,000** | 590 | 26.5 | 97.5 | 0.04 | 64 | 1,008 | 319 | 2026-11-02 |
-| 215 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
-| 216 | r-plumber2-josiahparry | #242 | R (plumber2), behind Nginx | **2,000** | 195 | 300 | 924 | 0.00 | 86 | 4,103 | 279 | 2026-11-01 |
+| 146 | cpp-io_uring-0329-at | #412 | C++ (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,394 | 91 | 196 | 0.00 | 35 | 51 | 397 | 2026-11-12 |
+| 159 | bun-elysia-shashishsoni | #59 | Bun (Elysia) | **64,000** | 6,300 | 14 | 75 | 0.00 | 89 | 131 | 1,507 | 2026-10-27 |
+| 160 | csharp-aspnetcore-maks-march | #27 | C# (ASP.NET Core) | **63,000** | 6,136 | 417 | 757 | 0.00 | 87 | 131 | 925 | 2026-10-27 |
+| 160 | csharp-aspnetcore-devv-guru | #195 | C# (ASP.NET Core, Native AOT) | **63,000** | 6,156 | 202 | 679 | 0.00 | 79 | 119 | 1,081 | 2026-10-29 |
+| 162 | pypy-twisted-perkinslr | #79 | PyPy (Twisted) | **62,000** | 6,017 | 474 | 757 | 0.00 | 73 | 113 | 563 | 2026-10-27 |
+| 162 | go-nethttp-rkkautsar | #277 | Go (net/http, cgo SQLite) | **62,000** | 6,059 | 465 | 742 | 0.00 | 93 | 143 | 1,152 | 2026-11-03 |
+| 164 | go-fasthttp-riyaz-ali | #344 | Go (fasthttp, cgo SQLite) | **61,000** ᶳ | 5,984 | 243.6 | 836.5 | 0.00 | 79 | 123 | 1,162 | 2026-11-07 |
+| 165 | java-netty-itsnaveenk | #57 | Java (Netty) | **58,000** | 5,665 | 349 | 519 | 0.00 | 83 | 136 | 879 | 2026-10-27 |
+| 166 | typescript-bun-tbsvttr | #4 | Bun | **57,000** | 5,593 | 103 | 291 | 0.00 | 86 | 143 | 301 | 2026-10-25 |
+| 166 | java-quarkus-panama-raisinsfried | #73 | Java (Quarkus, FFM SQLite) | **57,000** | 5,607 | 9.6 | 359 | 0.00 | 60 | 100 | 725 | 2026-10-27 |
+| 166 | typescript-fastify-melroy89 | #51 | TypeScript (Fastify, Node) | **57,000** | 5,582 | 212 | 614 | 0.00 | 77 | 128 | 1,072 | 2026-10-30 |
+| 169 | haskell-warp-staticfx | #104 | Haskell (Warp) | **55,000** | 5,411 | 2.5 | 198 | 0.00 | 62 | 107 | 1,587 | 2026-10-21 |
+| 169 | go-nethttp-fi5HiE | #99 | Go (net/http) | **55,000** | 5,382 | 425 | 679 | 0.00 | 90 | 156 | 1,465 | 2026-10-21 |
+| 169 | java-jdkhttpserver-razorree | #262 | Java (JDK HttpServer, virtual threads) | **55,000** | 5,384 | 306 | 862 | 0.00 | 92 | 159 | 1,291 | 2026-11-02 |
+| 169 | ecko-stdhttp-sn | #334 | Ecko (std.http) | **55,000** | 5,403 | 68.1 | 227.2 | 0.00 | 81 | 139 | 582 | 2026-11-06 |
+| 173 | go-nethttp-tbsvttr | #18 | Go (net/http) | **53,000** | 5,165 | 374 | 659 | 0.00 | 93 | 168 | 624 | 2026-10-26 |
+| 173 | python-pyrustapi-rajboopathiking | #147 | Python (PyRustAPI, Rust/Hyper core) | **53,000** | 5,185 | 294 | 429 | 0.00 | 90 | 162 | 1,232 | 2026-10-28 |
+| 175 | koru-orisha-denstad | #310 | Koru (Orisha, io_uring, native-compiled) | **50,000** | 4,913 | 66 | 125 | 0.00 | 52 | 98 | 166 | 2026-11-05 |
+| 176 | csharp-aspnetcore-andrexx | #20 | C# (ASP.NET Core) | **49,000** | 4,815 | 84 | 234 | 0.00 | 88 | 170 | 846 | 2026-10-26 |
+| 176 | rust-hyper-dannie203 | #178 | Rust (hyper) | **49,000** | 4,820 | 34 | 370 | 0.00 | 86 | 166 | 1,254 | 2026-11-04 |
+| 178 | python-fastapi-tejasnafde | #10 | Python (FastAPI) | **48,000** | 4,701 | 303 | 465 | 0.00 | 89 | 176 | 583 | 2026-10-21 |
+| 178 | swift-hummingbird-denizak ᵖ | #43 | Swift (Hummingbird) | **48,000** | 4,700 | 210 | 300 | 0.00 | 97 | 191 | 1,269 | 2026-10-21 |
+| 180 | java-helidon-dglynch | #159 | Java (Helidon) | **46,000** | 4,525 | 76 | 121 | 0.00 | 84 | 173 | 1,579 | 2026-10-29 |
+| 181 | python-granian-tbsvttr | #13 | Python (Granian) | **45,000** | 4,400 | 202 | 812 | 0.00 | 93 | 197 | 709 | 2026-10-26 |
+| 181 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
+| 183 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
+| 184 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
+| 184 | typescript-tinyjs-animuni-express | #382 | TypeScript (TinyJS on Bun) | **43,000** ᵀ | 4,219 | 138.1 | 584.6 | 0.00 | 86 | 189 | 489 | 2026-11-11 |
+| 186 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
+| 187 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
+| 188 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
+| 189 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
+| 189 | goose-native-tbsvttr | #143 | Goose (native, epoll) | **32,000** | 3,150 | 0.6 | 148 | 0.00 | 15 | 44 | 384 | 2026-11-02 |
+| 191 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
+| 191 | go-iouring-pmatteo | #168 | Go (io_uring, PGO) | **29,000** ʲ | 2,857 | 2.2 | 42 | 0.00 | 21 | 68 | 326 | 2026-10-29 |
+| 193 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
+| 194 | go-gin-lincolng4 | #103 | Go (Gin) | **27,000** ᵐ | 2,658 | 1.2 | 4.8 | 0.00 | 42 | 147 | 1,600 | 2026-10-27 |
+| 195 | java-flash-relism | #133 | Java (Flash) | **25,000** | 2,449 | 280 | 991 | 0.00 | 38 | 144 | 1,464 | 2026-10-28 |
+| 196 | lua-lunet-simbo1905 | #126 | Lua (lunet), behind Nginx | **24,000** ˡ | 2,362 | 20 | 38 | 0.93 | 93 | 366 | 38 | 2026-10-28 |
+| 196 | crystal-kemal-faustinoaq | #194 | Crystal (Kemal), behind Nginx | **24,000** ʷ | 2,362 | 24 | 70 | 0.96 | 51 | 201 | 126 | 2026-10-29 |
+| 196 | jww-fiber | #328 | Go (Fiber, fasthttp), behind Nginx | **24,000** ᵞ | 2,361 | 28.4 | 76.0 | 0.94 | 49 | 193 | 85 | 2026-11-05 |
+| 199 | typescript-effect-SeeThruHead | #49 | TypeScript (Effect, Node) | **23,000** | 2,229 | 413 | 765 | 0.00 | 96 | 399 | 623 | 2026-10-26 |
+| 200 | d-arsd-hybridcgi-cyrusmsk | #160 | D (arsd hybrid cgi) | **22,000** ʰ | 2,167 | 10 | 97 | 0.00 | 37 | 159 | 1,688 | 2026-10-29 |
+| 201 | php-symfony-pklebba | #40 | PHP (Symfony, FrankenPHP) | **21,000** | 2,061 | 186 | 274 | 0.00 | 95 | 428 | 915 | 2026-10-26 |
+| 202 | pascal-horse-viniabreu | #134 | Pascal (Horse) | **20,000** | 1,966 | 81 | 111 | 0.00 | 90 | 426 | 270 | 2026-10-28 |
+| 203 | csharp-aspnetcore-larsholm | #47 | C# (ASP.NET Core) | **19,000** | 1,854 | 381 | 943 | 0.00 | 57 | 286 | 439 | 2026-10-26 |
+| 203 | crystal-kemal-krthr | #146 | Crystal (Kemal) | **19,000** ᵐ | 1,869 | 27 | 153 | 0.00 | 24 | 119 | 1,631 | 2026-10-28 |
+| 203 | php-symfony-gnugat | #338 | PHP (Symfony, FrankenPHP) | **19,000** | 1,863 | 253 | 608 | 0.00 | 92 | 459 | 1,090 | 2026-11-06 |
+| 206 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
+| 207 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
+| 208 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
+| 209 | kotlin-ktor-graalvm-noamm9 | #53 | Kotlin (Ktor, GraalVM native) | **10,500** | 1,027 | 356 | 906 | 0.00 | 79 | 715 | 314 | 2026-10-26 |
+| 210 | php-codeigniter-melroy89 | #50 | PHP (CodeIgniter, FrankenPHP) | **9,500** | 926 | 332 | 456 | 0.00 | 99 | 995 | 626 | 2026-10-30 |
+| 210 | scala-http4s-sideeffffect | #172 | Scala (http4s Ember, Cats Effect), behind Nginx | **9,500** | 934 | 7.0 | 179 | 0.00 | 50 | 498 | 1,392 | 2026-11-01 |
+| 212 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
+| 212 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
+| 214 | sql-sqlite3cli-public | #232 | SQL (sqlite3 CLI, Bash accept), behind Nginx | **7,000** | 688 | 167 | 309 | 0.80 | 96 | 1,298 | 258 | 2026-10-31 |
+| 215 | c-dreamcast-public | #221 | C (KallistiOS on an emulated Dreamcast in Flycast, SQLite on the SH-4), behind Nginx | **6,000** | 590 | 26.5 | 97.5 | 0.04 | 64 | 1,008 | 319 | 2026-11-02 |
+| 216 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
+| 217 | r-plumber2-josiahparry | #242 | R (plumber2), behind Nginx | **2,000** | 195 | 300 | 924 | 0.00 | 86 | 4,103 | 279 | 2026-11-01 |
 | 217 | spice-ngspice-public | #220 | SPICE (ngspice + Verilog chip, SQLite in the network card), behind Nginx | **500** | 49 | 246 | 519 | 0.00 | 82 | 15,675 | 29 | 2026-11-01 |
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
@@ -780,7 +781,10 @@ and a 1.6 s p99 at 40,000.
 ᶜ **C io_uring #239 is connection-capped at ~65k, not CPU-bound.** At 65,000 it ran at 28 % CPU (32 ms p95, 56 ms p99,
 0 errors). From 68,000 up, connections past the cap got EOF / `connection reset by peer` (5.2 % at 68k, 9.1 % at 70k,
 24.6 % at 80k) while CPU stayed at 37–51 %. Its fixed-file table is sized from `RLIMIT_NOFILE` (server.c:1117), one slot
-per connection.
+per connection. **C++ io_uring #412** (`2598291`, held, not merged: accepts tokens without `exp`) is capped at the same
+point: at 65,000 it ran at 35 % CPU (91 ms p95, 196 ms p99, 0 errors, 397 MB); 68,000, 70,000 and 80,000 failed on EOF /
+`connection reset by peer` (5.5 %, 9.3 %, 24.8 %) at 40–60 % CPU. Its completion tag keeps only 16 bits of the
+connection slot (main.cpp `ud()`), so connections past slot 65,535 never see their reads.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute
@@ -954,7 +958,7 @@ committed in this repo.
 - **Tokens without `exp` accepted** (SPEC requires rejecting them): java-nio #88, quarkus #67 (SmallRye
   grace), kotlin #83, scala #107, node-uws #102, dart #46, go-champ3oy #76, pypy #84 (deliberately), bash #89,
   go-gnet #38, kotlin-ktor #36, python-fastapi-granian #41, go-stdlib #44, kotlin-ktor-C-Hatton #45, go-epoll-damianoneill #52,
-  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, r-plumber2 #242, c-iouring-marwanabdelhameed #270 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, spice-ngspice #220 in `23d5dd7`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, java-jdkhttpserver #209 in `89e75e0`, c-epoll-patrickryankenneth #246 in `f9cf266`, kotlin-trikeshed #128 in `2fb010a`, rust-iouring-tbsvttr #313 in `bfc4be0`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
+  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, r-plumber2 #242, c-iouring-marwanabdelhameed #270, cpp-io_uring-0329-at #412 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, spice-ngspice #220 in `23d5dd7`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, java-jdkhttpserver #209 in `89e75e0`, c-epoll-patrickryankenneth #246 in `f9cf266`, kotlin-trikeshed #128 in `2fb010a`, rust-iouring-tbsvttr #313 in `bfc4be0`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
 - **Kotlin Ktor #36 (and #53, based on it) commit `gradle/wrapper/gradle-wrapper.jar`**. Arjay ruled (2026-10-26) that
   the standard Gradle wrapper jar is fine and not a prebuilt binary under rule 10. Kotlin Ktor #36 also returned a few HTTP 500s on writes under load (1–5 per probe,
   0 in the scored hold); its StatusPages handler doesn't log the exception. kotlin-springboot #66 commits the same

@@ -7,18 +7,24 @@
 #ifndef DB_H
 #define DB_H
 
+#include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
+#include <time.h>
+#include <unistd.h>
 
 #include "json.h"
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
 static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
-static int ckpt_tail = 512;      /* once this few frames remain, the tail thread takes them under a hold */
-static uint64_t hold_max_ns = 100000000ULL; /* a hold's limit */
+static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
+static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
+static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
+static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 131072        /* last resort (512 MB): the loop checkpoints by itself */
 #define CKPT_NICE 19
@@ -42,6 +48,9 @@ struct db {
   int ck_left;  /* frames the last pass could not copy (written meanwhile) */
   int ck_nlog;  /* frames the log held when that pass ended */
   int ck_passes;
+  int ck_tail_frames;
+  int ck_min_frames; /* the next cycle starts at this many frames: CKPT_FRAMES, or more after a slow tail */
+  const char *path;
   int wal_frames;  /* from the wal hook, on the loop thread */
   int writes_held; /* the tail is being copied: writes wait (reads go on) */
   uint64_t hold_t0;
@@ -308,14 +317,43 @@ struct ck_thread {
   sqlite3 *c;
   int state; /* the state this thread acts on: CK_BULK or CK_TAIL */
   int nice;
+  int wal_fd;        /* the bulk thread's own descriptor on the log, for writeback kicks */
+  int64_t wb_kicked; /* log offset up to which writeback has been started */
 };
+/* Starts (does not wait for) the writeback of the log frames written since the last kick, so the
+ * log's dirty pages reach the disk continuously instead of in one burst at the next fsync: the
+ * tail's sync, which writes wait for, then finds little left. Runs on the bulk thread while idle. */
+static void wb_kick(struct ck_thread *t) {
+  struct db *d = t->d;
+  if (t->wal_fd < 0) {
+    char p[512];
+    snprintf(p, sizeof p, "%s-wal", d->path);
+    t->wal_fd = open(p, O_RDONLY | O_CLOEXEC);
+    if (t->wal_fd < 0) return;
+  }
+  int64_t end = 32 + (int64_t)atomic_load_explicit((_Atomic int *)&d->wal_frames, memory_order_relaxed) * (24 + 4096);
+  if (end < t->wb_kicked) t->wb_kicked = 0; /* the log restarted */
+  if (end - t->wb_kicked < (int64_t)(64 * 4120)) return;
+  if (sync_file_range(t->wal_fd, t->wb_kicked, end - t->wb_kicked, SYNC_FILE_RANGE_WRITE) == 0) t->wb_kicked = end;
+}
 static void *ck_main(void *arg) {
   struct ck_thread *t = arg;
   struct db *d = t->d;
   if (t->nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), t->nice);
   for (;;) {
     pthread_mutex_lock(&d->mu);
-    while (d->ck_state != t->state) pthread_cond_wait(&d->cv, &d->mu);
+    while (d->ck_state != t->state) {
+      if (t->state != CK_BULK || wb_kick_ms <= 0) { pthread_cond_wait(&d->cv, &d->mu); continue; }
+      struct timespec ts;
+      clock_gettime(CLOCK_REALTIME, &ts);
+      ts.tv_nsec += wb_kick_ms * 1000000L;
+      while (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+      if (pthread_cond_timedwait(&d->cv, &d->mu, &ts) == ETIMEDOUT) {
+        pthread_mutex_unlock(&d->mu);
+        wb_kick(t);
+        pthread_mutex_lock(&d->mu);
+      }
+    }
     pthread_mutex_unlock(&d->mu);
     int nlog = -1, ndone = -2;
     int rc = sqlite3_wal_checkpoint_v2(t->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
@@ -334,6 +372,7 @@ static int ck_start(struct db *d, const char *path, int state, int nice) {
   t->d = d;
   t->state = state;
   t->nice = nice;
+  t->wal_fd = -1;
   if (db_open_conn(&t->c, path, 64) < 0) return -1;
   pthread_t th;
   pthread_attr_t a;
@@ -345,7 +384,9 @@ static int ck_start(struct db *d, const char *path, int state, int nice) {
 }
 static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
   (void)c; (void)name;
-  ((struct db *)ud)->wal_frames = frames;
+  struct db *d = ud;
+  if (ckpt_log && frames < d->wal_frames) fprintf(stderr, "ckpt: log restarted (%d -> %d frames)\n", d->wal_frames, frames);
+  d->wal_frames = frames;
   return SQLITE_OK;
 }
 /* Between batches, with no transaction open: drives the checkpoint cycle. The only place a hold
@@ -358,7 +399,7 @@ static void db_tick(struct db *d) {
       d->n_force++;
       if (sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK && nlog == ndone)
         d->wal_frames = 0;
-    } else if (d->wal_frames >= ckpt_frames) {
+    } else if (d->wal_frames >= d->ck_min_frames) {
       d->bulk_t0 = now_ns();
       d->ck_passes = 0;
       d->n_cycles++;
@@ -367,42 +408,57 @@ static void db_tick(struct db *d) {
     break;
   case CK_BULK_DONE: {
     d->ck_passes++;
-    if (d->ck_left > ckpt_tail && d->ck_passes < CKPT_PASSES_MAX) { ck_set(d, CK_BULK); break; } /* another pass */
+    int behind = d->ck_left + (d->wal_frames - d->ck_nlog); /* skipped by the pass, plus appended since it began */
+    if (behind > ckpt_tail && d->ck_passes < CKPT_PASSES_MAX) { ck_set(d, CK_BULK); break; } /* another pass */
     if (d->ck_passes >= CKPT_PASSES_MAX) d->n_passes_max++;
     uint64_t t = now_ns(), dt = t - d->bulk_t0;
     if (dt > d->bulk_max_ns) d->bulk_max_ns = dt;
-    if (d->ck_left == 0 && d->wal_frames == d->ck_nlog) { /* nothing written since: the next write restarts the log by itself */
+    if (behind == 0) { /* nothing written since: the next write restarts the log by itself */
+      if (ckpt_log) fprintf(stderr, "ckpt: cycle %llu: %d passes, nothing behind, no hold\n", (unsigned long long)d->n_cycles, d->ck_passes);
       d->wal_frames = 0;
       ck_set(d, CK_IDLE);
       break;
     }
-    uint64_t tail = (uint64_t)(d->ck_left + (d->wal_frames - d->ck_nlog)); /* missed by the pass, plus written since */
-    if (tail > d->tail_frames_max) d->tail_frames_max = tail;
+    if ((uint64_t)behind > d->tail_frames_max) d->tail_frames_max = (uint64_t)behind;
+    d->ck_tail_frames = behind;
     d->writes_held = 1; /* the tail: writes wait so that it completes and the log restarts */
     d->hold_t0 = t;
     ck_set(d, CK_TAIL);
     break;
   }
   case CK_TAIL_DONE: {
-    if (d->ck_left == 0) d->wal_frames = 0;
-    else d->n_tail_short++;
+    int clean = d->ck_left == 0 && d->writes_held; /* copied everything, and no write slipped in */
+    if (d->ck_left != 0) d->n_tail_short++;
     if (d->writes_held) { /* the hold lasted the whole tail */
       uint64_t dt = now_ns() - d->hold_t0;
       d->hold_total_ns += dt;
       if (dt > d->hold_max_ns) d->hold_max_ns = dt;
       d->writes_held = 0;
     }
+    if (ckpt_log)
+      fprintf(stderr, "ckpt: cycle %llu: %d passes, tail %d frames, hold %.1f ms%s%s\n", (unsigned long long)d->n_cycles, d->ck_passes,
+              d->ck_tail_frames, (double)(now_ns() - d->hold_t0) / 1e6, clean ? "" : " TIMED OUT", d->ck_left ? " SHORT" : "");
+    if (clean) {
+      d->wal_frames = 0;
+      d->ck_min_frames = ckpt_frames;
+    } else { /* the log may not restart: the next cycle waits for half a log more, so a slow disk never gives back-to-back holds */
+      d->ck_min_frames = d->wal_frames + ckpt_frames / 2;
+    }
     ck_set(d, CK_IDLE);
     break;
   }
-  default: /* a thread is working */
-    if (d->writes_held && now_ns() - d->hold_t0 > hold_max_ns) { /* a slow sync: writes resume, the log restarts next cycle */
+  default: { /* a thread is working */
+    /* The limit grows with the log: a log that has missed restarts (the disk made the last tails
+     * slow) must restart before it reaches the inline last resort, whatever the sync costs. */
+    uint64_t limit = hold_max_ns * (uint64_t)(1 + d->wal_frames / (2 * ckpt_frames));
+    if (d->writes_held && now_ns() - d->hold_t0 > limit) { /* a slow sync: writes resume, the log restarts next cycle */
       d->writes_held = 0;
       d->n_hold_timeout++;
-      d->hold_total_ns += hold_max_ns;
-      if (hold_max_ns > d->hold_max_ns) d->hold_max_ns = hold_max_ns;
+      d->hold_total_ns += limit;
+      if (limit > d->hold_max_ns) d->hold_max_ns = limit;
     }
     break;
+  }
   }
 }
 
@@ -443,6 +499,8 @@ static void pagecache_arena(int cache_kib) {
 
 static int db_open(struct db *d, const char *path, int cache_kib) {
   memset(d, 0, sizeof *d);
+  d->path = path;
+  d->ck_min_frames = ckpt_frames;
   if (pcache_install() < 0) { fprintf(stderr, "sqlite: could not install the page cache\n"); return -1; }
   pagecache_arena(cache_kib);
   if (sqlite3_initialize() != SQLITE_OK) { fprintf(stderr, "sqlite3_initialize failed\n"); return -1; }

@@ -4,6 +4,7 @@
  * the kernel's receive buffers and answered into an arena), the batch's transaction commits,
  * and only then are the responses handed to the kernel, one send each, straight from the arena.
  * See README.md for the design. */
+#define _GNU_SOURCE /* sync_file_range */
 #include "uring.h"
 
 #include <arpa/inet.h>
@@ -837,13 +838,15 @@ int main(int argc, char **argv) {
   wait_min = (unsigned)env_long("WAIT_MIN", 256);
   wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
   ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
-  ckpt_tail = (int)env_long("CKPT_TAIL", 512);
-  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 100) * 1000000ULL;
+  ckpt_tail = (int)env_long("CKPT_TAIL", 64);
+  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
+  wb_kick_ms = env_long("WB_KICK_MS", 250);
+  ckpt_log = (int)env_long("CKPT_LOG", 0);
   long want = env_long("MAX_CONNS", 600000);
   NR_MAX = (unsigned)((want + nslots - 1) / nslots);
   if (NR_MAX < 1) NR_MAX = 1;
   if (NR_MAX > MAX_RINGS) NR_MAX = MAX_RINGS;
-  int cache_kib = (int)env_long("CACHE_KIB", 98304); /* 96 MB: the likes index, the post tails and their indexes stay resident */
+  int cache_kib = (int)env_long("CACHE_KIB", 65536); /* 64 MB: the likes index (24 MB), the post tails and their indexes stay resident */
 
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
 

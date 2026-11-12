@@ -123,19 +123,28 @@ mostly idle sockets under `LimitNOFILE=65535`.
   every slot). The idea is from c-iouring-pavlyhalim #245. The cache's memory comes from one arena
   handed to SQLite with `SQLITE_CONFIG_PAGECACHE`, backed by transparent huge pages where the kernel
   offers them.
-- WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 96 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
+- WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
   rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
   nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
   writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
   fully copied; so that thread runs pass after pass, each copying what the previous one missed,
-  until fewer than 512 frames remain (it converges: it copies faster than the loop writes). Then
+  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). Then
   writes are held (reads go on; the next POST on each connection waits in its buffer) while a
   second thread at the normal priority copies that remainder: a few milliseconds of copying plus
   the syncs of the log and of the database, on a thread. The next write restarts the log. A hold
-  starts and ends only between batches and lasts at most 100 ms: if the disk makes the tail's
-  sync slow, writes resume and the log restarts a cycle later. Two earlier designs scored worse
+  starts and ends only between batches and lasts at most 400 ms (writes only, once per cycle:
+  under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the next
+  cycle waits for half a log more, so a slow disk never gives back-to-back holds, and the limit
+  grows for a log that has missed restarts, so it restarts long before the inline last resort.
+  (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms limit: on the
+  box the tail's sync of a few hundred random pages outlasted the limit, the log never restarted,
+  and the last resort copied half a gigabyte on the loop once per probe, the one stall that
+  failed every 280k probe at 78 % CPU.) While idle, the bulk thread starts the writeback of the log pages
+  written since its last look every 250 ms (`sync_file_range`, no waiting), so the log's dirty
+  pages reach the disk continuously rather than in a burst at the next fsync, and the tail's
+  sync finds little left. Two earlier designs scored worse
   on the box. `c3fdb10` (270,000 users) copied the tail without the convergence: on one vCPU it
   had grown to tens of MB during the slow bulk, the thread competed with the loop for the core and
   the holds ran into their limit, so every request saw the cycle (p95 114 ms, p99 551 ms at 77 %

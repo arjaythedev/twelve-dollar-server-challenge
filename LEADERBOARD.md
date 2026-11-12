@@ -600,7 +600,9 @@ p99 (1.76 s at 83 % CPU, 0 errors), 266,000 failed the 5-minute hold on p99 (3.4
 refused, 94 % CPU). #402's head moved to `9caa0a5` during the run; that commit was then scored too: **270,000**
 (25,718 req/s, p95 366.2 / p99 961.5 ms, 0 err, 78 % CPU, 27 µs/req, 1,482 MB, 2026-11-12), level with the merged
 row, so not merged (280,000 failed the 2-minute probe on p99, 1.68 s at 80 % CPU). The head moved again to `42abbf3`
-during that run; it is queued for its own run.
+during that run; `42abbf3` was then scored too: **270,000** (25,859 req/s, p95 52.6 / p99 178.9 ms, 0 err, 74 % CPU,
+26 µs/req, 1,314 MB, 2026-11-12), again level with the merged row, so not merged (280,000 failed the 2-minute probe on
+p99, 1.40 s at 78 % CPU; 320,000 failed it on p99, 7.39 s at 96 % CPU).
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

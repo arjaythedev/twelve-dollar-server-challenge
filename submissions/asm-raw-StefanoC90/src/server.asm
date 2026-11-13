@@ -906,12 +906,9 @@ conn_close:
     mov rdi, [rbx+CONN_BUF]
     test rdi, rdi
     jz .out
-    mov eax, SYS_epoll_ctl
-    mov edi, [rel g_epfd]
-    mov esi, EPOLL_CTL_DEL
-    mov edx, r12d
-    xor r10d, r10d
-    syscall
+    ; No epoll_ctl(DEL) here: close() removes the descriptor from every epoll
+    ; set that watches it, so the explicit deregistration was one wasted
+    ; syscall per closed connection.
     mov eax, SYS_close
     mov edi, r12d
     syscall

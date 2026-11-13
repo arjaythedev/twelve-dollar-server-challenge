@@ -32,7 +32,7 @@ const (
 	waitMin        = 256     // a pass waits for this many completions on ring 0 ...
 	waitNs         = 1000000 // ... or this long, whichever comes first
 	readsPerPass   = 16384
-	answersPerPass = 2048
+	answersPerPass = 256 // short passes: a reply later than 40 ms costs the kernel a separate delayed ACK
 	outCap         = 8192
 )
 

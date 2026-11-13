@@ -380,7 +380,9 @@ static void run_worker(const char *host,long p) {
   }
 }
 int main(void) {
-  const char *host=getenv("HOST"),*port=getenv("PORT");if(!host)host="127.0.0.1";if(!port)port="3000";
+  struct rlimit lim;if(getrlimit(RLIMIT_NOFILE,&lim))fail("getrlimit");
+  if(lim.rlim_cur<lim.rlim_max){lim.rlim_cur=lim.rlim_max;if(setrlimit(RLIMIT_NOFILE,&lim))fail("setrlimit RLIMIT_NOFILE");}
+  const char *host=getenv("HOST"),*port=getenv("PORT");if(!host)host="0.0.0.0";if(!port)port="80";
   char *tail=NULL;long p=strtol(port,&tail,10);if(!tail||*tail||p<1||p>65535){fprintf(stderr,"invalid PORT\n");return 2;}
   long online=sysconf(_SC_NPROCESSORS_ONLN);if(online<1)online=1;if(online>8)online=8;
   const char *setting=getenv("WORKERS");long workers=setting?strtol(setting,&tail,10):online;

@@ -872,7 +872,9 @@ checkpoint rounds and the explicit WAL sync removed, one passive checkpoint per 
 3.17 s). Head `73c09c9` (2026-11-12: both checkpoint threads at nice 5, database file grown in 64 MiB chunks) held
 **240,000** at 70 % CPU (23,221 req/s, p95 29.8 / p99 853.3 ms, 0 errors, 617 MB; 250k failed the 2-minute probe on
 p99 1.25 s, 260k on p99 1.05 s, 280k on p99 1.85 s). All three are below #388's 280,000, so #390 is not merged and the
-row stays at #388.
+row stays at #388. PR **#400** (`2451eae`, 2026-11-13, by Pranjay-kumar: loop wait `WAIT_NS` 1 ms → 125 µs) held
+**244,000** at 78 % CPU (23,626 req/s, p95 16.1 / p99 117.8 ms, 0 errors, 631 MB; 270k and 257k failed the 5-minute
+hold on p99 2.11 s / 1.87 s), also below 280,000, so #400 is not merged either.
 
 ᴱ **fsharp-uring-delneg** is scored at its follow-up PR **#394** (`bbc1c39`, merged 2026-11-11: held writes in their
 own queue, drained in bulk after a hold; `CKPASS` 4000 and `HOLD` 16384, checkpoint thread at nice 19): 290,000 held

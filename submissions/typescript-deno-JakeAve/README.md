@@ -73,6 +73,11 @@ not paying for 15,000 or more idle keep-alive connections.
 - **HTTP/1.1 by hand.** The parser reads only what the challenge sends: request
   line, `Authorization`, `Content-Length`, fixed-length bodies, keep-alive,
   pipelining. Each response is one buffer and one `write`.
+- **Past the fd limit.** `LimitNOFILE=65535` caps open sockets, and batch 2
+  showed the cost: users past ~65,500 waited in the listen queue until they
+  timed out. Now, once open connections pass the limit minus 1,024, responses
+  carry `connection: close` and the socket closes after the write, so those
+  users reconnect per request instead (about 28 µs of CPU each on a droplet).
 - **SQLite built for this box.** `build.sh` downloads SQLite 3.53.2 (sha256
   pinned), compiles it `-O3 -march=native` with `THREADSAFE=2`, `MEMSTATUS=0`
   and the usual recommended omits, then recompiles with profile-guided
@@ -116,7 +121,11 @@ not paying for 15,000 or more idle keep-alive connections.
 On an `s-1vcpu-2gb` droplet with a separate load generator (kload, a
 k6-compatible generator, 64,000 users, 5-minute holds) the hold passed at about
 65% CPU with p95 under 65 ms and p99 under 400 ms, including a run that hit a
-2.6 s disk stall. The organizer's score will come from k6 on their own box.
+2.6 s disk stall. Past the fd limit, 72,000 users passed a 5-minute hold with
+0 errors at about 90% CPU (p95 259 ms, p99 473 ms; ~11% of requests
+reconnected); 80,000 failed on CPU, not errors. That droplet is about 1.7×
+slower per request than the batch 2 box. The organizer's score will come from
+their own load generator on their own box.
 
 The measurement scripts (wrk per endpoint, connection storms, the droplet
 harness) live in the source repository,

@@ -103,9 +103,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 31 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
 | 31 | rust-iouring-not-my-segfault | #401 | Rust (io_uring, SQLite B-tree reads) | **250,000** | 24,071 | 138.1 | 678.7 | 0.00 | 79 | 30 | 1,297 | 2026-11-12 |
 | 31 | c-iouring-PROGABBOMALA | #406 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,121 | 44.9 | 400.6 | 0.00 | 77 | 29 | 677 | 2026-11-12 |
-| 36 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 36 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
-| 38 | holyphp-io-uring-elifoxcoder | #336 | HolyPHP (io_uring, SQLite B-tree reads) | **244,000** ᵘ | 23,557 | 128.8 | 735.0 | 0.00 | 81 | 31 | 907 | 2026-11-07 |
+| 31 | holyphp-io-uring-elifoxcoder | #418 | HolyPHP (io_uring, SQLite B-tree reads) | **250,000** ᵘ | 24,124 | 91.9 | 297.2 | 0.00 | 82 | 31 | 1,334 | 2026-11-13 |
+| 37 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 37 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
 | 39 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
 | 39 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
 | 39 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
@@ -302,9 +302,12 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 62 ms, 0 err, 91 % CPU, 37 µs/req, 931 MB, 2026-10-28) and is CPU-bound, not source-port-bound: 240,000 failed at 95 % CPU
 (p99 1.5 s). The row above stays on #82's merged code until #141 is rebased and merged.
 
-ᵘ **HolyPHP** is scored at its follow-up **#336** at commit **`4758859`** (forced PASSIVE checkpoint through
-`sqlite3_wal_checkpoint_v2`, extended error codes; merged 2026-11-07, above the 230,000 row). The 244,000 hold had 0
-errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
+ᵘ **HolyPHP** is scored at its follow-up **#418** at commit **`0dde0df`** (restarts the SQLite WAL after background
+checkpoints; merged 2026-11-13, above #336's 244,000 row). The 250,000 hold had 0 errors; 260,000 failed the 2-minute
+probe on p95/p99 (728 / 879 ms, 85 % CPU), 280,000 on p95 (1.2 s, 93 %) and 320,000 on p95 (2.8 s, 100 %). Before that
+it was scored at **#336** at commit **`4758859`** (**244,000**, 23,557 req/s, p95 128.8 / p99 735.0 ms, 81 % CPU, 31
+µs/req, 907 MB, 2026-11-07; forced PASSIVE checkpoint through `sqlite3_wal_checkpoint_v2`, extended error codes; merged
+2026-11-07, above the 230,000 row). That 244,000 hold had 0 errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
 the 2-minute probe on p95 (9.4 s, 76 % CPU) and 320,000 on p95 (2.9 s, 100 % CPU). Its later follow-up **#348**
 (`8dabf64`, shim WAL-coalescing VFS; held, not merged: not above 244,000) held **238,000** (23,050 req/s, p95 46.2 /
 p99 258.5 ms, 0 err, 81 % CPU, 32 µs/req, 1,366 MB, 2026-11-07); 250,000 passed the 2-minute probe but failed the

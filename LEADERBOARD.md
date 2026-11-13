@@ -55,7 +55,9 @@ held, not merged: open copies question, see the rule flags) scored 195,000 (19,1
 60 % CPU, 29 µs/req, 1,249 MB, 2026-11-04; 200,000 failed the 2-minute probe on p99 6.1 s). rust-iouring-tbsvttr is scored at its follow-up PR #323
 (`53cf87c`, merged); its merged #313 code (`bfc4be0`) held 250,000 and its earlier #313 run (`7effd5c`) 71,000.
 rust-iouring-not-my-segfault is scored at its follow-up PR #401 (`4881ff1`, merged); its merged #356 code (`f53ec18`) held
-220,000. c-iouring-PROGABBOMALA is scored at its follow-up PR #406 (`740ab89`, merged); its merged #399 code (`bab1010`)
+220,000. Its later follow-up #426 (`dffecfb`, ring-0 work-based waits, PGO removed; held, not merged: it didn't beat the
+merged row) scored 250,000 (24,097 req/s, p95 102.5 / p99 493.6 ms, 0 err, 79 % CPU, 30 µs/req, 1,305 MB, 2026-11-13;
+260,000 failed the 2-minute probe on p99 1.12 s). c-iouring-PROGABBOMALA is scored at its follow-up PR #406 (`740ab89`, merged); its merged #399 code (`bab1010`)
 held 220,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for

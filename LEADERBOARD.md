@@ -103,9 +103,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 31 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
 | 31 | rust-iouring-not-my-segfault | #401 | Rust (io_uring, SQLite B-tree reads) | **250,000** | 24,071 | 138.1 | 678.7 | 0.00 | 79 | 30 | 1,297 | 2026-11-12 |
 | 31 | c-iouring-PROGABBOMALA | #406 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,121 | 44.9 | 400.6 | 0.00 | 77 | 29 | 677 | 2026-11-12 |
-| 36 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 36 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
-| 38 | holyphp-io-uring-elifoxcoder | #336 | HolyPHP (io_uring, SQLite B-tree reads) | **244,000** ᵘ | 23,557 | 128.8 | 735.0 | 0.00 | 81 | 31 | 907 | 2026-11-07 |
+| 31 | holyphp-io-uring-elifoxcoder | #418 | HolyPHP (io_uring, SQLite B-tree reads) | **250,000** ᵘ | 24,124 | 91.9 | 297.2 | 0.00 | 82 | 31 | 1,334 | 2026-11-13 |
+| 37 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 37 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
 | 39 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
 | 39 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
 | 39 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
@@ -302,9 +302,12 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 62 ms, 0 err, 91 % CPU, 37 µs/req, 931 MB, 2026-10-28) and is CPU-bound, not source-port-bound: 240,000 failed at 95 % CPU
 (p99 1.5 s). The row above stays on #82's merged code until #141 is rebased and merged.
 
-ᵘ **HolyPHP** is scored at its follow-up **#336** at commit **`4758859`** (forced PASSIVE checkpoint through
-`sqlite3_wal_checkpoint_v2`, extended error codes; merged 2026-11-07, above the 230,000 row). The 244,000 hold had 0
-errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
+ᵘ **HolyPHP** is scored at its follow-up **#418** at commit **`0dde0df`** (restarts the SQLite WAL after background
+checkpoints; merged 2026-11-13, above #336's 244,000 row). The 250,000 hold had 0 errors; 260,000 failed the 2-minute
+probe on p95/p99 (728 / 879 ms, 85 % CPU), 280,000 on p95 (1.2 s, 93 %) and 320,000 on p95 (2.8 s, 100 %). Before that
+it was scored at **#336** at commit **`4758859`** (**244,000**, 23,557 req/s, p95 128.8 / p99 735.0 ms, 81 % CPU, 31
+µs/req, 907 MB, 2026-11-07; forced PASSIVE checkpoint through `sqlite3_wal_checkpoint_v2`, extended error codes; merged
+2026-11-07, above the 230,000 row). That 244,000 hold had 0 errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
 the 2-minute probe on p95 (9.4 s, 76 % CPU) and 320,000 on p95 (2.9 s, 100 % CPU). Its later follow-up **#348**
 (`8dabf64`, shim WAL-coalescing VFS; held, not merged: not above 244,000) held **238,000** (23,050 req/s, p95 46.2 /
 p99 258.5 ms, 0 err, 81 % CPU, 32 µs/req, 1,366 MB, 2026-11-07); 250,000 passed the 2-minute probe but failed the
@@ -646,7 +649,29 @@ CPU, 26 µs/req, 798 MB, 2026-11-12), below the merged row, so not merged (280,0
 **244,000** (23,616 req/s, p95 24.5 / p99 143.7 ms, 0 err, 66 % CPU, 26 µs/req, 771 MB, 2026-11-13), below the merged
 row, so not merged: 270,000 and 260,000 passed the 2-minute probe, but the 5-minute holds failed on p99 at 270,000
 (11.7 s at 77 % CPU) and 257,000 (1.91 s at 72 % CPU), all with 0 errors; 280,000 failed the 2-minute probe on p99
-(2.63 s at 81 % CPU). #415 stays open.
+(2.63 s at 81 % CPU). #415's head then moved to **`09b27be`** (batch wait 64 / 2 ms, the urgent bulk checkpoint thread
+removed; PGO build worked), which held **260,000** (24,973 req/s, p95 36.0 / p99 216.1 ms, 0 err, 73 % CPU, 27 µs/req,
+1,245 MB, 2026-11-13), below the merged row, so not merged: 270,000 failed the 2-minute probe on p99 (2.15 s at 78 %
+CPU), 280,000 on p99 (4.23 s at 78 % CPU) and 320,000 on p99 (12.7 s at 92 % CPU), all with 0 errors. Its next head,
+**`f4ec9c5`** (batch window back to 1 ms; PGO build worked), held **280,000** (26,670 req/s, p95 94.6 / p99 328.3 ms,
+0 err, 78 % CPU, 26 µs/req, 1,369 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
+2-minute probe on p99 (1.32 s at 81 % CPU), 300,000 on p99 (3.83 s at 84 % CPU) and 320,000 on p99 (12.2 s at 92 %
+CPU), all with 0 errors. Its next head, **`594fc37`** (a second ring sweep per batch, 2 ms batch window, readahead of
+the database file when memory allows; PGO build worked), held **280,000** (26,718 req/s, p95 82.3 / p99 318.6 ms,
+0 err, 76 % CPU, 26 µs/req, 856 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
+2-minute probe on p99 (2.38 s at 81 % CPU), 300,000 on p99 (2.93 s at 82 % CPU) and 320,000 on p99 (3.80 s at 97 %
+CPU), all with 0 errors. Its next head, **`5d2fa6b`** (checkpoint holds capped at 250 ms whatever the log's length;
+PGO build worked), held **270,000** (25,865 req/s, p95 39.0 / p99 211.9 ms, 0 err, 73 % CPU, 26 µs/req, 1,420 MB,
+2026-11-13), still below the merged row, so not merged: 280,000 failed the 2-minute probe on p99 (1.07 s at 75 % CPU)
+and 320,000 on p99 (5.07 s at 89 % CPU), all with 0 errors. Its next head, **`ca5743b`** (bulk checkpoint thread at
+nice 12, checkpoint hold limit back to 400 ms and growing with the log; PGO build worked), held **270,000** (25,861
+req/s, p95 36.0 / p99 297.2 ms, 0 err, 73 % CPU, 26 µs/req, 1,308 MB, 2026-11-13), still below the merged row, so not
+merged: 280,000 failed the 2-minute probe on p99 (1.87 s at 79 % CPU) and 320,000 on p99 (5.49 s at 88 % CPU), all
+with 0 errors. Its next head, **`2f08e6d`** (the merged row's checkpoint policy: 4,096-frame checkpoints, 250 ms hold
+limit, checkpoint thread at nice 19, no database warm-up; PGO build worked), held **280,000** (26,676 req/s, p95 171.9 /
+p99 757.2 ms, 0 err, 79 % CPU, 27 µs/req, 860 MB, 2026-11-13), still below the merged row, so not merged: 290,000
+failed the 2-minute probe on p99 (1.34 s at 84 % CPU), 300,000 on p99 (1.70 s at 88 % CPU) and 320,000 on p99 (5.38 s
+at 96 % CPU), all with 0 errors. #415 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

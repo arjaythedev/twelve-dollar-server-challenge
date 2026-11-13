@@ -2796,38 +2796,46 @@ static uint64_t *hp_ur_chunk_diag_ns(struct hp_urchunk *c) {
 #define HP_RESP_BUF_POOL_CAP_MAX (16u * 1024u)
 #define HP_RESP_BUF_POOL_BYTES_MAX (4u * 1024u * 1024u)
 typedef struct { char *data; size_t cap; } hp_resp_buf_entry;
-static _Thread_local hp_resp_buf_entry hp_resp_buf_pool[HP_RESP_BUF_POOL_MAX];
-static _Thread_local unsigned hp_resp_buf_pool_n;
+/* Two size classes: small buffers (most responses) and large ones (feed-sized
+ * builders). One mixed stack let a run of small buffers hide every large
+ * one, so large builders fell back to malloc. */
+#define HP_RESP_BUF_SMALL_MAX 4096u
+typedef struct {
+    hp_resp_buf_entry e[HP_RESP_BUF_POOL_MAX / 2];
+    unsigned n;
+} hp_resp_buf_stack;
+static _Thread_local hp_resp_buf_stack hp_resp_buf_pool[2];
 static _Thread_local size_t hp_resp_buf_pool_bytes;
 
+static char *hp_resp_buf_take(hp_resp_buf_stack *st, unsigned i, size_t *cap) {
+    hp_resp_buf_entry e = st->e[i];
+    st->e[i] = st->e[st->n - 1];
+    st->n--;
+    if (hp_resp_buf_pool_bytes >= e.cap) hp_resp_buf_pool_bytes -= e.cap;
+    else hp_resp_buf_pool_bytes = 0;
+    *cap = e.cap;
+    return e.data;
+}
+
 static char *hp_resp_buf_acquire(size_t *cap) {
-    if (hp_resp_buf_pool_n) {
-        hp_resp_buf_entry e = hp_resp_buf_pool[--hp_resp_buf_pool_n];
-        if (hp_resp_buf_pool_bytes >= e.cap) hp_resp_buf_pool_bytes -= e.cap;
-        else hp_resp_buf_pool_bytes = 0;
-        *cap = e.cap;
-        return e.data;
+    for (int c = 0; c < 2; c++) {
+        hp_resp_buf_stack *st = &hp_resp_buf_pool[c];
+        if (st->n) return hp_resp_buf_take(st, st->n - 1, cap);
     }
     *cap = 0;
     return NULL;
 }
 
-/* Take a pooled buffer of at least `want` bytes. The pool mixes small and
- * large capacities (e.g. 2 KiB and 16 KiB builders), so look a few entries
- * deep instead of only at the top; the hit is swapped out from the top. */
+/* Take a pooled buffer of at least `want` bytes from the matching class (a
+ * small request may also use a large buffer). The hit is swapped out. */
 static char *hp_resp_buf_acquire_min(size_t want, size_t *cap) {
-    unsigned n = hp_resp_buf_pool_n;
-    unsigned look = n < 8 ? n : 8;
-    for (unsigned k = 0; k < look; k++) {
-        unsigned i = n - 1 - k;
-        if (hp_resp_buf_pool[i].cap >= want) {
-            hp_resp_buf_entry e = hp_resp_buf_pool[i];
-            hp_resp_buf_pool[i] = hp_resp_buf_pool[n - 1];
-            hp_resp_buf_pool_n = n - 1;
-            if (hp_resp_buf_pool_bytes >= e.cap) hp_resp_buf_pool_bytes -= e.cap;
-            else hp_resp_buf_pool_bytes = 0;
-            *cap = e.cap;
-            return e.data;
+    for (int c = want > HP_RESP_BUF_SMALL_MAX ? 1 : 0; c < 2; c++) {
+        hp_resp_buf_stack *st = &hp_resp_buf_pool[c];
+        unsigned n = st->n;
+        unsigned look = n < 8 ? n : 8;
+        for (unsigned k = 0; k < look; k++) {
+            unsigned i = n - 1 - k;
+            if (st->e[i].cap >= want) return hp_resp_buf_take(st, i, cap);
         }
     }
     *cap = 0;
@@ -2836,10 +2844,11 @@ static char *hp_resp_buf_acquire_min(size_t want, size_t *cap) {
 
 static void hp_resp_buf_release(char *data, size_t cap) {
     if (!data) return;
+    hp_resp_buf_stack *st = &hp_resp_buf_pool[cap > HP_RESP_BUF_SMALL_MAX ? 1 : 0];
     if (cap && cap <= HP_RESP_BUF_POOL_CAP_MAX &&
-        hp_resp_buf_pool_n < HP_RESP_BUF_POOL_MAX &&
+        st->n < HP_RESP_BUF_POOL_MAX / 2 &&
         cap <= HP_RESP_BUF_POOL_BYTES_MAX - hp_resp_buf_pool_bytes) {
-        hp_resp_buf_pool[hp_resp_buf_pool_n++] = (hp_resp_buf_entry){ data, cap };
+        st->e[st->n++] = (hp_resp_buf_entry){ data, cap };
         hp_resp_buf_pool_bytes += cap;
     } else {
         free(data);
@@ -4733,7 +4742,7 @@ static bool hp_uring_add_conn(hp_sock fd) {
 /* Queue a response whose buffer the runtime already owns (stream_send_sb):
  * like hp_uring_send2, but there is nothing to copy -- the malloc'd builder
  * buffer becomes the chunk. -2 on a fatal path, buffer freed. */
-static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len, size_t cap) {
+static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t off, size_t len, size_t cap) {
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || st->reof) { hp_resp_buf_release(buf, cap); return -2; }
     if (st->squeued >= 64) {                       /* a stalled peer */
@@ -4743,14 +4752,14 @@ static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len, size_t cap
     }
     struct hp_urchunk *c = hp_ur_chunk_alloc();
     if (!c) { hp_resp_buf_release(buf, cap); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
-    c->data = buf; c->off = 0; c->len = len; c->cap = cap; c->next = NULL;
+    c->data = buf; c->off = off; c->len = len; c->cap = cap; c->next = NULL;
     uint64_t *queued_ns = hp_ur_chunk_diag_ns(c);
     if (queued_ns) *queued_ns = hp_diag_now_ns();
     if (st->stail) st->stail->next = c; else st->shead = c;
     st->stail = c;
     st->squeued++;
     if (!st->sarmed) hp_ur_arm_send_head(fd);
-    return (int64_t)len;
+    return (int64_t)(len - off);
 }
 
 /* Queue a response for the ring: the bytes are copied into the chunk so the
@@ -4771,8 +4780,9 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
     }
     size_t n = a->len + b->len;
     size_t cap = 0;
-    char *buf = hp_resp_buf_acquire(&cap);
     size_t need = n ? n : 1;
+    char *buf = hp_resp_buf_acquire_min(need, &cap);
+    if (!buf) buf = hp_resp_buf_acquire(&cap);
     if (cap < need) {
         size_t next_cap = cap ? cap : 256;
         while (next_cap < need && next_cap <= HP_RESP_BUF_POOL_CAP_MAX / 2)
@@ -5721,7 +5731,7 @@ static int hp_uring_active(void);
 static void hp_ur_free_fd(hp_sock fd);
 static hstr *hp_uring_take_recv(hp_sock fd, size_t want);
 static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b);
-static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len, size_t cap);
+static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t off, size_t len, size_t cap);
 #endif
 
 hval hpbi_epoll_add(hval s) {
@@ -5885,7 +5895,7 @@ hval hpbi_stream_send_nb(hval s, hval data) {
         char *buf = (char *)malloc(d->len);
         if (!buf) return hp_of_int(-2);
         memcpy(buf, d->data, d->len);
-        return hp_of_int(hp_uring_send_owned(fd, buf, d->len, d->len));
+        return hp_of_int(hp_uring_send_owned(fd, buf, 0, d->len, d->len));
     }
 #endif
     int r = (int)send(fd, d->data, (int)d->len, 0);
@@ -7485,7 +7495,63 @@ static const uint32_t K256[64] = {
 static uint32_t rotr32(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 static void hp_sha256_digest(const unsigned char *msg, size_t len, unsigned char out[32]);
 
+static void hp_sha256_compress_soft(uint32_t h[8], const unsigned char block[64]);
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+/* One block with the x86 SHA extensions (SHA-NI); same result as the scalar
+ * code, chosen at run time when the CPU reports the extension. */
+__attribute__((target("sha,sse4.1,ssse3")))
+static void hp_sha256_compress_ni(uint32_t h[8], const unsigned char block[64]) {
+    const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
+    __m128i tmp = _mm_loadu_si128((const __m128i *)(const void *)&h[0]);
+    __m128i st1 = _mm_loadu_si128((const __m128i *)(const void *)&h[4]);
+    tmp = _mm_shuffle_epi32(tmp, 0xB1);              /* CDAB */
+    st1 = _mm_shuffle_epi32(st1, 0x1B);              /* EFGH */
+    __m128i st0 = _mm_alignr_epi8(tmp, st1, 8);      /* ABEF */
+    st1 = _mm_blend_epi16(st1, tmp, 0xF0);           /* CDGH */
+    const __m128i abef = st0, cdgh = st1;
+    __m128i m[4];
+    for (int i = 0; i < 16; i++) {
+        __m128i w;
+        if (i < 4) {
+            w = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(const void *)(block + 16 * i)), mask);
+        } else {
+            __m128i a = _mm_sha256msg1_epu32(m[i & 3], m[(i + 1) & 3]);
+            a = _mm_add_epi32(a, _mm_alignr_epi8(m[(i + 3) & 3], m[(i + 2) & 3], 4));
+            w = _mm_sha256msg2_epu32(a, m[(i + 3) & 3]);
+        }
+        m[i & 3] = w;
+        __m128i k = _mm_add_epi32(w, _mm_loadu_si128((const __m128i *)(const void *)&K256[4 * i]));
+        st1 = _mm_sha256rnds2_epu32(st1, st0, k);
+        k = _mm_shuffle_epi32(k, 0x0E);
+        st0 = _mm_sha256rnds2_epu32(st0, st1, k);
+    }
+    st0 = _mm_add_epi32(st0, abef);
+    st1 = _mm_add_epi32(st1, cdgh);
+    tmp = _mm_shuffle_epi32(st0, 0x1B);              /* FEBA */
+    st1 = _mm_shuffle_epi32(st1, 0xB1);              /* DCHG */
+    st0 = _mm_blend_epi16(tmp, st1, 0xF0);           /* DCBA */
+    st1 = _mm_alignr_epi8(st1, tmp, 8);              /* HGFE */
+    _mm_storeu_si128((__m128i *)(void *)&h[0], st0);
+    _mm_storeu_si128((__m128i *)(void *)&h[4], st1);
+}
+#endif
+
 static void hp_sha256_compress(uint32_t h[8], const unsigned char block[64]) {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    static int have_ni = -1;
+    if (have_ni < 0) {
+        __builtin_cpu_init();
+        have_ni = __builtin_cpu_supports("sha") ? 1 : 0;
+        const char *e = getenv("HPHP_SHA_NI");
+        if (e && e[0] == '0') have_ni = 0;
+    }
+    if (have_ni) { hp_sha256_compress_ni(h, block); return; }
+#endif
+    hp_sha256_compress_soft(h, block);
+}
+
+static void hp_sha256_compress_soft(uint32_t h[8], const unsigned char block[64]) {
     uint32_t w[64];
     for (int i = 0; i < 16; i++)
         w[i] = ((uint32_t)block[i*4] << 24) | ((uint32_t)block[i*4+1] << 16) |
@@ -7652,12 +7718,37 @@ hval hpbi_hash_hmac(hval algo, hval data, hval key, hval raw_output) {
  * The PHP-level version built the same check out of substr/concat/base64
  * calls and allocated ~20 strings per authenticated request. */
 
+/* b64_val() as a table: 0..63, or -1 for a byte the decoders skip. */
+static const signed char hp_b64_tab[256] = {
+#define X16 -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    X16, X16,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,62,-1,63,
+    52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,63,
+    -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    X16, X16, X16, X16, X16, X16, X16, X16
+#undef X16
+};
 static int hp_b64url_decode_into(const char *in, size_t n, char *out, size_t cap) {
     uint32_t acc = 0;
     int bits = 0;
     size_t o = 0;
-    for (size_t i = 0; i < n; i++) {
-        int v = b64_val(in[i]);
+    size_t i = 0;
+    /* Four valid characters -> three bytes; anything unusual (a skipped
+     * byte, the tail) goes through the general loop below. */
+    while (i + 4 <= n && o + 3 <= cap) {
+        int a = hp_b64_tab[(unsigned char)in[i]], b = hp_b64_tab[(unsigned char)in[i + 1]];
+        int c = hp_b64_tab[(unsigned char)in[i + 2]], d = hp_b64_tab[(unsigned char)in[i + 3]];
+        if ((a | b | c | d) < 0) break;
+        uint32_t v = ((uint32_t)a << 18) | ((uint32_t)b << 12) | ((uint32_t)c << 6) | (uint32_t)d;
+        out[o] = (char)(v >> 16); out[o + 1] = (char)(v >> 8); out[o + 2] = (char)v;
+        o += 3;
+        i += 4;
+    }
+    for (; i < n; i++) {
+        int v = hp_b64_tab[(unsigned char)in[i]];
         if (v < 0) continue;
         acc = (acc << 6) | (uint32_t)v;
         bits += 6;
@@ -8993,13 +9084,18 @@ hval hpbi_bt_count_key(hval h, hval key) {
 }
 
 /* ---- generic string builder ---- */
-typedef struct { Buf b; } HpSb;
+/* head: bytes of free space in front of the contents. The contents are
+ * b.data[head .. b.len). A reserved builder starts with HP_SB_HEADROOM bytes
+ * there, so sb_prepend() of a short prefix (a response header) writes into
+ * that space instead of moving the whole body. */
+#define HP_SB_HEADROOM 192
 static HpSb *sb_h(hval v) { return (HpSb *)(intptr_t)hp_val_to_int(v); }
 
 
 hval hpbi_sb_new(void) {
     HpSb *s = (HpSb *)hp_alloc(sizeof *s);
     hbuf_init(&s->b);
+    s->head = 0;
     return hp_of_int((int64_t)(intptr_t)s);
 }
 hval hpbi_sb_put(hval h, hval str) {
@@ -9017,7 +9113,7 @@ hval hpbi_sb_bytes(hval h, hval ptr, hval len) {
 }
 hval hpbi_sb_data_ptr(hval h) {
     HpSb *s = sb_h(h);
-    return hp_of_int((int64_t)(intptr_t)s->b.data);
+    return hp_of_int(s->b.data ? (int64_t)(intptr_t)(s->b.data + s->head) : 0);
 }
 hval hpbi_sb_discard(hval h) {
     HpSb *s = sb_h(h);
@@ -9030,13 +9126,9 @@ hval hpbi_sb_discard(hval h) {
 }
 hval hpbi_sb_int(hval h, hval n) {
     HpSb *s = sb_h(h);
-    long long v = (long long)hp_val_to_int(n);
     char tmp[24];
-    int i = 24;
-    unsigned long long u = v < 0 ? -(unsigned long long)v : (unsigned long long)v;
-    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
-    if (v < 0) tmp[--i] = '-';
-    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    char *p = hp_fmt_i64(tmp + sizeof tmp, hp_val_to_int(n));
+    hbuf_write(&s->b, p, (size_t)(tmp + sizeof tmp - p));
     return hp_of_bool(true);
 }
 /* int_digits(n): decimal digit count of an integer, so a caller can compute a
@@ -9168,12 +9260,37 @@ hval hpbi_sb_json_str(hval h, hval str) {
  * response. Only capacity is reused, never bytes. */
 static void hp_sb_reserve_pooled(HpSb *s, int64_t want) {
     if (want <= 0) return;
-    if (!s->b.data && (size_t)want < HP_RESP_BUF_POOL_CAP_MAX) {
-        size_t cap = 0;
-        char *p = hp_resp_buf_acquire_min((size_t)want + 1, &cap);
-        if (p) { s->b.data = p; s->b.cap = cap; s->b.len = 0; }
+    size_t extra = 0;
+    if (s->b.len == 0 && s->head == 0) {
+        extra = HP_SB_HEADROOM;
+        if (!s->b.data && (size_t)want + extra < HP_RESP_BUF_POOL_CAP_MAX) {
+            size_t cap = 0;
+            char *p = hp_resp_buf_acquire_min((size_t)want + extra + 1, &cap);
+            if (p) { s->b.data = p; s->b.cap = cap; s->b.len = 0; }
+        }
     }
-    hbuf_reserve(&s->b, (size_t)want);
+    hbuf_reserve(&s->b, s->b.len + (size_t)want + extra);
+    if (extra && s->b.data) {
+        s->b.len = s->head = extra;
+        s->b.data[s->b.len] = 0;
+    }
+}
+/* Put x in front of the contents: into the headroom when it fits, else by
+ * moving the contents once (and dropping the headroom). */
+static void hp_sb_prepend_bytes(HpSb *s, const char *x, size_t n) {
+    if (n == 0) return;
+    if (n <= s->head) {
+        s->head -= n;
+        memcpy(s->b.data + s->head, x, n);
+        return;
+    }
+    size_t body = s->b.len - s->head;
+    hbuf_reserve(&s->b, body + n);
+    if (body) memmove(s->b.data + n, s->b.data + s->head, body);
+    memcpy(s->b.data, x, n);
+    s->b.len = body + n;
+    s->b.data[s->b.len] = 0;
+    s->head = 0;
 }
 hval hpbi_sb_reserve(hval h, hval n) {
     HpSb *s = sb_h(h);
@@ -9181,18 +9298,14 @@ hval hpbi_sb_reserve(hval h, hval n) {
     return hp_of_bool(true);
 }
 /* sb_len(sb): bytes currently in the builder. */
-hval hpbi_sb_len(hval h) { return hp_of_int((int64_t)sb_h(h)->b.len); }
+hval hpbi_sb_len(hval h) { HpSb *s = sb_h(h); return hp_of_int((int64_t)(s->b.len - s->head)); }
 /* sb_prepend(sb, str): put str in front of the current contents. Used to add
  * a response header to a body that is already built, without a second buffer
  * or a header string concatenation. */
 hval hpbi_sb_prepend(hval h, hval str) {
     HpSb *s = sb_h(h);
     hstr *x = hp_val_to_str(str);
-    if (x->len == 0) return hp_of_bool(true);
-    hbuf_reserve(&s->b, s->b.len + x->len);
-    if (s->b.len) memmove(s->b.data + x->len, s->b.data, s->b.len);
-    memcpy(s->b.data, x->data, x->len);
-    s->b.len += x->len;
+    hp_sb_prepend_bytes(s, x->data, x->len);
     return hp_of_bool(true);
 }
 hval hpbi_str_from_bytes(hval ptr, hval len) {
@@ -9332,9 +9445,10 @@ int64_t hp_bt_read_t(int64_t h, int64_t out, int64_t cols) {
 
 hval hpbi_sb_take(hval h) {
     HpSb *s = sb_h(h);
-    size_t n = s->b.len;
+    size_t head = s->head;
+    size_t n = s->b.len - head;
     char *p = hbuf_take(&s->b);
-    hstr *r = hp_str_new(p, n);
+    hstr *r = hp_str_new(p + head, n);
     free(p);
     hp_free(s);
     return hp_of_str(r);
@@ -9547,14 +9661,216 @@ static bool hp_sqlite_ckpt_tick(sqlite3 *db) {
 }
 #endif
 
+/* Optional generic SQLite VFS wrapper. SQLite emits separate xWrite calls
+ * for WAL frame headers and pages; sequential frames are buffered until a
+ * commit frame, then written as one contiguous range. All reads, syncs,
+ * truncates, locks, and file controls flush first, so SQLite observes the
+ * same bytes and durability boundary as the underlying VFS. */
+#if !defined(_WIN32)
+typedef struct {
+    sqlite3_file base;
+    sqlite3_file *real;
+    unsigned char *buf;
+    size_t n, cap;
+    sqlite3_int64 off, next;
+    int wal, commit_hdr;
+} HpWalFile;
+static sqlite3_vfs *hp_wal_base_vfs;
+static sqlite3_vfs hp_wal_vfs;
+static char hp_wal_vfs_name[96];
+
+static int hp_wal_flush(HpWalFile *f) {
+    if (!f->n) return SQLITE_OK;
+    int rc = SQLITE_OK;
+    for (size_t at = 0; at < f->n && rc == SQLITE_OK; at += 0x1f000) {
+        size_t n = f->n - at;
+        if (n > 0x1f000) n = 0x1f000;
+        rc = f->real->pMethods->xWrite(f->real, f->buf + at, (int)n,
+                                       f->off + (sqlite3_int64)at);
+    }
+    f->n = 0;
+    return rc;
+}
+#define HP_WAL_FLUSH(f) do { int hp_rc_ = hp_wal_flush((HpWalFile *)(f)); if (hp_rc_ != SQLITE_OK) return hp_rc_; } while (0)
+static int hp_wal_close(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    int rc = hp_wal_flush(f);
+    free(f->buf);
+    f->buf = NULL;
+    int rc2 = f->real->pMethods->xClose(f->real);
+    return rc != SQLITE_OK ? rc : rc2;
+}
+static int hp_wal_read(sqlite3_file *file, void *buf, int n, sqlite3_int64 off) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xRead(f->real, buf, n, off);
+}
+static int hp_wal_write(sqlite3_file *file, const void *buf, int n, sqlite3_int64 off) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (!f->wal) return f->real->pMethods->xWrite(f->real, buf, n, off);
+    /* SQLite can rewrite a previously emitted frame header after a cache
+     * spill. Write that header through immediately; otherwise a commit could
+     * return before its final checksum reaches the underlying VFS. */
+    if (n == 24 && off != f->next) {
+        HP_WAL_FLUSH(file);
+        f->next = off + n;
+        const unsigned char *h = (const unsigned char *)buf;
+        f->commit_hdr = (h[4] | h[5] | h[6] | h[7]) != 0;
+        return f->real->pMethods->xWrite(f->real, buf, n, off);
+    }
+    f->next = off + n;
+    if (f->n && off != f->off + (sqlite3_int64)f->n) HP_WAL_FLUSH(file);
+    if (f->n + (size_t)n > f->cap) {
+        if (f->n + (size_t)n > (8u << 20)) {
+            HP_WAL_FLUSH(file);
+            if ((size_t)n > f->cap) return f->real->pMethods->xWrite(f->real, buf, n, off);
+        } else {
+            size_t cap = f->cap ? f->cap : 65536;
+            while (cap < f->n + (size_t)n) cap *= 2;
+            unsigned char *next = (unsigned char *)realloc(f->buf, cap);
+            if (!next) {
+                HP_WAL_FLUSH(file);
+                return f->real->pMethods->xWrite(f->real, buf, n, off);
+            }
+            f->buf = next;
+            f->cap = cap;
+        }
+    }
+    if (!f->n) f->off = off;
+    memcpy(f->buf + f->n, buf, (size_t)n);
+    f->n += (size_t)n;
+    if (n == 24) {
+        const unsigned char *h = (const unsigned char *)buf;
+        f->commit_hdr = (h[4] | h[5] | h[6] | h[7]) != 0;
+        return SQLITE_OK;
+    }
+    if (f->commit_hdr) {
+        f->commit_hdr = 0;
+        return hp_wal_flush(f);
+    }
+    return SQLITE_OK;
+}
+static int hp_wal_truncate(sqlite3_file *file, sqlite3_int64 size) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xTruncate(f->real, size);
+}
+static int hp_wal_sync(sqlite3_file *file, int flags) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xSync(f->real, flags);
+}
+static int hp_wal_size(sqlite3_file *file, sqlite3_int64 *size) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xFileSize(f->real, size);
+}
+static int hp_wal_lock(sqlite3_file *file, int level) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xLock(f->real, level);
+}
+static int hp_wal_unlock(sqlite3_file *file, int level) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xUnlock(f->real, level);
+}
+static int hp_wal_reserved(sqlite3_file *file, int *result) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xCheckReservedLock(f->real, result);
+}
+static int hp_wal_control(sqlite3_file *file, int op, void *arg) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xFileControl(f->real, op, arg);
+}
+static int hp_wal_sector(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xSectorSize(f->real);
+}
+static int hp_wal_device(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xDeviceCharacteristics(f->real);
+}
+static int hp_wal_shm_map(sqlite3_file *file, int page, int size, int extend,
+                          void volatile **out) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmMap(f->real, page, size, extend, out);
+}
+static int hp_wal_shm_lock(sqlite3_file *file, int off, int n, int flags) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmLock(f->real, off, n, flags);
+}
+static void hp_wal_shm_barrier(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    f->real->pMethods->xShmBarrier(f->real);
+}
+static int hp_wal_shm_unmap(sqlite3_file *file, int del) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmUnmap(f->real, del);
+}
+static int hp_wal_fetch(sqlite3_file *file, sqlite3_int64 off, int n, void **out) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (f->real->pMethods->iVersion < 3 || !f->real->pMethods->xFetch) { *out = NULL; return SQLITE_OK; }
+    return f->real->pMethods->xFetch(f->real, off, n, out);
+}
+static int hp_wal_unfetch(sqlite3_file *file, sqlite3_int64 off, void *ptr) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (f->real->pMethods->iVersion < 3 || !f->real->pMethods->xUnfetch) return SQLITE_OK;
+    return f->real->pMethods->xUnfetch(f->real, off, ptr);
+}
+static const sqlite3_io_methods hp_wal_io = {
+    3, hp_wal_close, hp_wal_read, hp_wal_write, hp_wal_truncate, hp_wal_sync,
+    hp_wal_size, hp_wal_lock, hp_wal_unlock, hp_wal_reserved, hp_wal_control,
+    hp_wal_sector, hp_wal_device, hp_wal_shm_map, hp_wal_shm_lock,
+    hp_wal_shm_barrier, hp_wal_shm_unmap, hp_wal_fetch, hp_wal_unfetch
+};
+static int hp_wal_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file,
+                       int flags, int *out_flags) {
+    (void)vfs;
+    HpWalFile *f = (HpWalFile *)file;
+    memset(f, 0, sizeof(*f));
+    f->real = (sqlite3_file *)(f + 1);
+    int rc = hp_wal_base_vfs->xOpen(hp_wal_base_vfs, name, f->real, flags, out_flags);
+    f->wal = (flags & SQLITE_OPEN_WAL) != 0;
+    f->base.pMethods = rc == SQLITE_OK && f->real->pMethods ? &hp_wal_io : NULL;
+    return rc;
+}
+/* Register the wrapper over `base` (NULL: SQLite's default VFS) and return
+ * its name. One wrapper per process: both SQLite connections use it. */
+static const char *hp_wal_vfs_register(const char *base) {
+    if (hp_wal_base_vfs) return hp_wal_vfs_name;
+    sqlite3_vfs *b = sqlite3_vfs_find(base);
+    if (!b) return NULL;
+    hp_wal_base_vfs = b;
+    snprintf(hp_wal_vfs_name, sizeof hp_wal_vfs_name, "hphp-wal-coalesce-%s", b->zName);
+    hp_wal_vfs = *b;
+    hp_wal_vfs.zName = hp_wal_vfs_name;
+    hp_wal_vfs.szOsFile = (int)sizeof(HpWalFile) + b->szOsFile;
+    hp_wal_vfs.xOpen = hp_wal_open;
+    hp_wal_vfs.pNext = NULL;
+    if (sqlite3_vfs_register(&hp_wal_vfs, 0) != SQLITE_OK) { hp_wal_base_vfs = NULL; return NULL; }
+    return hp_wal_vfs_name;
+}
+#else
+static const char *hp_wal_vfs_register(const char *base) { (void)base; return NULL; }
+#endif
+
 static hval hpbi_sqlite_open_impl(hval path, hval vfs) {
     hstr *p = hp_val_to_str(path);
     hstr *v = vfs.tag == HV_STR ? hp_val_to_str(vfs) : NULL;
     sqlite3 *db = NULL;
     if (sqlite3_initialize() != SQLITE_OK) return hp_of_int(0);
+    const char *vfs_name = v && v->len ? v->data : NULL;
+    /* HPHP_SQLITE_WAL_COALESCE=1: write each commit's WAL frames with one
+     * write call, through a thin wrapper over the selected VFS. */
+    const char *co = getenv("HPHP_SQLITE_WAL_COALESCE");
+    if (co && strcmp(co, "1") == 0) {
+        vfs_name = hp_wal_vfs_register(vfs_name);
+        if (!vfs_name) return hp_of_int(0);
+    }
     int rc = sqlite3_open_v2(p->data, &db,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                             v && v->len ? v->data : NULL);
+                             vfs_name);
     if (rc != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return hp_of_int(0);
@@ -9580,12 +9896,16 @@ hval hpbi_sqlite_bg_checkpoint_start(hval dbv, hval pathv, hval framesv, hval ho
     int hold_ms = (int)hp_val_to_int(holdv);
     if (!db || !path || frames < 1 || hold_ms < 1 || sqlite3_threadsafe() == 0 || w->started)
         return hp_of_bool(false);
-    /* Use the same VFS as the request connection. unix-excl keeps its WAL
-     * index in connection-local heap memory; a second connection using that
-     * VFS cannot safely checkpoint a database opened by the default unix VFS. */
+    /* Use the same VFS as the request connection. With unix-excl the WAL
+     * index lives in process heap memory shared by this process's
+     * connections, so both connections must use it; mixing it with the
+     * default unix VFS would give them different WAL indexes. */
+    sqlite3_vfs *vfs = NULL;
+    if (sqlite3_file_control(db, "main", SQLITE_FCNTL_VFS_POINTER, &vfs) != SQLITE_OK)
+        vfs = NULL;
     int rc = sqlite3_open_v2(path->data, &ckdb,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                             NULL);
+                             vfs ? vfs->zName : NULL);
     if (rc != SQLITE_OK) {
         if (ckdb) sqlite3_close(ckdb);
         return hp_of_bool(false);
@@ -9850,29 +10170,12 @@ hval hpbi_sqlite_busy_timeout(hval dbv, hval ms) {
 int64_t hp_sb_new_t(void) {
     HpSb *s = (HpSb *)hp_alloc(sizeof *s);
     hbuf_init(&s->b);
+    s->head = 0;
     return (int64_t)(intptr_t)s;
 }
 bool hp_sb_reserve_t(int64_t h, int64_t n) {
     hp_sb_reserve_pooled((HpSb *)(intptr_t)h, n);
     return true;
-}
-bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    const char *p = (const char *)(intptr_t)ptr;
-    if (p && len > 0) hbuf_write(&s->b, p, (size_t)len);
-    return true;
-}
-bool hp_sb_put_t(int64_t h, hstr *x) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    hbuf_write(&s->b, x->data, x->len);
-    return true;
-}
-int64_t hp_sb_len_t(int64_t h) {
-    return (int64_t)((HpSb *)(intptr_t)h)->b.len;
-}
-int64_t hp_sb_data_ptr_t(int64_t h) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    return (int64_t)(intptr_t)s->b.data;
 }
 bool hp_sb_discard_t(int64_t h) {
     HpSb *s = (HpSb *)(intptr_t)h;
@@ -9884,22 +10187,7 @@ bool hp_sb_discard_t(int64_t h) {
     return true;
 }
 bool hp_sb_prepend_t(int64_t h, hstr *x) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    if (x->len == 0) return true;
-    hbuf_reserve(&s->b, s->b.len + x->len);
-    if (s->b.len) memmove(s->b.data + x->len, s->b.data, s->b.len);
-    memcpy(s->b.data, x->data, x->len);
-    s->b.len += x->len;
-    return true;
-}
-bool hp_sb_int_t(int64_t h, int64_t n) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    char tmp[24];
-    int i = 24;
-    unsigned long long u = n < 0 ? -(unsigned long long)n : (unsigned long long)n;
-    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
-    if (n < 0) tmp[--i] = '-';
-    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    hp_sb_prepend_bytes((HpSb *)(intptr_t)h, x->data, x->len);
     return true;
 }
 bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len) {
@@ -9916,9 +10204,10 @@ bool hp_sb_json_str_t(int64_t h, hstr *x) {
 }
 hstr *hp_sb_take_t(int64_t h) {
     HpSb *s = (HpSb *)(intptr_t)h;
-    size_t n = s->b.len;
+    size_t head = s->head;
+    size_t n = s->b.len - head;
     char *p = hbuf_take(&s->b);
-    hstr *r = hp_str_new(p, n);
+    hstr *r = hp_str_new(p + head, n);
     free(p);
     hp_free(s);
     return r;
@@ -9936,8 +10225,10 @@ static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
     char *buf = sb->b.data;
     size_t len = sb->b.len;
     size_t cap = sb->b.cap;
+    size_t head = buf ? sb->head : 0;
     sb->b.data = NULL;
     sb->b.len = sb->b.cap = 0;
+    sb->head = 0;
     hp_free(sb);         /* the builder handle is consumed: only the buffer
                             travels on (it was leaked before: ~55 B/request) */
     if (!buf) {                                   /* empty builder: send "" */
@@ -9946,9 +10237,9 @@ static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
         cap = 0;
     }
 #ifdef HP_UR_CAN
-    if (hp_uring_active()) return hp_uring_send_owned(fd, buf, len, cap);
+    if (hp_uring_active()) return hp_uring_send_owned(fd, buf, head, len, cap);
 #endif
-    size_t off = 0;
+    size_t off = head;
     int waited_ms = 0;
     while (off < len) {
         ssize_t r = send(fd, buf + off, (int)(len - off), 0);
@@ -9963,7 +10254,7 @@ static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
         return -2;
     }
     hp_resp_buf_release(buf, cap);
-    return (int64_t)len;
+    return (int64_t)(len - head);
 }
 hval hpbi_stream_send_sb(hval s, hval h) {
     hp_net_init();

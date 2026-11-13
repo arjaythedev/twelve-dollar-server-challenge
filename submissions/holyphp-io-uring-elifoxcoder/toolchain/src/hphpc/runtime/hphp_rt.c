@@ -468,9 +468,9 @@ int64_t hp_str_index(hstr *hay, hstr *needle) {
 }
 
 hstr *hp_str_from_int(int64_t v) {
-    char buf[32];
-    snprintf(buf, sizeof buf, "%lld", (long long)v);
-    return hp_str_lit(buf);
+    char buf[24];
+    char *p = hp_fmt_i64(buf + sizeof buf, v);
+    return hp_str_new(p, (size_t)(buf + sizeof buf - p));
 }
 
 hstr *hp_str_from_double(double v) {

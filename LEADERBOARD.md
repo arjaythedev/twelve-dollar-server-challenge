@@ -641,7 +641,12 @@ p99, 1.40 s at 78 % CPU; 320,000 failed it on p99, 7.39 s at 96 % CPU). #402 sta
 a second WAL write-shim fix, kernel counters), held **270,000** (25,863 req/s, p95 40.6 / p99 160.4 ms, 0 err, 75 %
 CPU, 26 µs/req, 798 MB, 2026-11-12), below the merged row, so not merged (280,000 failed the 2-minute probe on p99,
 4.19 s at 79 % CPU; 320,000 failed it on p99, 20.4 s at 86 % CPU). On the box its PGO training client hit its own
-300-second timeout, so `build.sh` fell back to a plain (non-PGO) build for that run. #415 stays open.
+300-second timeout, so `build.sh` fell back to a plain (non-PGO) build for that run. #415's next head, **`2703df3`**
+(small batches commit at once, group-commit wake timer, 900-second training timeout; PGO build worked), held
+**244,000** (23,616 req/s, p95 24.5 / p99 143.7 ms, 0 err, 66 % CPU, 26 µs/req, 771 MB, 2026-11-13), below the merged
+row, so not merged: 270,000 and 260,000 passed the 2-minute probe, but the 5-minute holds failed on p99 at 270,000
+(11.7 s at 77 % CPU) and 257,000 (1.91 s at 72 % CPU), all with 0 errors; 280,000 failed the 2-minute probe on p99
+(2.63 s at 81 % CPU). #415 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

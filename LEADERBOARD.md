@@ -653,6 +653,10 @@ CPU), 280,000 on p99 (4.23 s at 78 % CPU) and 320,000 on p99 (12.7 s at 92 % CPU
 **`f4ec9c5`** (batch window back to 1 ms; PGO build worked), held **280,000** (26,670 req/s, p95 94.6 / p99 328.3 ms,
 0 err, 78 % CPU, 26 µs/req, 1,369 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
 2-minute probe on p99 (1.32 s at 81 % CPU), 300,000 on p99 (3.83 s at 84 % CPU) and 320,000 on p99 (12.2 s at 92 %
+CPU), all with 0 errors. Its next head, **`594fc37`** (a second ring sweep per batch, 2 ms batch window, readahead of
+the database file when memory allows; PGO build worked), held **280,000** (26,718 req/s, p95 82.3 / p99 318.6 ms,
+0 err, 76 % CPU, 26 µs/req, 856 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
+2-minute probe on p99 (2.38 s at 81 % CPU), 300,000 on p99 (2.93 s at 82 % CPU) and 320,000 on p99 (3.80 s at 97 %
 CPU), all with 0 errors. #415 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but

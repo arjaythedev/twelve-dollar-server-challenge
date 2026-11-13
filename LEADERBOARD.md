@@ -657,7 +657,10 @@ CPU), all with 0 errors. Its next head, **`594fc37`** (a second ring sweep per b
 the database file when memory allows; PGO build worked), held **280,000** (26,718 req/s, p95 82.3 / p99 318.6 ms,
 0 err, 76 % CPU, 26 µs/req, 856 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
 2-minute probe on p99 (2.38 s at 81 % CPU), 300,000 on p99 (2.93 s at 82 % CPU) and 320,000 on p99 (3.80 s at 97 %
-CPU), all with 0 errors. #415 stays open.
+CPU), all with 0 errors. Its next head, **`5d2fa6b`** (checkpoint holds capped at 250 ms whatever the log's length;
+PGO build worked), held **270,000** (25,865 req/s, p95 39.0 / p99 211.9 ms, 0 err, 73 % CPU, 26 µs/req, 1,420 MB,
+2026-11-13), still below the merged row, so not merged: 280,000 failed the 2-minute probe on p99 (1.07 s at 75 % CPU)
+and 320,000 on p99 (5.07 s at 89 % CPU), all with 0 errors. #415 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

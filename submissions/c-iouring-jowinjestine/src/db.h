@@ -22,7 +22,7 @@
 #define VFS_NAME "feed-wal"
 static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
-static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
+static uint64_t hold_max_ns = 250000000ULL; /* a hold's limit, whatever the log's length */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
 static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
@@ -538,10 +538,10 @@ static void db_tick(struct db *d) {
     break;
   }
   default: { /* a thread is working */
-    /* The limit grows with the log: a log that has missed restarts (the disk made the last tails
-     * slow) must restart before it reaches the inline last resort, whatever the sync costs. */
-    uint64_t limit = hold_max_ns * (uint64_t)(1 + d->wal_frames / (2 * ckpt_frames));
-    if (limit > 2 * hold_max_ns) limit = 2 * hold_max_ns; /* never a hold a POST would count as a failure */
+    /* The limit does not grow with the log: every held POST counts in the percentiles, and POSTs
+     * are ~8 % of requests, so a hold near its limit puts ~1 % of all requests at the limit. A log
+     * that misses restarts costs the loop nothing while its page cache holds the hot pages. */
+    uint64_t limit = hold_max_ns;
     if (d->writes_held && now_ns() - d->hold_t0 > limit) { /* a slow sync: writes resume, the log restarts next cycle */
       d->writes_held = 0;
       d->n_hold_timeout++;

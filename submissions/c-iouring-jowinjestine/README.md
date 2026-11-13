@@ -186,13 +186,15 @@ mostly idle sockets under `LimitNOFILE=65535`.
   a restart does not disturb; a read that began earlier holds another mark and makes the attempt
   `BUSY`, so it is retried, and if the hold ends first the loop's next write restarts the log as
   before. A hold
-  starts and ends only between batches and lasts at most 400 ms (writes only, once per cycle:
-  under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the next
-  cycle waits for half a log more, so a slow disk never gives back-to-back holds, and the limit
-  grows for a log that has missed restarts, up to 800 ms and no further: a POST that waited a
-  second would count against the score, so past that the log is simply allowed to grow (a
-  longer log costs the loop nothing while its page cache holds the hot pages: the wal-index is
-  consulted only on a cache miss) until the disk gives a restart. Before each pass the bulk
+  starts and ends only between batches and lasts at most 250 ms (writes only, once per cycle),
+  the leader's limit (rust-iouring-kensac #264): if the disk makes the tail's sync slow, writes
+  resume and the next cycle waits for half a log more, so a slow disk never gives back-to-back
+  holds, and the log is simply allowed to grow (a longer log costs the loop nothing while its
+  page cache holds the hot pages: the wal-index is consulted only on a cache miss) until the
+  disk gives a restart. The limit used to be 400 ms, growing to 800 ms for a log that had
+  missed restarts; on the box every hold near its limit holds the POSTs that arrive meanwhile,
+  and POSTs are ~8 % of requests, so a few long holds put ~1 % of all requests at the limit:
+  that was the box's p99 at the held level (270-330 ms) and, one step up, past a second. Before each pass the bulk
   thread reads the log sequentially ahead (`readahead`): a pass reads frames in page order,
   random in the file, and once the box's memory pressure has evicted them (they are clean once
   written back) that would be a disk seek per frame. Between passes the same thread keeps the

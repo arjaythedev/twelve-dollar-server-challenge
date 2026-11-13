@@ -894,7 +894,7 @@ int main(int argc, char **argv) {
   wait_ns = (uint64_t)env_long("WAIT_US", 2000) * 1000ULL;
   ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
   ckpt_tail = (int)env_long("CKPT_TAIL", 64);
-  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
+  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 250) * 1000000ULL;
   wb_kick_ms = env_long("WB_KICK_MS", 250);
   ckpt_log = (int)env_long("CKPT_LOG", 0);
   long want = env_long("MAX_CONNS", 600000);

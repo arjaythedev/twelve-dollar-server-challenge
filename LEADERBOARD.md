@@ -304,7 +304,10 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 
 ᵘ **HolyPHP** is scored at its follow-up **#418** at commit **`0dde0df`** (restarts the SQLite WAL after background
 checkpoints; merged 2026-11-13, above #336's 244,000 row). The 250,000 hold had 0 errors; 260,000 failed the 2-minute
-probe on p95/p99 (728 / 879 ms, 85 % CPU), 280,000 on p95 (1.2 s, 93 %) and 320,000 on p95 (2.8 s, 100 %). Before that
+probe on p95/p99 (728 / 879 ms, 85 % CPU), 280,000 on p95 (1.2 s, 93 %) and 320,000 on p95 (2.8 s, 100 %). Its later
+follow-up **#420** (`f1f8d45`, `unix-excl` VFS + WAL-write-coalescing shim VFS; held, not merged: not above 250,000)
+held **230,000** (22,342 req/s, p95 84.8 / p99 483.9 ms, 0 err, 74 % CPU, 30 µs/req, 653 MB, 2026-11-13); 240,000
+failed the 2-minute probe on p95/p99 (529 / 742 ms, 77 % CPU) and 320,000 on p95 (4.2 s, 100 %). Before that
 it was scored at **#336** at commit **`4758859`** (**244,000**, 23,557 req/s, p95 128.8 / p99 735.0 ms, 81 % CPU, 31
 µs/req, 907 MB, 2026-11-07; forced PASSIVE checkpoint through `sqlite3_wal_checkpoint_v2`, extended error codes; merged
 2026-11-07, above the 230,000 row). That 244,000 hold had 0 errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed

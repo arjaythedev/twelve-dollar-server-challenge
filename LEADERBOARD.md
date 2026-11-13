@@ -846,7 +846,10 @@ header checks) held **240,000** (23,241 req/s, p95 41.0 / p99 152.6 ms, 0 errors
 250,000–280,000 failed the 2-minute probe on p99), below the merged row, so it isn't merged. Its open follow-up
 **#383** (`9133a4d`: release build with Swift's checks on) also held **240,000** (23,222 req/s, p95 92.8 / p99 222.7 ms,
 0 errors, 86 % CPU, 748 MB, 2026-11-10; 250,000 and 260,000 failed the 2-minute probe on p99, 1.05 s / 1.03 s), below
-the merged row, so it isn't merged. Its #371 code (`bd715b2`: full LTO, checkpointer tuning, like counts stepped
+the merged row, so it isn't merged. Its open follow-up **#419** (`292888a`: byte loops in bulk, seed-layout claims
+read as words, SHA-256 rounds written out) held **260,000** (24,941 req/s, p95 105.6 / p99 412.7 ms, 0 errors, 91 %
+CPU, 675 MB, 2026-11-13; 270,000 and 280,000 failed the 2-minute probe on p99, 12.3 s / 3.8 s), below the merged
+row, so it isn't merged. Its #371 code (`bd715b2`: full LTO, checkpointer tuning, like counts stepped
 entry by entry through `sqlite3BtreeNext`) held **270,000** (25,841 req/s, p95 87.4 / p99 216.1 ms, 89 % CPU,
 2026-11-09). An earlier #371 run (`a04c2ad`) held 280,000 but wrote SQLite's private `BtCursor.ix` field (ruling 8),
 so it wasn't merged; `bd715b2` dropped that write. Its merged #361 code (`e417d34`: io_uring in pure Swift over syscalls, B-tree reads through SQLite's

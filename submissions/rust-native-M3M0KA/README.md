@@ -14,7 +14,7 @@ SQLite bindings are written in this repository.
 
 ## Files
 
-- `src/main.rs` - configuration, epoll transport, worker processes (`FEED_WORKERS`, default 5),
+- `src/main.rs` - configuration, epoll transport, worker processes (`FEED_WORKERS`, default 6),
   event-loop pass = one transaction (write lock taken up front when the pass contains a POST),
   accept backpressure on system-wide low memory
 - `src/net_uring.rs`, `src/uring.rs` - io_uring transport: up to eight rings, each sized to
@@ -72,14 +72,29 @@ they differ.
   non-decreasing `created_at`) at startup and after every insert. Any violation, foreign
   write, or unreadable record disables the plan permanently and reads use SQL.
 
+## Input buffer reuse
+
+The epoll fallback returns completed request buffers to a per-worker pool bounded
+at 1 MiB, 256 buffers and 32 KiB per buffer. Partial requests remain attached to
+their connections. This avoids retaining a completed input allocation on every
+idle connection; it does not cache request or database data. The pool is enabled
+by default on epoll and is unused by io_uring.
+
+A local 50k six-worker A/B/A against the same #265-based binary reduced service
+cgroup peak by about 52 MiB and post-drain current by about 49 MiB. Request rate
+was unchanged. A1/A2 CPU variation was about 9%, so this run cannot establish a
+CPU change; p95/p99 differences were small relative to control variation. This
+local test does not establish target capacity or an official score.
+
 ## Connection capacity
 
 One process cannot hold more than its descriptor limit (65,535 under the challenge's
-`LimitNOFILE`). The epoll transport therefore forks `FEED_WORKERS` (default 5) processes
+`LimitNOFILE`). The epoll transport therefore forks `FEED_WORKERS` (default 6) processes
 after binding one listening socket. Each worker has its own descriptor table, its own
 SQLite connection and its own epoll set; the kernel distributes accepts among them.
-Five workers give 327,675 descriptors. io_uring, when its self test passes, serves from a
-single process instead.
+Six workers provide descriptor headroom for a 350k target under the per-process
+65,535 limit; maximum-scale behavior remains unverified. io_uring, when its self test
+passes, serves from a single process instead.
 
 ## Durability
 

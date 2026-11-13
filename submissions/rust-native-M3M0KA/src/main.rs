@@ -29,6 +29,19 @@ use app::App;
 /// connection. Everything except `/feed` fits comfortably below it.
 pub const SMALL_RESPONSE: usize = 2048;
 
+/// Retain a small, bounded set of completed request buffers for reuse.
+const INPUT_POOL_MAX_BUFFERS: usize = 256;
+const INPUT_POOL_MAX_BUFFER_BYTES: usize = 32 * 1024;
+const INPUT_POOL_MAX_BYTES: usize = 1024 * 1024;
+
+#[inline]
+fn input_pool_buffer_allowed(count: usize, bytes: usize, capacity: usize) -> bool {
+    capacity != 0
+        && capacity <= INPUT_POOL_MAX_BUFFER_BYTES
+        && count < INPUT_POOL_MAX_BUFFERS
+        && bytes <= INPUT_POOL_MAX_BYTES.saturating_sub(capacity)
+}
+
 struct Conn {
     live: bool,
     inbuf: Vec<u8>,
@@ -76,6 +89,9 @@ struct Server {
     /// A feed response is a few KB; keeping one per connection would cost
     /// gigabytes at 300k sockets, and freeing one per request costs syscalls.
     pool: Vec<Vec<u8>>,
+    input_pool_enabled: bool,
+    input_pool: Vec<Vec<u8>>,
+    input_pool_bytes: usize,
 }
 
 const POOL_MAX: usize = 256;
@@ -101,13 +117,39 @@ impl Server {
             sys::close(fd);
         }
         self.touch(fd as usize);
+        let input = mem::take(&mut self.conns[fd as usize].inbuf);
         self.conns[fd as usize] = Conn::new();
+        self.recycle_input_buffer(input);
+    }
+
+    fn recycle_input_buffer(&mut self, mut buf: Vec<u8>) {
+        if !self.input_pool_enabled {
+            return;
+        }
+        let capacity = buf.capacity();
+        if !input_pool_buffer_allowed(self.input_pool.len(), self.input_pool_bytes, capacity) {
+            return;
+        }
+        buf.clear();
+        self.input_pool_bytes += capacity;
+        self.input_pool.push(buf);
+    }
+
+    fn take_input_buffer(&mut self, idx: usize) {
+        if self.input_pool_enabled && self.conns[idx].inbuf.capacity() == 0 {
+            if let Some(mut buf) = self.input_pool.pop() {
+                self.input_pool_bytes -= buf.capacity();
+                buf.clear();
+                self.conns[idx].inbuf = buf;
+            }
+        }
     }
 
     /// Read what is available into the input buffer. false = close.
     fn recv_conn(&mut self, fd: c_int) -> bool {
         let idx = fd as usize;
         self.touch(idx);
+        self.take_input_buffer(idx);
 
         loop {
             let old = self.conns[idx].inbuf.len();
@@ -194,7 +236,11 @@ impl Server {
         }
         // Put the buffer back even when it is empty: dropping it here frees and
         // reallocates it per request, which glibc turns into mmap/munmap.
-        self.conns[idx].inbuf = buf;
+        if self.input_pool_enabled && buf.is_empty() && buf.capacity() != 0 {
+            self.recycle_input_buffer(buf);
+        } else {
+            self.conns[idx].inbuf = buf;
+        }
         true
     }
 
@@ -462,7 +508,7 @@ fn main() {
     let mut workers: usize = std::env::var("FEED_WORKERS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(5)
+        .unwrap_or(6)
         .clamp(1, 16);
     if started.is_some() {
         workers = 1;
@@ -494,7 +540,30 @@ fn main() {
         accepting: true,
         mem: sys::MemGuard::new(),
         pool: Vec::new(),
+        input_pool_enabled: std::env::var("FEED_EPOLL_INPUT_POOL")
+            .map(|value| value != "0")
+            .unwrap_or(true),
+        input_pool: Vec::new(),
+        input_pool_bytes: 0,
     };
+    eprintln!("epoll input buffer pool: {}", if server.input_pool_enabled { "enabled" } else { "disabled" });
     let _ = std::io::stderr().write_all(format!("listening on {host}:{port}\n").as_bytes());
     server.run(lfd);
+}
+
+#[cfg(test)]
+mod input_pool_tests {
+    use super::*;
+
+    #[test]
+    fn input_pool_enforces_count_capacity_and_byte_bounds() {
+        assert!(input_pool_buffer_allowed(0, 0, 1));
+        assert!(input_pool_buffer_allowed(INPUT_POOL_MAX_BUFFERS - 1, 0, INPUT_POOL_MAX_BUFFER_BYTES));
+        assert!(input_pool_buffer_allowed(0, INPUT_POOL_MAX_BYTES - 1, 1));
+        assert!(!input_pool_buffer_allowed(0, 0, 0));
+        assert!(!input_pool_buffer_allowed(0, 0, INPUT_POOL_MAX_BUFFER_BYTES + 1));
+        assert!(!input_pool_buffer_allowed(INPUT_POOL_MAX_BUFFERS, 0, 1));
+        assert!(!input_pool_buffer_allowed(0, INPUT_POOL_MAX_BYTES, 1));
+        assert!(!input_pool_buffer_allowed(0, usize::MAX, 1));
+    }
 }

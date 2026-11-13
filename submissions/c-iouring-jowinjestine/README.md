@@ -166,22 +166,16 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
-  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
-  nice 12 (`CKPT_NICE`) runs PASSIVE checkpoints on its own connection, mostly in the loop's
-  idle time. Under steady
-  writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
-  fully copied; so that thread runs pass after pass, each copying what the previous one missed,
-  until fewer than 64 frames remain (it converges while it gets the CPU it needs). The priority
-  is the balance between two failures seen on the box. At nice 19 (every head up to `5d2fa6b`)
-  the thread's guaranteed share of a busy core is ~1.4 % (CFS weight 15 against the loop's
-  1,024), and checkpointing needs ~1 % when it keeps up: once the core is near saturation, as it
-  is at 280,000-300,000 users, it falls behind, the log stops restarting and grows, and its page
-  cache takes memory the sockets need on a 2 GB box (locally, with the core shared with another
-  workload, the log reached 330,000 frames, 1.3 GB, in a 90-second hold; the box's memory peaks
-  were 1.1-1.4 GB). At the normal priority (`297c8ea`'s second bulk thread) the passes ran
-  against the loop as an equal and the 5-minute holds failed on p99 (11.7 s at 270,000). Nice 12
-  (weight 70) guarantees ~6 % while there is work, which is enough to keep up, and takes nothing
-  once the log has converged. Then
+  rust-iouring-kensac #264, changed for one vCPU). The policy is the leader's, as a whole: past
+  4,096 WAL frames (16 MB) a thread at nice 19 runs one PASSIVE checkpoint on its own connection,
+  in the loop's idle time; whatever that pass could not copy (the frames written meanwhile) the
+  tail takes under a hold of at most 250 ms; a missed restart costs one short cycle. This entry
+  tried its own policy first and the box never favoured it: 64 MB cycles with passes repeated
+  until fewer than 64 frames remained, holds of 400 ms growing to 800 ms, scored 270,000-290,000
+  across eleven heads, and changing one parameter at a time toward the leader's (a flat 250 ms
+  hold, `5d2fa6b`, 270,000; the bulk thread at nice 12, `ca5743b`, 270,000) changed nothing the
+  box could resolve. `CKPT_FRAMES`, `CKPT_TAIL` (converge to this few frames first),
+  `HOLD_MAX_MS` and `CKPT_NICE` keep the old policy one environment variable away. Then
   writes are held (reads go on; the next POST on each connection waits in its buffer) while a
   second thread at the normal priority copies that remainder: a few milliseconds of copying plus
   the syncs of the log and of the database, on a thread. That thread then restarts the log itself
@@ -191,19 +185,16 @@ mostly idle sockets under `LimitNOFILE=65535`.
   a restart does not disturb; a read that began earlier holds another mark and makes the attempt
   `BUSY`, so it is retried, and if the hold ends first the loop's next write restarts the log as
   before. A hold
-  starts and ends only between batches and lasts at most 400 ms (writes only, once per cycle:
-  under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the next
-  cycle waits for half a log more, so a slow disk never gives back-to-back holds, and the limit
-  grows for a log that has missed restarts, up to 800 ms and no further: a POST that waited a
-  second would count against the score, so past that the log is simply allowed to grow (a
-  longer log costs the loop nothing while its page cache holds the hot pages: the wal-index is
+  starts and ends only between batches and lasts at most 250 ms (writes only, once per cycle):
+  if the disk makes the tail's sync slow, writes resume and the next cycle waits for half a log
+  more, so a slow disk never gives back-to-back holds, and the log is allowed to grow (a longer
+  log costs the loop nothing while its page cache holds the hot pages: the wal-index is
   consulted only on a cache miss) until the disk gives a restart. Before each pass the bulk
   thread reads the log sequentially ahead (`readahead`): a pass reads frames in page order,
   random in the file, and once the box's memory pressure has evicted them (they are clean once
-  written back) that would be a disk seek per frame. Between passes the same thread keeps the
-  database file's first 256 MB warm (`readahead` every 5 s, `DBWARM_MB`): a page SQLite's own
-  cache misses is then a copy, not a disk read on the loop. Pages already cached cost a lookup,
-  and it stops whenever MemAvailable is under 512 MB, so it never competes with reclaim.
+  written back) that would be a disk seek per frame. The same thread can keep the database
+  file's first pages warm between passes (`DBWARM_MB`, `readahead` every 5 s, only while
+  MemAvailable is over 512 MB); it is off by default, as the leader has no such thing.
   (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms limit: on the
   box the tail's sync of a few hundred random pages outlasted the limit, the log never restarted,
   and the last resort copied half a gigabyte on the loop once per probe, the one stall that

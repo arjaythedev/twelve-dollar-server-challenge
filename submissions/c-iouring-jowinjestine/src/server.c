@@ -892,17 +892,17 @@ int main(int argc, char **argv) {
   wait_min = (unsigned)env_long("WAIT_MIN", 64);
   sweep2 = (int)env_long("SWEEP2", 1);  /* the rings are entered a second time after the batch's database work */
   wait_ns = (uint64_t)env_long("WAIT_US", 2000) * 1000ULL;
-  ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
-  ckpt_tail = (int)env_long("CKPT_TAIL", 64);
-  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
-  ckpt_nice = (int)env_long("CKPT_NICE", 12);
+  ckpt_frames = (int)env_long("CKPT_FRAMES", 4096);
+  ckpt_tail = (int)env_long("CKPT_TAIL", 1 << 30);
+  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 250) * 1000000ULL;
+  ckpt_nice = (int)env_long("CKPT_NICE", 19);
   wb_kick_ms = env_long("WB_KICK_MS", 250);
   ckpt_log = (int)env_long("CKPT_LOG", 0);
   long want = env_long("MAX_CONNS", 600000);
   NR_MAX = (unsigned)((want + nslots - 1) / nslots);
   if (NR_MAX < 1) NR_MAX = 1;
   if (NR_MAX > MAX_RINGS) NR_MAX = MAX_RINGS;
-  dbwarm_bytes = (size_t)env_long("DBWARM_MB", 256) << 20;
+  dbwarm_bytes = (size_t)env_long("DBWARM_MB", 0) << 20;
   dbwarm_s = (uint64_t)env_long("DBWARM_S", 5);
   int cache_kib = (int)env_long("CACHE_KIB", 65536); /* 64 MB: the likes index (24 MB), the post tails and their indexes stay resident */
 

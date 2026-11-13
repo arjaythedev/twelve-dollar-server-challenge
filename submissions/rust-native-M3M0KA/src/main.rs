@@ -14,6 +14,7 @@ mod db;
 mod http;
 mod json;
 mod net_uring;
+mod writer;
 mod sys;
 mod uring;
 
@@ -428,16 +429,23 @@ fn main() {
 
     sys::raise_nofile();
 
-    let listener = match TcpListener::bind((host.as_str(), port)) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("cannot bind {host}:{port}: {e}");
-            std::process::exit(1);
+    // Ring teardown after SIGKILL can briefly retain in-flight accepts (and
+    // their listener reference) after waitpid has reported process exit.
+    let bind_deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let listener = loop {
+        match TcpListener::bind((host.as_str(), port)) {
+            Ok(listener) => break listener,
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse
+                && std::time::Instant::now() < bind_deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => panic!("bind listener: {e}"),
         }
     };
     listener.set_nonblocking(true).expect("nonblocking listener");
-    let lfd = listener.into_raw_fd();
-    sys::set_reuseaddr(lfd);
+    let lfds = vec![listener.into_raw_fd()];
+    sys::set_reuseaddr(lfds[0]);
 
     // io_uring lifts the connection ceiling inside one process. It is used only
     // after a live end-to-end self test; otherwise the epoll loop serves the same
@@ -446,10 +454,14 @@ fn main() {
     let use_uring = std::env::var("FEED_EPOLL").is_err() && net_uring::self_test(&secret, &db_path);
     let mut started: Option<App> = None;
     if use_uring {
+        // The io_uring server owns one process and both SQLite connections.
+        // The unix-excl VFS keeps WAL-index lock traffic in-process; epoll may
+        // fork workers, so it continues to use the default VFS.
+        std::env::set_var("FEED_UNIX_EXCL", "1");
         eprintln!("transport: io_uring");
         let app = App::new(&db_path, &secret);
         // Returns only when the rings could not be set up after all.
-        started = Some(net_uring::serve(app, lfd));
+        started = Some(net_uring::serve(app, lfds[0]));
         eprintln!("io_uring: no ring could be opened; serving on epoll in one process");
     }
 
@@ -468,16 +480,21 @@ fn main() {
         workers = 1;
     }
     let mut is_child = false;
-    for _ in 1..workers {
+    let mut worker_index = 0usize;
+    for k in 1..workers {
+        worker_index = k;
         if sys::fork_process() == 0 {
             is_child = true;
-            break;
+            break; // the child keeps this loop's index as its listener index
         }
+        // The fork returned to the PARENT, which accepts on listener 0.
+        worker_index = 0;
     }
-    eprintln!("transport: epoll, worker {} of {}", if is_child { "child" } else { "parent" }, workers);
+    eprintln!("transport: epoll, worker {} of {}: listener {}", if is_child { "child" } else { "parent" }, workers, worker_index);
 
     let ep = unsafe { sys::epoll_create1(0x80000) }; // EPOLL_CLOEXEC
     assert!(ep >= 0, "epoll_create1 failed");
+    let lfd = lfds[worker_index % lfds.len()]; // per-worker accept queue
     let ev = sys::event_for(lfd, sys::EPOLL_IN_FOR_LISTENER);
     unsafe {
         assert!(sys::epoll_ctl(ep, sys::EPOLL_CTL_ADD, lfd, &ev) >= 0);

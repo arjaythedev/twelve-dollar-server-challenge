@@ -18,6 +18,11 @@
 %define SYS_epoll_ctl       233
 %define SYS_epoll_wait      232
 %define SYS_clock_gettime   228
+%define SYS_getrlimit       97
+%define SYS_setrlimit       160
+%define SYS_fork            57
+
+%define RLIMIT_NOFILE       7
 
 %define CLOCK_REALTIME      0
 %define CLOCK_MONOTONIC     1
@@ -26,6 +31,7 @@
 %define SOCK_STREAM         1
 %define SOL_SOCKET          1
 %define SO_REUSEADDR        2
+%define SO_REUSEPORT        15
 %define SO_RCVTIMEO         20
 %define SO_SNDTIMEO         21
 %define IPPROTO_TCP         6

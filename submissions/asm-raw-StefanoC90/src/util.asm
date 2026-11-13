@@ -4,6 +4,10 @@
 
 section .rodata
 hexdigits: db '0123456789abcdef'
+align 16
+v_quote:  times 16 db '"'
+v_bslash: times 16 db '\'
+v_ctl:    times 16 db 0x1f
 
 section .text
 
@@ -43,6 +47,7 @@ mem_copy:
 
 ; -----------------------------------------------------------------------------
 ; append_u64(rdi=dst, rsi=value) -> rax = new end
+; Divides by 10 with a multiply (no div in the loop, ~15 cycles per digit).
 ; -----------------------------------------------------------------------------
 append_u64:
     push rbp
@@ -50,14 +55,19 @@ append_u64:
     sub rsp, 32
     mov rax, rsi
     lea r8, [rsp+32]
+    mov r10, 0xCCCCCCCCCCCCCCCD
     xor ecx, ecx
 .loop:
-    xor edx, edx
-    mov r9, 10
-    div r9
-    add dl, '0'
+    mov r11, rax
+    mul r10                     ; rdx = high(value * magic)
+    mov rax, rdx
+    shr rax, 3                  ; rax = value / 10
+    lea rdx, [rax+rax*4]
+    add rdx, rdx                ; rdx = (value/10) * 10
+    sub r11, rdx                ; r11 = value % 10
+    add r11b, '0'
     dec r8
-    mov [r8], dl
+    mov [r8], r11b
     inc ecx
     test rax, rax
     jnz .loop
@@ -70,6 +80,9 @@ append_u64:
 ; -----------------------------------------------------------------------------
 ; append_json_string(rdi=dst, rsi=str, rdx=len) -> rax = new end
 ; Escapes quote, backslash and control bytes; everything else is copied raw.
+; Scans 16 bytes at a time with SSE2 and copies the whole string in one go when
+; nothing needs escaping (the normal case), so long bodies are not walked byte
+; by byte. Short strings skip the scan: rep movsb would not pay for it.
 ; -----------------------------------------------------------------------------
 append_json_string:
     push rbp
@@ -85,6 +98,51 @@ append_json_string:
     lea r14, [rsi+rdx]
     mov byte [r12], '"'
     inc r12
+    cmp rdx, 32
+    jb .loop                    ; too short to be worth scanning
+    movdqa xmm3, [rel v_quote]
+    movdqa xmm4, [rel v_bslash]
+    movdqa xmm5, [rel v_ctl]
+    mov rbx, r13
+.scan16:
+    lea rcx, [rbx+16]
+    cmp rcx, r14
+    ja .scan_tail
+    movdqu xmm0, [rbx]
+    movdqa xmm1, xmm0
+    pcmpeqb xmm1, xmm3
+    movdqa xmm2, xmm0
+    pcmpeqb xmm2, xmm4
+    por xmm1, xmm2
+    movdqa xmm2, xmm0
+    pminub xmm2, xmm5
+    pcmpeqb xmm2, xmm0
+    por xmm1, xmm2
+    pmovmskb eax, xmm1
+    test eax, eax
+    jnz .loop                   ; something needs escaping: byte loop
+    add rbx, 16
+    jmp .scan16
+.scan_tail:
+    cmp rbx, r14
+    jae .clean
+    movzx eax, byte [rbx]
+    cmp al, '"'
+    je .loop
+    cmp al, '\'
+    je .loop
+    cmp al, 0x20
+    jb .loop
+    inc rbx
+    jmp .scan_tail
+.clean:
+    mov rdi, r12
+    mov rsi, r13
+    mov rdx, r14
+    sub rdx, r13
+    call append_bytes
+    mov r12, rax
+    jmp .close
 .loop:
     cmp r13, r14
     jae .close

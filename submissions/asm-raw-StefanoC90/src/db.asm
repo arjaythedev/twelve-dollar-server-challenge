@@ -30,7 +30,7 @@ sql_feed:
     db 'SELECT p.id,p.body,p.created_at,u.username,'
     db '(SELECT count(*) FROM likes l WHERE l.post_id=p.id) '
     db 'FROM posts p JOIN users u ON u.id=p.user_id '
-    db 'ORDER BY p.created_at DESC,p.id DESC LIMIT 20', 0
+    db 'ORDER BY p.id DESC LIMIT 20', 0
 sql_get:
     db 'SELECT p.id,p.body,p.created_at,u.username,'
     db '(SELECT count(*) FROM likes l WHERE l.post_id=p.id) '

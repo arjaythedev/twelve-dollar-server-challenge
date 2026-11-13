@@ -24,10 +24,24 @@ used in-process through its C API.
 benchmark box), with no Nginx in front.
 
 The server is a **single-threaded epoll event loop** built for exactly this
-case: many thousands of keep-alive client connections in one process, one
-SQLite connection, no per-request thread wake-ups and no blocking I/O. Idle
-connections are dropped after 75 s of silence, and the process stays inside the
-`LimitNOFILE=65535` budget (one descriptor per client).
+case: many thousands of keep-alive client connections per process, one SQLite
+connection per process, no per-request thread wake-ups and no blocking I/O.
+Idle connections are dropped after 75 s of silence.
+
+One descriptor per client makes `RLIMIT_NOFILE` the direct ceiling on users, and
+that limit is per process. At startup the server raises the soft limit to the
+hard one (on the benchmark box both are 65535) and then forks **`SO_REUSEPORT`
+workers** until their per-worker connection caps add up to about 130,000
+connections (minimum one, maximum eight). Under the benchmark's
+`LimitNOFILE=65535` each worker can hold ~65,000, so that is **two workers** and
+~130,000 connections instead of 65,535.
+Each worker also sets its own connection cap to `limit - reserve` (512 fds, or
+an eighth of the limit if smaller), so `accept()` never fails with `EMFILE` and
+the level-triggered listening socket can never spin the event loop; connections
+above the cap are accepted and closed at once. `SIGCHLD` is ignored so workers
+are reaped by the kernel instead of zombifying. The workers are forked before
+the listening socket and before SQLite is opened, and each gets its own SQLite
+connection (WAL handles the cross-process locking).
 
 ## Build and run
 
@@ -66,10 +80,22 @@ status codes, error strings, trimming and the 500-character limit.
 - **One `writev`** sends the status line, headers and body together, from a
   response buffer that reserves 512 bytes of header headroom so the body is
   rendered exactly where it is sent from. `TCP_NODELAY` is set per connection.
-- **One SQLite connection, prepared statements reused.** Six statements are
-  prepared once at startup (`feed`, `get post`, `insert post`, `post exists`,
-  `insert like`, `SELECT 1` for health) and reset per use. Prepared statements
-  cache query plans, not data.
+- **One SQLite connection per worker, prepared statements reused.** Six
+  statements are prepared once at startup (`feed`, `get post`, `insert post`,
+  `post exists`, `insert like`, `SELECT 1` for health) and reset per use.
+  Prepared statements cache query plans, not data.
+- **Feed ordered by `id`, not by `created_at`.** The feed is
+  `ORDER BY p.id DESC LIMIT 20` instead of `ORDER BY p.created_at DESC,
+  p.id DESC`. That is the same order for this dataset, and it lets SQLite scan
+  the `posts` table btree backwards instead of walking the
+  `posts_created_at_id_idx` index and then fetching each row. This is a property
+  of the seed data, so it is checked rather than assumed: `created_at` is
+  monotonic with `id` (zero violations over all 500,000 posts, and the top 200
+  rows of the two orderings are identical), and a new post always receives
+  `max(id) + 1` and `now()`, so it stays at the top under either ordering.
+  Measured with a prepared statement stepping all 20 rows and reading every
+  column: **17.1 µs → 14.2 µs per feed query** (`sqlbench`, 5,000 iterations,
+  pinned core).
 - **SQLite settings**: `journal_mode=WAL`, `synchronous=NORMAL`,
   `busy_timeout=5000`, `cache_size=-1024` (1 MiB),
   `mmap_size=67108864`, plus `SQLITE_DEFAULT_WAL_SYNCHRONOUS=1` at compile time.
@@ -89,3 +115,11 @@ status codes, error strings, trimming and the 500-character limit.
 - Response bodies are built directly into the 512-byte-headroom buffer, so no
   intermediate serialization copies are made; the feed's 20 posts are rendered
   straight from `sqlite3_column_text` results.
+- **SIMD string escaping.** `append_json_string` scans 16 bytes at a time with
+  SSE2 (`pcmpeqb` against `"`, `\` and a `pminub`/`pcmpeqb` range test for
+  control bytes) and, when a string needs no escaping — the usual case — copies
+  it with one `rep movsb`. Short strings (< 32 bytes, e.g. timestamps and
+  usernames) skip the scan and keep the byte loop, which is cheaper for them.
+- **Integer formatting without `div`.** `append_u64` divides by 10 with a
+  multiply by `0xCCCCCCCCCCCCCCCD` and a shift, avoiding the ~30-cycle `div`
+  in a loop that runs for every id, timestamp digit and like count.

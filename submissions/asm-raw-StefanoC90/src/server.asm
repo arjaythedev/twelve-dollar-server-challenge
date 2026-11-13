@@ -143,6 +143,8 @@ g_timeout:       resq 2
 g_now_ms:        resq 1
 g_last_sweep:    resq 1
 sockaddr_in:     resb 16
+rlim:            resq 2
+g_conn_cap:      resd 1
 evtmp:           resb 16
 g_wctx:          resb W_SIZE
 conns:           resb CONN_SIZE * MAX_CONN
@@ -179,6 +181,10 @@ main:
     sub rsp, 24
     ; SIGPIPE -> ignore
     mov edi, 13
+    mov esi, 1
+    call signal
+    ; SIGCHLD -> ignore: workers are never waited for and must not zombify
+    mov edi, 17
     mov esi, 1
     call signal
     call b64url_init
@@ -226,6 +232,80 @@ main:
     mov rax, [rbp-56]
     mov [rel g_start_nsec], rax
 
+    ; direct mode: one connection per client, so the fd budget is a hard wall.
+    ; Raise the soft limit to the hard one when allowed (it is not on the
+    ; benchmark box: both are 65535). RLIMIT_NOFILE is per process, so fork a
+    ; few SO_REUSEPORT workers, each with its own budget, until their caps add
+    ; up to ~130k connections (65,535 on the benchmark box means two workers).
+    ; The worker count is capped at eight so they still fit one core.
+    mov eax, SYS_getrlimit
+    mov edi, RLIMIT_NOFILE
+    lea rsi, [rel rlim]
+    syscall
+    mov rax, [rel rlim+8]
+    mov [rel rlim], rax
+    mov eax, SYS_setrlimit
+    mov edi, RLIMIT_NOFILE
+    lea rsi, [rel rlim]
+    syscall
+    mov eax, SYS_getrlimit
+    mov edi, RLIMIT_NOFILE
+    lea rsi, [rel rlim]
+    syscall
+    mov rax, [rel rlim]
+    cmp rax, 1000000            ; RLIM_INFINITY and huge limits: cap the input
+    jbe .limit_ok
+    mov eax, 1000000
+.limit_ok:
+    ; Per-worker connection cap: leave the reserve for stdio, the epoll fd,
+    ; the listener and SQLite, so accept() never fails with EMFILE. Keeping the
+    ; cap below the limit is what stops the level-triggered listener from
+    ; spinning at 100% once the fd budget is gone.
+    mov rcx, rax
+    shr rcx, 3
+    mov rdx, 512
+    cmp rcx, rdx
+    jae .reserve
+    mov rdx, rcx
+.reserve:
+    sub rax, rdx
+    cmp rax, MAX_CONN
+    jbe .cap_ok
+    mov eax, MAX_CONN
+.cap_ok:
+    mov [rel g_conn_cap], eax
+
+    ; Enough workers to reach ~130k connections (about what one core can serve
+    ; at 50-90 us per request), never fewer than one nor more than eight.
+    mov rcx, rax
+    mov rax, 130000
+    xor edx, edx
+    div rcx
+    test rdx, rdx
+    jz .exact
+    inc rax
+.exact:
+    test rax, rax
+    jnz .atleast1
+    mov eax, 1
+.atleast1:
+    cmp rax, 8
+    jbe .atmost8
+    mov eax, 8
+.atmost8:
+    mov r9d, eax
+.fork_loop:
+    cmp r9d, 1
+    jbe .forked
+    mov eax, SYS_fork
+    syscall
+    test rax, rax
+    jz .forked                  ; child serves too, but forks no further
+    js .forked
+    dec r9d                     ; rcx/r11 are clobbered by syscall
+    jmp .fork_loop              ; parent keeps forking until the count is met
+.forked:
+
     ; listening socket
     mov eax, SYS_socket
     mov edi, AF_INET
@@ -241,6 +321,13 @@ main:
     mov edi, r12d
     mov esi, SOL_SOCKET
     mov edx, SO_REUSEADDR
+    lea r10, [rel one]
+    mov r8d, 4
+    syscall
+    mov eax, SYS_setsockopt
+    mov edi, r12d
+    mov esi, SOL_SOCKET
+    mov edx, SO_REUSEPORT
     lea r10, [rel one]
     mov r8d, 4
     syscall
@@ -474,7 +561,7 @@ accept_new:
     test rax, rax
     js .out                     ; EAGAIN: queue drained
     mov r13d, eax
-    cmp r13d, MAX_CONN
+    cmp r13d, [rel g_conn_cap]
     jae .reject
     ; non-blocking so neither read nor write can stall the event loop
     mov eax, SYS_fcntl

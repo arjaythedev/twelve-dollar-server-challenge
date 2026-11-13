@@ -43,6 +43,7 @@ let private taskrunFlag = env "TASKRUN_FLAG" 1 = 1
 let private holdRem = env "HOLDREM" 0 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
 let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frames (1 GB of WAL), hold after any pass
 let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
+let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
 
@@ -837,11 +838,15 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         wq.[wqHead + wqLen] <- r
         wqLen <- wqLen + 1
 
-    /// Runs one pass in one transaction. While a WAL hold or the write window is on, writes wait in the held queue
+    /// Runs one pass in a transaction: a pass that writes commits it, one that only reads leaves it open, with its
+    /// cursors where they are, for the next pass. While a WAL hold or the write window is on, writes wait in the held queue
     /// (with every later request on their connections) while reads are answered. When the hold ends, the held queue is
     /// answered first, oldest first, up to wqMax requests in the pass's one commit.
     let flush () =
         uptime <- now - started
+        // A write rewinds the WAL only in a transaction begun after the WAL was all copied: once it is, a transaction
+        // a read-only pass left open ends, so the next write can rewind.
+        if Db.carrying () && Db.walFrames > 0 && ckBackfilled >= Db.walFrames && not (Db.commit ()) then Db.rollback ()
         let isWin = wwin > 0u && passMs - lastWriteMs < wwin
         let mutable hold = ckHold || isWin
         let mutable oneWrite = ckRewind && oneWriteOn && not hold
@@ -957,15 +962,17 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             nHeldNow <- wqLen
             let mutable ok = true
             let c0 = if statsOn then Diagnostics.Stopwatch.GetTimestamp() else 0L
-            if txn && not (Db.commit ()) then
+            let keep = txn && not wrote && carryOn
+            if keep then Db.keep ()
+            elif txn && not (Db.commit ()) then
                 ok <- false
                 Db.rollback ()
-            if statsOn && txn then
+            if statsOn && txn && not keep then
                 let us = int64 (Diagnostics.Stopwatch.GetElapsedTime(c0).TotalMicroseconds)
                 stCommitUs <- stCommitUs + us
                 stCommits <- stCommits + 1L
                 if us > stCommitMax then stCommitMax <- us
-            elif not txn then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
+            elif not txn && not (Db.carrying ()) then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
             if not ok && wrote then
                 // never acknowledge an uncommitted write: every connection of this pass closes without an answer
                 for d in 0 .. dirty.Count - 1 do

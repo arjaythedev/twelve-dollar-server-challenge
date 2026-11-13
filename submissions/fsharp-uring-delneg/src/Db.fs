@@ -189,7 +189,7 @@ let private CAuthor = 24
 [<Literal>]
 let private CCount = 44
 
-/// Cursors stay open for the rest of the pass's transaction (closed before COMMIT/ROLLBACK); a write in between makes
+/// Cursors stay open for the rest of the transaction (closed before COMMIT/ROLLBACK), which read-only passes share; a write in between makes
 /// SQLite save and reseek them, as for any open statement cursor. The feed reads its n-th post and that post's author
 /// through cursors of their own: requests in one pass mostly ask for the same rows, and sqlite3BtreeTableMoveto returns
 /// at once from a cursor already on the key. The row is still decoded from SQLite's page for each request.
@@ -646,14 +646,27 @@ let health () =
 
 let lastError () = errmsg db
 
+/// A pass that wrote nothing leaves its transaction open, cursors and all, for the next pass (keep). Only this
+/// connection writes, and a pass that writes commits, so that transaction's snapshot is always the latest one.
+let mutable private carried = false
+
+let carrying () = carried
+
 let begin' () =
-    let rc = sqlite3_step sBegin
-    sqlite3_reset sBegin |> ignore
-    if rc <> DONE then logErr "BEGIN" rc
-    rc = DONE
+    if carried && sqlite3_get_autocommit db = 0 then true
+    else
+        carried <- false
+        let rc = sqlite3_step sBegin
+        sqlite3_reset sBegin |> ignore
+        if rc <> DONE then logErr "BEGIN" rc
+        rc = DONE
+
+/// Ends a pass that wrote nothing without ending its transaction (the next pass's begin' goes on with it)
+let keep () = carried <- true
 
 /// true when committed
 let commit () =
+    carried <- false
     endCursors ()
     if walBuf then Vfs.enter ()
     let rc = sqlite3_step_commit sCommit
@@ -664,6 +677,7 @@ let commit () =
     rc = DONE && f = OK
 
 let rollback () =
+    carried <- false
     endCursors ()
     if sqlite3_get_autocommit db = 0 then
         sqlite3_step_commit sRollback |> ignore

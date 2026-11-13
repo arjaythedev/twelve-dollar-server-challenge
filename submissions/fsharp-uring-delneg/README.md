@@ -37,7 +37,10 @@
 - **Group commit.** Each loop pass is one SQLite transaction (WAL, `synchronous=NORMAL`), and no response of the pass
   is handed to the kernel before its `COMMIT` returns (rule 6). If a commit fails, the pass's connections close
   without an answer, so no response claims a write that didn't land. Writes commit at most once per 10 ms (reads
-  aren't held), so a commit carries more writes and fewer WAL frames per write.
+  aren't held), so a commit carries more writes and fewer WAL frames per write. A pass that only reads doesn't
+  commit: the next pass goes on in its read transaction, with its cursors where they are, so most passes skip
+  `BEGIN`/`COMMIT` and the cursors' descents from the root. It ends once the WAL is all copied, so the next write
+  can rewind it.
 - **Held writes.** A write that must wait (the write window, or a checkpoint hold) moves once to a queue of its own,
   with every later request on its connection and a copy of a new post's text, and passes don't walk it again. The
   first pass after the hold answers up to 4,096 of them, oldest first, in its one commit. Releasing at most a pass's
@@ -95,7 +98,8 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
   still decodes the rows from SQLite's pages. Like counts take one range walk of `likes_post_id_idx` when the 20 ids
   lie within 512 of each other, a seek per post otherwise.
 - **Live reads:** every request reads its rows while it is served (rule 5). Only prepared statements, cursors, key
-  descriptions and the four root pages are kept, and the schema cookie is checked on every read.
+  descriptions and the four root pages are kept, and the schema cookie is checked on every read. A read transaction
+  that read-only passes share always sees the latest commit: only the loop writes, and a pass that writes commits.
 - **Fallbacks to SQL:** a row the decoder doesn't cover (a record spilling onto overflow pages, an unexpected type, a
   post without its user) is read with the reference SQL query. At startup the server checks the column order of each
   table and index it decodes, then compares the B-tree answers with SQL's, byte for byte, on the feed and on the

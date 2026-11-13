@@ -29,6 +29,8 @@
 #define PENDING_LIMIT (1u << 20) /* Input held while the application is busy; more closes the client. */
 #define TD_CANCEL (UINT64_MAX - 1)
 #define QUICKACK_MS 20 /* half the 40 ms minimum delayed-ACK timeout (TCP_ATO_MIN) */
+#define OUTPUT_BLOCK 6144 /* a feed reply (about 5.2 KB) fits; glibc's tcache stops at 1 KB */
+#define OUTPUT_POOL 256 /* spare blocks kept per ring: at most 12 MiB over all rings */
 static const int td_zero = 0;
 
 enum { FREE, ACCEPT, RECV, SEND, CLOSE, APPLICATION };
@@ -43,7 +45,7 @@ struct td_client {
     uint32_t recv_ms; /* ring clock when the current request reached the application */
     int next;
     unsigned char operation, queued, busy, close_after, notify_drain;
-    unsigned char armed, cancelling, eof;
+    unsigned char armed, cancelling, eof, pooled;
 };
 
 struct td_ring {
@@ -52,6 +54,8 @@ struct td_ring {
     unsigned char *memory;
     struct td_client *clients;
     int *free_slots;
+    unsigned char **pool; /* spare OUTPUT_BLOCK output buffers */
+    int pool_count;
     int free_count, accepting;
     int ready_head, ready_tail, retry_head, retry_tail, deliver_head, deliver_tail;
     uint64_t retry_at, accept_at, now;
@@ -115,10 +119,12 @@ static void td_recycle(struct td_ring *r, int buffer)
     io_uring_buf_ring_advance(r->buffers, 1);
 }
 
-static void td_drop_output(struct td_client *c)
+static void td_drop_output(struct td_ring *r, struct td_client *c)
 {
-    free(c->output);
+    if (c->pooled && r->pool_count < OUTPUT_POOL) r->pool[r->pool_count++] = c->output;
+    else free(c->output);
     c->output = NULL;
+    c->pooled = 0;
     c->output_len = c->sent = 0;
 }
 
@@ -299,7 +305,8 @@ struct td_net *td_net_new(int listener, int checkpoint)
         /* Entry i holds slot ^ i, so the zeroed calloc pages already read as slots 0..SLOTS-1
          * and only the stack depth in use is ever touched. */
         r->free_slots = calloc(SLOTS, sizeof(*r->free_slots));
-        if (!r->memory || !r->clients || !r->free_slots) td_fail("allocate ring state", ENOMEM);
+        r->pool = malloc(OUTPUT_POOL * sizeof(*r->pool));
+        if (!r->memory || !r->clients || !r->free_slots || !r->pool) td_fail("allocate ring state", ENOMEM);
         r->free_count = SLOTS;
         for (int b = 0; b < BUFFERS; ++b)
             io_uring_buf_ring_add(r->buffers, r->memory + b * BUFFER_SIZE,
@@ -426,7 +433,7 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
             }
             td_fail("direct close", result);
         }
-        td_drop_output(c);
+        td_drop_output(r, c);
         free(c->pending);
         c->pending = NULL;
         c->pending_len = c->close_after = 0;
@@ -451,7 +458,7 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
     c->sent += result;
     if (c->sent < c->output_len) td_enqueue(r, slot, SEND);
     else {
-        td_drop_output(c);
+        td_drop_output(r, c);
         if (c->close_after) td_enqueue(r, slot, CLOSE);
         else if (c->notify_drain) {
             c->operation = APPLICATION;
@@ -588,10 +595,22 @@ void td_net_send(struct td_net *net, int id, const unsigned char *data, int len)
     assert(c->operation == APPLICATION && !c->busy && !c->queued && c->sent == 0);
     if ((unsigned)len > UINT_MAX - c->output_len) td_fail("output size", EOVERFLOW);
     unsigned size = c->output_len + len;
-    /* A delayed batch can release thousands of short replies; retain only their actual bytes. */
-    unsigned char *output = realloc(c->output, size);
-    if (!output) td_fail("allocate committed output", ENOMEM);
-    c->output = output;
+    if (!c->output && size <= OUTPUT_BLOCK) {
+        c->output = r->pool_count ? r->pool[--r->pool_count] : malloc(OUTPUT_BLOCK);
+        if (!c->output) td_fail("allocate committed output", ENOMEM);
+        c->pooled = 1;
+    } else if (!c->pooled || size > OUTPUT_BLOCK) {
+        /* A delayed batch can release thousands of short replies; retain only their actual bytes. */
+        unsigned char *output = c->pooled ? malloc(size) : realloc(c->output, size);
+        if (!output) td_fail("allocate committed output", ENOMEM);
+        if (c->pooled) {
+            memcpy(output, c->output, c->output_len);
+            if (r->pool_count < OUTPUT_POOL) r->pool[r->pool_count++] = c->output;
+            else free(c->output);
+            c->pooled = 0;
+        }
+        c->output = output;
+    }
     memcpy(c->output + c->output_len, data, len);
     c->output_len = size;
 }

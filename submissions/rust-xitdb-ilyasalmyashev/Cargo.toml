@@ -1,0 +1,21 @@
+[package]
+name = "feed-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+io-uring = "=0.7.15"
+libc = "=0.2.183"
+sha2 = "=0.10.9"
+memchr = "=2.8.0"
+xitdb = { git = "https://github.com/ToyVo/xitdb-rs", rev = "8cd8cb11610a577f064bc1d94b5d4b1b56fe5217" }
+
+[features]
+stats = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

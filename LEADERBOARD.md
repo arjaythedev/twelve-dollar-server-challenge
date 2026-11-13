@@ -949,7 +949,10 @@ on p99 (4.0 s) and 160,000 on timeouts (1.6 % err).
 AF_XDP + lwIP transport behind `start.sh --bypass`, which the rig doesn't use, so the benchmarked binary is #403's code;
 the PR was closed by its author during the run, so it can't be merged) held **270,000** (25,882 req/s, p95 31.4 / p99
 266.4 ms, 0 err, 80 % CPU, 28 µs/req, 1,467 MB, 2026-11-12): 280,000 failed the 2-minute probe on p99 (1.08 s at 82 %
-CPU, 0 errors) and 320,000 on p95/p99 (1.30 / 2.31 s at 93 % CPU).
+CPU, 0 errors) and 320,000 on p95/p99 (1.30 / 2.31 s at 93 % CPU). Its follow-up **#428** (`9970034`, a public
+`SQLITE_CONFIG_PCACHE2` wrapper + batched registration; not merged, below the row) held **257,000** (24,756 req/s, p95
+27.3 / p99 177.1 ms, 0 err, 76 % CPU, 28 µs/req, 815 MB, 2026-11-13), 42/42 tests: 270,000 failed the 5-minute hold on
+p99 (2.45 s at 80 % CPU) and 280,000 the 2-minute probe (p99 1.55 s at 81 %).
 
 ᵀ **typescript-tinyjs-animuni-express** is scored at its merged #382 code (`e6a08ba`). Its follow-up **#410**
 (`3b3c64f`, a native `Bun.serve` transport feeding TinyJS's handler; held, not merged yet: it conflicts with `main`, so

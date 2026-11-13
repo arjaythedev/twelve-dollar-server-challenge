@@ -12,6 +12,11 @@ cd /work
 case "${1:-test}" in
   build) bash "submissions/$SUB/build.sh" ;;
   test)  bash test/run.sh "submissions/$SUB" ;;
+  feedbench) # dev/feedbench.jl on a fresh seed copy (PLAN 5.5)
+         bash "submissions/$SUB/build.sh" >/dev/null
+         mkdir -p /work/data && cp /src/seed/feed.db /work/data/feed.db
+         . "submissions/$SUB/config.sh"
+         exec "$JULIA_HOME/bin/julia" --startup-file=no -O3 "submissions/$SUB/dev/feedbench.jl" /work/data/feed.db ;;
   serve) # build, then run the server on a fresh copy of the seed in the foreground (for stress)
          bash "submissions/$SUB/build.sh"
          # JR_DATA: where the database copy lives. dev/ct.sh mounts a volume (host ext4) at /data; the

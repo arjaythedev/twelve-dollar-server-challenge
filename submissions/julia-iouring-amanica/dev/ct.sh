@@ -5,6 +5,7 @@
 #   dev/ct.sh image                       build the dev images
 #   dev/ct.sh build                       run build.sh in a clean container
 #   dev/ct.sh test                        test/run.sh (build + start + 42 checks), as CI does
+#   dev/ct.sh feedbench                   time GET /feed query variants in-process (dev/feedbench.jl)
 #   dev/ct.sh stress [N] [DUR]            one run on a fresh server + DB; appends a row to stress-results.csv
 #   dev/ct.sh ladder [START] [MAX] [DUR]  double N until a run fails, then bisect to within 5%
 #   dev/ct.sh report                      rewrite the results section of README.md from the CSV
@@ -16,13 +17,15 @@
 #   GEN=blast  wrk with the same request mix and no think time. N = open connections. Cheap; measures
 #              max req/s (users estimated as req/s x 10.6).
 #   GEN=users  wrk with the same mix plus think time (3-16 s) per connection: N connections ~ N users.
-#              ~10 KB per user, so 100k+ users fit; shows connection limits (fds, memory).
+#              ~22 KB per user, so 100k+ users fit; shows connection limits (fds, memory).
 # --debug (first argument): also count the server's connections (fds) and log its allocation/GC stats
 #   (JR_DEBUG=1). Off by default so measuring costs nothing; the CSV's debug column says which.
 # Env: CKPT (auto: SQLite's automatic checkpoint on the event loop, for A/B; default: background thread),
 #      HOLD_PAGES (WAL pages at which writes wait for the checkpoint; 0: never; default in src/db.jl),
 #      RESTART (loop: the event loop's next write restarts the WAL, for A/B; default: the checkpoint thread),
 #      GROUP (off: one commit per write, for A/B; default: one commit per event-loop pass),
+#      FEED (plain: GET /feed as one query, for A/B; default: range scans when the newest ids are contiguous),
+#      PROFILE ("<start s>,<seconds>": sample the event loop then, table in server.log; src/prof.jl),
 #      DATA (volume: the DB copy on a per-run podman volume on the host's disk; overlay: on the container's
 #      fuse-overlayfs, as before 2026-11-08, which blocks the loop on every write),
 #      LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
@@ -74,7 +77,8 @@ box() {
 # the generator container's memory and, with --debug, julia's open fds (~ connections + ~23).
 sampler() { # sampler <server> <generator>
   set +e +o pipefail   # a failed read must not end the sampling
-  local srv="$1" g="$2" pid cg prev="" usec thr now_ns mem rss fds gm run wait
+  local srv="$1" g="$2" pid cg prev="" usec thr now_ns mem rss fds gm run wait stime TICKS
+  TICKS="$(getconf CLK_TCK)"
   pid="$(podman inspect -f '{{.State.Pid}}' "$srv" 2>/dev/null)" || return 0
   cg="/sys/fs/cgroup$(cut -d: -f3- "/proc/$pid/cgroup" 2>/dev/null)"
   while [ -d "/proc/$pid" ] && podman container exists "$srv"; do
@@ -82,16 +86,18 @@ sampler() { # sampler <server> <generator>
     thr="$(awk '/throttled_usec/{print $2}' "$cg/cpu.stat" 2>/dev/null)"
     # main thread (the event loop): ns on a CPU, ns runnable but waiting for one (run-queue delay)
     read -r run wait _ < "/proc/$pid/schedstat" 2>/dev/null || { run=0; wait=0; }
+    # main thread's kernel time in clock ticks (stime, field 15; "julia" has no spaces, so fields are plain)
+    stime="$(awk '{print $15}' "/proc/$pid/task/$pid/stat" 2>/dev/null)"; stime="${stime:-0}"
     if [ -n "$prev" ] && [ -n "$usec" ]; then
-      set -- $prev     # prev_usec prev_ns prev_run prev_wait prev_thr
+      set -- $prev     # prev_usec prev_ns prev_run prev_wait prev_thr prev_stime
       mem="$(cat "$cg/memory.current" 2>/dev/null || echo 0)"
       rss="$(awk '/^VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)"
       fds=""   # /proc/<pid>/fd of a rootless container is only readable inside podman's user namespace
       [ "$DEBUG" = 1 ] && fds=" fds=$(podman unshare ls "/proc/$pid/fd" 2>/dev/null | wc -l || true)"
       gm="$(podman stats --no-stream --format '{{.MemUsage}}' "$g" 2>/dev/null | cut -d' ' -f1)"
-      echo "$(date +%T) cpu=$(( (usec - $1) * 100000 / (now_ns - $2) )) main=$(( (run - $3) * 100 / (now_ns - $2) )) runq=$(( (wait - $4) * 100 / (now_ns - $2) )) thr=$(( (${thr:-0} - $5) * 100000 / (now_ns - $2) )) cgmem_mb=$(( mem >> 20 )) rss_mb=$(( ${rss:-0} >> 10 ))$fds genmem=${gm:-?}"
+      echo "$(date +%T) cpu=$(( (usec - $1) * 100000 / (now_ns - $2) )) main=$(( (run - $3) * 100 / (now_ns - $2) )) sys=$(( (stime - $6) * 100 * 1000000000 / TICKS / (now_ns - $2) )) runq=$(( (wait - $4) * 100 / (now_ns - $2) )) thr=$(( (${thr:-0} - $5) * 100000 / (now_ns - $2) )) cgmem_mb=$(( mem >> 20 )) rss_mb=$(( ${rss:-0} >> 10 ))$fds genmem=${gm:-?}"
     fi
-    [ -n "$usec" ] && prev="$usec $now_ns $run $wait ${thr:-0}"
+    [ -n "$usec" ] && prev="$usec $now_ns $run $wait ${thr:-0} $stime"
     sleep 2
   done
 }
@@ -142,7 +148,7 @@ stress_run() { # stress_run <n> <duration>
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1 || true" EXIT
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1; exit 130" INT TERM HUP PIPE
   BOX_RM=()    # keep the server container until we have its log, also when it dies at startup
-  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" -e JR_PROFILE="${PROFILE:-}" -e JR_FEED="${FEED:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
@@ -166,7 +172,7 @@ stress_run() { # stress_run <n> <duration>
   commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
   RUN_PASS=0
-  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}"
+  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}${PROFILE:+; PROFILE=$PROFILE}${FEED:+; FEED=$FEED}"
   DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${notes//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
     DUR="$dur" COMMIT="$commit" tools record "$out" "$rc" "$CSV" && RUN_PASS=1
   true
@@ -207,13 +213,14 @@ elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur
 else def_n=1000 def_start=2500 def_max=320000 def_dur=1m; fi
 case "$cmd" in
   image) image; echo "$IMAGE" ;;
-  build|test) image; box "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
+  build|test|feedbench) image; box "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
   shell) image; box -it "$IMAGE" bash ;;
   stress) only_run; image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
   ladder) only_run; image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;
   report) report ;;
   clean) n="$(podman ps -a --format '{{.Names}}' | grep -E '^jr-(srv|gen)-' || true)"
-         [ -n "$n" ] && podman rm -f $n >/dev/null
+         # generators first: they share their server's network namespace, so podman refuses the server before them
+         for c in $(echo "$n" | grep '^jr-gen-') $(echo "$n" | grep '^jr-srv-'); do podman rm -f "$c" >/dev/null; done
          v="$(podman volume ls --format '{{.Name}}' | grep '^jr-data-' || true)"
          [ -n "$v" ] && podman volume rm -f $v >/dev/null; echo "removed: ${n:-no containers} ${v:-no volumes}" ;;
   *) sed -n '2,30p' "$0"; exit 2 ;;

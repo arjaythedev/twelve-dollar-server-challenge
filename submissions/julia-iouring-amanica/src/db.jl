@@ -16,6 +16,13 @@ const ST_POST = Ref{Ptr{Cvoid}}(C_NULL)
 const ST_EXISTS = Ref{Ptr{Cvoid}}(C_NULL)
 const ST_INSERT_POST = Ref{Ptr{Cvoid}}(C_NULL)
 const ST_INSERT_LIKE = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_FEED_IDS = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_FEED_RANGE = Ref{Ptr{Cvoid}}(C_NULL)
+const ST_FEED_LIKES = Ref{Ptr{Cvoid}}(C_NULL)
+const FEED_COUNTS = zeros(Int, 20)
+# GET /feed by range scans when the 20 newest posts have contiguous ids (see feed!). JR_FEED=plain: always
+# the single query, for dev A/B.
+const FEED_RANGE = get(ENV, "JR_FEED", "") != "plain"
 const ST_BEGIN = Ref{Ptr{Cvoid}}(C_NULL)
 const ST_COMMIT = Ref{Ptr{Cvoid}}(C_NULL)
 
@@ -61,6 +68,10 @@ function db_open(path::String)
     db_exec("PRAGMA temp_store=MEMORY")
     ST_HEALTH[] = db_prepare("SELECT 1")
     ST_FEED[] = db_prepare(POST_SELECT * " ORDER BY p.created_at DESC, p.id DESC LIMIT 20")
+    ST_FEED_IDS[] = db_prepare("SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20")
+    ST_FEED_RANGE[] = db_prepare("""SELECT p.id, p.body, p.created_at, u.username
+        FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2 ORDER BY p.id DESC""")
+    ST_FEED_LIKES[] = db_prepare("SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id")
     ST_POST[] = db_prepare(POST_SELECT * " WHERE p.id = ?1")
     ST_EXISTS[] = db_prepare("SELECT 1 FROM posts WHERE id = ?1")
     ST_INSERT_POST[] = db_prepare("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at")
@@ -139,7 +150,59 @@ abstract type ReadBackend end
 struct SqlBackend <: ReadBackend end
 
 # {"posts":[...]} -> true, or false on a database error.
-function feed!(::SqlBackend, b::Buf)
+#
+# Fast path: the 20 newest ids come from the covering index (created_at DESC, id DESC). Usually they are
+# hi, hi-1, ..., hi-19 (ids and created_at both grow with each insert); then the same posts in the same order
+# are `id BETWEEN hi-19 AND hi ORDER BY id DESC`, and their like counts one range scan of likes_post_id_idx:
+# 1 descent instead of 20 for the counts. Measured (dev/feedbench.jl, WAL of 7.5k-15k frames): 25-31 ->
+# 18-20 us per feed, same JSON. Otherwise, or if a row is missing, the plain query. All three statements
+# read the same data: only this thread writes, and not in between.
+function feed!(r::SqlBackend, b::Buf)
+    FEED_RANGE || return feed_plain!(b)
+    ids = ST_FEED_IDS[]
+    hi = -1; k = 0
+    while true
+        rc = step(ids)
+        rc == SQLITE_ROW || (reset(ids); rc == SQLITE_DONE || return false; break)
+        id = col_int(ids, 0)
+        k == 0 && (hi = id)
+        id == hi - k || (reset(ids); return feed_plain!(b))
+        k += 1
+    end
+    k == 20 || return feed_plain!(b)
+    lo = hi - 19
+    fill!(FEED_COUNTS, 0)
+    st = ST_FEED_LIKES[]
+    bind_int(st, 1, lo); bind_int(st, 2, hi)
+    while true
+        rc = step(st)
+        rc == SQLITE_ROW || (reset(st); rc == SQLITE_DONE || return false; break)
+        @inbounds FEED_COUNTS[col_int(st, 0) - lo + 1] = col_int(st, 1)
+    end
+    st = ST_FEED_RANGE[]
+    bind_int(st, 1, lo); bind_int(st, 2, hi)
+    start = b.len
+    putstr!(b, "{\"posts\":[")
+    n = 0
+    while true
+        rc = step(st)
+        rc == SQLITE_ROW || (reset(st); rc == SQLITE_DONE || return false; break)
+        n > 0 && pushb!(b, UInt8(','))
+        id = col_int(st, 0)
+        putstr!(b, "{\"id\":"); putint!(b, id)
+        putstr!(b, ",\"body\":"); put_text_col!(b, st, 1)
+        putstr!(b, ",\"created_at\":"); put_text_col!(b, st, 2)
+        putstr!(b, ",\"author\":"); put_text_col!(b, st, 3)
+        putstr!(b, ",\"like_count\":"); @inbounds putint!(b, FEED_COUNTS[id - lo + 1])
+        pushb!(b, UInt8('}'))
+        n += 1
+    end
+    n == 20 || (b.len = start; return feed_plain!(b))
+    putstr!(b, "]}")
+    true
+end
+
+function feed_plain!(b::Buf)
     st = ST_FEED[]
     putstr!(b, "{\"posts\":[")
     first = true

@@ -12,7 +12,7 @@ using Printf, Dates, JSON
 
 const COLUMNS = ["timestamp", "commit", "label", "gen", "debug", "julia", "backend", "transport", "cpus", "mem",
     "vus", "ramp", "duration", "requests", "req_s", "est_users", "p95_ms", "p99_ms", "max_ms",
-    "err_pct", "pass", "failed_on", "srv_cpu_avg", "srv_cpu_max", "srv_main_avg", "srv_runq_avg", "srv_runq_max",
+    "err_pct", "pass", "failed_on", "srv_cpu_avg", "srv_cpu_max", "srv_main_avg", "srv_main_sys_avg", "srv_runq_avg", "srv_runq_max",
     "srv_thr_avg", "loop_wait_pct", "srv_rss_peak_mb",
     "srv_cgmem_peak_mb", "srv_conns_peak", "alloc_b_per_req", "gc_ms", "gc_max_pause_ms", "gen_mem_peak",
     "boot_ms", "notes"]
@@ -127,6 +127,7 @@ function record(out, rc, csv_path)
     # host-side samples (dev/ct.sh sampler)
     cpu, cg, rss, gm, fds = Int[], Int[], Int[], Float64[], Int[]
     mainc, runq, thr = Int[], Int[], Int[]           # per window, paired with cpu
+    sysc = Int[]                                      # main thread's kernel share (runs since 2026-11-10)
     for line in eachline(IOBuffer(readall(joinpath(out, "stats.log"))))
         d = kv(line)
         if haskey(d, "cpu")
@@ -134,6 +135,7 @@ function record(out, rc, csv_path)
             haskey(d, "fds") && push!(fds, parse(Int, d["fds"]))
             haskey(d, "main") && (push!(mainc, parse(Int, d["main"])); push!(runq, parse(Int, d["runq"]));
                                   push!(thr, parse(Int, d["thr"])))
+            haskey(d, "sys") && push!(sysc, parse(Int, d["sys"]))
         end
         mm = match(r"^([\d.]+)([kMG]?B)", get(d, "genmem", ""))
         mm === nothing || push!(gm, parse(Float64, mm[1]) * Dict("B" => 1e-6, "kB" => 1e-3, "MB" => 1.0, "GB" => 1e3)[mm[2]])
@@ -148,6 +150,7 @@ function record(out, rc, csv_path)
         bi = [k for k in eachindex(cpu) if cpu[k] > 2]; isempty(bi) && (bi = collect(eachindex(cpu)))
         avg(v) = string(round(Int, sum(v[bi]) / length(bi)))
         row["srv_main_avg"] = avg(mainc); row["srv_runq_avg"] = avg(runq)
+        length(sysc) == length(cpu) && (row["srv_main_sys_avg"] = avg(sysc))
         # (not the last sample: the throttling counter jumps while the container shuts down)
         tb = filter(!=(length(thr)), bi); row["srv_thr_avg"] = isempty(tb) ? "0" : string(round(Int, sum(thr[tb]) / length(tb)))
         row["srv_runq_max"] = string(maximum(runq))
@@ -196,7 +199,9 @@ function record(out, rc, csv_path)
     println("   ", ok ? "PASS" : "FAIL", "  $gen $(row["vus"]) $what  boot=$(row["boot_ms"])ms req/s=$(row["req_s"])",
         isempty(row["est_users"]) ? "" : " (~$(row["est_users"]) users)",
         " p95=$(row["p95_ms"])ms p99=$(row["p99_ms"])ms err=$(row["err_pct"])%",
-        " cpu avg/max=$(row["srv_cpu_avg"])/$(row["srv_cpu_max"])% loop on-cpu=$(row["srv_main_avg"])% runq=$(row["srv_runq_avg"])%",
+        " cpu avg/max=$(row["srv_cpu_avg"])/$(row["srv_cpu_max"])% loop on-cpu=$(row["srv_main_avg"])%",
+        isempty(get(row, "srv_main_sys_avg", "")) ? "" : " (kernel $(row["srv_main_sys_avg"])%)",
+        " runq=$(row["srv_runq_avg"])%",
         " throttled=$(row["srv_thr_avg"])% loop-wait=$(row["loop_wait_pct"])% rss=$(row["srv_rss_peak_mb"])MB",
         " conns=$(row["srv_conns_peak"]) alloc/req=$(row["alloc_b_per_req"])B gc=$(row["gc_ms"])ms",
         " $gen=$(row["gen_mem_peak"]) $(row["failed_on"])")

@@ -632,6 +632,7 @@ end
 
 function serve_uring(U::Uring)
     GROUP_ON[] = GROUP
+    @prof prof_init!()
     @dbg (g = Base.gc_num(); st = Stats(time(), NREQ[], Base.gc_bytes(), g.total_time, g.pause))
     top_up_accepts!(U)
     while true
@@ -714,6 +715,7 @@ function serve_uring(U::Uring)
             empty!(U.held2)
         end
         top_up_accepts!(U)
+        @prof prof_tick!()
         A = U.arenas[U.cur]
         A.refs == 0 && (A.len = 0)                           # nothing points into it: reuse from the start
         @dbg begin

@@ -3,14 +3,24 @@
 -- so the weights are 1 : 1 : 0.15 : 0.02. Each wrk connection is one "user" with no pauses.
 local tokens, names, ids, nids = {}, {}, {}, 0
 
+-- Every wrk thread has its own Lua state (and so does each wrk process's main thread): with all ~4.8 MB of
+-- tokens in each, they took ~2/3 of the generator's memory at 50k users. So each state keeps a random sample
+-- (reservoir) of KEEP users; across a run's many threads, the sampled users still cover the seed.
+local KEEP = 1000
+
 function init(args)
+  math.randomseed(os.time() + tonumber(tostring({}):match("0x(%x+)") or "0", 16) % 100000)
   local f = assert(io.open("/seed/tokens.json"))
   local s = f:read("*a"); f:close()
+  local seen = 0
   for name, tok in s:gmatch('"username":"([^"]+)","token":"([^"]+)"') do
-    tokens[#tokens + 1] = tok; names[#names + 1] = name
+    seen = seen + 1
+    local k = seen <= KEEP and seen or math.random(seen)
+    if k <= KEEP then tokens[k] = tok; names[k] = name end
   end
+  s = nil
+  collectgarbage("collect")
   assert(#tokens > 0, "no tokens parsed from /seed/tokens.json")
-  math.randomseed(os.time() + tonumber(tostring({}):match("0x(%x+)") or "0", 16) % 100000)
 end
 
 local function some_id()

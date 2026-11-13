@@ -23,6 +23,9 @@ Work in progress.
 - Group commit (io_uring): all writes of one event-loop pass share one transaction, committed before the
   loop hands any reply to the kernel, so each 201 still waits for its commit (rule 6). Max req/s went up
   ~48% (blast 30k → 45k); at 150k users p95 fell from 4–27 ms to 1.5–3.7 ms.
+- GET /feed: when the 20 newest posts have consecutive ids (the usual case), their like counts come from
+  one range scan instead of 20 lookups; otherwise the plain query. Same JSON, live data on every request.
+  Blast ~+12% req/s; at 200k users p95 fell from 12–43 ms to 4–18 ms.
 
 ## Files
 
@@ -66,11 +69,34 @@ dev/ct.sh clean                                   # remove stress containers lef
 
 Three load generators (`GEN`):
 
-| `GEN` | What it runs | N means | Cost | Use it for |
+| `GEN` | What it runs | N means | Generator memory | Use it for |
 |---|---|---|---|---|
-| `k6` (default) | `bench/load.js`, the scoring's user model, think time included | virtual users | ~0.3 MB per user: this 32 GB host tops out near 20k | latency under the real traffic shape |
-| `blast` | wrk + `dev/blast.lua`: the same request mix (feed 1 : post 1 : like 0.15 : create 0.02), no think time | open connections | a few MB | max req/s at 1 CPU, comparing optimizations |
-| `users` | wrk + `dev/users.lua`: the same mix, each connection pausing 3–16 s (mean 9.5 s, like load.js) | users (one connection each) | ~25 KB per user | many open connections: fd limit, per-connection memory, accept rate |
+| `k6` (default) | `bench/load.js`, the scoring's own script | virtual users | ~0.3 MB per user: this 32 GB host tops out near 20k | the real traffic shape, small scale |
+| `blast` | wrk + `dev/blast.lua`, no think time | open connections | a few MB | max req/s at 1 CPU, comparing optimizations |
+| `users` | wrk + `dev/users.lua`, with think time | users (one connection each) | ~22 KB per user | many open connections at realistic req/s |
+
+How they differ:
+
+- **`k6`** is what the scoring runs. Each virtual user is one person on one keep-alive connection, with
+  its own token, following a fixed sequence: GET /feed → think 3–7 s → GET /posts/:id (a post from that
+  feed) → think 3–8 s → like it (15%) → write a post (2%) → idle 5–15 s → repeat. That is ~2.17 requests
+  per ~20.5 s loop, about 0.106 req/s per user. Users ramp up linearly over `RAMP_UP`. Each user is a
+  JavaScript VM, hence the memory: it can't reach the user counts this server handles.
+- **`blast`** is closed-loop: each connection sends its next request the moment the previous reply
+  arrives. Every request is drawn at random with the same weights as a k6 loop (feed 1 : post 1 :
+  like 0.15 : create 0.02), with a post id from the last feed that wrk thread saw and a token from a
+  random sample of 1,000 users per thread. It keeps the server saturated, so it measures throughput;
+  its latency is mostly queueing (latency ≈ connections ÷ req/s).
+- **`users`** is `blast` plus a random pause of 3–16 s (mean 9.5 s) before every request, so one
+  connection sends about 0.105 req/s, like a k6 user. It's a cheap stand-in for k6 at 100k+ users, with
+  two differences: wrk's Lua state is per thread, not per connection, so there is no per-user sequence
+  (the pause and request type are drawn independently each time); and each wrk process opens all its
+  connections at once, so the ramp is a series of bursts (one per shard, spread over `RAMP_UP`) rather
+  than k6's smooth line. The memory is mostly wrk itself: an 8 KB receive buffer per connection plus the
+  response buffers it keeps (the script reads feeds for post ids), and ~4 KB of kernel socket state.
+
+All three run on this host, outside the server's 1-CPU/2 GB container, so they don't use the server's
+CPU budget, but they do compete for the host's memory (see caveats).
 
 Every run starts a fresh server on a fresh copy of the seed database (like the scoring), checks the same
 thresholds (p95 < 500 ms, p99 < 1 s, errors < 1%), samples server CPU / RSS every 2 s, and records the boot
@@ -97,9 +123,13 @@ Other settings: `NOTES` (free text in the row), `RAMP_UP` (30s, k6 and users), `
 
 Caveats:
 - Don't run two stress runs at once, and close heavy apps first: the generator shares the host. If the
-  host swaps, k6 stalls and the run fails for reasons unrelated to the server. A note is printed when a
-  run fails while server CPU stayed below 85%.
-- Keep k6 users below about (free MB ÷ 0.3) (`free -m`).
+  host runs short of memory, the generator stalls, and so does the server: its first touch of new memory
+  waits behind the host's swap writes (seen at 200k users, 2026-11-11). The run then fails for reasons
+  unrelated to the server. A note is printed when a run fails while server CPU stayed below 85%. A low
+  `vm.swappiness` (e.g. 10) makes the host drop file cache before swapping, which helps a little; record
+  host changes like that in `NOTES`.
+- Keep k6 users below about (free MB ÷ 0.3) and `users` below about (free MB ÷ 0.022) (`free -m`),
+  leaving a few GB for the server and page cache.
 - Blast's "est. users" (req/s × 10.6, the leaderboard ratio) is inflated: this desktop core is faster than
   the benchmark's shared Xeon vCPU, and blast does not include the cost of holding hundreds of thousands of
   idle connections. Compare blast numbers with each other only.
@@ -131,4 +161,9 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P5.3c: restart catchup | – | – | – |
 | P5.4: group off | – | 150,000 (418 MB) | 30,472 (-0%), n=3 |
 | P5.4: group on | – | 150,000 (420 MB) | 45,018 (+48%), n=3 |
+| P5.4: users step | – | 200,000 (451 MB) | – |
+| P5.7: hold_pages 15000 | – | 150,000 (415 MB) | 46,284 (+3%), n=3 |
+| P5.7: hold_pages 4000 | – | 150,000 (418 MB) | 40,831 (-12%), n=3 |
+| P5.5: feed plain | – | 200,000 (453 MB) | 43,079 (+6%), n=6 |
+| P5.5: feed range | – | 200,000 (442 MB) | 50,609 (+17%), n=5 |
 <!-- results:end -->

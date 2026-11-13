@@ -34,7 +34,7 @@ const char *app_db_mode(void) {
                                         : "sqlite-auto";
   const char *locking = APP_DB_CKPT == 2 ? "unix-excl" : APP_DB_EXCL ? "exclusive" : "normal";
   snprintf(m, sizeof m, "%s reads, %s VFS, %s checkpoints%s, %s locking, cache %d KiB, %s JWT, stock SQLite (%s)",
-           APP_DB_DIRECT ? "direct" : "SQL", APP_DB_VFS ? "cursed-wal" : "stock", ckpt,
+           APP_DB_DIRECT ? "direct" : APP_DB_TURBO ? "turbo" : "SQL", APP_DB_VFS ? "cursed-wal" : "stock", ckpt,
            APP_DB_WAL_DROP ? " + WAL page drop" : "", locking, (int)APP_DB_CACHE_KIB,
            APP_JWT_SCALAR ? "scalar" : jwt_engine(),
            APP_SQLITE_LINK ? "separate unit, public API only" : "one unit with the engine");
@@ -164,17 +164,18 @@ int app_init(const char *db_path, const char *secret, char *err, size_t errn) {
   eng_default_opts(&o);
   // build-time cursedness (cursed.sh): what the engine does to SQLite
   o.direct_reads = APP_DB_DIRECT;               // 0: the spec's prepared SELECTs
+  o.turbo_reads = APP_DB_TURBO;                 // 1: ... run by cursed-sqlite-turbo's qc plans
   o.wal_coalesce = APP_DB_VFS;                  // 0: SQLite's own unix VFS
   o.exclusive = APP_DB_EXCL;                    // 0: locking_mode=NORMAL
   o.ckpt_thread = APP_DB_CKPT == 2;             // 2: checkpoint thread + write gate: a pass every 1,024 frames, the
   if (o.ckpt_thread) {                          //    WAL restarted at 8,192 (32 MB; was 4,096 / 32,768 = 128 MB). Every
     o.ckpt_frames = 1024;                       //    frame past the restart is a fresh page-cache page, and at the box's
     o.ckpt_restart = 8192;                      //    memory wall the OOM killer fired on such a WAL write. Xeon at ~24k
-    // nice 19: on 1 vCPU a nice-0 thread takes half the CPU from the loop for each 300-430 ms pass; at the memory
-    // wall that stall left every connection's next request unread in the kernel and the OOM killer took the server
-    // (2 of 5 and 2 of 3 five-minute edge holds, 8 rings, ~29k req/s; nice 19: 3 of 3 held, TCP memory <= 2 MB,
-    // p99 60-177 ms; wall-280k). Costs held writes instead (drains up to ~1.1 s), which stay inside p99 < 1 s
-    o.ckpt_nice = 19;
+    // nice 10: at nice 0 the thread took half the single vCPU from the loop for each 300-430 ms pass, and at the memory
+    // wall that stall turned fatal (2 of 5 five-minute edge holds died; wall-280k). At nice 19 it starves once the
+    // CPU is saturated (#278): with a nice-0 burner on box1 its passes reached 3.7 s, 100 of 159 write holds timed
+    // out and p99 was 2.6 s. Nice 10 in the same run: p99 150 ms, 0 timeouts, WAL <= 34 MB (exp1419-1421)
+    o.ckpt_nice = 10;
   }                                             //    req/s: 4,096 held writes 8x as often, p99 131 ms; 8,192: 77 (exp1132/1140)
   if (APP_DB_CKPT == 1) o.ckpt_frames = 16384;  // 1: inline PASSIVE after the replies
   if (APP_DB_CKPT == 0) o.ckpt_frames = 0;      // 0: SQLite's own wal_autocheckpoint (1000 frames)

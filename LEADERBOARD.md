@@ -226,7 +226,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 147 | java-raw-agrison | #101 | Java (raw NIO, FFM SQLite) | **65,000** | 6,387 | 99 | 443 | 0.00 | 81 | 118 | 731 | 2026-10-27 |
 | 147 | lean-c-iouring-loafecho | #239 | C (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,399 | 32 | 56 | 0.00 | 28 | 41 | 605 | 2026-11-01 |
 | 147 | go-fasthttp-savak1990 | #106 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,397 | 45 | 66 | 0.00 | 66 | 96 | 875 | 2026-11-05 |
-| 147 | cpp-io_uring-0329-at | #412 | C++ (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,394 | 91 | 196 | 0.00 | 35 | 51 | 397 | 2026-11-12 |
+| 147 | cpp-io_uring-0329-at | #412 | C++ (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,391 | 109 | 221 | 0.00 | 31 | 45 | 401 | 2026-11-13 |
 | 160 | bun-elysia-shashishsoni | #59 | Bun (Elysia) | **64,000** | 6,300 | 14 | 75 | 0.00 | 89 | 131 | 1,507 | 2026-10-27 |
 | 161 | csharp-aspnetcore-maks-march | #27 | C# (ASP.NET Core) | **63,000** | 6,136 | 417 | 757 | 0.00 | 87 | 131 | 925 | 2026-10-27 |
 | 161 | csharp-aspnetcore-devv-guru | #195 | C# (ASP.NET Core, Native AOT) | **63,000** | 6,156 | 202 | 679 | 0.00 | 79 | 119 | 1,081 | 2026-10-29 |
@@ -828,10 +828,10 @@ and a 1.6 s p99 at 40,000.
 ᶜ **C io_uring #239 is connection-capped at ~65k, not CPU-bound.** At 65,000 it ran at 28 % CPU (32 ms p95, 56 ms p99,
 0 errors). From 68,000 up, connections past the cap got EOF / `connection reset by peer` (5.2 % at 68k, 9.1 % at 70k,
 24.6 % at 80k) while CPU stayed at 37–51 %. Its fixed-file table is sized from `RLIMIT_NOFILE` (server.c:1117), one slot
-per connection. **C++ io_uring #412** (`2598291`, held, not merged: accepts tokens without `exp`) is capped at the same
-point: at 65,000 it ran at 35 % CPU (91 ms p95, 196 ms p99, 0 errors, 397 MB); 68,000, 70,000 and 80,000 failed on EOF /
-`connection reset by peer` (5.5 %, 9.3 %, 24.8 %) at 40–60 % CPU. Its completion tag keeps only 16 bits of the
-connection slot (main.cpp `ud()`), so connections past slot 65,535 never see their reads.
+per connection. **C++ io_uring #412** (`7315af0`) is capped at the same point: at 65,000 it ran at 31 % CPU (109 ms
+p95, 221 ms p99, 0 errors, 401 MB); 68,000, 70,000 and 80,000 failed on EOF / `connection reset by peer` (5.5 %, 9.3 %,
+24.8 %) at 37–56 % CPU. `7315af0` widened the completion tag's slot to 24 bits, but the connection table is still sized
+from `RLIMIT_NOFILE` minus 128 (main.cpp:643), and systemd gives 65,535. Its earlier `2598291` run also held 65,000.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute
@@ -1010,7 +1010,7 @@ committed in this repo.
 - **Tokens without `exp` accepted** (SPEC requires rejecting them): java-nio #88, quarkus #67 (SmallRye
   grace), kotlin #83, scala #107, node-uws #102, dart #46, go-champ3oy #76, pypy #84 (deliberately), bash #89,
   go-gnet #38, kotlin-ktor #36, python-fastapi-granian #41, go-stdlib #44, kotlin-ktor-C-Hatton #45, go-epoll-damianoneill #52,
-  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, r-plumber2 #242, c-iouring-marwanabdelhameed #270, cpp-io_uring-0329-at #412 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, spice-ngspice #220 in `23d5dd7`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, java-jdkhttpserver #209 in `89e75e0`, c-epoll-patrickryankenneth #246 in `f9cf266`, kotlin-trikeshed #128 in `2fb010a`, rust-iouring-tbsvttr #313 in `bfc4be0`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
+  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, r-plumber2 #242, c-iouring-marwanabdelhameed #270 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, spice-ngspice #220 in `23d5dd7`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, java-jdkhttpserver #209 in `89e75e0`, c-epoll-patrickryankenneth #246 in `f9cf266`, kotlin-trikeshed #128 in `2fb010a`, rust-iouring-tbsvttr #313 in `bfc4be0`, cpp-io_uring-0329-at #412 in `7315af0`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
 - **Kotlin Ktor #36 (and #53, based on it) commit `gradle/wrapper/gradle-wrapper.jar`**. Arjay ruled (2026-10-26) that
   the standard Gradle wrapper jar is fine and not a prebuilt binary under rule 10. Kotlin Ktor #36 also returned a few HTTP 500s on writes under load (1–5 per probe,
   0 in the scored hold); its StatusPages handler doesn't log the exception. kotlin-springboot #66 commits the same

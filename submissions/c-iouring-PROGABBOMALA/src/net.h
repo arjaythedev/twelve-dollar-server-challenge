@@ -173,6 +173,27 @@ static void ring_flush(struct ring_ctx *r) {
   }
 }
 
+/* submit only, nothing is collected */
+static void ring_submit(struct ring_ctx *r) {
+  uint32_t n = ring_unsubmitted(r);
+  if (!n) return;
+  __atomic_store_n(r->sq_ktail, r->sq_tail, __ATOMIC_RELEASE);
+  for (;;) {
+    int rc = (int)syscall(__NR_io_uring_enter, r->fd, n, 0, 0, NULL, 0);
+    if (rc >= 0 || errno == EBUSY || errno == EAGAIN) return;
+    if (errno != EINTR) ring_die("io_uring_enter");
+  }
+}
+
+/* enters again while an enter still brings a full load */
+static void ring_poll(struct ring_ctx *r) {
+  for (int k = 0; k < 32; k++) {
+    uint32_t before = __atomic_load_n(r->cq_ktail, __ATOMIC_ACQUIRE);
+    ring_flush(r);
+    if (__atomic_load_n(r->cq_ktail, __ATOMIC_ACQUIRE) - before < 16) break;
+  }
+}
+
 static void ring_wait(struct ring_ctx *r, unsigned min_complete, long timeout_ns) {
   uint32_t n = ring_unsubmitted(r);
   __atomic_store_n(r->sq_ktail, r->sq_tail, __ATOMIC_RELEASE);

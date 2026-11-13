@@ -185,8 +185,9 @@ nonisolated struct Reads: ~Copyable, ~Sendable {
             }
         }
 
-        // Each row's fixed part and two integers take under 112 bytes, and an escaped byte at most 6.
-        let bound = 12 + 112 * n + 6 * text.count
+        // Each row's fixed part and two integers take under 112 bytes, and an escaped byte at most 6; an integer is
+        // written with 32 bytes of room.
+        let bound = 12 + 112 * n + 6 * text.count + 32
         let t = text.span
         body.append(maximum: bound) { out in
             out.append("{\"posts\":[")

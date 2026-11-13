@@ -83,7 +83,9 @@
   rules out reading a row after its cursor moved on; `Record` decodes SQLite's row format in place. The feed takes its
   20 entries off `posts_created_at_id_idx`, reads the posts in ascending id order (so SQLite's seek from one post to
   the next is a step along the leaf), then their authors, counts their likes in one walk of `likes_post_id_idx`, and
-  writes the response in one reservation, escaping 32 bytes at a time. That walk steps SQLite's cursor entry by entry
+  writes the response in one reservation, checking 32 bytes at a time for a byte to escape; a string's last bytes
+  are copied as overlapping 16- or 8-byte words too, and its integers with one store, so only a byte that needs
+  escaping goes one at a time. That walk steps SQLite's cursor entry by entry
   (`sqlite3BtreeNext`), and its seek key is a one-column one: an `UnpackedRecord` and its `Mem`, built in the
   server's own memory at offsets for the pinned 3.54.1. At startup the server checks that seeks with it count what the
   two-column key does, and keeps the two-column key if they don't, saying so in the log. The
@@ -99,7 +101,13 @@
   steady state no response allocates. Error answers are static strings written the same way.
 - **The JSON reader builds nothing.** Request bodies and token claims are checked whole and only the members the
   caller names are kept, as places in the bytes; strings are read in place and copied only when they must outlive
-  the request (a new post's text, the token's username, which the response echoes).
+  the request (a new post's text, the token's username, which the response echoes). Claims laid out as the seed's
+  tokens lay them out (`sub`, `username`, `iat`, `exp`, in that order, no whitespace or escapes) are read without it:
+  their fixed parts compared as 8-byte words, their numbers as digits; any other claims go through the reader.
+- **Bytes in bulk on the request path.** A byte is searched for 16 at a time, inline (a call to `memchr` cost more
+  than the search on a request head's short spans); a header name is checked against the token characters as a
+  128-bit set, and the request target 8 bytes at a time; base64url decodes 16 characters a step. SHA-256's 64 rounds
+  are written out 16 at a time, so its message schedule stays in registers instead of being indexed through memory.
 - **Half-closed and pipelined requests.** A client that half-closes gets the answers to what it sent before the
   connection closes; pipelined requests are answered in order.
 - **Shared with the author's million-users entry**: the HTTP parser, router, JSON, HS256 and buffers, written with

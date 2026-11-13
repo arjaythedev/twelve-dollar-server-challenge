@@ -910,6 +910,9 @@ file's page cache is dropped only after a checkpoint pass that copied the whole 
 until the WAL is fully backfilled) held **276,000** at 77 % CPU (26,371 req/s, p95 29.0 / p99 291.3 ms, 0 errors,
 663 MB; the 290k 5-minute hold failed on p99 4.59 s, 300k failed the 2-minute probe on p99 1.52 s, 320k on p99 8.01 s).
 None of those earlier #398 heads was above #394's 290,000 (`fb7a386` tied it); `8921ed9` is, so #398 was merged there.
+Its next follow-up **#427** (`229fa4a`, 2026-11-13: `HOLDMS` raised from 250 to 700 ms) held **285,000** at 80 % CPU
+(27,130 req/s, p95 39.8 / p99 429.4 ms, 0 errors, 1,165 MB; the 300k 5-minute hold failed on p99 1.66 s, 310k failed
+the 2-minute probe on p99 2.82 s, 320k on p99 4.15 s), below #398's 300,000, so #427 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

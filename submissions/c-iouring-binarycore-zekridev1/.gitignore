@@ -1,0 +1,7 @@
+bin/
+vendor/
+pgo/
+*.gcda
+*.gcno
+server.log
+*.o

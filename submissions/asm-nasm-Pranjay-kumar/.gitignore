@@ -1,0 +1,6 @@
+bin/
+vendor/
+deps/
+*.db
+*.db-shm
+*.db-wal

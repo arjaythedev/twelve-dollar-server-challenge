@@ -8,6 +8,8 @@ align 16
 v_quote:  times 16 db '"'
 v_bslash: times 16 db '\'
 v_ctl:    times 16 db 0x1f
+align 16
+v_nl:     times 16 db 10
 
 section .text
 
@@ -26,11 +28,26 @@ global u64_parse
 
 ; -----------------------------------------------------------------------------
 ; append_bytes(rdi=dst, rsi=src, rdx=len) -> rax = dst+len
+; rep movsb has a fixed startup cost, so short copies (most of them here: the
+; JSON keys and response header fragments) use a plain byte loop instead.
 ; -----------------------------------------------------------------------------
 append_bytes:
     mov rax, rdi
     test rdx, rdx
     jz .done
+    cmp rdx, 64
+    jae .bulk
+    mov rcx, rdx
+.copy:
+    mov r8b, [rsi]
+    mov [rdi], r8b
+    inc rsi
+    inc rdi
+    dec rcx
+    jnz .copy
+    mov rax, rdi
+    ret
+.bulk:
     mov rcx, rdx
     rep movsb
     mov rax, rdi
@@ -297,27 +314,68 @@ find_byte:
 
 ; -----------------------------------------------------------------------------
 ; find_header_end(rdi=ptr, rsi=len) -> rax = offset of CRLFCRLF or -1
+; Finds CRLFCRLF by locating each LF 16 bytes at a time (SSE2) and checking the
+; three bytes before it, so the common ~200-byte header is scanned in a dozen
+; steps instead of ~800 byte comparisons.
 ; -----------------------------------------------------------------------------
 find_header_end:
     cmp rsi, 4
     jb .no
-    mov rcx, 0
+    movdqa xmm3, [rel v_nl]
+    xor ecx, ecx
+.scan16:
+    lea rdx, [rcx+16]
+    cmp rdx, rsi
+    ja .tail
+    movdqu xmm0, [rdi+rcx]
+    pcmpeqb xmm0, xmm3
+    pmovmskb r9d, xmm0
+    test r9d, r9d
+    jz .next16
+.bits:
+    bsf r10d, r9d
+    lea r11, [rcx+r10]
+    cmp r11, 3
+    jb .drop
+    cmp byte [rdi+r11-1], 13
+    jne .drop
+    cmp byte [rdi+r11-2], 10
+    jne .drop
+    cmp byte [rdi+r11-3], 13
+    jne .drop
+    lea rax, [r11-3]
+    ret
+.drop:
+    mov r10d, r9d
+    dec r10d
+    and r9d, r10d
+    jnz .bits
+.next16:
+    add rcx, 16
+    jmp .scan16
+.tail:
+    ; A CRLFCRLF whose LF sits in the tail may have started up to three
+    ; bytes before the last scanned block, so rewind before the byte loop.
+    cmp rcx, 3
+    jb .tail_ready
+    sub rcx, 3
+.tail_ready:
     mov r8, rsi
     sub r8, 3
-.loop:
+.tail_loop:
     cmp rcx, r8
     jae .no
     cmp byte [rdi+rcx], 13
-    jne .next
+    jne .tail_next
     cmp byte [rdi+rcx+1], 10
-    jne .next
+    jne .tail_next
     cmp byte [rdi+rcx+2], 13
-    jne .next
+    jne .tail_next
     cmp byte [rdi+rcx+3], 10
     je .yes
-.next:
+.tail_next:
     inc rcx
-    jmp .loop
+    jmp .tail_loop
 .yes:
     mov rax, rcx
     ret

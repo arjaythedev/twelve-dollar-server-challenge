@@ -16,7 +16,11 @@ if [ ! -f "vendor/$SQLITE/sqlite3.c" ]; then
   rm -f "vendor/$SQLITE.zip"
 fi
 
-SQLITE_FLAGS="-DSQLITE_THREADSAFE=1 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0
+# THREADSAFE=0: every worker process is single-threaded and owns its own
+# connection (it forks before opening the database), so SQLite's per-call
+# mutexes only cost time. File locking still serialises writers across
+# processes, which is what WAL needs.
+SQLITE_FLAGS="-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0
   -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_PROGRESS_CALLBACK
   -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_LIKE_DOESNT_MATCH_BLOBS
   -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_USE_ALLOCA -DHAVE_USLEEP=1 -DHAVE_FDATASYNC=1

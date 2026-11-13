@@ -553,22 +553,18 @@ accept_new:
     push r15
     sub rsp, 40
 .acc:
-    mov eax, SYS_accept
+    mov eax, SYS_accept4
     mov edi, [rel g_listen_fd]
     xor esi, esi
     xor edx, edx
+    mov r10d, SOCK_NONBLOCK
     syscall
     test rax, rax
     js .out                     ; EAGAIN: queue drained
     mov r13d, eax
     cmp r13d, [rel g_conn_cap]
     jae .reject
-    ; non-blocking so neither read nor write can stall the event loop
-    mov eax, SYS_fcntl
-    mov edi, r13d
-    mov esi, F_SETFL
-    mov edx, O_NONBLOCK
-    syscall
+    ; already non-blocking, so neither read nor write can stall the loop
     mov eax, SYS_setsockopt
     mov edi, r13d
     mov esi, IPPROTO_TCP
@@ -662,13 +658,12 @@ conn_read:
     jnz .too_big
     jmp .read
 .have_space:
-    mov eax, SYS_recvfrom
+    mov eax, SYS_read
     mov edi, r12d
     mov rsi, [rbx+CONN_BUF]
     add rsi, [rbx+CONN_LEN]
-    mov r10d, MSG_DONTWAIT
-    xor r8d, r8d
-    xor r9d, r9d
+    mov rdx, [rbx+CONN_CAP]
+    sub rdx, [rbx+CONN_LEN]
     syscall
     test rax, rax
     jg .got
@@ -682,6 +677,22 @@ conn_read:
     add [rbx+CONN_LEN], rax
     mov rcx, [rel g_now_ms]
     mov [rbx+CONN_LAST], rcx
+    ; Run whatever is complete right away. The listener is level-triggered, so
+    ; bytes still queued in the socket will report again: another recv() only
+    ; to observe EAGAIN would be one wasted syscall per request. If the buffer
+    ; did fill up, grow it now instead, because a request larger than the
+    ; buffer may have no further byte coming to wake us.
+    mov rdi, r12
+    call conn_process
+    test eax, eax
+    jnz .close
+    mov rax, [rbx+CONN_CAP]
+    cmp [rbx+CONN_LEN], rax
+    jb .out
+    mov rdi, r12
+    call conn_grow
+    test eax, eax
+    jnz .too_big
     jmp .read
 .eof:
     mov rdi, r12
@@ -751,6 +762,7 @@ conn_process:
     add rdi, r13
     mov rsi, r14
     lea rdx, [rbp-160]
+    mov rcx, rax                ; header end already found above
     call parse_request
     test rax, rax
     js .bad
@@ -778,7 +790,16 @@ conn_process:
     sub rax, r13
     cmp rax, [rbx+CONN_CAP]
     jb .compact                 ; wait for more bytes
-    jmp .bad                    ; a header this large can never be valid
+    ; The buffer is full and the request is still incomplete. Grow it so a
+    ; header larger than CONN_INIT_CAP still fits instead of being rejected.
+    mov rax, [rbx+CONN_CAP]
+    cmp rax, REQ_SIZE
+    jae .bad                    ; a request this large can never be valid
+    mov rdi, r12
+    call conn_grow
+    test eax, eax
+    jnz .bad
+    jmp .compact
 .compact:
     mov rdx, [rbx+CONN_LEN]
     sub rdx, r13
@@ -967,7 +988,9 @@ send_simple:
 
 
 ; -----------------------------------------------------------------------------
-; parse_request(rdi=req, rsi=len, rdx=out) -> rax = total bytes or negative
+; parse_request(rdi=req, rsi=len, rdx=out, rcx=header end) -> rax = total bytes
+; The caller already located the CRLFCRLF to decide the request was complete,
+; so it is passed in instead of scanning the header a second time.
 ; -----------------------------------------------------------------------------
 parse_request:
     push rbp
@@ -981,17 +1004,13 @@ parse_request:
     mov r12, rdi
     mov r13, rsi
     mov r14, rdx
+    mov r15, rcx
     mov rdi, r14
     xor eax, eax
     mov ecx, 9
     rep stosq
-    mov rdi, r12
-    mov rsi, r13
-    call find_header_end
-    cmp rax, -1
-    je .bad
-    mov r15, rax
-    ; request-line end
+    test r15, r15
+    js .bad
     mov rdi, r12
     mov rsi, r13
     mov edx, 13

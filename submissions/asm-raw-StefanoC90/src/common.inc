@@ -6,7 +6,6 @@
 %define SYS_write           1
 %define SYS_close           3
 %define SYS_writev          20
-%define SYS_recvfrom        45
 %define SYS_socket          41
 %define SYS_accept          43
 %define SYS_accept4         288
@@ -29,6 +28,7 @@
 
 %define AF_INET             2
 %define SOCK_STREAM         1
+%define SOCK_NONBLOCK       0x800
 %define SOL_SOCKET          1
 %define SO_REUSEADDR        2
 %define SO_REUSEPORT        15
@@ -56,7 +56,11 @@
 ; ---- event loop ----
 %define MAX_CONN            65536
 %define MAX_EVENTS          256
-%define CONN_INIT_CAP       2048
+; Initial per-connection read buffer. A request line plus headers plus a
+; 500-character JSON body is under 1 KiB for every client in the benchmark
+; model, and anything larger grows on demand, so this is only a floor: at
+; 130k connections it is the difference between ~130 MB and ~260 MB.
+%define CONN_INIT_CAP       1024
 %define IDLE_TIMEOUT_MS     75000
 %define SWEEP_INTERVAL_MS   2000
 

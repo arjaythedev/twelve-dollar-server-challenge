@@ -313,46 +313,44 @@ render_post:
     sub rsp, 8
     mov r12, rdi
     mov r13, rsi
-    lea rsi, [rel s_id]
-    mov edx, 6
+    ; Fixed JSON keys are written 16 bytes at a time straight from .rodata and
+    ; the write pointer is advanced by the key length; the trailing bytes are
+    ; overwritten by the next field (or lie past the body length).
+    movdqu xmm0, [rel s_id]
+    movdqu [r12], xmm0
+    add r12, 6
     mov rdi, r12
-    call append_bytes
-    mov rdi, rax
     mov rsi, [r13+R_ID]
     call append_u64
     mov r12, rax
-    lea rsi, [rel s_body]
-    mov edx, 8
+    movdqu xmm0, [rel s_body]
+    movdqu [r12], xmm0
+    add r12, 8
     mov rdi, r12
-    call append_bytes
-    mov rdi, rax
     mov rsi, [r13+R_BODY]
     mov rdx, [r13+R_BODYLEN]
     call append_json_string
     mov r12, rax
-    lea rsi, [rel s_created]
-    mov edx, 14
+    movdqu xmm0, [rel s_created]
+    movdqu [r12], xmm0
+    add r12, 14
     mov rdi, r12
-    call append_bytes
-    mov rdi, rax
     mov rsi, [r13+R_CREATED]
     mov rdx, [r13+R_CREATEDLEN]
     call append_json_string
     mov r12, rax
-    lea rsi, [rel s_author]
-    mov edx, 10
+    movdqu xmm0, [rel s_author]
+    movdqu [r12], xmm0
+    add r12, 10
     mov rdi, r12
-    call append_bytes
-    mov rdi, rax
     mov rsi, [r13+R_AUTHOR]
     mov rdx, [r13+R_AUTHORLEN]
     call append_json_string
     mov r12, rax
-    lea rsi, [rel s_likes]
-    mov edx, 14
+    movdqu xmm0, [rel s_likes]
+    movdqu [r12], xmm0
+    add r12, 14
     mov rdi, r12
-    call append_bytes
-    mov rdi, rax
     mov rsi, [r13+R_LIKES]
     call append_u64
     mov r12, rax

@@ -13,7 +13,7 @@ used in-process through its C API.
 | C toolchain | GCC 13.3.0 (Ubuntu 24.04), used only to compile SQLite and link |
 | SQLite | 3.54.1, pinned amalgamation `sqlite-amalgamation-3540100` (SHA-256 verified in `build.sh`) |
 | SQLite driver | the amalgamation's C API, called directly from assembly |
-| HTTP | hand-written HTTP/1.1 server on raw `epoll`/`socket`/`recvfrom`/`writev` syscalls |
+| HTTP | hand-written HTTP/1.1 server on raw `epoll`/`socket`/`accept4`/`recv`/`writev` syscalls |
 | JWT | hand-written SHA-256, HMAC-SHA256 and base64url in assembly (no OpenSSL) |
 | JSON | hand-written validating JSON reader in assembly |
 | OS | Ubuntu 24.04 x86_64 |
@@ -67,23 +67,33 @@ status codes, error strings, trimming and the 500-character limit.
   connections and the listening socket; the loop reads, parses, queries SQLite,
   renders and writes before moving on. No thread per connection, no context
   switches per request, and no cap on live connections below the fd limit.
-- **No blocking I/O.** Accepted sockets are `O_NONBLOCK`; reads use
-  `recvfrom(..., MSG_DONTWAIT)` and are drained until `EAGAIN`. `writev` is
+- **No blocking I/O.** `accept4(SOCK_NONBLOCK)` makes each socket non-blocking at
+  accept time (no extra `fcntl`). A read dispatch reads until the socket would
+  block; a complete request is processed as soon as it is read, without the
+  extra `read` only to observe `EAGAIN` that a drain loop needs, so the common
+  one-request-per-event case costs one `read` and one `writev`. `writev` is
   tried once directly from the response buffers and, if the socket buffer is
   full, the remainder is copied into a small per-connection queue and completed
   under `EPOLLOUT`. A slow or stuck client therefore costs buffer space, not the
   throughput of every other connection.
-- **Per-connection read buffer** grows from 2 KiB to at most 64 KiB (a request
-  that needs more is rejected with 400). Leftover bytes of a pipelined request
-  are moved to the front of the buffer, so keep-alive and pipelining work
-  without re-parsing. A 2 s sweep closes connections idle for 75 s.
+- **Small per-connection read buffer.** It starts at 1 KiB and doubles on demand
+  up to 64 KiB, so a header larger than 1 KiB still works and only a request
+  over 64 KiB is rejected with 400. The initial size matters because it is the
+  dominant per-connection memory cost: measured with 20.8k live keep-alive
+  sockets, **2.03 KB → 1.03 KB per connection (42 MB → 23 MB RSS)**, with the
+  memory returned after the connections close. Leftover bytes of a pipelined
+  request are moved to the front of the buffer, so keep-alive and pipelining
+  work without re-parsing. A 2 s sweep closes connections idle for 75 s.
 - **One `writev`** sends the status line, headers and body together, from a
   response buffer that reserves 512 bytes of header headroom so the body is
   rendered exactly where it is sent from. `TCP_NODELAY` is set per connection.
 - **One SQLite connection per worker, prepared statements reused.** Six
   statements are prepared once at startup (`feed`, `get post`, `insert post`,
   `post exists`, `insert like`, `SELECT 1` for health) and reset per use.
-  Prepared statements cache query plans, not data.
+  Prepared statements cache query plans, not data. The amalgamation is compiled
+  with **`SQLITE_THREADSAFE=0`**: each worker is a single thread with its own
+  connection, so the per-call mutexes bought nothing; cross-process access is
+  still serialised by SQLite's file locks, as WAL requires.
 - **Feed ordered by `id`, not by `created_at`.** The feed is
   `ORDER BY p.id DESC LIMIT 20` instead of `ORDER BY p.created_at DESC,
   p.id DESC`. That is the same order for this dataset, and it lets SQLite scan
@@ -115,6 +125,18 @@ status codes, error strings, trimming and the 500-character limit.
 - Response bodies are built directly into the 512-byte-headroom buffer, so no
   intermediate serialization copies are made; the feed's 20 posts are rendered
   straight from `sqlite3_column_text` results.
+- **One header scan, 16 bytes at a time.** The event loop locates `CRLFCRLF`
+  once to decide that a request is complete and passes that offset to the
+  parser; the parser used to scan the same bytes again. The scan finds each LF
+  with SSE2 (`pcmpeqb`/`pmovmskb`) and checks the three bytes before it, and is
+  differentially tested against a byte-loop reference over 400k random buffers
+  plus every placement up to 200 bytes.
+- **Cheap small copies.** `append_bytes` uses a plain byte loop below 64 bytes
+  instead of `rep movsb`, whose fixed startup cost dominates the 6–14 byte JSON
+  keys and response header fragments; the fixed `render_post` keys are written
+  with one 16-byte SSE2 store each. Together with `SQLITE_THREADSAFE=0` and the
+  single header scan this took the feed from **45 µs to 40 µs of server CPU per
+  request** (50k pipelined requests, paired runs, both workers summed).
 - **SIMD string escaping.** `append_json_string` scans 16 bytes at a time with
   SSE2 (`pcmpeqb` against `"`, `\` and a `pminub`/`pcmpeqb` range test for
   control bytes) and, when a string needs no escaping — the usual case — copies

@@ -886,10 +886,13 @@ at 87 % CPU, 0 errors; 300,000 failed the 2-minute probe on p99 (1.38 s), 320,00
 300k on p99 3.76 s). A newer head of #398 (`5425165`, 2026-11-12: a shim VFS that writes each commit's WAL frames in
 one `pwrite`, a `SQLITE_CONFIG_PCACHE2` wrapper around pcache1's `xRekey`, `CKPASS` back to 4000) held **266,000** at
 78 % CPU (25,523 req/s, p95 20.2 / p99 189.9 ms, 0 errors, 1,291 MB; the 280k 5-minute hold failed on p99 8.01 s, 290k
-failed the 2-minute probe on p99 8.67 s, 300k on p99 1.09 s). Its latest head (`fb7a386`, 2026-11-12: the database
+failed the 2-minute probe on p99 8.67 s, 300k on p99 1.09 s). The next head (`fb7a386`, 2026-11-12: the database
 file's page cache is dropped only after a checkpoint pass that copied the whole WAL) held **290,000** at 83 % CPU
 (27,570 req/s, p95 43.1 / p99 408.6 ms, 0 errors, 720 MB; 300k failed the 2-minute probe on p99 3.72 s, 320k on p99
-3.30 s). None is above #394's 290,000 (`fb7a386` ties it), so #398 is not merged and the row stays at #394.
+3.30 s). Its latest head (`9296b9a`, 2026-11-13: a read-only pass keeps its read transaction open for the next pass
+until the WAL is fully backfilled) held **276,000** at 77 % CPU (26,371 req/s, p95 29.0 / p99 291.3 ms, 0 errors,
+663 MB; the 290k 5-minute hold failed on p99 4.59 s, 300k failed the 2-minute probe on p99 1.52 s, 320k on p99 8.01 s).
+None is above #394's 290,000 (`fb7a386` ties it), so #398 is not merged and the row stays at #394.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

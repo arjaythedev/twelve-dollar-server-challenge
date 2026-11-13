@@ -42,23 +42,29 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
-  ring 0 waits for 64 completions or 1 ms (`WAIT_MIN`, `WAIT_US`), whichever comes first, so
+  ring 0 waits for 64 completions or 2 ms (`WAIT_MIN`, `WAIT_US`), whichever comes first, so
   bigger batches share one commit and a pass never spins; while a commit group is open the wait
   ends at the group's deadline, and a batch of fewer than 32 completions (`CG_MIN`) commits at
   once, so a lone request is answered within its batch (the heads before `2703df3` let it wait
-  for the idle timeout, which starved the PGO training client on the box). The window stays at
-  1 ms on purpose. A 2 ms window is 3-4 % less CPU on the loop thread locally (300,000
-  connections, user+sys of the thread), but on this kernel, with deferred task work
-  (`IORING_SETUP_DEFER_TASKRUN`) and a wait for many completions, a loop that sleeps long with
-  completions pending leaves requests unread in their sockets: locally a 2.5 ms window gave
-  6,000 server sockets with bytes in their receive queue and nothing queued in user space (p99
-  1.4 s), a cliff that moves with the product of window and count (3 ms with 128 falls off it,
-  3 ms with 64 nearly, 2 ms with 64 did not). On the box, whose core is slower and busier, the
-  2 ms window (`09b27be`) held 260,000 flat but failed the 270,000 probe on p99 (2.15 s at 78 %
-  CPU) where 1 ms (`1e7fb4d`) held 290,000: the box reaches the same regime one step earlier.
-  The count is 64 rather than 256 for the margin; at this load the batch is bounded by the
-  window, so it costs nothing. Cooperative task work instead of deferred has no cliff but costs
-  13-20 % more CPU, so it is not used.
+  for the idle timeout, which starved the PGO training client on the box).
+- **Every ring is entered twice per batch** (`SWEEP2`). With deferred task work
+  (`IORING_SETUP_DEFER_TASKRUN`) a ring's completions are posted only inside an enter on that
+  ring, and the one non-blocking enter per batch on the rings the loop does not wait on does not
+  always post them. Found with a load generator holding 300,000 connections (one per user) and
+  batches stretched to 3 ms, which is what the box's busier core does at 1 ms: ~6,000 server
+  sockets with an unread request, nothing queued in user space, p99 1.4 s with 0 errors, and,
+  with each response tagged by the ring that served it, every stuck request was on one of the
+  rings the loop did not wait on, one ring at a time for a second or more, never on ring 0. That
+  is the box's failure at 290,000-300,000 (`1e7fb4d`, `f4ec9c5`: p99 1.3-3.8 s, 0 errors, 78-84 %
+  CPU). Entering every ring again after the batch's database work, before the commit, posts
+  what the first enter left behind: the same run passes with p99 12 ms and no ring ever holds a
+  stuck request. A ring that rotates the wait instead also passes (p99 37 ms) but less well. The
+  second sweep costs 5 % of loop CPU at a 1 ms window; the 2 ms window it makes safe again is
+  10 % cheaper, so together they are 5 % under the 1 ms head (41.9 s against 44.2 s of loop CPU
+  for 3.0 M requests). Commit groups of 20 ms saved another 2 % of the cgroup's CPU but doubled
+  the softirq time on the server's core (the replies of a group leave as one burst), which on
+  the box is the same core, so groups stay at 3 ms. Cooperative task work instead of deferred
+  has no stuck rings either but costs 13-20 % more CPU.
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per
@@ -189,7 +195,10 @@ mostly idle sockets under `LimitNOFILE=65535`.
   consulted only on a cache miss) until the disk gives a restart. Before each pass the bulk
   thread reads the log sequentially ahead (`readahead`): a pass reads frames in page order,
   random in the file, and once the box's memory pressure has evicted them (they are clean once
-  written back) that would be a disk seek per frame.
+  written back) that would be a disk seek per frame. Between passes the same thread keeps the
+  database file's first 256 MB warm (`readahead` every 5 s, `DBWARM_MB`): a page SQLite's own
+  cache misses is then a copy, not a disk read on the loop. Pages already cached cost a lookup,
+  and it stops whenever MemAvailable is under 512 MB, so it never competes with reclaim.
   (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms limit: on the
   box the tail's sync of a few hundred random pages outlasted the limit, the log never restarted,
   and the last resort copied half a gigabyte on the loop once per probe, the one stall that

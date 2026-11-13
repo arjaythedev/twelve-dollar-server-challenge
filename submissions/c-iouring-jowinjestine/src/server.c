@@ -25,6 +25,7 @@
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
 static unsigned answers_per_pass = 2048, wait_min = 64;
+static int sweep2 = 1;
 static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
@@ -889,7 +890,8 @@ int main(int argc, char **argv) {
    * commit), but measured under a CPU quota they add 25-50 ms to p95 at high load: bigger
    * service bursts, more queueing variance. The tail is what the score is made of. */
   wait_min = (unsigned)env_long("WAIT_MIN", 64);
-  wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
+  sweep2 = (int)env_long("SWEEP2", 1);  /* the rings are entered a second time after the batch's database work */
+  wait_ns = (uint64_t)env_long("WAIT_US", 2000) * 1000ULL;
   ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
   ckpt_tail = (int)env_long("CKPT_TAIL", 64);
   hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
@@ -899,6 +901,8 @@ int main(int argc, char **argv) {
   NR_MAX = (unsigned)((want + nslots - 1) / nslots);
   if (NR_MAX < 1) NR_MAX = 1;
   if (NR_MAX > MAX_RINGS) NR_MAX = MAX_RINGS;
+  dbwarm_bytes = (size_t)env_long("DBWARM_MB", 256) << 20;
+  dbwarm_s = (uint64_t)env_long("DBWARM_S", 5);
   int cache_kib = (int)env_long("CACHE_KIB", 65536); /* 64 MB: the likes index (24 MB), the post tails and their indexes stay resident */
 
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
@@ -954,6 +958,19 @@ int main(int argc, char **argv) {
     unsigned ncq = reap_all();
     run_ready(); /* oldest first: what earlier batches read */
     ncq += read_rounds();
+    /* The second sweep. With deferred task work a ring's completions are posted only inside an
+     * enter on that ring, and one non-blocking enter per batch on the rings the loop does not
+     * wait on (step 1) does not always post them: on a 300,000-connection run whose batches
+     * were 3 ms long, one of those rings at a time kept thousands of requests unanswered for a
+     * second or more (the waited ring never did), and that is the rig's failure at 290-300k: p99
+     * of seconds with 0 errors at 78-84 % CPU. Entering every ring again after the batch's
+     * database work, before the commit, posts them; what it collects is answered in this batch. */
+    if (sweep2) {
+      for (unsigned i = 0; i < NR; i++) ring_enter(&R[i].r, 0, 0);
+      ncq += reap_all();
+      run_ready();
+      ncq += read_rounds();
+    }
     if (writes_ok && nheld) release_held();
     if (A.db.wrote && !tx_write_ns) tx_write_ns = t;
     /* Group commit across batches: a transaction that wrote stays open for up to CG_US (3 ms),

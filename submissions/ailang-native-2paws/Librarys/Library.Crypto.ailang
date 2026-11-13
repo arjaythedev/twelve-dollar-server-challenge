@@ -1,0 +1,778 @@
+// Library.Crypto.ailang — SHA-256, HMAC-SHA256, Base64URL, JWT HS256
+//
+// Software SHA-256 (FIPS 180-4). Single-threaded: compression state lives
+// in FixedPools. SHA-NI can replace SHA256 later without changing callers.
+//
+// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+LibraryImport.Arena
+LibraryImport.JSON
+
+FixedPool.CryptoSt {
+    "ktab": Initialize=0, CanChange=True
+    "wtab": Initialize=0, CanChange=True
+    "pad": Initialize=0, CanChange=True
+    "inited": Initialize=0, CanChange=True
+}
+
+FixedPool.SHA256H {
+    "h0": Initialize=0, CanChange=True
+    "h1": Initialize=0, CanChange=True
+    "h2": Initialize=0, CanChange=True
+    "h3": Initialize=0, CanChange=True
+    "h4": Initialize=0, CanChange=True
+    "h5": Initialize=0, CanChange=True
+    "h6": Initialize=0, CanChange=True
+    "h7": Initialize=0, CanChange=True
+}
+
+FixedPool.SHA256W {
+    "a": Initialize=0, CanChange=True
+    "b": Initialize=0, CanChange=True
+    "c": Initialize=0, CanChange=True
+    "d": Initialize=0, CanChange=True
+    "e": Initialize=0, CanChange=True
+    "f": Initialize=0, CanChange=True
+    "g": Initialize=0, CanChange=True
+    "h": Initialize=0, CanChange=True
+    "t1": Initialize=0, CanChange=True
+    "t2": Initialize=0, CanChange=True
+}
+
+FixedPool.JWTOut {
+    "uid": Initialize=0, CanChange=True
+    "name": Initialize=0, CanChange=True
+}
+
+Function.Crypto.U32 {
+    Input: n: Integer
+    Output: Integer
+    Body: {
+        ReturnValue(BitwiseAnd(n, 4294967295))
+    }
+}
+
+Function.Crypto.Rotr {
+    Input: x: Integer
+    Input: n: Integer
+    Output: Integer
+    Body: {
+        ux = BitwiseAnd(x, 4294967295)
+        left_n = Subtract(32, n)
+        hi = RightShift(ux, n)
+        lo = LeftShift(ux, left_n)
+        ReturnValue(BitwiseAnd(BitwiseOr(hi, lo), 4294967295))
+    }
+}
+
+Function.Crypto.Ch {
+    Input: x: Integer
+    Input: y: Integer
+    Input: z: Integer
+    Output: Integer
+    Body: {
+        ux = BitwiseAnd(x, 4294967295)
+        uy = BitwiseAnd(y, 4294967295)
+        uz = BitwiseAnd(z, 4294967295)
+        n_x = BitwiseXor(ux, 4294967295)
+        xy = BitwiseAnd(ux, uy)
+        nxz = BitwiseAnd(n_x, uz)
+        ReturnValue(BitwiseAnd(BitwiseXor(xy, nxz), 4294967295))
+    }
+}
+
+Function.Crypto.Maj {
+    Input: x: Integer
+    Input: y: Integer
+    Input: z: Integer
+    Output: Integer
+    Body: {
+        ux = BitwiseAnd(x, 4294967295)
+        uy = BitwiseAnd(y, 4294967295)
+        uz = BitwiseAnd(z, 4294967295)
+        xy = BitwiseAnd(ux, uy)
+        xz = BitwiseAnd(ux, uz)
+        yz = BitwiseAnd(uy, uz)
+        t = BitwiseXor(xy, xz)
+        ReturnValue(BitwiseAnd(BitwiseXor(t, yz), 4294967295))
+    }
+}
+
+Function.Crypto.BSIG0 {
+    Input: x: Integer
+    Output: Integer
+    Body: {
+        r2 = Crypto.Rotr(x, 2)
+        r13 = Crypto.Rotr(x, 13)
+        r22 = Crypto.Rotr(x, 22)
+        t = BitwiseXor(r2, r13)
+        ReturnValue(BitwiseXor(t, r22))
+    }
+}
+
+Function.Crypto.BSIG1 {
+    Input: x: Integer
+    Output: Integer
+    Body: {
+        r6 = Crypto.Rotr(x, 6)
+        r11 = Crypto.Rotr(x, 11)
+        r25 = Crypto.Rotr(x, 25)
+        t = BitwiseXor(r6, r11)
+        ReturnValue(BitwiseXor(t, r25))
+    }
+}
+
+Function.Crypto.SSIG0 {
+    Input: x: Integer
+    Output: Integer
+    Body: {
+        r7 = Crypto.Rotr(x, 7)
+        r18 = Crypto.Rotr(x, 18)
+        shr = RightShift(BitwiseAnd(x, 4294967295), 3)
+        t = BitwiseXor(r7, r18)
+        ReturnValue(BitwiseXor(t, shr))
+    }
+}
+
+Function.Crypto.SSIG1 {
+    Input: x: Integer
+    Output: Integer
+    Body: {
+        r17 = Crypto.Rotr(x, 17)
+        r19 = Crypto.Rotr(x, 19)
+        shr = RightShift(BitwiseAnd(x, 4294967295), 10)
+        t = BitwiseXor(r17, r19)
+        ReturnValue(BitwiseXor(t, shr))
+    }
+}
+
+Function.Crypto.LoadBE32 {
+    Input: buf: Address
+    Input: off: Integer
+    Output: Integer
+    Body: {
+        b0 = GetByte(buf, off)
+        b1 = GetByte(buf, Add(off, 1))
+        b2 = GetByte(buf, Add(off, 2))
+        b3 = GetByte(buf, Add(off, 3))
+        s1 = LeftShift(b0, 24)
+        s2 = LeftShift(b1, 16)
+        s3 = LeftShift(b2, 8)
+        t = BitwiseOr(s1, s2)
+        t2 = BitwiseOr(t, s3)
+        ReturnValue(BitwiseOr(t2, b3))
+    }
+}
+
+Function.Crypto.StoreBE32 {
+    Input: buf: Address
+    Input: off: Integer
+    Input: val: Integer
+    Body: {
+        u = BitwiseAnd(val, 4294967295)
+        SetByte(buf, off, BitwiseAnd(RightShift(u, 24), 255))
+        SetByte(buf, Add(off, 1), BitwiseAnd(RightShift(u, 16), 255))
+        SetByte(buf, Add(off, 2), BitwiseAnd(RightShift(u, 8), 255))
+        SetByte(buf, Add(off, 3), BitwiseAnd(u, 255))
+    }
+}
+
+Function.Crypto.StoreBE64 {
+    Input: buf: Address
+    Input: off: Integer
+    Input: val: Integer
+    Body: {
+        hi = RightShift(val, 32)
+        Crypto.StoreBE32(buf, off, hi)
+        Crypto.StoreBE32(buf, Add(off, 4), val)
+    }
+}
+
+Function.Crypto.KSet {
+    Input: i: Integer
+    Input: val: Integer
+    Body: {
+        StoreValue(Add(CryptoSt.ktab, Multiply(i, 8)), val)
+    }
+}
+
+Function.Crypto.FillK {
+    Body: {
+        Crypto.KSet(0, 0x428a2f98)
+        Crypto.KSet(1, 0x71374491)
+        Crypto.KSet(2, 0xb5c0fbcf)
+        Crypto.KSet(3, 0xe9b5dba5)
+        Crypto.KSet(4, 0x3956c25b)
+        Crypto.KSet(5, 0x59f111f1)
+        Crypto.KSet(6, 0x923f82a4)
+        Crypto.KSet(7, 0xab1c5ed5)
+        Crypto.KSet(8, 0xd807aa98)
+        Crypto.KSet(9, 0x12835b01)
+        Crypto.KSet(10, 0x243185be)
+        Crypto.KSet(11, 0x550c7dc3)
+        Crypto.KSet(12, 0x72be5d74)
+        Crypto.KSet(13, 0x80deb1fe)
+        Crypto.KSet(14, 0x9bdc06a7)
+        Crypto.KSet(15, 0xc19bf174)
+        Crypto.KSet(16, 0xe49b69c1)
+        Crypto.KSet(17, 0xefbe4786)
+        Crypto.KSet(18, 0x0fc19dc6)
+        Crypto.KSet(19, 0x240ca1cc)
+        Crypto.KSet(20, 0x2de92c6f)
+        Crypto.KSet(21, 0x4a7484aa)
+        Crypto.KSet(22, 0x5cb0a9dc)
+        Crypto.KSet(23, 0x76f988da)
+        Crypto.KSet(24, 0x983e5152)
+        Crypto.KSet(25, 0xa831c66d)
+        Crypto.KSet(26, 0xb00327c8)
+        Crypto.KSet(27, 0xbf597fc7)
+        Crypto.KSet(28, 0xc6e00bf3)
+        Crypto.KSet(29, 0xd5a79147)
+        Crypto.KSet(30, 0x06ca6351)
+        Crypto.KSet(31, 0x14292967)
+        Crypto.KSet(32, 0x27b70a85)
+        Crypto.KSet(33, 0x2e1b2138)
+        Crypto.KSet(34, 0x4d2c6dfc)
+        Crypto.KSet(35, 0x53380d13)
+        Crypto.KSet(36, 0x650a7354)
+        Crypto.KSet(37, 0x766a0abb)
+        Crypto.KSet(38, 0x81c2c92e)
+        Crypto.KSet(39, 0x92722c85)
+        Crypto.KSet(40, 0xa2bfe8a1)
+        Crypto.KSet(41, 0xa81a664b)
+        Crypto.KSet(42, 0xc24b8b70)
+        Crypto.KSet(43, 0xc76c51a3)
+        Crypto.KSet(44, 0xd192e819)
+        Crypto.KSet(45, 0xd6990624)
+        Crypto.KSet(46, 0xf40e3585)
+        Crypto.KSet(47, 0x106aa070)
+        Crypto.KSet(48, 0x19a4c116)
+        Crypto.KSet(49, 0x1e376c08)
+        Crypto.KSet(50, 0x2748774c)
+        Crypto.KSet(51, 0x34b0bcb5)
+        Crypto.KSet(52, 0x391c0cb3)
+        Crypto.KSet(53, 0x4ed8aa4a)
+        Crypto.KSet(54, 0x5b9cca4f)
+        Crypto.KSet(55, 0x682e6ff3)
+        Crypto.KSet(56, 0x748f82ee)
+        Crypto.KSet(57, 0x78a5636f)
+        Crypto.KSet(58, 0x84c87814)
+        Crypto.KSet(59, 0x8cc70208)
+        Crypto.KSet(60, 0x90befffa)
+        Crypto.KSet(61, 0xa4506ceb)
+        Crypto.KSet(62, 0xbef9a3f7)
+        Crypto.KSet(63, 0xc67178f2)
+    }
+}
+
+Function.Crypto.EnsureInit {
+    Body: {
+        IfCondition EqualTo(CryptoSt.inited, 1) ThenBlock: {
+            ReturnValue(0)
+        }
+        CryptoSt.ktab = Allocate(512)
+        CryptoSt.wtab = Allocate(512)
+        CryptoSt.pad = Allocate(128)
+        Crypto.FillK()
+        CryptoSt.inited = 1
+    }
+}
+
+Function.Crypto.SHA256_Compress {
+    Input: block: Address
+    Body: {
+        wtab = CryptoSt.wtab
+        ktab = CryptoSt.ktab
+        i = 0
+        WhileLoop LessThan(i, 16) {
+            off = Multiply(i, 4)
+            word = Crypto.LoadBE32(block, off)
+            StoreValue(Add(wtab, Multiply(i, 8)), word)
+            i = Add(i, 1)
+        }
+        WhileLoop LessThan(i, 64) {
+            w2 = Dereference(Add(wtab, Multiply(Subtract(i, 2), 8)))
+            w7 = Dereference(Add(wtab, Multiply(Subtract(i, 7), 8)))
+            w15 = Dereference(Add(wtab, Multiply(Subtract(i, 15), 8)))
+            w16 = Dereference(Add(wtab, Multiply(Subtract(i, 16), 8)))
+            s1 = Crypto.SSIG1(w2)
+            s0 = Crypto.SSIG0(w15)
+            sum1 = Add(s1, w7)
+            sum2 = Add(sum1, s0)
+            sum3 = Add(sum2, w16)
+            StoreValue(Add(wtab, Multiply(i, 8)), Crypto.U32(sum3))
+            i = Add(i, 1)
+        }
+        SHA256W.a = SHA256H.h0
+        SHA256W.b = SHA256H.h1
+        SHA256W.c = SHA256H.h2
+        SHA256W.d = SHA256H.h3
+        SHA256W.e = SHA256H.h4
+        SHA256W.f = SHA256H.h5
+        SHA256W.g = SHA256H.h6
+        SHA256W.h = SHA256H.h7
+        i = 0
+        WhileLoop LessThan(i, 64) {
+            ki = Dereference(Add(ktab, Multiply(i, 8)))
+            wi = Dereference(Add(wtab, Multiply(i, 8)))
+            se = Crypto.BSIG1(SHA256W.e)
+            ch = Crypto.Ch(SHA256W.e, SHA256W.f, SHA256W.g)
+            t1a = Add(SHA256W.h, se)
+            t1b = Add(t1a, ch)
+            t1c = Add(t1b, ki)
+            t1d = Add(t1c, wi)
+            SHA256W.t1 = Crypto.U32(t1d)
+            sa = Crypto.BSIG0(SHA256W.a)
+            mj = Crypto.Maj(SHA256W.a, SHA256W.b, SHA256W.c)
+            SHA256W.t2 = Crypto.U32(Add(sa, mj))
+            SHA256W.h = SHA256W.g
+            SHA256W.g = SHA256W.f
+            SHA256W.f = SHA256W.e
+            SHA256W.e = Crypto.U32(Add(SHA256W.d, SHA256W.t1))
+            SHA256W.d = SHA256W.c
+            SHA256W.c = SHA256W.b
+            SHA256W.b = SHA256W.a
+            SHA256W.a = Crypto.U32(Add(SHA256W.t1, SHA256W.t2))
+            i = Add(i, 1)
+        }
+        SHA256H.h0 = Crypto.U32(Add(SHA256H.h0, SHA256W.a))
+        SHA256H.h1 = Crypto.U32(Add(SHA256H.h1, SHA256W.b))
+        SHA256H.h2 = Crypto.U32(Add(SHA256H.h2, SHA256W.c))
+        SHA256H.h3 = Crypto.U32(Add(SHA256H.h3, SHA256W.d))
+        SHA256H.h4 = Crypto.U32(Add(SHA256H.h4, SHA256W.e))
+        SHA256H.h5 = Crypto.U32(Add(SHA256H.h5, SHA256W.f))
+        SHA256H.h6 = Crypto.U32(Add(SHA256H.h6, SHA256W.g))
+        SHA256H.h7 = Crypto.U32(Add(SHA256H.h7, SHA256W.h))
+    }
+}
+
+Function.Crypto.SHA256_ResetH {
+    Body: {
+        SHA256H.h0 = 0x6a09e667
+        SHA256H.h1 = 0xbb67ae85
+        SHA256H.h2 = 0x3c6ef372
+        SHA256H.h3 = 0xa54ff53a
+        SHA256H.h4 = 0x510e527f
+        SHA256H.h5 = 0x9b05688c
+        SHA256H.h6 = 0x1f83d9ab
+        SHA256H.h7 = 0x5be0cd19
+    }
+}
+
+Function.Crypto.SHA256 {
+    Input: buf: Address
+    Input: len: Integer
+    Output: Address
+    Body: {
+        Crypto.EnsureInit()
+        Crypto.SHA256_ResetH()
+        i = 0
+        WhileLoop LessEqual(Add(i, 64), len) {
+            Crypto.SHA256_Compress(Add(buf, i))
+            i = Add(i, 64)
+        }
+        rem = Subtract(len, i)
+        pad = CryptoSt.pad
+        z = 0
+        WhileLoop LessThan(z, 128) {
+            SetByte(pad, z, 0)
+            z = Add(z, 1)
+        }
+        IfCondition GreaterThan(rem, 0) ThenBlock: {
+            MemoryCopy(pad, Add(buf, i), rem)
+        }
+        SetByte(pad, rem, 128)
+        bitlen = Multiply(len, 8)
+        IfCondition LessThan(rem, 56) ThenBlock: {
+            Crypto.StoreBE64(pad, 56, bitlen)
+            Crypto.SHA256_Compress(pad)
+        } ElseBlock: {
+            Crypto.StoreBE64(pad, 120, bitlen)
+            Crypto.SHA256_Compress(pad)
+            Crypto.SHA256_Compress(Add(pad, 64))
+        }
+        out = Allocate(33)
+        Crypto.StoreBE32(out, 0, SHA256H.h0)
+        Crypto.StoreBE32(out, 4, SHA256H.h1)
+        Crypto.StoreBE32(out, 8, SHA256H.h2)
+        Crypto.StoreBE32(out, 12, SHA256H.h3)
+        Crypto.StoreBE32(out, 16, SHA256H.h4)
+        Crypto.StoreBE32(out, 20, SHA256H.h5)
+        Crypto.StoreBE32(out, 24, SHA256H.h6)
+        Crypto.StoreBE32(out, 28, SHA256H.h7)
+        SetByte(out, 32, 0)
+        ReturnValue(out)
+    }
+}
+
+Function.Crypto.HexDigit {
+    Input: v: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(v, 10) ThenBlock: {
+            ReturnValue(Add(48, v))
+        }
+        ReturnValue(Add(87, v))
+    }
+}
+
+Function.Crypto.DigestHex {
+    Input: dig: Address
+    Output: Address
+    Body: {
+        out = Allocate(65)
+        i = 0
+        WhileLoop LessThan(i, 32) {
+            b = GetByte(dig, i)
+            hi = Crypto.HexDigit(RightShift(b, 4))
+            lo = Crypto.HexDigit(BitwiseAnd(b, 15))
+            SetByte(out, Multiply(i, 2), hi)
+            SetByte(out, Add(Multiply(i, 2), 1), lo)
+            i = Add(i, 1)
+        }
+        SetByte(out, 64, 0)
+        ReturnValue(out)
+    }
+}
+
+Function.Crypto.HMAC_SHA256 {
+    Input: key: Address
+    Input: key_len: Integer
+    Input: msg: Address
+    Input: msg_len: Integer
+    Output: Address
+    Body: {
+        kptr = key
+        klen = key_len
+        hashed = 0
+        IfCondition GreaterThan(key_len, 64) ThenBlock: {
+            hashed = Crypto.SHA256(key, key_len)
+            kptr = hashed
+            klen = 32
+        }
+        ipad = Allocate(64)
+        opad = Allocate(64)
+        i = 0
+        WhileLoop LessThan(i, 64) {
+            kb = 0
+            IfCondition LessThan(i, klen) ThenBlock: {
+                kb = GetByte(kptr, i)
+            }
+            SetByte(ipad, i, BitwiseXor(kb, 54))
+            SetByte(opad, i, BitwiseXor(kb, 92))
+            i = Add(i, 1)
+        }
+        inner_len = Add(64, msg_len)
+        inner = Allocate(inner_len)
+        MemoryCopy(inner, ipad, 64)
+        IfCondition GreaterThan(msg_len, 0) ThenBlock: {
+            MemoryCopy(Add(inner, 64), msg, msg_len)
+        }
+        inner_dig = Crypto.SHA256(inner, inner_len)
+        outer = Allocate(96)
+        MemoryCopy(outer, opad, 64)
+        MemoryCopy(Add(outer, 64), inner_dig, 32)
+        out = Crypto.SHA256(outer, 96)
+        ReturnValue(out)
+    }
+}
+
+Function.Crypto.B64UrlByte {
+    Input: v: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(v, 26) ThenBlock: { ReturnValue(Add(65, v)) }
+        IfCondition LessThan(v, 52) ThenBlock: { ReturnValue(Add(97, Subtract(v, 26))) }
+        IfCondition LessThan(v, 62) ThenBlock: { ReturnValue(Add(48, Subtract(v, 52))) }
+        IfCondition EqualTo(v, 62) ThenBlock: { ReturnValue(45) }
+        ReturnValue(95)
+    }
+}
+
+Function.Crypto.B64UrlVal {
+    Input: c: Integer
+    Output: Integer
+    Body: {
+        IfCondition And(GreaterEqual(c, 65), LessEqual(c, 90)) ThenBlock: {
+            ReturnValue(Subtract(c, 65))
+        }
+        IfCondition And(GreaterEqual(c, 97), LessEqual(c, 122)) ThenBlock: {
+            ReturnValue(Add(Subtract(c, 97), 26))
+        }
+        IfCondition And(GreaterEqual(c, 48), LessEqual(c, 57)) ThenBlock: {
+            ReturnValue(Add(Subtract(c, 48), 52))
+        }
+        IfCondition EqualTo(c, 45) ThenBlock: { ReturnValue(62) }
+        IfCondition EqualTo(c, 95) ThenBlock: { ReturnValue(63) }
+        IfCondition EqualTo(c, 43) ThenBlock: { ReturnValue(62) }
+        IfCondition EqualTo(c, 47) ThenBlock: { ReturnValue(63) }
+        ReturnValue(-1)
+    }
+}
+
+Function.Crypto.Base64UrlEncode {
+    Input: data: Address
+    Input: data_len: Integer
+    Output: Address
+    Body: {
+        full = Divide(data_len, 3)
+        rem = Subtract(data_len, Multiply(full, 3))
+        out_len = Multiply(full, 4)
+        IfCondition EqualTo(rem, 1) ThenBlock: { out_len = Add(out_len, 2) }
+        IfCondition EqualTo(rem, 2) ThenBlock: { out_len = Add(out_len, 3) }
+        out = Allocate(Add(out_len, 1))
+        oi = 0
+        i = 0
+        WhileLoop LessThan(i, full) {
+            base = Multiply(i, 3)
+            b0 = GetByte(data, base)
+            b1 = GetByte(data, Add(base, 1))
+            b2 = GetByte(data, Add(base, 2))
+            v0 = BitwiseAnd(RightShift(b0, 2), 63)
+            v1 = BitwiseAnd(BitwiseOr(LeftShift(b0, 4), RightShift(b1, 4)), 63)
+            v2 = BitwiseAnd(BitwiseOr(LeftShift(b1, 2), RightShift(b2, 6)), 63)
+            v3 = BitwiseAnd(b2, 63)
+            SetByte(out, oi, Crypto.B64UrlByte(v0))
+            SetByte(out, Add(oi, 1), Crypto.B64UrlByte(v1))
+            SetByte(out, Add(oi, 2), Crypto.B64UrlByte(v2))
+            SetByte(out, Add(oi, 3), Crypto.B64UrlByte(v3))
+            oi = Add(oi, 4)
+            i = Add(i, 1)
+        }
+        IfCondition EqualTo(rem, 1) ThenBlock: {
+            base = Multiply(full, 3)
+            b0 = GetByte(data, base)
+            v0 = BitwiseAnd(RightShift(b0, 2), 63)
+            v1 = BitwiseAnd(LeftShift(b0, 4), 63)
+            SetByte(out, oi, Crypto.B64UrlByte(v0))
+            SetByte(out, Add(oi, 1), Crypto.B64UrlByte(v1))
+            oi = Add(oi, 2)
+        }
+        IfCondition EqualTo(rem, 2) ThenBlock: {
+            base = Multiply(full, 3)
+            b0 = GetByte(data, base)
+            b1 = GetByte(data, Add(base, 1))
+            v0 = BitwiseAnd(RightShift(b0, 2), 63)
+            v1 = BitwiseAnd(BitwiseOr(LeftShift(b0, 4), RightShift(b1, 4)), 63)
+            v2 = BitwiseAnd(LeftShift(b1, 2), 63)
+            SetByte(out, oi, Crypto.B64UrlByte(v0))
+            SetByte(out, Add(oi, 1), Crypto.B64UrlByte(v1))
+            SetByte(out, Add(oi, 2), Crypto.B64UrlByte(v2))
+            oi = Add(oi, 3)
+        }
+        SetByte(out, oi, 0)
+        ReturnValue(out)
+    }
+}
+
+Function.Crypto.Base64UrlDecode {
+    Input: src: Address
+    Input: src_len: Integer
+    Output: Address
+    Body: {
+        IfCondition EqualTo(src_len, 0) ThenBlock: {
+            z = Allocate(1)
+            SetByte(z, 0, 0)
+            ReturnValue(z)
+        }
+        rem4 = Modulo(src_len, 4)
+        IfCondition EqualTo(rem4, 1) ThenBlock: {
+            ReturnValue(0)
+        }
+        out_cap = Add(Divide(Multiply(src_len, 3), 4), 2)
+        out = Allocate(out_cap)
+        oi = 0
+        i = 0
+        WhileLoop LessThan(i, src_len) {
+            c0 = Crypto.B64UrlVal(GetByte(src, i))
+            IfCondition LessThan(c0, 0) ThenBlock: { ReturnValue(0) }
+            c1 = -1
+            c2 = -1
+            c3 = -1
+            IfCondition LessThan(Add(i, 1), src_len) ThenBlock: {
+                c1 = Crypto.B64UrlVal(GetByte(src, Add(i, 1)))
+                IfCondition LessThan(c1, 0) ThenBlock: { ReturnValue(0) }
+            }
+            IfCondition LessThan(Add(i, 2), src_len) ThenBlock: {
+                c2 = Crypto.B64UrlVal(GetByte(src, Add(i, 2)))
+                IfCondition LessThan(c2, 0) ThenBlock: { ReturnValue(0) }
+            }
+            IfCondition LessThan(Add(i, 3), src_len) ThenBlock: {
+                c3 = Crypto.B64UrlVal(GetByte(src, Add(i, 3)))
+                IfCondition LessThan(c3, 0) ThenBlock: { ReturnValue(0) }
+            }
+            IfCondition LessThan(c1, 0) ThenBlock: { ReturnValue(0) }
+            b0 = BitwiseOr(LeftShift(c0, 2), RightShift(c1, 4))
+            SetByte(out, oi, BitwiseAnd(b0, 255))
+            oi = Add(oi, 1)
+            IfCondition GreaterEqual(c2, 0) ThenBlock: {
+                b1 = BitwiseOr(LeftShift(BitwiseAnd(c1, 15), 4), RightShift(c2, 2))
+                SetByte(out, oi, BitwiseAnd(b1, 255))
+                oi = Add(oi, 1)
+            }
+            IfCondition GreaterEqual(c3, 0) ThenBlock: {
+                b2 = BitwiseOr(LeftShift(BitwiseAnd(c2, 3), 6), c3)
+                SetByte(out, oi, BitwiseAnd(b2, 255))
+                oi = Add(oi, 1)
+            }
+            i = Add(i, 4)
+        }
+        SetByte(out, oi, 0)
+        ReturnValue(out)
+    }
+}
+
+Function.Crypto.FindDot {
+    Input: s: Address
+    Input: start: Integer
+    Output: Integer
+    Body: {
+        i = start
+        WhileLoop 1 {
+            c = GetByte(s, i)
+            IfCondition EqualTo(c, 0) ThenBlock: { ReturnValue(-1) }
+            IfCondition EqualTo(c, 46) ThenBlock: { ReturnValue(i) }
+            i = Add(i, 1)
+        }
+        ReturnValue(-1)
+    }
+}
+
+Function.Crypto.SliceZ {
+    Input: s: Address
+    Input: start: Integer
+    Input: end: Integer
+    Output: Address
+    Body: {
+        IfCondition LessThan(end, start) ThenBlock: { ReturnValue(0) }
+        n = Subtract(end, start)
+        out = Allocate(Add(n, 1))
+        IfCondition GreaterThan(n, 0) ThenBlock: {
+            MemoryCopy(out, Add(s, start), n)
+        }
+        SetByte(out, n, 0)
+        ReturnValue(out)
+    }
+}
+
+Function.Crypto.ParsePosInt {
+    Input: s: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(s, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(GetByte(s, 0), 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(GetByte(s, 0), 48) ThenBlock: {
+            IfCondition EqualTo(GetByte(s, 1), 0) ThenBlock: { ReturnValue(0) }
+        }
+        result = 0
+        i = 0
+        WhileLoop 1 {
+            ch = GetByte(s, i)
+            IfCondition EqualTo(ch, 0) ThenBlock: { ReturnValue(result) }
+            IfCondition Or(LessThan(ch, 48), GreaterThan(ch, 57)) ThenBlock: {
+                ReturnValue(0)
+            }
+            result = Add(Multiply(result, 10), Subtract(ch, 48))
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+Function.Crypto.MacEqual32 {
+    Input: a: Address
+    Input: b: Address
+    Output: Integer
+    Body: {
+        x = 0
+        i = 0
+        WhileLoop LessThan(i, 32) {
+            ba = GetByte(a, i)
+            bb = GetByte(b, i)
+            x = BitwiseOr(x, BitwiseXor(ba, bb))
+            i = Add(i, 1)
+        }
+        IfCondition EqualTo(x, 0) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+Function.Crypto.JWT_HS256 {
+    Input: token: Address
+    Input: secret: Address
+    Input: now_unix: Integer
+    Output: Integer
+    Body: {
+        JWTOut.uid = 0
+        JWTOut.name = 0
+        IfCondition EqualTo(token, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(secret, 0) ThenBlock: { ReturnValue(0) }
+        d1 = Crypto.FindDot(token, 0)
+        IfCondition LessThan(d1, 1) ThenBlock: { ReturnValue(0) }
+        d1n = Add(d1, 1)
+        d2 = Crypto.FindDot(token, d1n)
+        d1n2 = Add(d1, 2)
+        IfCondition LessThan(d2, d1n2) ThenBlock: { ReturnValue(0) }
+        d2n = Add(d2, 1)
+        d3 = Crypto.FindDot(token, d2n)
+        IfCondition GreaterThan(d3, -1) ThenBlock: { ReturnValue(0) }
+        hdr = Crypto.SliceZ(token, 0, d1)
+        pay = Crypto.SliceZ(token, d1n, d2)
+        sig_len = 0
+        WhileLoop 1 {
+            sc = GetByte(token, Add(d2n, sig_len))
+            IfCondition EqualTo(sc, 0) ThenBlock: { BreakLoop }
+            sig_len = Add(sig_len, 1)
+        }
+        sig_end = Add(d2n, sig_len)
+        sig = Crypto.SliceZ(token, d2n, sig_end)
+        hdr_json = Crypto.Base64UrlDecode(hdr, d1)
+        IfCondition EqualTo(hdr_json, 0) ThenBlock: { ReturnValue(0) }
+        hdr_tag = ParseJSON(hdr_json)
+        IfCondition EqualTo(hdr_tag, 0) ThenBlock: { ReturnValue(0) }
+        hdr_obj = JSON.AsObject(hdr_tag)
+        IfCondition EqualTo(hdr_obj, 0) ThenBlock: { ReturnValue(0) }
+        alg = JSON.GetString(hdr_obj, "alg")
+        IfCondition EqualTo(alg, 0) ThenBlock: { ReturnValue(0) }
+        alg_ok = StringCompare(alg, "HS256")
+        IfCondition NotEqual(alg_ok, 0) ThenBlock: { ReturnValue(0) }
+        slen = StringLength(secret)
+        mac = Crypto.HMAC_SHA256(secret, slen, token, d2)
+        got = Crypto.Base64UrlDecode(sig, sig_len)
+        IfCondition EqualTo(got, 0) ThenBlock: { ReturnValue(0) }
+        eq = Crypto.MacEqual32(mac, got)
+        IfCondition EqualTo(eq, 0) ThenBlock: { ReturnValue(0) }
+        pay_len = Subtract(d2, d1n)
+        pay_json = Crypto.Base64UrlDecode(pay, pay_len)
+        IfCondition EqualTo(pay_json, 0) ThenBlock: { ReturnValue(0) }
+        pay_tag = ParseJSON(pay_json)
+        IfCondition EqualTo(pay_tag, 0) ThenBlock: { ReturnValue(2) }
+        pay_obj = JSON.AsObject(pay_tag)
+        IfCondition EqualTo(pay_obj, 0) ThenBlock: { ReturnValue(2) }
+        sub = JSON.GetString(pay_obj, "sub")
+        name = JSON.GetString(pay_obj, "username")
+        exp = JSON.GetNumber(pay_obj, "exp")
+        uid = Crypto.ParsePosInt(sub)
+        IfCondition EqualTo(uid, 0) ThenBlock: { ReturnValue(2) }
+        IfCondition EqualTo(name, 0) ThenBlock: { ReturnValue(2) }
+        IfCondition LessEqual(exp, now_unix) ThenBlock: { ReturnValue(0) }
+        JWTOut.uid = uid
+        JWTOut.name = name
+        ReturnValue(1)
+    }
+}
+
+Function.Crypto.JWT_Uid {
+    Output: Integer
+    Body: {
+        ReturnValue(JWTOut.uid)
+    }
+}
+
+Function.Crypto.JWT_Username {
+    Output: Address
+    Body: {
+        ReturnValue(JWTOut.name)
+    }
+}

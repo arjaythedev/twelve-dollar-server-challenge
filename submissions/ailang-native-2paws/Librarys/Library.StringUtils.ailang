@@ -1,0 +1,386 @@
+// Library.StringUtils.ailang — string combinations in pure AiLang
+//
+// The old StringUtils library used a deprecated two-arg Dereference form
+// and was retired. This replacement is written against the current core
+// (GetByte, SetByte, Allocate, StringLength, StringConcat, …) and focuses
+// on COMBINATIONS — functions that compose the basic string primitives
+// into the patterns users actually reach for: parse, prefix/suffix test,
+// search, pad, trim, repeat.
+//
+// Convention:
+//   * All functions take Address arguments (null-terminated byte strings).
+//   * Return types are either Integer (predicates, positions, counts) or
+//     Address (a new allocated string).
+//   * Allocated results live in the Arena; caller doesn't free.
+//
+// Requires: LibraryImport.Arena  (for Allocate / SetByte on new strings)
+//
+// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+LibraryImport.Arena
+
+// =============================================================================
+// PARSING
+// =============================================================================
+
+// Parse a decimal digit string into an Integer. Stops at the first
+// non-digit byte (whitespace, punctuation, null). Returns 0 on empty.
+// No negative-sign handling — add that wrapper in user code when needed.
+Function.StringToInt {
+    Input: s: Address
+    Output: Integer
+    Body: {
+        result = 0
+        i = 0
+        WhileLoop 1 {
+            ch = GetByte(s, i)
+            IfCondition Or(LessThan(ch, 48), GreaterThan(ch, 57)) ThenBlock: {
+                ReturnValue(result)
+            }
+            digit = Subtract(ch, 48)
+            result = Add(Multiply(result, 10), digit)
+            i = Add(i, 1)
+        }
+        ReturnValue(result)
+    }
+}
+
+// =============================================================================
+// PREFIX / SUFFIX TESTS
+// =============================================================================
+
+// 1 if `s` starts with `prefix`, 0 otherwise. Empty prefix is always 1.
+Function.StringStartsWith {
+    Input: s: Address
+    Input: prefix: Address
+    Output: Integer
+    Body: {
+        i = 0
+        WhileLoop 1 {
+            p = GetByte(prefix, i)
+            IfCondition EqualTo(p, 0) ThenBlock: {
+                ReturnValue(1)
+            }
+            c = GetByte(s, i)
+            IfCondition NotEqual(c, p) ThenBlock: {
+                ReturnValue(0)
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+// 1 if `s` ends with `suffix`, 0 otherwise. Empty suffix is always 1.
+Function.StringEndsWith {
+    Input: s: Address
+    Input: suffix: Address
+    Output: Integer
+    Body: {
+        s_len = StringLength(s)
+        suf_len = StringLength(suffix)
+        IfCondition GreaterThan(suf_len, s_len) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(suf_len, 0) ThenBlock: { ReturnValue(1) }
+
+        offset = Subtract(s_len, suf_len)
+        i = 0
+        WhileLoop LessThan(i, suf_len) {
+            a = GetByte(s, Add(offset, i))
+            b = GetByte(suffix, i)
+            IfCondition NotEqual(a, b) ThenBlock: { ReturnValue(0) }
+            i = Add(i, 1)
+        }
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// SEARCH
+// =============================================================================
+
+// First byte-offset where `needle` occurs in `haystack`, or -1 if absent.
+// Empty needle returns 0 (matches at start).
+Function.StringIndexOf {
+    Input: haystack: Address
+    Input: needle: Address
+    Output: Integer
+    Body: {
+        h_len = StringLength(haystack)
+        n_len = StringLength(needle)
+        IfCondition EqualTo(n_len, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterThan(n_len, h_len) ThenBlock: { ReturnValue(-1) }
+
+        // Try each candidate position; scan needle against haystack from there.
+        limit = Subtract(h_len, n_len)
+        i = 0
+        WhileLoop LessEqual(i, limit) {
+            j = 0
+            match = 1
+            WhileLoop LessThan(j, n_len) {
+                a = GetByte(haystack, Add(i, j))
+                b = GetByte(needle, j)
+                IfCondition NotEqual(a, b) ThenBlock: {
+                    match = 0
+                    j = n_len
+                } ElseBlock: {
+                    j = Add(j, 1)
+                }
+            }
+            IfCondition EqualTo(match, 1) ThenBlock: { ReturnValue(i) }
+            i = Add(i, 1)
+        }
+        ReturnValue(-1)
+    }
+}
+
+// 1 if `needle` appears anywhere in `haystack`, 0 otherwise.
+// Thin wrapper over StringIndexOf — kept separate because callers reach
+// for "does X contain Y" far more than "where does Y appear in X."
+Function.StringContains {
+    Input: haystack: Address
+    Input: needle: Address
+    Output: Integer
+    Body: {
+        IfCondition GreaterEqual(StringIndexOf(haystack, needle), 0) ThenBlock: {
+            ReturnValue(1)
+        }
+        ReturnValue(0)
+    }
+}
+
+// =============================================================================
+// PADDING
+// =============================================================================
+
+// Right-align `s` inside a field of `width` bytes, padding the left with
+// `pad_char`. If `s` is already >= `width`, return a copy of `s` unmodified.
+// Result is a fresh Arena-backed buffer.
+Function.StringPadLeft {
+    Input: s: Address
+    Input: width: Integer
+    Input: pad_char: Integer
+    Output: Address
+    Body: {
+        s_len = StringLength(s)
+        out_len = width
+        IfCondition GreaterThan(s_len, width) ThenBlock: { out_len = s_len }
+
+        buf = Allocate(Add(out_len, 1))
+        pad_count = Subtract(out_len, s_len)
+
+        // Left pad
+        i = 0
+        WhileLoop LessThan(i, pad_count) {
+            SetByte(buf, i, pad_char)
+            i = Add(i, 1)
+        }
+
+        // Copy s
+        j = 0
+        WhileLoop LessThan(j, s_len) {
+            SetByte(buf, Add(pad_count, j), GetByte(s, j))
+            j = Add(j, 1)
+        }
+        SetByte(buf, out_len, 0)
+        ReturnValue(buf)
+    }
+}
+
+// Left-align `s` inside a field of `width` bytes, padding the right.
+Function.StringPadRight {
+    Input: s: Address
+    Input: width: Integer
+    Input: pad_char: Integer
+    Output: Address
+    Body: {
+        s_len = StringLength(s)
+        out_len = width
+        IfCondition GreaterThan(s_len, width) ThenBlock: { out_len = s_len }
+
+        buf = Allocate(Add(out_len, 1))
+
+        // Copy s
+        i = 0
+        WhileLoop LessThan(i, s_len) {
+            SetByte(buf, i, GetByte(s, i))
+            i = Add(i, 1)
+        }
+
+        // Right pad
+        j = s_len
+        WhileLoop LessThan(j, out_len) {
+            SetByte(buf, j, pad_char)
+            j = Add(j, 1)
+        }
+        SetByte(buf, out_len, 0)
+        ReturnValue(buf)
+    }
+}
+
+// =============================================================================
+// TRIMMING
+// =============================================================================
+
+// Return a new string with leading and trailing ASCII whitespace removed.
+// Whitespace = space (32), tab (9), \n (10), \r (13). An all-whitespace
+// input becomes an empty string.
+Function.StringTrim {
+    Input: s: Address
+    Output: Address
+    Body: {
+        s_len = StringLength(s)
+
+        // Find first non-ws
+        start = 0
+        WhileLoop LessThan(start, s_len) {
+            c = GetByte(s, start)
+            is_ws = Or(Or(EqualTo(c, 32), EqualTo(c, 9)),
+                       Or(EqualTo(c, 10), EqualTo(c, 13)))
+            IfCondition EqualTo(is_ws, 0) ThenBlock: { start = s_len }
+            IfCondition EqualTo(is_ws, 1) ThenBlock: { start = Add(start, 1) }
+        }
+        // start now points one past last ws, OR s_len if we hit end early.
+        // Re-compute properly:
+        start = 0
+        WhileLoop LessThan(start, s_len) {
+            c = GetByte(s, start)
+            is_ws = Or(Or(EqualTo(c, 32), EqualTo(c, 9)),
+                       Or(EqualTo(c, 10), EqualTo(c, 13)))
+            IfCondition EqualTo(is_ws, 0) ThenBlock: {
+                // break out
+                end = s_len
+                start_final = start
+                // jump to tail trim
+                WhileLoop GreaterThan(end, start_final) {
+                    c2 = GetByte(s, Subtract(end, 1))
+                    is_ws2 = Or(Or(EqualTo(c2, 32), EqualTo(c2, 9)),
+                                Or(EqualTo(c2, 10), EqualTo(c2, 13)))
+                    IfCondition EqualTo(is_ws2, 0) ThenBlock: {
+                        out_len = Subtract(end, start_final)
+                        buf = Allocate(Add(out_len, 1))
+                        k = 0
+                        WhileLoop LessThan(k, out_len) {
+                            SetByte(buf, k, GetByte(s, Add(start_final, k)))
+                            k = Add(k, 1)
+                        }
+                        SetByte(buf, out_len, 0)
+                        ReturnValue(buf)
+                    }
+                    end = Subtract(end, 1)
+                }
+                // All whitespace after start_final — return empty
+                empty = Allocate(1)
+                SetByte(empty, 0, 0)
+                ReturnValue(empty)
+            }
+            start = Add(start, 1)
+        }
+
+        // Input was all whitespace or empty
+        empty = Allocate(1)
+        SetByte(empty, 0, 0)
+        ReturnValue(empty)
+    }
+}
+
+// =============================================================================
+// REPEAT
+// =============================================================================
+
+// Return a new string that is `s` concatenated with itself `count` times.
+// count <= 0 yields an empty string.
+Function.StringRepeat {
+    Input: s: Address
+    Input: count: Integer
+    Output: Address
+    Body: {
+        IfCondition LessEqual(count, 0) ThenBlock: {
+            empty = Allocate(1)
+            SetByte(empty, 0, 0)
+            ReturnValue(empty)
+        }
+
+        s_len = StringLength(s)
+        total = Multiply(s_len, count)
+        buf = Allocate(Add(total, 1))
+
+        written = 0
+        WhileLoop LessThan(written, total) {
+            i = 0
+            WhileLoop LessThan(i, s_len) {
+                SetByte(buf, Add(written, i), GetByte(s, i))
+                i = Add(i, 1)
+            }
+            written = Add(written, s_len)
+        }
+        SetByte(buf, total, 0)
+        ReturnValue(buf)
+    }
+}
+
+// =============================================================================
+// SPLITTING
+// =============================================================================
+
+// Return the Nth field of `s`, split on `delim` (a single byte).
+// Fields are 0-indexed. Empty fields count (two delims in a row yield
+// an empty middle field). If `n` is past the last field, returns an
+// allocated empty string — callers can check with StringLength == 0.
+// Result is a fresh Arena-backed buffer; the original `s` is not
+// modified.
+Function.StringSplitField {
+    Input: s: Address
+    Input: delim: Integer
+    Input: n: Integer
+    Output: Address
+    Body: {
+        s_len = StringLength(s)
+
+        // Find where field n starts and ends (end = delim or end-of-string).
+        field_idx = 0
+        field_start = 0
+        i = 0
+        found_start = -1
+        found_end = -1
+
+        WhileLoop LessEqual(i, s_len) {
+            ch = 0
+            IfCondition LessThan(i, s_len) ThenBlock: {
+                ch = GetByte(s, i)
+            } ElseBlock: {
+                ch = delim   // Treat end-of-string as one final delim.
+            }
+
+            is_boundary = Or(EqualTo(ch, delim), EqualTo(i, s_len))
+            IfCondition EqualTo(is_boundary, 1) ThenBlock: {
+                IfCondition EqualTo(field_idx, n) ThenBlock: {
+                    found_start = field_start
+                    found_end = i
+                    i = Add(s_len, 1)   // force loop exit
+                } ElseBlock: {
+                    field_idx = Add(field_idx, 1)
+                    field_start = Add(i, 1)
+                }
+            }
+            i = Add(i, 1)
+        }
+
+        // n was past the last field — return empty.
+        IfCondition EqualTo(found_start, -1) ThenBlock: {
+            empty = Allocate(1)
+            SetByte(empty, 0, 0)
+            ReturnValue(empty)
+        }
+
+        out_len = Subtract(found_end, found_start)
+        buf = Allocate(Add(out_len, 1))
+        k = 0
+        WhileLoop LessThan(k, out_len) {
+            SetByte(buf, k, GetByte(s, Add(found_start, k)))
+            k = Add(k, 1)
+        }
+        SetByte(buf, out_len, 0)
+        ReturnValue(buf)
+    }
+}

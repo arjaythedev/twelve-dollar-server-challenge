@@ -1,0 +1,656 @@
+// Library.Array.ailang
+// Performance dynamic array — flat Allocate/Dereference/StoreValue storage.
+// Replaces ArrayCreate/ArrayGet/ArraySet/ArrayDestroy with direct pointer math.
+//
+// Header layout (32 bytes):
+//   [magic:8][capacity:8][size:8][data_ptr:8]
+//
+// Data layout: flat block of capacity*8 bytes, element i at data_ptr + i*8.
+//
+// Copyright (c) 2025-2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+FixedPool.Arrays {
+    "MAGIC":            Initialize=7133856912
+    "NULL":             Initialize=-1
+    "DEFAULT_CAPACITY": Initialize=16
+    "GROWTH_FACTOR":    Initialize=2
+    "HEADER_SIZE":      Initialize=32
+}
+
+// =============================================================================
+// Array.Create — allocate header + flat data block
+// =============================================================================
+Function.Array.Create {
+    Input: initial_capacity: Integer
+    Output: Address
+    Body: {
+        IfCondition LessEqual(initial_capacity, 0) ThenBlock: {
+            initial_capacity = Arrays.DEFAULT_CAPACITY
+        }
+
+        header   = Allocate(Arrays.HEADER_SIZE)
+        data     = Allocate(Multiply(initial_capacity, 8))
+        MemorySet(data, 0, Multiply(initial_capacity, 8))
+
+        StoreValue(header,              Arrays.MAGIC)
+        StoreValue(Add(header, 8),  initial_capacity)
+        StoreValue(Add(header, 16), 0)
+        StoreValue(Add(header, 24), data)
+
+        ReturnValue(header)
+    }
+}
+
+// =============================================================================
+// Array.Destroy
+// =============================================================================
+Function.Array.Destroy {
+    Input: arr: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        magic = Dereference(arr)
+        IfCondition NotEqual(magic, Arrays.MAGIC) ThenBlock: {
+            PrintMessage("Array.Destroy: bad magic\n")
+            ReturnValue(0)
+        }
+
+        capacity = Dereference(Add(arr, 8))
+        data     = Dereference(Add(arr, 24))
+
+        IfCondition NotEqual(data, 0) ThenBlock: {
+            Deallocate(data, Multiply(capacity, 8))
+        }
+
+        Deallocate(arr, Arrays.HEADER_SIZE)
+    }
+}
+
+// =============================================================================
+// Array.IsArray — bulletproof type check
+// =============================================================================
+Function.Array.IsArray {
+    Input: value: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(value, 0)       ThenBlock: { ReturnValue(0) }
+        // Allocate() returns high pointers; unboxed ints in [1e6, 4e6) are not
+        // mapped and used to SIGSEGV here (AIMacro NumAdd on large sums).
+        IfCondition LessThan(value, 4000000) ThenBlock: { ReturnValue(0) }
+        magic = Dereference(value)
+        IfCondition EqualTo(magic, Arrays.MAGIC) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+// =============================================================================
+// Array.Size
+// =============================================================================
+Function.Array.Size {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(arr, 16)))
+    }
+}
+
+// =============================================================================
+// Array.Capacity
+// =============================================================================
+Function.Array.Capacity {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(Dereference(Add(arr, 8)))
+    }
+}
+
+// =============================================================================
+// Array.Get — direct pointer read, no ArrayGet overhead
+// =============================================================================
+Function.Array.Get {
+    Input: arr:   Address
+    Input: index: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        size = Dereference(Add(arr, 16))
+        IfCondition LessThan(index, 0)     ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterEqual(index, size) ThenBlock: { ReturnValue(0) }
+
+        data = Dereference(Add(arr, 24))
+        ReturnValue(Dereference(Add(data, Multiply(index, 8))))
+    }
+}
+
+// =============================================================================
+// Array.Set — direct pointer write
+// =============================================================================
+Function.Array.Set {
+    Input: arr:   Address
+    Input: index: Integer
+    Input: value: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        size = Dereference(Add(arr, 16))
+        IfCondition LessThan(index, 0)     ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterEqual(index, size) ThenBlock: { ReturnValue(0) }
+
+        data = Dereference(Add(arr, 24))
+        StoreValue(Add(data, Multiply(index, 8)), value)
+    }
+}
+
+// =============================================================================
+// Array.Push — append with grow
+// =============================================================================
+Function.Array.Push {
+    Input: arr:   Address
+    Input: value: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        capacity = Dereference(Add(arr, 8))
+        size     = Dereference(Add(arr, 16))
+        data     = Dereference(Add(arr, 24))
+
+        IfCondition GreaterEqual(size, capacity) ThenBlock: {
+            new_capacity = Multiply(capacity, Arrays.GROWTH_FACTOR)
+            new_data     = Allocate(Multiply(new_capacity, 8))
+
+            i = 0
+            WhileLoop LessThan(i, size) {
+                StoreValue(Add(new_data, Multiply(i, 8)),
+                           Dereference(Add(data, Multiply(i, 8))))
+                i = Add(i, 1)
+            }
+
+            Deallocate(data, Multiply(capacity, 8))
+            StoreValue(Add(arr, 8),  new_capacity)
+            StoreValue(Add(arr, 24), new_data)
+            data = new_data
+        }
+
+        StoreValue(Add(data, Multiply(size, 8)), value)
+        StoreValue(Add(arr, 16), Add(size, 1))
+    }
+}
+
+// =============================================================================
+// Array.Pop
+// =============================================================================
+Function.Array.Pop {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        size = Dereference(Add(arr, 16))
+        IfCondition LessEqual(size, 0) ThenBlock: { ReturnValue(0) }
+
+        data     = Dereference(Add(arr, 24))
+        new_size = Subtract(size, 1)
+        value    = Dereference(Add(data, Multiply(new_size, 8)))
+
+        StoreValue(Add(arr, 16), new_size)
+        ReturnValue(value)
+    }
+}
+
+// =============================================================================
+// Array.Clear
+// =============================================================================
+Function.Array.Clear {
+    Input: arr: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+        StoreValue(Add(arr, 16), 0)
+    }
+}
+
+// =============================================================================
+// Array.Insert — shift right then write
+// =============================================================================
+Function.Array.Insert {
+    Input: arr:   Address
+    Input: index: Integer
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        capacity = Dereference(Add(arr, 8))
+        size     = Dereference(Add(arr, 16))
+        data     = Dereference(Add(arr, 24))
+
+        IfCondition LessThan(index, 0)    ThenBlock: { index = 0 }
+        IfCondition GreaterThan(index, size) ThenBlock: { index = size }
+
+        IfCondition GreaterEqual(size, capacity) ThenBlock: {
+            new_capacity = Multiply(capacity, Arrays.GROWTH_FACTOR)
+            new_data     = Allocate(Multiply(new_capacity, 8))
+
+            i = 0
+            WhileLoop LessThan(i, size) {
+                StoreValue(Add(new_data, Multiply(i, 8)),
+                           Dereference(Add(data, Multiply(i, 8))))
+                i = Add(i, 1)
+            }
+
+            Deallocate(data, Multiply(capacity, 8))
+            StoreValue(Add(arr, 8),  new_capacity)
+            StoreValue(Add(arr, 24), new_data)
+            data = new_data
+        }
+
+        i = size
+        WhileLoop GreaterThan(i, index) {
+            prev = Subtract(i, 1)
+            StoreValue(Add(data, Multiply(i, 8)),
+                       Dereference(Add(data, Multiply(prev, 8))))
+            i = Subtract(i, 1)
+        }
+
+        StoreValue(Add(data, Multiply(index, 8)), value)
+        StoreValue(Add(arr, 16), Add(size, 1))
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// Array.Delete — shift left, return deleted value
+// =============================================================================
+Function.Array.Delete {
+    Input: arr:   Address
+    Input: index: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        size = Dereference(Add(arr, 16))
+        IfCondition LessThan(index, 0)     ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterEqual(index, size) ThenBlock: { ReturnValue(0) }
+
+        data    = Dereference(Add(arr, 24))
+        deleted = Dereference(Add(data, Multiply(index, 8)))
+
+        i = index
+        last = Subtract(size, 1)
+        WhileLoop LessThan(i, last) {
+            next = Add(i, 1)
+            StoreValue(Add(data, Multiply(i, 8)),
+                       Dereference(Add(data, Multiply(next, 8))))
+            i = Add(i, 1)
+        }
+
+        StoreValue(Add(arr, 16), last)
+        ReturnValue(deleted)
+    }
+}
+
+// =============================================================================
+// Array.IndexOf — linear scan, returns -1 if not found
+// =============================================================================
+Function.Array.IndexOf {
+    Input: arr:   Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(Arrays.NULL) }
+
+        size = Dereference(Add(arr, 16))
+        data = Dereference(Add(arr, 24))
+
+        i = 0
+        WhileLoop LessThan(i, size) {
+            IfCondition EqualTo(Dereference(Add(data, Multiply(i, 8))), value) ThenBlock: {
+                ReturnValue(i)
+            }
+            i = Add(i, 1)
+        }
+
+        ReturnValue(Arrays.NULL)
+    }
+}
+
+// =============================================================================
+// Array.Contains
+// =============================================================================
+Function.Array.Contains {
+    Input: arr:   Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        IfCondition NotEqual(Array.IndexOf(arr, value), Arrays.NULL) ThenBlock: {
+            ReturnValue(1)
+        }
+        ReturnValue(0)
+    }
+}
+
+// =============================================================================
+// Array.Copy — shallow clone
+// =============================================================================
+Function.Array.Copy {
+    Input: arr: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: {
+            ReturnValue(Array.Create(Arrays.DEFAULT_CAPACITY))
+        }
+
+        size     = Dereference(Add(arr, 16))
+        capacity = Dereference(Add(arr, 8))
+        data     = Dereference(Add(arr, 24))
+
+        new_arr  = Array.Create(capacity)
+        new_data = Dereference(Add(new_arr, 24))
+
+        i = 0
+        WhileLoop LessThan(i, size) {
+            StoreValue(Add(new_data, Multiply(i, 8)),
+                       Dereference(Add(data, Multiply(i, 8))))
+            i = Add(i, 1)
+        }
+
+        StoreValue(Add(new_arr, 16), size)
+        ReturnValue(new_arr)
+    }
+}
+
+// =============================================================================
+// Array.Extend — append all elements from other
+// =============================================================================
+Function.Array.Extend {
+    Input: arr:   Address
+    Input: other: Address
+    Body: {
+        IfCondition EqualTo(arr,   0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(other, 0) ThenBlock: { ReturnValue(0) }
+
+        other_size = Dereference(Add(other, 16))
+        other_data = Dereference(Add(other, 24))
+
+        i = 0
+        WhileLoop LessThan(i, other_size) {
+            val = Dereference(Add(other_data, Multiply(i, 8)))
+            Array.Push(arr, val)
+            i = Add(i, 1)
+        }
+    }
+}
+
+// =============================================================================
+// Array.Reverse — in place
+// =============================================================================
+Function.Array.Reverse {
+    Input: arr: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        size = Dereference(Add(arr, 16))
+        data = Dereference(Add(arr, 24))
+
+        left  = 0
+        right = Subtract(size, 1)
+
+        WhileLoop LessThan(left, right) {
+            loff = Add(data, Multiply(left,  8))
+            roff = Add(data, Multiply(right, 8))
+            lv   = Dereference(loff)
+            rv   = Dereference(roff)
+            StoreValue(loff, rv)
+            StoreValue(roff, lv)
+            left  = Add(left,  1)
+            right = Subtract(right, 1)
+        }
+    }
+}
+
+// =============================================================================
+// Array.Sort — insertion sort in place
+// =============================================================================
+Function.Array.Sort {
+    Input: arr: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
+
+        size = Dereference(Add(arr, 16))
+        data = Dereference(Add(arr, 24))
+
+        IfCondition LessEqual(size, 1) ThenBlock: { ReturnValue(0) }
+
+        i = 1
+        WhileLoop LessThan(i, size) {
+            key = Dereference(Add(data, Multiply(i, 8)))
+            j   = Subtract(i, 1)
+
+            cont = 1
+            WhileLoop EqualTo(cont, 1) {
+                IfCondition LessThan(j, 0) ThenBlock: {
+                    cont = 0
+                } ElseBlock: {
+                    curr = Dereference(Add(data, Multiply(j, 8)))
+                    IfCondition GreaterThan(curr, key) ThenBlock: {
+                        StoreValue(Add(data, Multiply(Add(j, 1), 8)), curr)
+                        j = Subtract(j, 1)
+                    } ElseBlock: {
+                        cont = 0
+                    }
+                }
+            }
+
+            StoreValue(Add(data, Multiply(Add(j, 1), 8)), key)
+            i = Add(i, 1)
+        }
+    }
+}
+
+// =============================================================================
+// Array.Slice — return new array with elements [start, end)
+// =============================================================================
+Function.Array.Slice {
+    Input: arr:     Address
+    Input: start:   Integer
+    Input: end_idx: Integer
+    Output: Address
+    Body: {
+        IfCondition EqualTo(arr, 0) ThenBlock: {
+            ReturnValue(Array.Create(0))
+        }
+
+        size = Dereference(Add(arr, 16))
+        data = Dereference(Add(arr, 24))
+
+        IfCondition LessThan(start, 0) ThenBlock: {
+            start = Add(size, start)
+            IfCondition LessThan(start, 0) ThenBlock: { start = 0 }
+        }
+        IfCondition LessThan(end_idx, 0) ThenBlock: {
+            end_idx = Add(size, end_idx)
+        }
+        IfCondition GreaterThan(start,   size) ThenBlock: { start   = size }
+        IfCondition GreaterThan(end_idx, size) ThenBlock: { end_idx = size }
+        IfCondition LessThan(end_idx, start)   ThenBlock: { end_idx = start }
+
+        new_size = Subtract(end_idx, start)
+        result   = Array.Create(new_size)
+
+        i = start
+        WhileLoop LessThan(i, end_idx) {
+            val = Dereference(Add(data, Multiply(i, 8)))
+            Array.Push(result, val)
+            i = Add(i, 1)
+        }
+
+        ReturnValue(result)
+    }
+}
+
+// =============================================================================
+// Array.Swap — swap elements at two indices
+// =============================================================================
+Function.Array.Swap {
+    Input: arr:  Address
+    Input: idx1: Integer
+    Input: idx2: Integer
+    Output: Integer
+    Body: {
+        size = Dereference(Add(arr, 16))
+        IfCondition Or(LessThan(idx1, 0), GreaterEqual(idx1, size)) ThenBlock: { ReturnValue(0) }
+        IfCondition Or(LessThan(idx2, 0), GreaterEqual(idx2, size)) ThenBlock: { ReturnValue(0) }
+        data = Dereference(Add(arr, 24))
+        v1 = Dereference(Add(data, Multiply(idx1, 8)))
+        v2 = Dereference(Add(data, Multiply(idx2, 8)))
+        StoreValue(Add(data, Multiply(idx1, 8)), v2)
+        StoreValue(Add(data, Multiply(idx2, 8)), v1)
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// Array.Shift — remove and return first element, shift rest left
+// =============================================================================
+Function.Array.Shift {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        size = Dereference(Add(arr, 16))
+        IfCondition LessEqual(size, 0) ThenBlock: { ReturnValue(0) }
+        data = Dereference(Add(arr, 24))
+        first = Dereference(data)
+        i = 1
+        WhileLoop LessThan(i, size) {
+            val = Dereference(Add(data, Multiply(i, 8)))
+            StoreValue(Add(data, Multiply(Subtract(i, 1), 8)), val)
+            i = Add(i, 1)
+        }
+        StoreValue(Add(arr, 16), Subtract(size, 1))
+        ReturnValue(first)
+    }
+}
+
+// =============================================================================
+// Array.First — peek at first element without removing
+// =============================================================================
+Function.Array.First {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        size = Dereference(Add(arr, 16))
+        IfCondition EqualTo(size, 0) ThenBlock: { ReturnValue(Arrays.NULL) }
+        data = Dereference(Add(arr, 24))
+        ReturnValue(Dereference(data))
+    }
+}
+
+// =============================================================================
+// Array.Last — peek at last element without removing
+// =============================================================================
+Function.Array.Last {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        size = Dereference(Add(arr, 16))
+        IfCondition EqualTo(size, 0) ThenBlock: { ReturnValue(Arrays.NULL) }
+        data = Dereference(Add(arr, 24))
+        ReturnValue(Dereference(Add(data, Multiply(Subtract(size, 1), 8))))
+    }
+}
+
+// =============================================================================
+// Array.IsEmpty
+// =============================================================================
+Function.Array.IsEmpty {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        ReturnValue(EqualTo(Dereference(Add(arr, 16)), 0))
+    }
+}
+
+// =============================================================================
+// Array.Resize — grow or shrink capacity (never below current size)
+// =============================================================================
+Function.Array.Resize {
+    Input: arr:          Address
+    Input: new_capacity: Integer
+    Output: Integer
+    Body: {
+        size     = Dereference(Add(arr, 16))
+        old_cap  = Dereference(Add(arr, 8))
+        old_data = Dereference(Add(arr, 24))
+        IfCondition LessThan(new_capacity, size) ThenBlock: { new_capacity = size }
+        new_data = Allocate(Multiply(new_capacity, 8))
+        i = 0
+        WhileLoop LessThan(i, size) {
+            val = Dereference(Add(old_data, Multiply(i, 8)))
+            StoreValue(Add(new_data, Multiply(i, 8)), val)
+            i = Add(i, 1)
+        }
+        Deallocate(old_data, Multiply(old_cap, 8))
+        StoreValue(Add(arr, 8),  new_capacity)
+        StoreValue(Add(arr, 24), new_data)
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// Array.InsertSorted — insert value maintaining ascending order
+// =============================================================================
+Function.Array.InsertSorted {
+    Input: arr:   Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        size = Dereference(Add(arr, 16))
+        data = Dereference(Add(arr, 24))
+        insert_idx = size
+        i = 0
+        found = 0
+        WhileLoop And(LessThan(i, size), EqualTo(found, 0)) {
+            cur = Dereference(Add(data, Multiply(i, 8)))
+            IfCondition GreaterThan(cur, value) ThenBlock: {
+                insert_idx = i
+                found = 1
+            }
+            i = Add(i, 1)
+        }
+        Array.Insert(arr, insert_idx, value)
+        ReturnValue(insert_idx)
+    }
+}
+
+// =============================================================================
+// Array.BinarySearch — search sorted array, return index or Arrays.NULL
+// =============================================================================
+Function.Array.BinarySearch {
+    Input: arr:   Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        size  = Dereference(Add(arr, 16))
+        data  = Dereference(Add(arr, 24))
+        left  = 0
+        right = Subtract(size, 1)
+        WhileLoop LessEqual(left, right) {
+            mid     = Divide(Add(left, right), 2)
+            mid_val = Dereference(Add(data, Multiply(mid, 8)))
+            IfCondition EqualTo(mid_val, value) ThenBlock: { ReturnValue(mid) }
+            IfCondition LessThan(mid_val, value) ThenBlock: {
+                left = Add(mid, 1)
+            } ElseBlock: {
+                right = Subtract(mid, 1)
+            }
+        }
+        ReturnValue(Arrays.NULL)
+    }
+}

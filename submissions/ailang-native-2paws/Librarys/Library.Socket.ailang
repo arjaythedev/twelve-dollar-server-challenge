@@ -1,0 +1,649 @@
+// Library.Socket.ailang
+// Socket wrapper using Linux syscalls directly
+// Copyright (c) 2025-2026 Sean Collins, 2 Paws Machine and Engineering. MIT License.
+
+FixedPool.SocketConstants {
+    "AF_INET": Initialize=2
+    "AF_INET6": Initialize=10
+    "SOCK_STREAM": Initialize=1
+    "SOCK_DGRAM": Initialize=2
+    "IPPROTO_TCP": Initialize=6
+    "SOL_SOCKET": Initialize=1
+    "SO_REUSEADDR": Initialize=2
+    "SO_KEEPALIVE": Initialize=9
+    "MSG_NOSIGNAL": Initialize=16384
+}
+
+// Create socket address structure for IPv4
+Function.Socket.CreateAddr {
+    Input: host: Address
+    Input: port: Integer
+    Output: Address
+    Body: {
+        addr = Allocate(16)
+
+        // Family AF_INET = 2, bytes 0-1
+        SetByte(addr, 0, 2)
+        SetByte(addr, 1, 0)
+
+        // Port in network byte order (big-endian), bytes 2-3
+        port_high = Divide(port, 256)
+        port_low = Subtract(port, Multiply(port_high, 256))
+        SetByte(addr, 2, port_high)
+        SetByte(addr, 3, port_low)
+
+        // IP address, bytes 4-7
+        is_localhost = StringCompare(host, "localhost")
+        is_loopback = StringCompare(host, "127.0.0.1")
+        IfCondition Or(EqualTo(is_localhost, 0), EqualTo(is_loopback, 0)) ThenBlock: {
+            SetByte(addr, 4, 127)
+            SetByte(addr, 5, 0)
+            SetByte(addr, 6, 0)
+            SetByte(addr, 7, 1)
+        } ElseBlock: {
+            ip_parts = Socket.ParseIPAddress(host)
+            SetByte(addr, 4, ArrayGet(ip_parts, 0))
+            SetByte(addr, 5, ArrayGet(ip_parts, 1))
+            SetByte(addr, 6, ArrayGet(ip_parts, 2))
+            SetByte(addr, 7, ArrayGet(ip_parts, 3))
+            ArrayDestroy(ip_parts)
+        }
+
+        // Zero padding, bytes 8-15
+        zi = 8
+        WhileLoop LessThan(zi, 16) {
+            SetByte(addr, zi, 0)
+            zi = Add(zi, 1)
+        }
+
+        ReturnValue(addr)
+    }
+}
+
+// Create socket — syscall 41: socket(family, type, protocol)
+Function.Socket.Create {
+    Input: family: Integer
+    Input: type: Integer
+    Output: Integer
+    Body: {
+        sock = SystemCall(41, family, type, 0)
+        IfCondition LessThan(sock, 0) ThenBlock: {
+            PrintMessage("[Socket] Create failed\n")
+            ReturnValue(-1)
+        }
+        ReturnValue(sock)
+    }
+}
+
+// Connect — syscall 42: connect(sock, addr, addrlen)
+// addr must be a sockaddr_in struct (16 bytes) from CreateAddr
+Function.Socket.Connect {
+    Input: sock: Integer
+    Input: addr: Address
+    Output: Integer
+    Body: {
+        result = SystemCall(42, sock, addr, 16)
+        IfCondition LessThan(result, 0) ThenBlock: {
+            PrintMessage("[Socket] Connect failed\n")
+        }
+        ReturnValue(result)
+    }
+}
+
+// Send — syscall 1: write(fd, buf, count)
+Function.Socket.Send {
+    Input: sock: Integer
+    Input: buffer: Address
+    Input: length: Integer
+    Output: Integer
+    Body: {
+        sent = SystemCall(1, sock, buffer, length)
+        ReturnValue(sent)
+    }
+}
+
+// Recv — syscall 0: read(fd, buf, count)
+Function.Socket.Recv {
+    Input: sock: Integer
+    Input: buffer: Address
+    Input: max_length: Integer
+    Output: Integer
+    Body: {
+        received = SystemCall(0, sock, buffer, max_length)
+        ReturnValue(received)
+    }
+}
+
+// RecvExact — read exactly N bytes, looping on partial reads
+Function.Socket.RecvExact {
+    Input: sock: Integer
+    Input: buffer: Address
+    Input: length: Integer
+    Output: Integer
+    Body: {
+        total_received = 0
+        WhileLoop LessThan(total_received, length) {
+            remaining = Subtract(length, total_received)
+            chunk = SystemCall(0, sock, Add(buffer, total_received), remaining)
+            IfCondition LessEqual(chunk, 0) ThenBlock: {
+                ReturnValue(0)
+            }
+            total_received = Add(total_received, chunk)
+        }
+        ReturnValue(total_received)
+    }
+}
+
+// SetRecvTimeout — syscall 54: setsockopt
+Function.Socket.SetRecvTimeout {
+    Input: sock: Integer
+    Input: timeout_ms: Integer
+    Body: {
+        tv_sec = Divide(timeout_ms, 1000)
+        tv_usec = Multiply(Modulo(timeout_ms, 1000), 1000)
+        timeval = Allocate(16)
+        StoreValue(timeval, tv_sec)
+        StoreValue(Add(timeval, 8), tv_usec)
+        SystemCall(54, sock, 1, 20, timeval, 16)
+        Deallocate(timeval, 16)
+        ReturnValue(0)
+    }
+}
+
+// Close — syscall 3: close(fd)
+Function.Socket.Close {
+    Input: sock: Integer
+    Body: {
+        SystemCall(3, sock, 0, 0)
+    }
+}
+
+// Parse IP address string "x.x.x.x" into 4-element array
+Function.Socket.ParseIPAddress {
+    Input: ip_str: Address
+    Output: Address
+    Body: {
+        parts = Allocate(32)
+        part_idx = 0
+        current_num = 0
+        pi = 0
+        ip_len = StringLength(ip_str)
+
+        WhileLoop LessThan(pi, ip_len) {
+            ch = GetByte(ip_str, pi)
+            IfCondition EqualTo(ch, 46) ThenBlock: {
+                StoreValue(Add(parts, Multiply(part_idx, 8)), current_num)
+                part_idx = Add(part_idx, 1)
+                current_num = 0
+            } ElseBlock: {
+                digit = Subtract(ch, 48)
+                current_num = Add(Multiply(current_num, 10), digit)
+            }
+            pi = Add(pi, 1)
+        }
+        StoreValue(Add(parts, Multiply(part_idx, 8)), current_num)
+        ReturnValue(parts)
+    }
+}
+
+// =============================================================================
+// UNIX DOMAIN SOCKET EXTENSIONS — add to Library.Socket.ailang
+// =============================================================================
+
+// Add to FixedPool.SocketConstants:
+//   "AF_UNIX": Initialize=1
+
+// Create socket address for AF_UNIX.
+//   sockaddr_un: family(2) + path(up to 108) = 110 bytes.
+//   Abstract socket convention: paths beginning with '@' (0x40) become
+//   abstract namespace sockets — sun_path[0] is set to '\0' instead.
+//   Abstract sockets live entirely in the kernel namespace (no filesystem
+//   inode) and bypass WSL2 tmpfs bugs that produce malformed socket inodes.
+Function.Socket.CreateAddrUnix {
+    Input: path: Address
+    Output: Address
+    Body: {
+        addr = Allocate(110)
+
+        // Zero the whole struct
+        zi = 0
+        WhileLoop LessThan(zi, 110) {
+            SetByte(addr, zi, 0)
+            zi = Add(zi, 1)
+        }
+
+        // Family AF_UNIX = 1
+        SetByte(addr, 0, 1)
+        SetByte(addr, 1, 0)
+
+        // Copy path starting at offset 2. If first char is '@' (0x40),
+        // emit a null byte instead — Linux abstract socket convention.
+        plen = StringLength(path)
+        IfCondition GreaterThan(plen, 107) ThenBlock: {
+            plen = 107
+        }
+        pi = 0
+        WhileLoop LessThan(pi, plen) {
+            b = GetByte(path, pi)
+            IfCondition EqualTo(pi, 0) ThenBlock: {
+                IfCondition EqualTo(b, 64) ThenBlock: { b = 0 }
+            }
+            SetByte(addr, Add(2, pi), b)
+            pi = Add(pi, 1)
+        }
+
+        ReturnValue(addr)
+    }
+}
+
+// Connect to a unix socket. POSIX: addrlen = offsetof(sun_path) + strlen(path)
+//   sa_family_t is 2 bytes, path is plen bytes, no trailing null counted.
+//   Linux tolerates +1 but WSL2 tmpfs gets confused by it (inode renders as
+//   regular file via ls but as directory via file(1)).
+Function.Socket.ConnectUnix {
+    Input: sock: Integer
+    Input: path: Address
+    Output: Integer
+    Body: {
+        addr = Socket.CreateAddrUnix(path)
+        plen = StringLength(path)
+        addrlen = Add(2, plen)
+        result = SystemCall(42, sock, addr, addrlen)
+        Deallocate(addr, 110)
+        ReturnValue(result)
+    }
+}
+
+// Bind a unix socket. POSIX addrlen = 2 + plen (see ConnectUnix comment).
+Function.Socket.BindUnix {
+    Input: sock: Integer
+    Input: path: Address
+    Output: Integer
+    Body: {
+        // Unlink any stale socket file first (syscall 87 = unlink)
+        SystemCall(87, path, 0, 0)
+
+        addr = Socket.CreateAddrUnix(path)
+        plen = StringLength(path)
+        addrlen = Add(2, plen)
+        result = SystemCall(49, sock, addr, addrlen)
+        Deallocate(addr, 110)
+        IfCondition LessThan(result, 0) ThenBlock: {
+            PrintMessage("[Socket] BindUnix failed\n")
+        }
+        ReturnValue(result)
+    }
+}
+
+// Listen for connections
+Function.Socket.Listen {
+    Input: sock: Integer
+    Input: backlog: Integer
+    Output: Integer
+    Body: {
+        result = SystemCall(50, sock, backlog, 0)
+        IfCondition LessThan(result, 0) ThenBlock: {
+            PrintMessage("[Socket] Listen failed\n")
+        }
+        ReturnValue(result)
+    }
+}
+
+// Accept a connection (returns new client fd)
+Function.Socket.Accept {
+    Input: sock: Integer
+    Output: Integer
+    Body: {
+        client = SystemCall(43, sock, 0, 0)
+        IfCondition LessThan(client, 0) ThenBlock: {
+            PrintMessage("[Socket] Accept failed\n")
+        }
+        ReturnValue(client)
+    }
+}
+
+// Send a length-prefixed JSON message (4-byte BE length + payload)
+Function.Socket.SendMsg {
+    Input: sock: Integer
+    Input: json_str: Address
+    Output: Integer
+    Body: {
+        len = StringLength(json_str)
+
+        // Send 4-byte big-endian length header
+        hdr = Allocate(4)
+        SetByte(hdr, 0, BitwiseAnd(RightShift(len, 24), 255))
+        SetByte(hdr, 1, BitwiseAnd(RightShift(len, 16), 255))
+        SetByte(hdr, 2, BitwiseAnd(RightShift(len, 8), 255))
+        SetByte(hdr, 3, BitwiseAnd(len, 255))
+        Socket.Send(sock, hdr, 4)
+        Deallocate(hdr, 4)
+
+        // Send payload
+        sent = Socket.Send(sock, json_str, len)
+        ReturnValue(sent)
+    }
+}
+
+// Receive a length-prefixed JSON message
+// Returns allocated string (caller must free) or 0
+Function.Socket.RecvMsg {
+    Input: sock: Integer
+    Output: Address
+    Body: {
+        // Read 4-byte length header
+        hdr = Allocate(4)
+        br = Socket.RecvExact(sock, hdr, 4)
+        IfCondition LessEqual(br, 0) ThenBlock: {
+            Deallocate(hdr, 4)
+            ReturnValue(0)
+        }
+
+        b3 = GetByte(hdr, 0)
+        b2 = GetByte(hdr, 1)
+        b1 = GetByte(hdr, 2)
+        b0 = GetByte(hdr, 3)
+        Deallocate(hdr, 4)
+
+        len = BitwiseOr(LeftShift(b3, 24), BitwiseOr(LeftShift(b2, 16), BitwiseOr(LeftShift(b1, 8), b0)))
+
+        // Signed length: a high-bit prefix is a desync, not a real size.
+        IfCondition LessEqual(len, 0) ThenBlock: { ReturnValue(0) }
+
+        // Sanity check — bad length likely means stream desync.
+        // Drain socket buffer to resynchronize, return -1 (not 0)
+        // so caller can distinguish "bad msg" from "disconnected".
+        // Limit is 1MB; tool responses are capped at 50KB so anything
+        // over 1MB is definitely a framing error, not a large response.
+        IfCondition GreaterThan(len, 1048576) ThenBlock: {
+            PrintMessage("[Socket] RecvMsg: bad length prefix (")
+            PrintNumber(len)
+            PrintMessage("), draining socket\n")
+            drain_buf = Allocate(4096)
+            drain_pass = 0
+            WhileLoop LessThan(drain_pass, 256) {
+                dr = SystemCall(0, sock, drain_buf, 4096, 0, 0)
+                IfCondition LessEqual(dr, 0) ThenBlock: { drain_pass = 256 }
+                drain_pass = Add(drain_pass, 1)
+            }
+            Deallocate(drain_buf, 4096)
+            ReturnValue(-1)
+        }
+
+        // Read payload
+        buf = Allocate(Add(len, 1))
+        br2 = Socket.RecvExact(sock, buf, len)
+        IfCondition LessEqual(br2, 0) ThenBlock: {
+            Deallocate(buf, Add(len, 1))
+            ReturnValue(0)
+        }
+        SetByte(buf, len, 0)
+
+        ReturnValue(buf)
+    }
+}
+
+// Set a file descriptor to non-blocking mode
+// Uses fcntl(fd, F_GETFL) then F_SETFL with O_NONBLOCK or'd in.
+Function.Socket.SetNonBlock {
+    Input: fd: Integer
+    Output: Integer
+    Body: {
+        flags = SystemCall(72, fd, 3, 0)
+        IfCondition LessThan(flags, 0) ThenBlock: {
+            ReturnValue(flags)
+        }
+        r = SystemCall(72, fd, 4, BitwiseOr(flags, 2048))
+        ReturnValue(r)
+    }
+}
+
+FixedPool.SockOpt {
+    "SOL_SOCKET": Initialize=1
+    "SO_REUSEADDR": Initialize=2
+    "SO_KEEPALIVE": Initialize=9
+    "IPPROTO_TCP": Initialize=6
+    "TCP_NODELAY": Initialize=1
+    "SOCK_NONBLOCK": Initialize=2048
+    "SYS_SETSOCKOPT": Initialize=54
+    "SYS_ACCEPT4": Initialize=288
+    "EAGAIN": Initialize=11
+}
+
+FixedPool.EpollC {
+    "CREATE1": Initialize=291
+    "CTL": Initialize=233
+    "WAIT": Initialize=232
+    "ADD": Initialize=1
+    "MOD": Initialize=2
+    "DEL": Initialize=3
+    "IN": Initialize=1
+    "OUT": Initialize=4
+    "ERR": Initialize=8
+    "HUP": Initialize=16
+    "RDHUP": Initialize=8192
+    "EVENT_SIZE": Initialize=12
+}
+
+Function.Socket.SetSockInt {
+    Input: fd: Integer
+    Input: level: Integer
+    Input: opt: Integer
+    Output: Integer
+    Body: {
+        v = Allocate(4)
+        SetByte(v, 0, 1)
+        SetByte(v, 1, 0)
+        SetByte(v, 2, 0)
+        SetByte(v, 3, 0)
+        r = SystemCall(SockOpt.SYS_SETSOCKOPT, fd, level, opt, v, 4)
+        Deallocate(v, 4)
+        ReturnValue(r)
+    }
+}
+
+Function.Socket.SetReuseAddr {
+    Input: fd: Integer
+    Output: Integer
+    Body: {
+        r = Socket.SetSockInt(fd, SockOpt.SOL_SOCKET, SockOpt.SO_REUSEADDR)
+        ReturnValue(r)
+    }
+}
+
+Function.Socket.SetTcpNoDelay {
+    Input: fd: Integer
+    Output: Integer
+    Body: {
+        r = Socket.SetSockInt(fd, SockOpt.IPPROTO_TCP, SockOpt.TCP_NODELAY)
+        ReturnValue(r)
+    }
+}
+
+Function.Socket.SetKeepAlive {
+    Input: fd: Integer
+    Output: Integer
+    Body: {
+        r = Socket.SetSockInt(fd, SockOpt.SOL_SOCKET, SockOpt.SO_KEEPALIVE)
+        ReturnValue(r)
+    }
+}
+
+Function.Socket.BindInet {
+    Input: fd: Integer
+    Input: host: Address
+    Input: port: Integer
+    Output: Integer
+    Body: {
+        addr = Socket.CreateAddr(host, port)
+        r = SystemCall(49, fd, addr, 16)
+        Deallocate(addr, 16)
+        ReturnValue(r)
+    }
+}
+
+Function.Socket.Accept4 {
+    Input: fd: Integer
+    Output: Integer
+    Body: {
+        client = SystemCall(SockOpt.SYS_ACCEPT4, fd, 0, 0, SockOpt.SOCK_NONBLOCK)
+        ReturnValue(client)
+    }
+}
+
+Function.Socket.RecvNB {
+    Input: sock: Integer
+    Input: buffer: Address
+    Input: max_length: Integer
+    Output: Integer
+    Body: {
+        n = SystemCall(0, sock, buffer, max_length)
+        ReturnValue(n)
+    }
+}
+
+Function.Socket.SendNB {
+    Input: sock: Integer
+    Input: buffer: Address
+    Input: length: Integer
+    Output: Integer
+    Body: {
+        n = SystemCall(1, sock, buffer, length)
+        ReturnValue(n)
+    }
+}
+
+Function.Epoll.Create {
+    Output: Integer
+    Body: {
+        epfd = SystemCall(EpollC.CREATE1, 0)
+        ReturnValue(epfd)
+    }
+}
+
+Function.Epoll.Pack {
+    Input: ev: Address
+    Input: events: Integer
+    Input: data: Integer
+    Body: {
+        SetByte(ev, 0, BitwiseAnd(events, 255))
+        SetByte(ev, 1, BitwiseAnd(RightShift(events, 8), 255))
+        SetByte(ev, 2, BitwiseAnd(RightShift(events, 16), 255))
+        SetByte(ev, 3, BitwiseAnd(RightShift(events, 24), 255))
+        SetByte(ev, 4, BitwiseAnd(data, 255))
+        SetByte(ev, 5, BitwiseAnd(RightShift(data, 8), 255))
+        SetByte(ev, 6, BitwiseAnd(RightShift(data, 16), 255))
+        SetByte(ev, 7, BitwiseAnd(RightShift(data, 24), 255))
+        SetByte(ev, 8, BitwiseAnd(RightShift(data, 32), 255))
+        SetByte(ev, 9, BitwiseAnd(RightShift(data, 40), 255))
+        SetByte(ev, 10, BitwiseAnd(RightShift(data, 48), 255))
+        SetByte(ev, 11, BitwiseAnd(RightShift(data, 56), 255))
+    }
+}
+
+Function.Epoll.EventsAt {
+    Input: ev: Address
+    Output: Integer
+    Body: {
+        b0 = GetByte(ev, 0)
+        b1 = GetByte(ev, 1)
+        b2 = GetByte(ev, 2)
+        b3 = GetByte(ev, 3)
+        t = BitwiseOr(b0, LeftShift(b1, 8))
+        t2 = BitwiseOr(t, LeftShift(b2, 16))
+        ReturnValue(BitwiseOr(t2, LeftShift(b3, 24)))
+    }
+}
+
+Function.Epoll.DataAt {
+    Input: ev: Address
+    Output: Integer
+    Body: {
+        b0 = GetByte(ev, 4)
+        b1 = GetByte(ev, 5)
+        b2 = GetByte(ev, 6)
+        b3 = GetByte(ev, 7)
+        b4 = GetByte(ev, 8)
+        b5 = GetByte(ev, 9)
+        b6 = GetByte(ev, 10)
+        b7 = GetByte(ev, 11)
+        t0 = BitwiseOr(b0, LeftShift(b1, 8))
+        t1 = BitwiseOr(t0, LeftShift(b2, 16))
+        t2 = BitwiseOr(t1, LeftShift(b3, 24))
+        t3 = BitwiseOr(t2, LeftShift(b4, 32))
+        t4 = BitwiseOr(t3, LeftShift(b5, 40))
+        t5 = BitwiseOr(t4, LeftShift(b6, 48))
+        ReturnValue(BitwiseOr(t5, LeftShift(b7, 56)))
+    }
+}
+
+Function.Epoll.Ctl {
+    Input: epfd: Integer
+    Input: op: Integer
+    Input: fd: Integer
+    Input: events: Integer
+    Input: data: Integer
+    Output: Integer
+    Body: {
+        ev = Allocate(16)
+        Epoll.Pack(ev, events, data)
+        r = SystemCall(EpollC.CTL, epfd, op, fd, ev)
+        Deallocate(ev, 16)
+        ReturnValue(r)
+    }
+}
+
+Function.Epoll.Add {
+    Input: epfd: Integer
+    Input: fd: Integer
+    Input: events: Integer
+    Input: data: Integer
+    Output: Integer
+    Body: {
+        r = Epoll.Ctl(epfd, EpollC.ADD, fd, events, data)
+        ReturnValue(r)
+    }
+}
+
+Function.Epoll.Mod {
+    Input: epfd: Integer
+    Input: fd: Integer
+    Input: events: Integer
+    Input: data: Integer
+    Output: Integer
+    Body: {
+        r = Epoll.Ctl(epfd, EpollC.MOD, fd, events, data)
+        ReturnValue(r)
+    }
+}
+
+Function.Epoll.Del {
+    Input: epfd: Integer
+    Input: fd: Integer
+    Output: Integer
+    Body: {
+        r = SystemCall(EpollC.CTL, epfd, EpollC.DEL, fd, 0)
+        ReturnValue(r)
+    }
+}
+
+Function.Epoll.Wait {
+    Input: epfd: Integer
+    Input: buf: Address
+    Input: max: Integer
+    Input: timeout_ms: Integer
+    Output: Integer
+    Body: {
+        n = SystemCall(EpollC.WAIT, epfd, buf, max, timeout_ms)
+        ReturnValue(n)
+    }
+}
+
+Function.Epoll.Slot {
+    Input: buf: Address
+    Input: i: Integer
+    Output: Address
+    Body: {
+        ReturnValue(Add(buf, Multiply(i, EpollC.EVENT_SIZE)))
+    }
+}

@@ -649,7 +649,11 @@ row, so not merged: 270,000 and 260,000 passed the 2-minute probe, but the 5-min
 (2.63 s at 81 % CPU). #415's head then moved to **`09b27be`** (batch wait 64 / 2 ms, the urgent bulk checkpoint thread
 removed; PGO build worked), which held **260,000** (24,973 req/s, p95 36.0 / p99 216.1 ms, 0 err, 73 % CPU, 27 µs/req,
 1,245 MB, 2026-11-13), below the merged row, so not merged: 270,000 failed the 2-minute probe on p99 (2.15 s at 78 %
-CPU), 280,000 on p99 (4.23 s at 78 % CPU) and 320,000 on p99 (12.7 s at 92 % CPU), all with 0 errors. #415 stays open.
+CPU), 280,000 on p99 (4.23 s at 78 % CPU) and 320,000 on p99 (12.7 s at 92 % CPU), all with 0 errors. Its next head,
+**`f4ec9c5`** (batch window back to 1 ms; PGO build worked), held **280,000** (26,670 req/s, p95 94.6 / p99 328.3 ms,
+0 err, 78 % CPU, 26 µs/req, 1,369 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
+2-minute probe on p99 (1.32 s at 81 % CPU), 300,000 on p99 (3.83 s at 84 % CPU) and 320,000 on p99 (12.2 s at 92 %
+CPU), all with 0 errors. #415 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

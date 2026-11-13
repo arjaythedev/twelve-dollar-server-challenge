@@ -318,6 +318,7 @@ void builtins_init(void) {
     add("stream_send2_nb",      B_MISC, ty_int,    false, false);
     add("nofile_limit",         B_ZERO, ty_int,    false, false);
     add("runtime_stats",        B_ZERO, ty_string, false, false);
+    add("runtime_diag_write",   B_STR1, ty_bool,   false, false);
     add("uring_active",         B_ZERO, ty_bool,   false, false);
     add("uring_direct",         B_ZERO, ty_bool,   false, false);
     add("uring_direct_slots",   B_ZERO, ty_int,    false, false);
@@ -905,6 +906,7 @@ void builtins_init(void) {
     add("bt_col_off",           B_MISC, ty_int,    false, false);
     add("bt_col_len",           B_MISC, ty_int,    false, false);
     add("bt_col_int",           B_MISC, ty_int,    false, false);
+    add("bt_col_int_at",        B_MISC, ty_int,    false, false);
     add("bt_read",              B_MISC, ty_int,    false, false);
     add("bt_count_key",        B_MISC, ty_int,    false, false);
     add("bt_count_range",      B_MISC, ty_int,    false, false);
@@ -939,6 +941,7 @@ void builtins_init(void) {
     add("sqlite_bg_checkpoint_active", B_MISC, ty_bool, false, false); /* (db) */
     add("sqlite_close",         B_MISC, ty_bool,   false, false);
     add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */
+    add("sqlite_status",        B_MISC, ty_string, false, false);  /* (db) -> interval cache/timing counters */
     add("sqlite_prepare",       B_MISC, ty_int,    false, false);  /* (db, sql) -> stmt|0 */
     add("sqlite_finalize",      B_MISC, ty_bool,   false, false);
     add("sqlite_bind_int",      B_MISC, ty_bool,   false, false);  /* (stmt, 1-based idx, value) */

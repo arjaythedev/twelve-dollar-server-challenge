@@ -118,6 +118,7 @@ static inline void hp_fdlist_push(HpFdList *q, hp_sock fd) {
     }
 }
 
+
 /* Graceful close for connected data sockets. Winsock's closesocket()
  * sends RST (destroying queued sends) when unread data is pending; a
  * "send + close" one-shot HTTP server always leaves its peer's request
@@ -2589,6 +2590,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_OFF_PBUF    0x80000000ULL
 #define HP_UR_OFF_PBUF_SHIFT 16
 #define HP_UR_ENTER_GET   1
+#define HP_UR_ENTER_SQ_WAKEUP 2
 /* IORING_ENTER_EXT_ARG is bit 3 (verified against io_uring.h + the probe) */
 #define HP_UR_ENTER_EXT   8
 /* io_uring SQ flags: deferred task work is pending (uapi value 1 << 2) */
@@ -2596,6 +2598,7 @@ static _Thread_local int g_epfd = -1;
 /* IORING_SETUP_CQSIZE = bit 3, IORING_SETUP_CLAMP = bit 4 (uapi io_uring.h) */
 #define HP_UR_SETUP_CQSIZE (1U << 3)
 #define HP_UR_SETUP_CLAMP   (1U << 4)
+#define HP_UR_SETUP_SQPOLL  (1U << 1)
 #define HP_UR_SETUP_SUBMIT_ALL (1U << 7)
 /* Cooperative task run: process completions in io_uring_enter instead of
  * task_work on every syscall exit. DEFER_TASKRUN (6.1+) keeps all task work
@@ -2604,6 +2607,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_SETUP_TASKRUN_FLAG  (1U << 9)
 #define HP_UR_SETUP_SINGLE_ISSUER (1U << 12)
 #define HP_UR_SETUP_DEFER_TASKRUN (1U << 13)
+#define HP_UR_SQ_NEED_WAKEUP (1U << 0)
 #define HP_UR_KIND_RECV   1
 #define HP_UR_KIND_SEND   2
 #define HP_UR_KIND_POLL   3
@@ -2614,7 +2618,8 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_WAKE_UD(r)  (((uint64_t)(r) << 8) | HP_UR_KIND_WAKE)
 #define HP_UR_OP_POLL_ADD 6
 #define HP_UR_POLL_ADD_MULTI 1
-/* Keep application work per poll round short at the 10k+ req/s plateau. */
+/* Bound app dispatch per poll round by default. High-concurrency experiments
+ * may raise the budget so a backlog can drain without repeated loop turns. */
 #ifndef HP_UR_READ_ANSWER_MAX
 #define HP_UR_READ_ANSWER_MAX 2048U
 #endif
@@ -2648,6 +2653,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_IOSQE_BUFFER_SELECT (1U << 5)
 #define HP_UR_ACCEPT_MULTISHOT    (1U << 0)
 #define HP_UR_ACCEPT_DEPTH        512U
+#define HP_UR_ACCEPT_DEPTH_MAX    (HP_UR_SQ_ENTRIES / 2U)
 #define HP_UR_RECV_MULTISHOT      (1U << 1)
 #define HP_UR_RECVSEND_POLL_FIRST (1U << 0)
 #define HP_UR_CQE_F_BUFFER         (1U << 0)
@@ -2664,9 +2670,9 @@ static _Thread_local int g_epfd = -1;
  * HPHP_DIRECT_FILES override to the same limit. */
 #define HP_UR_DIRECT_FILES_DEF     65535U
 /* Provided-buffer ring: keep the in-flight receive window bounded per ring.
- * 1k buffers of 1 KB match the Rust leader's count and are replenished as
- * requests are consumed; the larger count remains available via HPHP_PBUF_N. */
-#define HP_UR_PBUF_N_DEF           1024
+ * 4k buffers are replenished as requests are consumed; HPHP_PBUF_N can tune
+ * the count for deployments with a tighter memory budget. */
+#define HP_UR_PBUF_N_DEF           4096
 
 /* Recv buffer size per connection, overridable at run time (HPHP_RECV_LEN)
  * so the size can be A/B-tested on one binary. */
@@ -2766,11 +2772,21 @@ struct hp_uring_setup_params {
     struct hp_uring_cq_ring cq_off;
 };
 
+static int hp_diag_enabled(void);
+static uint64_t hp_diag_now_ns(void);
+
 struct hp_urchunk {
     struct hp_urchunk *next;
     char   *data;
     size_t  off, len, cap;
 };
+
+/* Keep the ordinary response chunk unchanged; append its queue timestamp only
+ * in diagnostic processes, where HPHP_DIAG is fixed for the process lifetime. */
+static uint64_t *hp_ur_chunk_diag_ns(struct hp_urchunk *c) {
+    if (!hp_diag_enabled()) return NULL;
+    return (uint64_t *)((char *)c + sizeof *c);
+}
 
 /* Recycle only the capacity of completed response buffers. The bytes are
  * overwritten before the next response is sent; no response content is
@@ -2791,6 +2807,28 @@ static char *hp_resp_buf_acquire(size_t *cap) {
         else hp_resp_buf_pool_bytes = 0;
         *cap = e.cap;
         return e.data;
+    }
+    *cap = 0;
+    return NULL;
+}
+
+/* Take a pooled buffer of at least `want` bytes. The pool mixes small and
+ * large capacities (e.g. 2 KiB and 16 KiB builders), so look a few entries
+ * deep instead of only at the top; the hit is swapped out from the top. */
+static char *hp_resp_buf_acquire_min(size_t want, size_t *cap) {
+    unsigned n = hp_resp_buf_pool_n;
+    unsigned look = n < 8 ? n : 8;
+    for (unsigned k = 0; k < look; k++) {
+        unsigned i = n - 1 - k;
+        if (hp_resp_buf_pool[i].cap >= want) {
+            hp_resp_buf_entry e = hp_resp_buf_pool[i];
+            hp_resp_buf_pool[i] = hp_resp_buf_pool[n - 1];
+            hp_resp_buf_pool_n = n - 1;
+            if (hp_resp_buf_pool_bytes >= e.cap) hp_resp_buf_pool_bytes -= e.cap;
+            else hp_resp_buf_pool_bytes = 0;
+            *cap = e.cap;
+            return e.data;
+        }
     }
     *cap = 0;
     return NULL;
@@ -2821,7 +2859,8 @@ static struct hp_urchunk *hp_ur_chunk_alloc(void) {
         g_chunk_spare_n--;
         return c;
     }
-    return (struct hp_urchunk *)malloc(sizeof *c);
+    return (struct hp_urchunk *)malloc(sizeof *c +
+        (hp_diag_enabled() ? sizeof(uint64_t) : 0));
 }
 static void hp_ur_chunk_release(struct hp_urchunk *c) {
     hp_resp_buf_release(c->data, c->cap);
@@ -2868,6 +2907,8 @@ struct hp_urfds {
     unsigned int rreading:1;              /* bounded single-shot recv is in flight */
     unsigned int ranswerq:1;              /* ready, but deferred by the answer cap */
     unsigned int rborrowed:1;             /* rh is an in-place view of a provided buffer */
+    unsigned int rdispatch:1;              /* already added to this poll's app-ready list */
+    unsigned int rdispatch_valid:1;        /* distinguishes a fresh connection from pass bit 0 */
 };
 _Static_assert(sizeof(struct hp_urfds) <= 64,
                "per-connection runtime state must stay compact");
@@ -2891,18 +2932,34 @@ static _Thread_local int hp_ur_busy = 0;   /* the last wakeup had completions */
 static _Thread_local long hp_ur_batch = HP_UR_BATCH;
 static _Thread_local long hp_ur_batch_us = HP_UR_BATCH_US;
 static _Thread_local uint32_t hp_ur_answer_budget_limit = HP_UR_READ_ANSWER_MAX;
+static _Thread_local unsigned int hp_ur_ready_bit;
+/* Dedupe can reduce redundant ready handles, but at high VU it also delayed
+ * useful reads in the same-binary A/B. Keep it opt-in until a full pass shows
+ * better completed throughput and tail latency together. */
+static _Thread_local int hp_ur_ready_dedupe = 0;
 static _Thread_local int hp_ur_defer_all = 0;
 static _Thread_local int hp_ur_ring0_wait = 1;
+/* Mirror the leader's event-loop policy: ring 0 only performs its bounded
+ * wait while both ready/recovery work and CQ completions are absent. */
+static _Thread_local int hp_ur_ring0_busy_aware = 1;
+/* When the SQ is full, Rust's push helper publishes SQEs without GETEVENTS;
+ * normal batch entry handles deferred task work later. Keep the old blocking
+ * flush available for same-binary A/B checks. */
+static _Thread_local int hp_ur_sq_flush_getevents = 1;
 /* The bounded one-shot accept queue mirrors the Rust leader. An explicit 0
  * keeps the earlier multishot listener available for A/B comparison. */
 static _Thread_local uint32_t hp_ur_accept_depth = HP_UR_ACCEPT_DEPTH;
 /* Optional Rust-style one-accept-lane handover. Only one ring accepts at a
  * time; it yields while its table still has room for all in-flight accepts. */
 static _Thread_local int hp_ur_accept_handover = 0;
+static _Thread_local int hp_ur_accept_parallel = 0;
 static _Thread_local int hp_ur_accept_lane = -1;
 static _Thread_local int hp_ur_accept_last_lane = -1;
 static _Thread_local int hp_ur_accept_diag = 0;
 static _Thread_local int hp_ur_taskrun = 1;
+/* Optional kernel-side SQ polling experiment. Keep disabled by default: its
+ * kernel thread can cost more CPU than it saves on a one-vCPU host. */
+static _Thread_local int hp_ur_sqpoll = 0;
 
 static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
 static _Thread_local struct hp_urfds *hp_ur_fds;
@@ -2916,6 +2973,9 @@ static _Thread_local struct hp_ur_readq_ent *hp_ur_readq;
 static _Thread_local uint32_t hp_ur_readq_cap, hp_ur_readq_head, hp_ur_readq_tail;
 static _Thread_local struct hp_ur_readq_ent *hp_ur_answerq;
 static _Thread_local uint32_t hp_ur_answerq_cap, hp_ur_answerq_head, hp_ur_answerq_tail;
+static _Thread_local int hp_ur_circular_queues;
+static _Thread_local uint32_t hp_ur_readq_max, hp_ur_answerq_max;
+static _Thread_local uint64_t hp_ur_readq_moved, hp_ur_answerq_moved;
 static _Thread_local uint32_t hp_ur_answer_budget;
 static _Thread_local int hp_ur_recovery_mode;
 static _Thread_local int hp_ur_readq_debugged;
@@ -2931,6 +2991,7 @@ struct hp_uring_ring {
     int fd;
     int efd;              /* CQE eventfd registered into epoll, -1 = none */
     int defer_taskrun;    /* only deferred rings need an enter to post task_work */
+    int sqpoll;           /* kernel SQ thread consumes published SQEs */
     unsigned char *sqes;
     struct hp_uring_cqe *cqes;
     uint32_t *sqarr;
@@ -2953,6 +3014,17 @@ struct hp_uring_ring {
     int accepting;                          /* Rust ring state: keep its accept queue filled */
     int accept_full;      /* this ring's direct table is full */
     int wake_ready;       /* ring 0 observed this ring's registered eventfd */
+    /* Opt-in per-ring timings. recv timestamps are allocated only for a
+     * diagnostic run; normal service connections retain the same footprint. */
+    uint64_t *diag_recv_ready_ns;
+    uint64_t *diag_answerq_ns;
+    uint64_t diag_enters, diag_enter_ns, diag_enter_max_ns;
+    uint64_t diag_submit_only, diag_submit_ns;
+    uint64_t diag_drain_cqes, diag_drain_ns;
+    uint64_t diag_accept_cqes, diag_recv_cqes, diag_send_cqes, diag_poll_cqes;
+    uint64_t diag_recv_to_app_ns, diag_recv_to_app_count, diag_recv_to_app_max_ns;
+    uint64_t diag_answerq_wait_ns, diag_answerq_wait_count, diag_answerq_wait_max_ns;
+    uint64_t diag_send_complete_ns, diag_send_complete_count, diag_send_complete_max_ns;
     /* The accept SQE keeps these alive while the multishot op is armed. */
     struct sockaddr_storage accept_addr;
     socklen_t accept_len;
@@ -3120,6 +3192,37 @@ static void hp_ur_use_ring(hp_sock fd) {
     int r = hp_ur_ring_of(fd);
     hp_ur_cur = (r >= 0) ? &hp_ur_rings[r] : &hp_ur_rings[0];
 }
+
+static void hp_ur_diag_recv_ready(hp_sock fd) {
+    if (!hp_diag_enabled()) return;
+    int r = hp_ur_ring_of(fd);
+    if (r < 0) return;
+    struct hp_uring_ring *rg = &hp_ur_rings[r];
+    uint32_t slot = (uint32_t)(fd - (hp_sock)HP_UR_HANDLE_BASE) %
+                    HP_UR_SLOTS_PER_RING;
+    if (rg->diag_recv_ready_ns && !rg->diag_recv_ready_ns[slot]) {
+        uint64_t now = hp_diag_now_ns();
+        rg->diag_recv_ready_ns[slot] = now ? now : 1;
+    }
+}
+
+static void hp_ur_diag_recv_taken(hp_sock fd) {
+    if (!hp_diag_enabled()) return;
+    int r = hp_ur_ring_of(fd);
+    if (r < 0) return;
+    struct hp_uring_ring *rg = &hp_ur_rings[r];
+    uint32_t slot = (uint32_t)(fd - (hp_sock)HP_UR_HANDLE_BASE) %
+                    HP_UR_SLOTS_PER_RING;
+    if (!rg->diag_recv_ready_ns || !rg->diag_recv_ready_ns[slot]) return;
+    uint64_t now = hp_diag_now_ns();
+    uint64_t t0 = rg->diag_recv_ready_ns[slot];
+    uint64_t age = now >= t0 ? now - t0 : 0;
+    rg->diag_recv_ready_ns[slot] = 0;
+    rg->diag_recv_to_app_ns += age;
+    rg->diag_recv_to_app_count++;
+    if (age > rg->diag_recv_to_app_max_ns)
+        rg->diag_recv_to_app_max_ns = age;
+}
 /* A direct slot has actually left its registered file table: resume accepts
  * after the same hysteresis used when a ring fills. */
 static void hp_ur_slot_maybe_resume(struct hp_uring_ring *rg) {
@@ -3158,6 +3261,9 @@ static void hp_ur_slot_close_done(hp_sock fd) {
 /* An enter is only needed when the ring has SQEs to submit, deferred task
  * work to flush, or completions waiting. Idle rings cost no syscall. */
 static int hp_ur_ring_needs_enter(struct hp_uring_ring *rg) {
+    if (rg->sqpoll && rg->sq_flags &&
+        !(__atomic_load_n(rg->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_NEED_WAKEUP))
+        return 0;
     if (rg->sqtail != __atomic_load_n(rg->sq_head, __ATOMIC_ACQUIRE)) return 1;
     if (rg->defer_taskrun && rg->sq_flags &&
         (__atomic_load_n(rg->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_TASKRUN))
@@ -3262,34 +3368,87 @@ static void hp_ur_retfd(hp_sock fd) {
  * with every other connection at once: that recreates the same ENOBUFS burst.
  * Keep each stopped connection once in a FIFO and drain it with bounded,
  * nonblocking buffer-select reads before returning to multishot receive. */
+static bool hp_ur_fifo_push(struct hp_ur_readq_ent **q, uint32_t *cap,
+                            uint32_t *head, uint32_t *tail,
+                            struct hp_ur_readq_ent ent, uint64_t *moved,
+                            uint32_t *max_depth) {
+    if (!*cap) {
+        uint32_t ncap = 1024;
+        struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)malloc(
+            (size_t)ncap * sizeof *n);
+        if (!n) return false;
+        *q = n;
+        *cap = ncap;
+        *head = *tail = 0;
+    }
+    uint32_t count = *tail - *head;
+    if (hp_ur_circular_queues) {
+        if (count == *cap) {
+            if (*cap >= (1U << 22)) return false;
+            uint32_t ncap = *cap << 1;
+            struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)malloc(
+                (size_t)ncap * sizeof *n);
+            if (!n) return false;
+            for (uint32_t i = 0; i < count; i++)
+                n[i] = (*q)[(*head + i) & (*cap - 1)];
+            free(*q);
+            *q = n;
+            *cap = ncap;
+            *head = 0;
+            *tail = count;
+        }
+        (*q)[*tail & (*cap - 1)] = ent;
+        (*tail)++;
+    } else {
+        if (*tail == *cap) {
+            if (*head) {
+                count = *tail - *head;
+                memmove(*q, *q + *head, (size_t)count * sizeof **q);
+                *moved += count;
+                *head = 0;
+                *tail = count;
+            }
+            if (*tail == *cap) {
+                if (*cap >= (1U << 22)) return false;
+                uint32_t ncap = *cap << 1;
+                struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)realloc(
+                    *q, (size_t)ncap * sizeof *n);
+                if (!n) return false;
+                *q = n;
+                *cap = ncap;
+            }
+        }
+        (*q)[(*tail)++] = ent;
+    }
+    count++;
+    if (count > *max_depth) *max_depth = count;
+    return true;
+}
+
+static bool hp_ur_fifo_pop(struct hp_ur_readq_ent *q, uint32_t cap,
+                           uint32_t *head, uint32_t *tail,
+                           struct hp_ur_readq_ent *out) {
+    if (*head == *tail) {
+        if (!hp_ur_circular_queues) *head = *tail = 0;
+        return false;
+    }
+    if (hp_ur_circular_queues)
+        *out = q[(*head) & (cap - 1)];
+    else
+        *out = q[*head];
+    (*head)++;
+    if (!hp_ur_circular_queues && *head == *tail) *head = *tail = 0;
+    return true;
+}
+
 static bool hp_ur_readq_push(hp_sock fd, struct hp_urfds *st, int reason) {
     if (!st || st->rreadq) return true;
     hp_ur_recovery_mode = 1;
-    if (!hp_ur_readq_cap) {
-        hp_ur_readq_cap = 1024;
-        hp_ur_readq = (struct hp_ur_readq_ent *)malloc(
-            (size_t)hp_ur_readq_cap * sizeof *hp_ur_readq);
-        if (!hp_ur_readq) { hp_ur_readq_cap = 0; return false; }
-    }
-    if (hp_ur_readq_tail == hp_ur_readq_cap) {
-        if (hp_ur_readq_head) {
-            uint32_t n = hp_ur_readq_tail - hp_ur_readq_head;
-            memmove(hp_ur_readq, hp_ur_readq + hp_ur_readq_head,
-                    (size_t)n * sizeof *hp_ur_readq);
-            hp_ur_readq_head = 0;
-            hp_ur_readq_tail = n;
-        }
-        if (hp_ur_readq_tail == hp_ur_readq_cap) {
-            if (hp_ur_readq_cap >= (1U << 22)) return false;
-            uint32_t ncap = hp_ur_readq_cap << 1;
-            struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)realloc(
-                hp_ur_readq, (size_t)ncap * sizeof *n);
-            if (!n) return false;
-            hp_ur_readq = n;
-            hp_ur_readq_cap = ncap;
-        }
-    }
-    hp_ur_readq[hp_ur_readq_tail++] = (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch };
+    if (!hp_ur_fifo_push(&hp_ur_readq, &hp_ur_readq_cap,
+                         &hp_ur_readq_head, &hp_ur_readq_tail,
+                         (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch },
+                         &hp_ur_readq_moved, &hp_ur_readq_max))
+        return false;
     st->rreadq = 1;
     hp_ur_readq_enqueues++;
     if (hp_ur_dbg && !hp_ur_readq_debugged) {
@@ -3301,59 +3460,46 @@ static bool hp_ur_readq_push(hp_sock fd, struct hp_urfds *st, int reason) {
 }
 
 static bool hp_ur_readq_pop(struct hp_ur_readq_ent *out) {
-    if (hp_ur_readq_head == hp_ur_readq_tail) {
-        hp_ur_readq_head = hp_ur_readq_tail = 0;
-        return false;
-    }
-    *out = hp_ur_readq[hp_ur_readq_head++];
-    return true;
+    return hp_ur_fifo_pop(hp_ur_readq, hp_ur_readq_cap,
+                          &hp_ur_readq_head, &hp_ur_readq_tail, out);
 }
 
 static bool hp_ur_answerq_push(hp_sock fd, struct hp_urfds *st) {
     if (!st || st->ranswerq) return true;
-    if (!hp_ur_answerq_cap) {
-        hp_ur_answerq_cap = 1024;
-        hp_ur_answerq = (struct hp_ur_readq_ent *)malloc(
-            (size_t)hp_ur_answerq_cap * sizeof *hp_ur_answerq);
-        if (!hp_ur_answerq) { hp_ur_answerq_cap = 0; return false; }
-    }
-    if (hp_ur_answerq_tail == hp_ur_answerq_cap) {
-        if (hp_ur_answerq_head) {
-            uint32_t n = hp_ur_answerq_tail - hp_ur_answerq_head;
-            memmove(hp_ur_answerq, hp_ur_answerq + hp_ur_answerq_head,
-                    (size_t)n * sizeof *hp_ur_answerq);
-            hp_ur_answerq_head = 0;
-            hp_ur_answerq_tail = n;
-        }
-        if (hp_ur_answerq_tail == hp_ur_answerq_cap) {
-            if (hp_ur_answerq_cap >= (1U << 22)) return false;
-            uint32_t ncap = hp_ur_answerq_cap << 1;
-            struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)realloc(
-                hp_ur_answerq, (size_t)ncap * sizeof *n);
-            if (!n) return false;
-            hp_ur_answerq = n;
-            hp_ur_answerq_cap = ncap;
-        }
-    }
-    hp_ur_answerq[hp_ur_answerq_tail++] =
-        (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch };
+    if (!hp_ur_fifo_push(&hp_ur_answerq, &hp_ur_answerq_cap,
+                         &hp_ur_answerq_head, &hp_ur_answerq_tail,
+                         (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch },
+                         &hp_ur_answerq_moved, &hp_ur_answerq_max))
+        return false;
     st->ranswerq = 1;
+    if (hp_diag_enabled()) {
+        int r = hp_ur_ring_of(fd);
+        if (r >= 0 && hp_ur_rings[r].diag_answerq_ns) {
+            uint32_t slot = (uint32_t)(fd - (hp_sock)HP_UR_HANDLE_BASE) %
+                            HP_UR_SLOTS_PER_RING;
+            hp_ur_rings[r].diag_answerq_ns[slot] = hp_diag_now_ns();
+        }
+    }
     return true;
 }
 
 static bool hp_ur_answerq_pop(struct hp_ur_readq_ent *out) {
-    if (hp_ur_answerq_head == hp_ur_answerq_tail) {
-        hp_ur_answerq_head = hp_ur_answerq_tail = 0;
-        return false;
-    }
-    *out = hp_ur_answerq[hp_ur_answerq_head++];
-    return true;
+    return hp_ur_fifo_pop(hp_ur_answerq, hp_ur_answerq_cap,
+                          &hp_ur_answerq_head, &hp_ur_answerq_tail, out);
 }
 
 /* Bound how many ready sockets reach the application in one loop pass. The
  * same FIFO serves normal receive completions and burst recovery. */
 static void hp_ur_recovery_ready(hp_sock fd, struct hp_urfds *st, HpFdList *in) {
-    if (!hp_fdlist_has(in)) return;
+    if (!hp_fdlist_has(in) || !st) return;
+    /* One PHP read_fd() drains all bytes already buffered for this socket.
+     * Multiple CQEs for the same connection in one drain must not consume
+     * several answer slots or add duplicate handles to the app's ready list. */
+    if (hp_ur_ready_dedupe) {
+        if (st->rdispatch_valid && st->rdispatch == hp_ur_ready_bit) return;
+        st->rdispatch = hp_ur_ready_bit;
+        st->rdispatch_valid = 1;
+    }
     if (hp_ur_answer_budget) {
         hp_fdlist_push(in, fd);
         hp_ur_answer_budget--;
@@ -3371,7 +3517,29 @@ static uint32_t hp_ur_dispatch_answerq(HpFdList *in) {
         struct hp_urfds *st = hp_ur_st_of(fd);
         if (!st || st->epoch != ent.epoch || !st->ranswerq) continue;
         st->ranswerq = 0;
+        if (hp_diag_enabled()) {
+            int r = hp_ur_ring_of(fd);
+            if (r >= 0 && hp_ur_rings[r].diag_answerq_ns) {
+                struct hp_uring_ring *rg = &hp_ur_rings[r];
+                uint32_t slot = (uint32_t)(fd - (hp_sock)HP_UR_HANDLE_BASE) %
+                                HP_UR_SLOTS_PER_RING;
+                uint64_t t0 = rg->diag_answerq_ns[slot];
+                uint64_t now = hp_diag_now_ns();
+                rg->diag_answerq_ns[slot] = 0;
+                if (t0 && now >= t0) {
+                    uint64_t age = now - t0;
+                    rg->diag_answerq_wait_ns += age;
+                    rg->diag_answerq_wait_count++;
+                    if (age > rg->diag_answerq_wait_max_ns)
+                        rg->diag_answerq_wait_max_ns = age;
+                }
+            }
+        }
         if (!st->rready || st->closeafter) continue;
+        if (hp_ur_ready_dedupe) {
+            st->rdispatch = hp_ur_ready_bit;
+            st->rdispatch_valid = 1;
+        }
         hp_fdlist_push(in, fd);
         hp_ur_answer_budget--;
         dispatched++;
@@ -3537,12 +3705,16 @@ static void hp_ur_free_fd(hp_sock fd) {
     hp_ur_detach(st);
 }
 
-static long hp_ur_enter(long to_submit, long min_complete, int wait_us) {
+static long hp_ur_enter_impl(long to_submit, long min_complete, int wait_us) {
     hp_st[HP_ST_ENTER]++;
     hp_st[HP_ST_SQE_SUB] += (uint64_t)(to_submit > 0 ? to_submit : 0);
+    unsigned enter_flags = HP_UR_ENTER_GET;
+    if (hp_ur_cur && hp_ur_cur->sqpoll && hp_ur_cur->sq_flags &&
+        (__atomic_load_n(hp_ur_cur->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_NEED_WAKEUP))
+        enter_flags |= HP_UR_ENTER_SQ_WAKEUP;
     if (wait_us < 0) return syscall(SYS_io_uring_enter, (long)hp_ur_fd,
                                     to_submit, min_complete,
-                                    HP_UR_ENTER_GET, 0L, 0L);
+                                    enter_flags, 0L, 0L);
     struct timespec ts;
     ts.tv_sec = wait_us / 1000000;
     ts.tv_nsec = (long)(wait_us % 1000000) * 1000L;
@@ -3560,7 +3732,7 @@ static long hp_ur_enter(long to_submit, long min_complete, int wait_us) {
     memset(&ga, 0, sizeof ga);
     ga.ts = (uint64_t)(uintptr_t)&ts;
     long r = syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit,
-                     min_complete, HP_UR_ENTER_GET | HP_UR_ENTER_EXT,
+                     min_complete, enter_flags | HP_UR_ENTER_EXT,
                      (long)&ga, (long)sizeof ga);
     if (r >= 0 || (errno != EINVAL && errno != ENOSYS)) return r;
     /* Old kernel without the ext-arg timeout: poll the ring fd for the
@@ -3574,7 +3746,22 @@ static long hp_ur_enter(long to_submit, long min_complete, int wait_us) {
         (void)poll(&pf, 1, (wait_us + 999) / 1000);
     }
     return syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit, 0,
-                   HP_UR_ENTER_GET, 0L, 0L);
+                   enter_flags, 0L, 0L);
+}
+
+static long hp_ur_enter(long to_submit, long min_complete, int wait_us) {
+    bool diag = hp_diag_enabled();
+    uint64_t t0 = diag ? hp_diag_now_ns() : 0;
+    long rc = hp_ur_enter_impl(to_submit, min_complete, wait_us);
+    if (diag && hp_ur_cur) {
+        uint64_t t1 = hp_diag_now_ns();
+        uint64_t dt = t1 >= t0 ? t1 - t0 : 0;
+        hp_ur_cur->diag_enters++;
+        hp_ur_cur->diag_enter_ns += dt;
+        if (dt > hp_ur_cur->diag_enter_max_ns)
+            hp_ur_cur->diag_enter_max_ns = dt;
+    }
+    return rc;
 }
 
 /* Secondary ordinary-taskrun rings only need their queued SQEs published.
@@ -3583,14 +3770,31 @@ static long hp_ur_enter(long to_submit, long min_complete, int wait_us) {
 static long hp_ur_submit_only(long to_submit) {
     hp_st[HP_ST_ENTER]++;
     hp_st[HP_ST_SQE_SUB] += (uint64_t)(to_submit > 0 ? to_submit : 0);
-    return syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit, 0, 0,
-                   0L, 0L);
+    bool diag = hp_diag_enabled();
+    uint64_t t0 = diag ? hp_diag_now_ns() : 0;
+    long rc = 0;
+    if (!hp_ur_cur || !hp_ur_cur->sqpoll || !hp_ur_cur->sq_flags ||
+        (__atomic_load_n(hp_ur_cur->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_NEED_WAKEUP)) {
+        unsigned flags = hp_ur_cur && hp_ur_cur->sqpoll
+            ? HP_UR_ENTER_SQ_WAKEUP : 0;
+        rc = syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit, 0,
+                     flags, 0L, 0L);
+    }
+    if (diag && hp_ur_cur) {
+        uint64_t t1 = hp_diag_now_ns();
+        uint64_t dt = t1 >= t0 ? t1 - t0 : 0;
+        hp_ur_cur->diag_submit_only++;
+        hp_ur_cur->diag_submit_ns += dt;
+    }
+    return rc;
 }
 
 /* Create and map one io_uring instance. */
 static bool hp_ur_ring_setup(struct hp_uring_ring *r, int defer_taskrun) {
     struct hp_uring_setup_params p;
     uint32_t sq_entries = HP_UR_SQ_ENTRIES;
+    int fd = -1;
+    int sqpoll = 0;
     const char *sq_env = getenv("HPHP_SQ_ENTRIES");
     if (sq_env && *sq_env) {
         long v = atol(sq_env);
@@ -3605,16 +3809,32 @@ static bool hp_ur_ring_setup(struct hp_uring_ring *r, int defer_taskrun) {
     p.cq_entries = HP_UR_CQ_ENTRIES;
     uint32_t base = HP_UR_SETUP_CQSIZE | HP_UR_SETUP_CLAMP |
                     HP_UR_SETUP_SUBMIT_ALL;
+    /* SQPOLL and DEFER_TASKRUN are incompatible. In this opt-in experiment
+     * the kernel thread consumes the shared SQ; ordinary taskrun handles
+     * completions. If setup is denied, retain the normal ring setup below. */
+    if (hp_ur_sqpoll) {
+        p.flags = base | HP_UR_SETUP_SQPOLL | HP_UR_SETUP_SINGLE_ISSUER;
+        p.sq_thread_idle = 1000;
+        fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
+        if (fd >= 0) sqpoll = 1;
+    }
     /* DEFER_TASKRUN keeps completion work inside io_uring_enter instead of
      * running it as task_work on every syscall exit; off-switchable via
      * HPHP_TASKRUN=0 if the box kernel treats it badly. */
-    if (defer_taskrun && hp_ur_taskrun) {
+    if (fd < 0 && defer_taskrun && hp_ur_taskrun) {
+        memset(&p, 0, sizeof p);
+        p.sq_entries = sq_entries;
+        p.cq_entries = HP_UR_CQ_ENTRIES;
         p.flags = base | HP_UR_SETUP_COOP_TASKRUN | HP_UR_SETUP_TASKRUN_FLAG |
                   HP_UR_SETUP_SINGLE_ISSUER | HP_UR_SETUP_DEFER_TASKRUN;
-    } else {
+        fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
+    } else if (fd < 0) {
+        memset(&p, 0, sizeof p);
+        p.sq_entries = sq_entries;
+        p.cq_entries = HP_UR_CQ_ENTRIES;
         p.flags = defer_taskrun ? base : base | HP_UR_SETUP_SINGLE_ISSUER;
+        fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
     }
-    int fd = (int)syscall(SYS_io_uring_setup, (unsigned long)p.sq_entries, &p);
     if (fd < 0 && defer_taskrun && hp_ur_taskrun) {
         /* older kernel: drop DEFER_TASKRUN/SINGLE_ISSUER, keep COOP_TASKRUN */
         p.flags = base | HP_UR_SETUP_COOP_TASKRUN | HP_UR_SETUP_TASKRUN_FLAG;
@@ -3634,10 +3854,15 @@ static bool hp_ur_ring_setup(struct hp_uring_ring *r, int defer_taskrun) {
         if (fd < 0) return false;
     }
     r->defer_taskrun = (p.flags & HP_UR_SETUP_DEFER_TASKRUN) != 0;
+    r->sqpoll = sqpoll;
     /* A registered eventfd makes CQ readiness pollable even with
      * DEFER_TASKRUN (the same mechanism the top C submission uses). */
     r->efd = -1;
-    {
+    /* HPHP_RING_EVENTFD=0 skips the registration: the kernel then signals no
+     * eventfd on CQ posts (a locked wakeup per flush), and a multi-ring loop
+     * relies on ring 0's bounded wait, as the multi-ring Rust loop does. */
+    const char *efd_env = getenv("HPHP_RING_EVENTFD");
+    if (!(efd_env && strcmp(efd_env, "0") == 0)) {
         int evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (evfd >= 0) {
             if (syscall(SYS_io_uring_register, (long)fd,
@@ -3689,11 +3914,19 @@ static bool hp_uring_setup(void) {
     const char *env = getenv("HPHP_URING");
     if (env && (env[0] == '0' || env[0] == 'n' || env[0] == 'N')) return false;
     hp_ur_dbg = getenv("HPHP_URING_DEBUG") != NULL;
+    if ((env = getenv("HPHP_SQPOLL")) && env[0] == '1')
+        hp_ur_sqpoll = 1;
+    if ((env = getenv("HPHP_READY_DEDUPE")) && env[0] == '1')
+        hp_ur_ready_dedupe = 1;
     if ((env = getenv("HPHP_RING0_WAIT")) && env[0] == '0')
         hp_ur_ring0_wait = 0;
+    if ((env = getenv("HPHP_RING0_BUSY")) && env[0] == '0')
+        hp_ur_ring0_busy_aware = 0;
     if ((env = getenv("HPHP_ACCEPT_DEPTH")) && *env) {
         long depth = atol(env);
-        if (depth >= 0 && depth <= HP_UR_ACCEPT_DEPTH)
+        /* Keep at least half of the SQ available for recv/send/close work;
+         * deeper accept pipelines are useful during large connection ramps. */
+        if (depth >= 0 && (uint64_t)depth <= HP_UR_ACCEPT_DEPTH_MAX)
             hp_ur_accept_depth = (uint32_t)depth;
     }
     if ((env = getenv("HPHP_ACCEPT_HANDOVER")) && env[0] == '1') {
@@ -3704,16 +3937,22 @@ static bool hp_uring_setup(void) {
         hp_ur_accept_lane = -1;
         hp_ur_accept_last_lane = -1;
     }
+    if ((env = getenv("HPHP_ACCEPT_PARALLEL")) && env[0] == '1')
+        hp_ur_accept_parallel = 1;
     if ((env = getenv("HPHP_ACCEPT_DIAG")) && env[0] == '1')
         hp_ur_accept_diag = 1;
     if ((env = getenv("HPHP_BATCH_N"))) hp_ur_batch = atol(env);
     if (hp_ur_batch < 1) hp_ur_batch = 1;
     if ((env = getenv("HPHP_BATCH_US"))) hp_ur_batch_us = atol(env);
     if (hp_ur_batch_us < 0) hp_ur_batch_us = 0;
+    if ((env = getenv("HPHP_SQ_FLUSH_GETEVENTS")) && env[0] == '0')
+        hp_ur_sq_flush_getevents = 0;
     if ((env = getenv("HPHP_ANSWER_BUDGET")) && *env) {
         long v = atol(env);
-        if (v >= 1 && v <= 8192) hp_ur_answer_budget_limit = (uint32_t)v;
+        if (v >= 1 && v <= 262144) hp_ur_answer_budget_limit = (uint32_t)v;
     }
+    if ((env = getenv("HPHP_CIRCULAR_QUEUES")) && *env == '1')
+        hp_ur_circular_queues = 1;
     if ((env = getenv("HPHP_TASKRUN")) && (env[0] == '0' || env[0] == 'n' ||
                                            env[0] == 'N'))
         hp_ur_taskrun = 0;
@@ -3883,6 +4122,20 @@ static bool hp_uring_direct_setup(void) {
         hp_ur_dirs = (struct hp_urfds *)calloc(n, sizeof *hp_ur_dirs);
         if (!hp_ur_dirs) break;
         hp_ur_dircap = n;
+        if (hp_diag_enabled()) {
+            hp_ur_cur->diag_recv_ready_ns =
+                (uint64_t *)calloc(n, sizeof(uint64_t));
+            if (!hp_ur_cur->diag_recv_ready_ns)
+                fprintf(stderr,
+                        "[ur] diag: ring %d receive-age timestamps unavailable\n",
+                        ri);
+            hp_ur_cur->diag_answerq_ns =
+                (uint64_t *)calloc(n, sizeof(uint64_t));
+            if (!hp_ur_cur->diag_answerq_ns)
+                fprintf(stderr,
+                        "[ur] diag: ring %d answer-queue timestamps unavailable\n",
+                        ri);
+        }
         hp_ur_cur->live = 0;
         hp_ur_cur->accept_armed = 0;
         hp_ur_cur->accepting = 0;
@@ -3943,8 +4196,18 @@ static bool hp_uring_direct_setup(void) {
         }
     }
     hp_ur_cur = &hp_ur_rings[0];
-    fprintf(stderr, "[ur] direct mode: %d rings, %u slots/ring, %u pbufs\n",
-            okrings, n, hp_ur_rings[0].pbuf_n);
+    int sqpoll_rings = 0;
+    for (int ri = 0; ri < okrings; ri++)
+        sqpoll_rings += hp_ur_rings[ri].sqpoll != 0;
+    fprintf(stderr,
+            "[ur] direct mode: %d rings, %u slots/ring, %u pbufs, "
+            "sqpoll=%d/%d, accept_depth=%u, answer_budget=%u, accept_parallel=%s, ready_dedupe=%s, batch=%ld/%ldus\n",
+            okrings, n, hp_ur_rings[0].pbuf_n, sqpoll_rings, okrings,
+            hp_ur_accept_depth,
+            hp_ur_answer_budget_limit,
+            hp_ur_accept_parallel ? "yes" : "no",
+            hp_ur_ready_dedupe ? "yes" : "no",
+            hp_ur_batch, hp_ur_batch_us);
     fprintf(stderr, "[ur] ring0 wake-poll: %s\n",
             hp_ur_ring_wake ? "enabled" : "disabled");
     return true;
@@ -3967,9 +4230,14 @@ static bool hp_ur_sq_push(struct hp_uring_sqe *fill) {
         for (int tries = 0; tries < 1000 &&
              tail - head >= (uint32_t)(hp_ur_sqmask + 1); tries++) {
             long pending = (long)(tail - head);
-            if (pending > 0 && hp_ur_enter(pending, 0, -1) < 0 &&
-                errno != EINTR && errno != EBUSY && errno != EAGAIN)
-                (void)hp_ur_enter(0, 0, -1);
+            if (pending > 0) {
+                long rc = hp_ur_sq_flush_getevents
+                    ? hp_ur_enter(pending, 0, -1)
+                    : hp_ur_submit_only(pending);
+                if (rc < 0 && errno != EINTR && errno != EBUSY &&
+                    errno != EAGAIN)
+                    (void)hp_ur_enter(0, 0, -1);
+            }
             tail = hp_ur_sqtail;
             head = __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE);
         }
@@ -4285,6 +4553,28 @@ static void hp_ur_fill_accept_quota(int r) {
 static void hp_ur_arm_all_accepts(void) {
     if (!hp_ur_listen_on || hp_ur_listen_count == 0 || hp_ur_direct != 1) return;
     if (hp_ur_accept_depth) {
+        if (hp_ur_accept_parallel) {
+            /* Each ring owns an independent direct table. Keep a bounded
+             * accept window on every non-full table at once, so admission
+             * does not wait for one table to approach its spill watermark. */
+            for (int r = 0; r < hp_ur_nrings; r++) {
+                struct hp_uring_ring *rg = &hp_ur_rings[r];
+                if (rg->accept_full) continue;
+                uint64_t used = (uint64_t)rg->live + rg->accept_armed +
+                                rg->accept_margin;
+                if (used >= rg->dircap) {
+                    rg->accepting = 0;
+                    rg->accept_full = 1;
+                    continue;
+                }
+                rg->accepting = 1;
+                rg->accept_resume = 0;
+                hp_ur_cur = rg;
+                hp_ur_fill_accept_quota(r);
+            }
+            hp_ur_cur = &hp_ur_rings[0];
+            return;
+        }
         if (hp_ur_accept_handover) {
             int lane = hp_ur_accept_lane;
             if (lane >= 0 && lane < hp_ur_nrings) {
@@ -4454,6 +4744,8 @@ static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len, size_t cap
     struct hp_urchunk *c = hp_ur_chunk_alloc();
     if (!c) { hp_resp_buf_release(buf, cap); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
     c->data = buf; c->off = 0; c->len = len; c->cap = cap; c->next = NULL;
+    uint64_t *queued_ns = hp_ur_chunk_diag_ns(c);
+    if (queued_ns) *queued_ns = hp_diag_now_ns();
     if (st->stail) st->stail->next = c; else st->shead = c;
     st->stail = c;
     st->squeued++;
@@ -4501,6 +4793,8 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
     struct hp_urchunk *c = hp_ur_chunk_alloc();
     if (!c) { hp_resp_buf_release(buf, cap); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
     c->data = buf; c->off = 0; c->len = n; c->cap = cap; c->next = NULL;
+    uint64_t *queued_ns = hp_ur_chunk_diag_ns(c);
+    if (queued_ns) *queued_ns = hp_diag_now_ns();
     hp_st[HP_ST_SEND_CHUNK]++;
     if (st->stail) st->stail->next = c; else st->shead = c;
     st->stail = c;
@@ -4542,6 +4836,7 @@ static hstr *hp_uring_take_recv(hp_sock fd, size_t maxall) {
         return hp_str_lit("");
     }
     if (!st->rready) return hp_str_lit("");
+    hp_ur_diag_recv_taken(fd);
     size_t avail = st->rlen < maxall ? st->rlen : maxall;
     /* Bytes copied out of a provided buffer no longer sit in the socket, so
      * the kernel cannot signal them again: hand the app the whole queue. */
@@ -4766,7 +5061,10 @@ static void hp_ur_rescan_one(hp_sock fd) {
  * calls may switch it, so the loop restores it every iteration. */
 static int hp_ur_drain_ring(HpFdList *in) {
     struct hp_uring_ring *self = hp_ur_cur;
+    bool diag = hp_diag_enabled();
+    uint64_t diag_t0 = diag ? hp_diag_now_ns() : 0;
     uint32_t head = hp_ur_cqhead;
+    uint32_t start_head = head;
     int drained = 0;
     /* One listener wakeup per drain is enough: accept_all() empties the
      * whole accept queue. Pushing the listener for every one of tens of
@@ -4833,6 +5131,7 @@ static int hp_ur_drain_ring(HpFdList *in) {
             continue;   /* closed + reused fd */
         }
         if (kind == HP_UR_KIND_ACCEPT) {
+            if (diag) self->diag_accept_cqes++;
             if (!st->listener) {
                 /* a reused real fd with a stale accept completion */
                 if (c->res >= 0) hp_ur_close_slot((uint32_t)c->res, 0);
@@ -4927,6 +5226,7 @@ static int hp_ur_drain_ring(HpFdList *in) {
             continue;
         }
         if (kind == HP_UR_KIND_READ) {
+            if (diag) self->diag_recv_cqes++;
             hp_st[HP_ST_CQE_RECV]++;
             hp_ur_recovery_mode = 1;
             st->rreading = 0;
@@ -4940,6 +5240,7 @@ static int hp_ur_drain_ring(HpFdList *in) {
             if (have_buf) hp_ur_pbuf_return(bid);
             if (st->closeafter) continue;
             if (c->res > 0 && have_buf) {
+                hp_ur_diag_recv_ready(fd);
                 hp_ur_recovery_ready(fd, st, in);
                 if ((uint32_t)c->res == hp_ur_pbuf_blen) {
                     if (!hp_ur_readq_push(fd, st, 1)) hp_ur_retfd(fd);
@@ -4959,6 +5260,7 @@ static int hp_ur_drain_ring(HpFdList *in) {
             continue;
         }
         if (kind == HP_UR_KIND_RECV) {
+            if (diag) self->diag_recv_cqes++;
             hp_st[HP_ST_CQE_RECV]++;
             int more = (c->flags & HP_UR_CQE_F_MORE) ? 1 : 0;
             if (!st->direct || !more) st->rarmed = 0;
@@ -4980,6 +5282,7 @@ static int hp_ur_drain_ring(HpFdList *in) {
             if (st->direct && st->rmshot && !more)
                 hp_ur_recovery_mode = 1;
             if (c->res > 0) {
+                hp_ur_diag_recv_ready(fd);
                 if (!st->direct || !st->rmshot) {
                     /* one-shot recv wrote straight into rh */
                     st->rlen = (size_t)c->res;
@@ -5017,6 +5320,7 @@ static int hp_ur_drain_ring(HpFdList *in) {
                 hp_ur_recovery_ready(fd, st, in);
             }
         } else if (kind == HP_UR_KIND_POLL) {
+            if (diag) self->diag_poll_cqes++;
             hp_st[HP_ST_CQE_POLL]++;
             st->pollarmed = 0;
             if (st->closeafter) continue;   /* app already closed: ignore */
@@ -5033,6 +5337,7 @@ static int hp_ur_drain_ring(HpFdList *in) {
                 hp_fdlist_push(in, fd);
             }
         } else {
+            if (diag) self->diag_send_cqes++;
             hp_st[HP_ST_CQE_SEND]++;
             st->sarmed = 0;
             struct hp_urchunk *c2 = st->shead;
@@ -5040,6 +5345,16 @@ static int hp_ur_drain_ring(HpFdList *in) {
                 if (c->res >= 0) {
                     c2->off += (size_t)c->res;
                     if (c2->off >= c2->len) {
+                        uint64_t *queued_ns = hp_ur_chunk_diag_ns(c2);
+                        if (diag && queued_ns && *queued_ns) {
+                            uint64_t now = hp_diag_now_ns();
+                            uint64_t age = now >= *queued_ns ?
+                                           now - *queued_ns : 0;
+                            self->diag_send_complete_ns += age;
+                            self->diag_send_complete_count++;
+                            if (age > self->diag_send_complete_max_ns)
+                                self->diag_send_complete_max_ns = age;
+                        }
                         st->shead = c2->next;
                         if (!st->shead) st->stail = NULL;
                         st->squeued--;
@@ -5071,6 +5386,11 @@ static int hp_ur_drain_ring(HpFdList *in) {
     hp_ur_cur = self;
     __atomic_store_n(hp_ur_cq_head, head, __ATOMIC_RELEASE);
     hp_ur_cqhead = head;
+    if (diag) {
+        uint64_t t1 = hp_diag_now_ns();
+        self->diag_drain_cqes += (uint64_t)(head - start_head);
+        self->diag_drain_ns += t1 >= diag_t0 ? t1 - diag_t0 : 0;
+    }
     return drained;
 }
 
@@ -5092,7 +5412,6 @@ static int hp_ur_run_readq(HpFdList *in) {
             hp_ur_cur = &hp_ur_rings[rr];
             struct hp_urfds *st = hp_ur_st_of(fd);
             if (!st || st->epoch != ent.epoch || !st->rreadq) continue;
-            st->rreadq = 0;
             if (hp_ur_dbg && !hp_ur_readq_diag) {
                 hp_ur_readq_diag = 1;
                 fprintf(stderr, "[ur] recovery state fd=%d direct=%d mshot=%d pbuf=%d eof=%d closing=%d armed=%d reading=%d inflight=%u/%u\n",
@@ -5101,11 +5420,26 @@ static int hp_ur_run_readq(HpFdList *in) {
                         hp_ur_cur->read_inflight, hp_ur_pbuf_n);
             }
             if (!st->direct || !st->rmshot || !hp_ur_pbuf || st->reof ||
-                st->closeafter || st->rarmed || st->rreading) continue;
-            if (hp_ur_cur->read_inflight >= hp_ur_pbuf_n) {
-                if (!hp_ur_readq_push(fd, st, 5)) hp_ur_retfd(fd);
+                st->closeafter || st->rarmed || st->rreading) {
+                st->rreadq = 0;
                 continue;
             }
+            if (hp_ur_cur->read_inflight >= hp_ur_pbuf_n) {
+                /* This connection is still waiting for a provided receive
+                 * slot. Keep its queued flag set while rotating it behind
+                 * other rings' eligible entries; clearing and re-enqueueing
+                 * on every poll caused millions of duplicate queue writes
+                 * while the buffer pool was saturated. */
+                if (!hp_ur_fifo_push(&hp_ur_readq, &hp_ur_readq_cap,
+                                     &hp_ur_readq_head, &hp_ur_readq_tail,
+                                     ent, &hp_ur_readq_moved,
+                                     &hp_ur_readq_max)) {
+                    st->rreadq = 0;
+                    hp_ur_retfd(fd);
+                }
+                continue;
+            }
+            st->rreadq = 0;
             if (!hp_uring_arm_read(fd)) {
                 if (!hp_ur_readq_push(fd, st, 6)) hp_ur_retfd(fd);
                 /* The SQ is full: let the next normal wait reap it first. */
@@ -5140,6 +5474,7 @@ static int hp_ur_run_readq(HpFdList *in) {
 static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
     unsigned char cq_ready[HP_UR_RINGS_MAX] = {0};
     if (hp_ur_dbg) fprintf(stderr, "[ur] wait to=%d\n", timeout_ms);
+    hp_ur_ready_bit ^= 1U;
     hp_ur_answer_budget = hp_ur_answer_budget_limit;
     hp_ur_recovery_mode =
         (hp_ur_answerq_head != hp_ur_answerq_tail ||
@@ -5163,7 +5498,12 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
 
     bool ring0_wait = hp_ur_ring0_wait && hp_ur_direct == 1 &&
                       hp_ur_nrings > 1 && hp_ur_ep_conns == 0;
-    if (ring0_wait) {
+    bool ring0_work_pending = have > 0 || recovery_dispatched > 0 ||
+        hp_ur_readq_head != hp_ur_readq_tail ||
+        hp_ur_answerq_head != hp_ur_answerq_tail;
+    bool ring0_do_wait = ring0_wait &&
+        (!hp_ur_ring0_busy_aware || !ring0_work_pending);
+    if (ring0_do_wait) {
         /* Match the multi-ring Rust loop: flush all nonzero rings first, then
          * let ring 0 own the bounded wait for the whole pass. Completions on
          * the other rings are drained immediately after that wait. */
@@ -5181,11 +5521,25 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
         hp_ur_cur = &hp_ur_rings[0];
         long to_submit = (long)(hp_ur_sqtail -
             __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
-        /* Match the multi-ring Rust loop: bounded ring-0 wait even when a
-         * smaller CQ batch is already present. */
+        /* With no ready work, ring 0 owns the bounded wait for the pass. */
         long wait_us = hp_ur_batch_us > 0 ? hp_ur_batch_us : 1000;
         long min_complete = hp_ur_batch > 0 ? hp_ur_batch : 1;
         hp_ur_enter(to_submit, min_complete, (int)wait_us);
+    } else if (ring0_wait) {
+        /* The Rust loop does not block when a request/read queue or CQ work
+         * already exists. Flush deferred task work and submissions, then
+         * drain the ready CQEs below without a completion-count wait. */
+        for (int r = 0; r < hp_ur_nrings; r++) {
+            struct hp_uring_ring *rg = &hp_ur_rings[r];
+            if (!hp_ur_ring_needs_enter(rg)) continue;
+            hp_ur_cur = rg;
+            long to_submit = (long)(rg->sqtail -
+                __atomic_load_n(rg->sq_head, __ATOMIC_ACQUIRE));
+            if (rg->defer_taskrun)
+                hp_ur_enter(to_submit > 0 ? to_submit : 0, 0, 0);
+            else
+                hp_ur_submit_only(to_submit > 0 ? to_submit : 0);
+        }
     } else {
     int epfd = -1;
     if (hp_ur_nrings > 1 || hp_ur_ep_conns > 0) epfd = hp_ur_ep_setup();
@@ -5252,10 +5606,14 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
             __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE) != hp_ur_cqhead)
             cq_ready[r] = 1;
         if (cq_ready[r]) drained |= hp_ur_drain_ring(in);
-        if (ring0_wait && hp_ur_rings[r].efd >= 0) {
+        /* The ring-0 multishot POLL_ADD fires on every eventfd signal, so the
+         * counter only needs resetting for rings that posted CQEs this pass,
+         * and one non-semaphore read returns and clears the whole counter.
+         * Draining every ring until EAGAIN cost up to two syscalls per ring
+         * per pass (mostly EAGAIN) without changing any wakeup. */
+        if (ring0_wait && cq_ready[r] && hp_ur_rings[r].efd >= 0) {
             uint64_t v;
-            while (read(hp_ur_rings[r].efd, &v, sizeof v) == (ssize_t)sizeof v)
-                ;
+            if (read(hp_ur_rings[r].efd, &v, sizeof v) < 0) { /* EAGAIN: already clear */ }
         }
     }
     hp_ur_arm_all_accepts();
@@ -8277,6 +8635,59 @@ static sqlite3_stmt *hp_sqlite_stmt(hval v) {
     return (sqlite3_stmt *)(intptr_t)hp_val_to_int(v);
 }
 
+/* Optional, generic SQLite/runtime diagnostics. The counters are only timed
+ * when HPHP_DIAG=1; ordinary sqlite_step/exec calls take one cached branch. */
+static int hp_diag_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("HPHP_DIAG");
+        enabled = e && strcmp(e, "1") == 0;
+    }
+    return enabled;
+}
+static uint64_t hp_diag_now_ns(void) {
+#if defined(_WIN32)
+    return (uint64_t)GetTickCount64() * 1000000ULL;
+#else
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+}
+static uint64_t hp_sql_step_ns, hp_sql_read_ns, hp_sql_write_ns, hp_sql_txn_ns;
+static uint64_t hp_sql_exec_ns, hp_sql_step_calls, hp_sql_exec_calls, hp_sql_busy;
+
+static bool hp_sql_prefix(const char *s, const char *kw) {
+    if (!s) return false;
+    while (isspace((unsigned char)*s)) s++;
+    while (*kw) {
+        if (tolower((unsigned char)*s++) != tolower((unsigned char)*kw++)) return false;
+    }
+    return !isalnum((unsigned char)*s) && *s != '_';
+}
+
+static int hp_sqlite_step_timed(sqlite3_stmt *st) {
+    if (!st) return SQLITE_MISUSE;
+    bool diag = hp_diag_enabled();
+    uint64_t t0 = diag ? hp_diag_now_ns() : 0;
+    int rc = sqlite3_step(st);
+    if (diag) {
+        uint64_t t1 = hp_diag_now_ns();
+        uint64_t dt = t1 >= t0 ? t1 - t0 : 0;
+        const char *sql = sqlite3_sql(st);
+        hp_sql_step_ns += dt;
+        hp_sql_step_calls++;
+        if (hp_sql_prefix(sql, "BEGIN") || hp_sql_prefix(sql, "COMMIT") ||
+            hp_sql_prefix(sql, "ROLLBACK")) hp_sql_txn_ns += dt;
+        else if (sqlite3_stmt_readonly(st)) hp_sql_read_ns += dt;
+        else hp_sql_write_ns += dt;
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED ||
+            rc == SQLITE_BUSY_SNAPSHOT || rc == SQLITE_LOCKED_SHAREDCACHE)
+            hp_sql_busy++;
+    }
+    return rc;
+}
+
 /* Request-scope memory: the server loop wraps one poll cycle in
  * scope_begin()/scope_end(); strings allocated in between are released in
  * one shot. str_persist() copies a value out of the scope, str_free()/
@@ -8332,6 +8743,7 @@ HP_BT_WEAK int hp_bt_prev_impl(void *v);
 HP_BT_WEAK int hp_bt_seek_impl(void *v, int64_t r);
 HP_BT_WEAK int64_t hp_bt_rowid_impl(void *v);
 HP_BT_WEAK const unsigned char *hp_bt_payload_impl(void *v, int *pn);
+HP_BT_WEAK int hp_bt_payload_size_impl(void *v);
 HP_BT_WEAK void *hp_bt_payload_pin_impl(void *v);
 HP_BT_WEAK void hp_bt_page_release_impl(void *v);
 HP_BT_WEAK int hp_bt_count_key_impl(void *v, int64_t key);
@@ -8369,10 +8781,8 @@ hval hpbi_bt_payload_ptr(hval h) {
     return hp_of_int((int64_t)(intptr_t)p);
 }
 hval hpbi_bt_payload_size(hval h) {
-    int n = 0;
-    if (!hp_bt_payload_impl) return hp_of_int(0);
-    (void)hp_bt_payload_impl(bt_h(h), &n);
-    return hp_of_int(n);
+    return hp_of_int(hp_bt_payload_size_impl
+        ? hp_bt_payload_size_impl(bt_h(h)) : 0);
 }
 hval hpbi_bt_payload_pin(hval h) {
     return hp_of_int((int64_t)(intptr_t)(hp_bt_payload_pin_impl
@@ -8412,6 +8822,21 @@ static int64_t hp_bt_varint(const unsigned char *p, int *used) {
     /* SQLite's ninth varint byte contributes all eight bits. */
     *used = 9;
     return (int64_t)((v << 8) | p[8]);
+}
+
+static int64_t hp_bt_varint_n(const unsigned char *p, int n, int *used) {
+    *used = 0;
+    if (!p || n < 1) return -1;
+    unsigned char c = p[0];
+    if (!(c & 0x80)) { *used = 1; return (int64_t)c; }
+    uint64_t v = (uint64_t)(c & 0x7f);
+    for (int i = 1; i < 8 && i < n; i++) {
+        c = p[i];
+        v = (v << 7) | (uint64_t)(c & 0x7f);
+        if (!(c & 0x80)) { *used = i + 1; return (int64_t)v; }
+    }
+    if (n >= 9) { *used = 9; return (int64_t)((v << 8) | p[8]); }
+    return -1;
 }
 
 static int hp_bt_st_len(int64_t st) {
@@ -8479,6 +8904,42 @@ static int64_t hp_bt_col_int_value(int64_t i) {
 }
 int64_t hp_bt_col_int_t(int64_t i) { return hp_bt_col_int_value(i); }
 
+/* Read one integer-like column from the cursor's current SQLite record.
+ * Unlike bt_cols()+bt_col_int(), this skips decoding every other column and
+ * does not touch the thread-local decoded-column state. */
+int64_t hp_bt_col_int_at_t(int64_t h, int64_t col) {
+    if (col < 0 || col >= 16 || !hp_bt_payload_impl) return 0;
+    int n = 0;
+    const unsigned char *p = hp_bt_payload_impl((void *)(intptr_t)h, &n);
+    if (!p || n < 1) return 0;
+    int used = 0;
+    int64_t hdr = hp_bt_varint_n(p, n, &used);
+    if (used <= 0 || hdr < used || hdr > n) return 0;
+    int k = used;
+    int64_t off = hdr;
+    for (int64_t i = 0; i <= col; i++) {
+        if (k >= hdr) return 0;
+        int nst = 0;
+        int64_t st = hp_bt_varint_n(p + k, (int)hdr - k, &nst);
+        if (nst <= 0 || k + nst > hdr) return 0;
+        k += nst;
+        int len = hp_bt_st_len(st);
+        if (len < 0 || off + len > n) return 0;
+        if (i == col) {
+            if (st == 8) return 0;
+            if (st == 9) return 1;
+            if (len <= 0 || len > 8) return 0;
+            const unsigned char *q = p + off;
+            uint64_t v = 0;
+            for (int j = 0; j < len; j++) v = (v << 8) | q[j];
+            if (len < 8 && (q[0] & 0x80)) v |= ~0ULL << (len * 8);
+            return (int64_t)v;
+        }
+        off += len;
+    }
+    return 0;
+}
+
 /* Decode only the requested leading columns directly into a caller-owned
  * int64 vector: {serial type, payload offset, payload length, integer value}. */
 static int64_t hp_bt_read_payload_raw(const unsigned char *p, int n, int64_t *out, int64_t cap) {
@@ -8522,6 +8983,10 @@ hval hpbi_bt_cols(hval h) { return hp_of_int(hp_bt_cols_t((int64_t)hp_val_to_int
 hval hpbi_bt_col_off(hval i) { return hp_of_int(hp_bt_col_off_t((int64_t)hp_val_to_int(i))); }
 hval hpbi_bt_col_len(hval i) { return hp_of_int(hp_bt_col_len_t((int64_t)hp_val_to_int(i))); }
 hval hpbi_bt_col_int(hval i) { return hp_of_int(hp_bt_col_int_t((int64_t)hp_val_to_int(i))); }
+hval hpbi_bt_col_int_at(hval h, hval col) {
+    return hp_of_int(hp_bt_col_int_at_t((int64_t)hp_val_to_int(h),
+                                        (int64_t)hp_val_to_int(col)));
+}
 hval hpbi_bt_count_key(hval h, hval key) {
     if (!hp_bt_count_key_impl) return hp_of_int(-1);
     return hp_of_int((int64_t)hp_bt_count_key_impl(bt_h(h), (int64_t)hp_val_to_int(key)));
@@ -8698,10 +9163,21 @@ hval hpbi_sb_json_str(hval h, hval str) {
     sb_json_esc(&s->b, (const unsigned char *)x->data, x->len);
     return hp_of_bool(true);
 }
+/* An empty builder reuses the capacity of an already-sent response buffer
+ * (they return to the pool on send completion) instead of a fresh malloc per
+ * response. Only capacity is reused, never bytes. */
+static void hp_sb_reserve_pooled(HpSb *s, int64_t want) {
+    if (want <= 0) return;
+    if (!s->b.data && (size_t)want < HP_RESP_BUF_POOL_CAP_MAX) {
+        size_t cap = 0;
+        char *p = hp_resp_buf_acquire_min((size_t)want + 1, &cap);
+        if (p) { s->b.data = p; s->b.cap = cap; s->b.len = 0; }
+    }
+    hbuf_reserve(&s->b, (size_t)want);
+}
 hval hpbi_sb_reserve(hval h, hval n) {
     HpSb *s = sb_h(h);
-    int64_t want = hp_val_to_int(n);
-    if (want > 0) hbuf_reserve(&s->b, (size_t)want);
+    hp_sb_reserve_pooled(s, hp_val_to_int(n));
     return hp_of_bool(true);
 }
 /* sb_len(sb): bytes currently in the builder. */
@@ -8876,7 +9352,7 @@ typedef struct {
     pthread_cond_t cv;
     int state;                 /* 0 idle, 1 bulk request, 2 bulk running,
                                 * 3 tail request, 4 tail running, 5 needs hold,
-                                * 6 stop */
+                                * 6 stop, 7 forced, 8 restart pending */
     int active_flag;           /* lock-free common-case poll by the event loop */
     int started;
     int threshold_frames;
@@ -8885,6 +9361,16 @@ typedef struct {
     uint32_t force_frames;       /* synchronous catch-up threshold */
     int max_hold_ms;
     int64_t hold_since_ms;
+    /* A PASSIVE checkpoint never resets the log; SQLite restarts it on the
+     * next write only when that writer's snapshot sees a fully backfilled WAL
+     * and no checkpoint holds the read marks. Re-triggering a checkpoint on
+     * every commit keeps the worker busy forever, so the log never restarts
+     * and grows until the forced path. After a full checkpoint the worker
+     * stays idle ("restart pending") until a commit shows the restart, or the
+     * log grew another threshold without one. HPHP_CKPT_RESTART=0 disables. */
+    int restart_wait;
+    uint32_t restart_frames;     /* log size when the restart wait began */
+    uint64_t restarts;
 } HpSqliteCkpt;
 static HpSqliteCkpt hp_sqlite_ckpt = {
     .mu = PTHREAD_MUTEX_INITIALIZER,
@@ -8904,6 +9390,17 @@ static int hp_sqlite_wal_hook(void *arg, sqlite3 *db, const char *name, int nfra
     if (nframe >= 0) {
         __atomic_store_n(&w->wal_frames, (uint32_t)nframe, __ATOMIC_RELEASE);
         w->wal_generation++;
+    }
+    if (w->state == 8 && nframe >= 0) {
+        if ((uint32_t)nframe < w->restart_frames) {
+            /* this commit restarted the log */
+            w->state = 0;
+            w->restarts++;
+            __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
+        } else if ((uint32_t)nframe >= w->restart_frames + (uint32_t)w->threshold_frames) {
+            /* no restart after another threshold of frames: copy again */
+            w->state = 0;
+        }
     }
     if (nframe >= w->threshold_frames && w->state == 0) {
         w->state = 1;
@@ -8933,15 +9430,29 @@ static void *hp_sqlite_ckpt_main(void *arg) {
                                             SQLITE_CHECKPOINT_PASSIVE,
                                             &nlog, &ndone);
         if (getenv("HPHP_STATS") && strcmp(getenv("HPHP_STATS"), "1") == 0)
-            fprintf(stderr, "[sqlite-ckpt] mode=%s rc=%d log=%d done=%d\n",
-                    mode == 1 ? "bulk" : "tail", rc, nlog, ndone);
+            fprintf(stderr, "[sqlite-ckpt] mode=%s rc=%d log=%d done=%d restarts=%llu\n",
+                    mode == 1 ? "bulk" : "tail", rc, nlog, ndone,
+                    (unsigned long long)w->restarts);
         pthread_mutex_lock(&w->mu);
         if (rc == SQLITE_OK && nlog >= 0 && ndone >= nlog) {
-            w->state = 0;
             w->hold_since_ms = 0;
+            if (w->restart_wait && nlog > 0 && w->wal_generation == generation) {
+                /* Fully backfilled and nothing committed meanwhile: the
+                 * next writer restarts the log. Stay idle until it does. */
+                w->state = 8;
+                w->restart_frames = (uint32_t)nlog;
+            } else if (w->restart_wait && nlog > 0) {
+                /* Commits overtook this checkpoint, so the WAL holds frames
+                 * past what was copied and no writer can restart it. Copy
+                 * the tail under a short write hold (state 5 -> 3), as for
+                 * an incomplete checkpoint; it then ends in state 8. */
+                w->state = 5;
+            } else {
+                w->state = 0;
+                __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
+            }
             if (w->wal_generation == generation)
                 __atomic_store_n(&w->wal_frames, 0, __ATOMIC_RELEASE);
-            __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
         } else {
             w->state = 5;
         }
@@ -9116,6 +9627,10 @@ hval hpbi_sqlite_bg_checkpoint_start(hval dbv, hval pathv, hval framesv, hval ho
     __atomic_store_n(&w->wal_frames, 0, __ATOMIC_RELEASE);
     w->wal_generation = 0;
     w->hold_since_ms = 0;
+    const char *restart_env = getenv("HPHP_CKPT_RESTART");
+    w->restart_wait = !(restart_env && strcmp(restart_env, "0") == 0);
+    w->restart_frames = 0;
+    w->restarts = 0;
     w->state = 0;
     __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
     if (sqlite3_wal_autocheckpoint(db, 0) != SQLITE_OK) {
@@ -9181,7 +9696,50 @@ hval hpbi_sqlite_exec(hval dbv, hval sql) {
     sqlite3 *db = hp_sqlite_db(dbv);
     if (!db) return hp_of_bool(false);
     hstr *s = hp_val_to_str(sql);
-    return hp_of_bool(sqlite3_exec(db, s->data, NULL, NULL, NULL) == SQLITE_OK);
+    bool diag = hp_diag_enabled();
+    uint64_t t0 = diag ? hp_diag_now_ns() : 0;
+    int rc = sqlite3_exec(db, s->data, NULL, NULL, NULL);
+    if (diag) {
+        uint64_t t1 = hp_diag_now_ns();
+        hp_sql_exec_ns += t1 >= t0 ? t1 - t0 : 0;
+        hp_sql_exec_calls++;
+        if (rc == SQLITE_BUSY || rc == SQLITE_LOCKED) hp_sql_busy++;
+    }
+    return hp_of_bool(rc == SQLITE_OK);
+}
+
+hval hpbi_sqlite_status(hval dbv) {
+    sqlite3 *db = hp_sqlite_db(dbv);
+    int hit = 0, miss = 0, write = 0, spill = 0;
+    int cache = 0, schema = 0, stmt = 0, hi = 0;
+    if (!db) return hp_of_str(hp_str_new("{}", 2));
+    (void)sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_HIT, &hit, &hi, 1);
+    (void)sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_MISS, &miss, &hi, 1);
+    (void)sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_WRITE, &write, &hi, 1);
+    (void)sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_SPILL, &spill, &hi, 1);
+    (void)sqlite3_db_status(db, SQLITE_DBSTATUS_CACHE_USED, &cache, &hi, 0);
+    (void)sqlite3_db_status(db, SQLITE_DBSTATUS_SCHEMA_USED, &schema, &hi, 0);
+    (void)sqlite3_db_status(db, SQLITE_DBSTATUS_STMT_USED, &stmt, &hi, 0);
+    uint64_t step_ns = hp_sql_step_ns, read_ns = hp_sql_read_ns;
+    uint64_t write_ns = hp_sql_write_ns, txn_ns = hp_sql_txn_ns;
+    uint64_t exec_ns = hp_sql_exec_ns, step_calls = hp_sql_step_calls;
+    uint64_t exec_calls = hp_sql_exec_calls, busy = hp_sql_busy;
+    hp_sql_step_ns = hp_sql_read_ns = hp_sql_write_ns = hp_sql_txn_ns = 0;
+    hp_sql_exec_ns = hp_sql_step_calls = hp_sql_exec_calls = hp_sql_busy = 0;
+    char tmp[640];
+    int n = snprintf(tmp, sizeof tmp,
+        "{\"cache_hit\":%d,\"cache_miss\":%d,\"cache_write\":%d,\"cache_spill\":%d,"
+        "\"cache_used_bytes\":%d,\"schema_used_bytes\":%d,\"stmt_used_bytes\":%d,"
+        "\"step_calls\":%llu,\"step_ns\":%llu,\"read_ns\":%llu,\"write_ns\":%llu,"
+        "\"txn_ns\":%llu,\"exec_calls\":%llu,\"exec_ns\":%llu,\"busy_locked\":%llu}",
+        hit, miss, write, spill, cache, schema, stmt,
+        (unsigned long long)step_calls, (unsigned long long)step_ns,
+        (unsigned long long)read_ns, (unsigned long long)write_ns,
+        (unsigned long long)txn_ns, (unsigned long long)exec_calls,
+        (unsigned long long)exec_ns, (unsigned long long)busy);
+    if (n < 0) n = 0;
+    if ((size_t)n >= sizeof tmp) n = (int)sizeof tmp - 1;
+    return hp_of_str(hp_str_new(tmp, (size_t)n));
 }
 
 hval hpbi_sqlite_prepare(hval dbv, hval sql) {
@@ -9220,8 +9778,7 @@ hval hpbi_sqlite_bind_text(hval stv, hval idx, hval v) {
 
 hval hpbi_sqlite_step(hval stv) {
     sqlite3_stmt *st = hp_sqlite_stmt(stv);
-    if (!st) return hp_of_int(SQLITE_MISUSE);
-    return hp_of_int(sqlite3_step(st));
+    return hp_of_int(hp_sqlite_step_timed(st));
 }
 
 hval hpbi_sqlite_reset(hval stv) {
@@ -9296,8 +9853,7 @@ int64_t hp_sb_new_t(void) {
     return (int64_t)(intptr_t)s;
 }
 bool hp_sb_reserve_t(int64_t h, int64_t n) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    if (n > 0) hbuf_reserve(&s->b, (size_t)n);
+    hp_sb_reserve_pooled((HpSb *)(intptr_t)h, n);
     return true;
 }
 bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len) {
@@ -9431,10 +9987,8 @@ int64_t hp_bt_payload_ptr_t(int64_t h) {
     return (int64_t)(intptr_t)p;
 }
 int64_t hp_bt_payload_size_t(int64_t h) {
-    int n = 0;
-    if (!hp_bt_payload_impl) return 0;
-    (void)hp_bt_payload_impl((void *)(intptr_t)h, &n);
-    return n;
+    return hp_bt_payload_size_impl
+        ? hp_bt_payload_size_impl((void *)(intptr_t)h) : 0;
 }
 int64_t hp_bt_payload_pin_t(int64_t h) {
     return (int64_t)(intptr_t)(hp_bt_payload_pin_impl
@@ -9605,6 +10159,14 @@ static void hp_stats_emit(void) {
 static void hp_stats_sig(int sig) {
     hp_stats_emit();
     signal(sig, SIG_DFL);
+#if defined(HPHP_PGO_FLUSH)
+    /* GCC's profile counters are normally flushed by atexit. During an
+     * instrumented benchmark, preserve the signal-derived exit code while
+     * allowing that flush to run; ordinary builds keep the original signal
+     * termination semantics. */
+    const char *flush = getenv("HPHP_PGO_FLUSH");
+    if (flush && flush[0] == '1' && flush[1] == '\0') exit(128 + sig);
+#endif
     raise(sig);                    /* keep the normal exit status/semantics */
 }
 #endif
@@ -9636,7 +10198,7 @@ hval hpbi_runtime_stats(void) {
     return hp_of_str(hp_runtime_stats_t());
 }
 hstr *hp_runtime_stats_t(void) {
-    char tmp[80];
+    char tmp[1024];
     Buf b;
     hbuf_init(&b);
     hbuf_write(&b, "{\"live_allocs\":", 15);
@@ -9648,14 +10210,55 @@ hstr *hp_runtime_stats_t(void) {
         hbuf_write(&b, tmp, strlen(tmp));
     }
 #ifdef HP_UR_CAN
+    snprintf(tmp, sizeof tmp,
+             ",\"recv_recovery\":{\"enqueued\":%llu,\"completed\":%llu}",
+             (unsigned long long)hp_ur_readq_enqueues,
+             (unsigned long long)hp_ur_readq_completions);
+    hbuf_write(&b, tmp, strlen(tmp));
+        snprintf(tmp, sizeof tmp,
+             ",\"queues\":{\"circular\":%s,\"ring0_busy_aware\":%s,\"read_depth\":%u,\"read_max\":%u,\"read_moved\":%llu,\"answer_depth\":%u,\"answer_max\":%u,\"answer_moved\":%llu}",
+             hp_ur_circular_queues ? "true" : "false",
+             hp_ur_ring0_busy_aware ? "true" : "false",
+             hp_ur_readq_tail - hp_ur_readq_head, hp_ur_readq_max,
+             (unsigned long long)hp_ur_readq_moved,
+             hp_ur_answerq_tail - hp_ur_answerq_head, hp_ur_answerq_max,
+             (unsigned long long)hp_ur_answerq_moved);
+    hbuf_write(&b, tmp, strlen(tmp));
     if (hp_ur_direct == 1) {
         hbuf_write(&b, ",\"rings\":[", 10);
         for (int r = 0; r < hp_ur_nrings; r++) {
             struct hp_uring_ring *rg = &hp_ur_rings[r];
             snprintf(tmp, sizeof tmp,
-                     "%s{\"id\":%d,\"live\":%u,\"accepts\":%u,\"full\":%s,\"slots\":%u}",
+                     "%s{\"id\":%d,\"live\":%u,\"accepts\":%u,\"full\":%s,\"slots\":%u"
+                     ",\"enter_calls\":%llu,\"enter_ns\":%llu,\"enter_max_ns\":%llu"
+                     ",\"submit_only\":%llu,\"submit_ns\":%llu"
+                     ",\"drain_cqes\":%llu,\"drain_ns\":%llu"
+                     ",\"accept_cqes\":%llu,\"recv_cqes\":%llu,\"send_cqes\":%llu,\"poll_cqes\":%llu"
+                     ",\"recv_to_app_ns\":%llu,\"recv_to_app_n\":%llu,\"recv_to_app_max_ns\":%llu"
+                     ",\"answerq_wait_ns\":%llu,\"answerq_wait_n\":%llu,\"answerq_wait_max_ns\":%llu"
+                     ",\"send_complete_ns\":%llu,\"send_complete_n\":%llu,\"send_complete_max_ns\":%llu}",
                      r ? "," : "", r, rg->live, rg->accept_armed,
-                     rg->accept_full ? "true" : "false", rg->dircap);
+                     rg->accept_full ? "true" : "false", rg->dircap,
+                     (unsigned long long)rg->diag_enters,
+                     (unsigned long long)rg->diag_enter_ns,
+                     (unsigned long long)rg->diag_enter_max_ns,
+                     (unsigned long long)rg->diag_submit_only,
+                     (unsigned long long)rg->diag_submit_ns,
+                     (unsigned long long)rg->diag_drain_cqes,
+                     (unsigned long long)rg->diag_drain_ns,
+                     (unsigned long long)rg->diag_accept_cqes,
+                     (unsigned long long)rg->diag_recv_cqes,
+                     (unsigned long long)rg->diag_send_cqes,
+                     (unsigned long long)rg->diag_poll_cqes,
+                     (unsigned long long)rg->diag_recv_to_app_ns,
+                     (unsigned long long)rg->diag_recv_to_app_count,
+                     (unsigned long long)rg->diag_recv_to_app_max_ns,
+                     (unsigned long long)rg->diag_answerq_wait_ns,
+                     (unsigned long long)rg->diag_answerq_wait_count,
+                     (unsigned long long)rg->diag_answerq_wait_max_ns,
+                     (unsigned long long)rg->diag_send_complete_ns,
+                     (unsigned long long)rg->diag_send_complete_count,
+                     (unsigned long long)rg->diag_send_complete_max_ns);
             hbuf_write(&b, tmp, strlen(tmp));
         }
         hbuf_write(&b, "]", 1);
@@ -9666,6 +10269,18 @@ hstr *hp_runtime_stats_t(void) {
     hstr *r = hp_str_new(p, strlen(p));
     free(p);
     return r;
+}
+
+hval hpbi_runtime_diag_write(hval message) {
+    if (!hp_diag_enabled()) return hp_of_bool(false);
+    hstr *s = hp_val_to_str(message);
+    if (!s) return hp_of_bool(false);
+    size_t n = s->len;
+    if (n > 8192) n = 8192;
+    size_t wrote = fwrite(s->data, 1, n, stderr);
+    if (n == 0 || s->data[n - 1] != '\n') fputc('\n', stderr);
+    fflush(stderr);
+    return hp_of_bool(wrote == n);
 }
 
 /* ---- typed fast paths for the request/parse and SQLite calls ---- */
@@ -9746,8 +10361,7 @@ bool hp_sqlite_bind_text_t(int64_t stv, int64_t idx, hstr *s) {
 }
 int64_t hp_sqlite_step_t(int64_t stv) {
     sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;
-    if (!st) return SQLITE_MISUSE;
-    return sqlite3_step(st);
+    return hp_sqlite_step_timed(st);
 }
 int64_t hp_sqlite_reset_t(int64_t stv) {
     sqlite3_stmt *st = (sqlite3_stmt *)(intptr_t)stv;

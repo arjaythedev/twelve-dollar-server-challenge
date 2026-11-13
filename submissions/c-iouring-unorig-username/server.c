@@ -1167,8 +1167,8 @@ static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anyth
 // The log is copied back by a worker thread at low priority, on its own connection, so the loop never waits for an
 // fsync. The loop alone decides: it asks for a pass by eventfd and the outcome comes back as a ring completion. A
 // log can only restart once all of it is copied, which steady writes prevent, so if frames arrived during a pass the
-// loop stops taking POSTs (reads go on) for one more pass. Past WAL_MAX frames it waits for that pass up to
-// MAX_HOLD_NS, because a saturated CPU starves the worker and the log would otherwise grow without bound.
+// loop stops taking POSTs (reads go on) for one more pass. Past WAL_MAX frames it waits for that pass however long
+// it takes, because a saturated CPU starves the worker and the log would otherwise grow without bound.
 #ifndef WAL_START
 #define WAL_START 1024  // small passes: each copy-back is short, so a held POST waits less
 #endif
@@ -1178,9 +1178,10 @@ enum { WAL_LEFT = 1, WAL_ALL };  // what a pass reports; a counter value, so nev
 static sqlite3 *wal_db;
 static int wal_asks, wal_frames, wal_asked_at, wal_busy, wal_last_pass;
 static int64_t post_deadline;  // 0: no limit
-// Past WAL_MAX, POSTs wait for the pass at most MAX_HOLD_NS from when the log first passed it (0: no limit).
+// Past WAL_MAX, POSTs wait for the pass at most MAX_HOLD_NS from when the log first passed it (0: no limit). No limit:
+// once a limit ran out, every later hold was let go at once and the log grew for the rest of the run.
 #ifndef MAX_HOLD_NS
-#define MAX_HOLD_NS 1000000000LL
+#define MAX_HOLD_NS 0
 #endif
 static int64_t full_since;
 static int64_t full_deadline(void) { if (!MAX_HOLD_NS) return 0; if (!full_since) full_since = mono_ns(); return full_since + MAX_HOLD_NS; }

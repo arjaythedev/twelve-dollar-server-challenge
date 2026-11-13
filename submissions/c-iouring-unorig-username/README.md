@@ -97,7 +97,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   The loop asks for a `PASSIVE` pass over an eventfd after 1,024 WAL frames (4 MB) and the outcome comes back on a second
   eventfd as an ordinary ring completion, so the loop never waits for an fsync. A log only restarts once fully copied, which
   steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, for at most 250 ms (reads go
-  on). Past 4,096 frames (a CPU saturated long enough to starve the worker) they wait for that pass, at most 1 s from when the log first passed 4,096 (the cap follows c-iouring-pavlyhalim, #245). Small passes keep each hold short: in local runs at 290,000 and 300,000 users with disk writes capped at 25 MB/s, POST p99 was 274-334 ms against 291-493 ms at 8,192 frames. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
+  on). Past 4,096 frames (a CPU saturated long enough to starve the worker) they wait for that pass with no time limit, so the log stays bounded. Small passes keep each hold short: in local runs at 290,000 and 300,000 users with disk writes capped at 25 MB/s, POST p99 was 274-334 ms against 291-493 ms at 8,192 frames. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
   waits for its `COMMIT`. If a commit fails, nothing from a batch with writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
@@ -252,7 +252,7 @@ the setup of the index seek in `likes_from` follow it closely, including some na
 reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds, `SO_REUSEPORT` listeners,
 `DEFER_TASKRUN` on every ring, and bounded reads and answers after a burst (#264). Checkpoint coordination and the likes count
 were rewritten for this entry, and its read bound was chosen by the sweep above. The `resv[0]` retry is also from
-rust-iouring-kensac and from c-iouring-pavlyhalim (#245), as do the 1,024-frame passes and the 1 s cap on the hold past the log limit. From objc-uring-delneg (#326, `1baccb2`): the newest-first order
+rust-iouring-kensac and from c-iouring-pavlyhalim (#245), as do the 1,024-frame passes. From objc-uring-delneg (#326, `1baccb2`): the newest-first order
 of the parked list with its aging bound, 128 answers per pass, and `journal_size_limit=0` (ideas, no code copied; the list
 here is this entry's own queue). Locking code in RAM follows c-iouring-pavlyhalim (#245), mojo-iouring-oh-meh (#257) and
 #326; sizing the completion queue over the connection count follows #245.

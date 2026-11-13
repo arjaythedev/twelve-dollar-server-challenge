@@ -34,11 +34,15 @@ A 5-endpoint feed API (see `SPEC.md`) implemented with
   response cache, no query-result cache, no in-memory copy of any table,
   and every write is committed before the response is sent.
 - Auth is HS256 JWT verification done in `src/server.ts` with
-  `node:crypto` (signature + `exp` checked on every request, nothing
-  about a token cached). Yatta's own auth subsystem is a full accounts
-  system whose error strings do not match `SPEC.md`, so it is not used
-  here; the error strings and statuses are exactly the spec's, including
-  auth-before-id ordering on the like route.
+  `Bun.CryptoHasher` (signature + `exp` checked on every request, nothing
+  about a token cached). The verifier logic is adapted from Yatta's fast
+  verifier (`yatta.js/jwt`, same MIT project) and inlined here because
+  the entry stays on npm `yatta.js@1.0.1`; it will be replaced by the
+  `yatta.js/jwt` export when a published Yatta version carries it.
+  Yatta's own auth subsystem is a full accounts system whose error
+  strings do not match `SPEC.md`, so it is not used here; the error
+  strings and statuses are exactly the spec's, including auth-before-id
+  ordering on the like route.
 - One deliberate adapter: Yatta's router spells its default 404
   `{"error":"Not Found"}` while the spec requires lowercase
   `{"error":"not found"}`. The serve wrapper rewrites only that exact
@@ -58,11 +62,27 @@ A 5-endpoint feed API (see `SPEC.md`) implemented with
   core.
 - Fast JWT verify: base64url decoding uses `Buffer.from(..., "base64url")`
   natively instead of manual char replacement + padding, the token is
-  split with `indexOf` instead of `split`, and the HMAC digest bytes are
-  compared directly instead of being re-encoded to a string first. Same
-  checks, same order, same error strings — about 30% faster on the
-  crypto portion in micro-benchmarks, confirmed in both JIT and compiled
-  runs.
+  split with `indexOf` instead of `split`, the HMAC runs through
+  `Bun.CryptoHasher` (~2x the HMAC call vs `node:createHmac`: 743ns vs
+  1,501ns), the payload is parsed only after the signature passes, and
+  the HMAC digest bytes are compared directly instead of being
+  re-encoded to a string first. Same checks, same order, same error
+  strings — a differential test over 33 cases (valid, expired, forged,
+  wrong alg incl. `none`, malformed, non-object payloads, bad sub /
+  username / exp, non-canonical base64url spelling) proves the new
+  verifier returns identical outcomes to the old one.
+- Row shape: the feed/post SQL aliases `u.username AS author`, so the
+  rows already carry the exact wire keys in the exact wire order and
+  go straight to JSON with no per-row mapping step. Same bytes
+  (verified: identical 5,102-byte feed payload), ~1.8µs saved per feed
+  request in micro-benchmarks.
+- Local `json()` helper instead of `API.json`: same bytes, same
+  `Content-Type: application/json; charset=utf-8`, one fewer `Headers`
+  allocation per response.
+- ASCII fast path for the 500-character body check: a string with
+  `.length <= 500` can never hold more than 500 code points, so the
+  `[...str]` spread runs only when the string is already over 500
+  UTF-16 units long. Same verdict on ascii/unicode/long inputs.
 - `idleTimeout: 120` so keep-alive connections survive the load test's
   think/idle gaps without reconnect churn.
 - Compiled binary (`bun build --compile`): the server starts in well
@@ -71,7 +91,12 @@ A 5-endpoint feed API (see `SPEC.md`) implemented with
 Measured, not claimed: the feed SQL already uses the
 `posts_created_at_id_idx` index plus covering-index like counts, so a
 JOIN + GROUP BY rewrite was tried and rejected — it drops the index,
-full-scans 500k posts and sorts, ~200x slower. Cache/mmap pragmas were
+full-scans 500k posts and sorts, ~200x slower. Two-query shapes were
+tried and rejected too: main query + one `IN (...) GROUP BY` count
+query, and main query + `UNION ALL` of 20 counts — both slower than
+the correlated subqueries, because the second statement's fixed cost
+(~15-18µs) exceeds the subqueries' marginal cost (~14µs); the
+correlated subqueries are already optimal. Cache/mmap pragmas were
 tried and dropped (no stable, repeatable gain: results swung from -20%
 to +80% between runs on the same box). A raw `bun:sqlite` switch was
 considered and rejected (Yatta's `rawAll` is a thin statement-cache
@@ -81,6 +106,11 @@ and REVERTED: it looked ~19% faster in JIT micro-benchmarks but measured
 with warmup (orig mean ~7070 req/s vs hand-built ~6080 req/s on a
 feed-only loader), so it does not ship. Multi-process was rejected (the
 scoring box has 1 vCPU, so extra processes add nothing there).
+Expected effect of this round's changes is small (~1.2µs per blended
+request, ~4-5% of the in-process request cost): the local driver cannot
+resolve a single-digit-percent change (its spread is 4-35%), so the
+in-process probes are the evidence and the maintainer's benchmark is
+the real test.
 
 ## Scripts
 

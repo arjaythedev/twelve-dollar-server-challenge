@@ -56,6 +56,12 @@
 ; ---- event loop ----
 %define MAX_CONN            65536
 %define MAX_EVENTS          256
+; How many connections the workers should be able to hold together. The fd
+; limit is per process, so the server forks ceil(CONN_TARGET / per-worker cap)
+; SO_REUSEPORT workers (1..8). 260k needs four workers under the benchmark's
+; LimitNOFILE=65535; the app-side cost is ~300 MB (260k x 1 KiB read buffers,
+; 64 B connection slots and the per-worker tables), which the 2 GB box holds.
+%define CONN_TARGET         260000
 ; Initial per-connection read buffer. A request line plus headers plus a
 ; 500-character JSON body is under 1 KiB for every client in the benchmark
 ; model, and anything larger grows on demand, so this is only a floor: at

@@ -31,10 +31,10 @@ Idle connections are dropped after 75 s of silence.
 One descriptor per client makes `RLIMIT_NOFILE` the direct ceiling on users, and
 that limit is per process. At startup the server raises the soft limit to the
 hard one (on the benchmark box both are 65535) and then forks **`SO_REUSEPORT`
-workers** until their per-worker connection caps add up to about 130,000
+workers** until their per-worker connection caps add up to about 260,000
 connections (minimum one, maximum eight). Under the benchmark's
-`LimitNOFILE=65535` each worker can hold ~65,000, so that is **two workers** and
-~130,000 connections instead of 65,535.
+`LimitNOFILE=65535` each worker can hold ~65,000, so that is **four workers** and
+~260,000 connections instead of 65,535.
 Each worker also sets its own connection cap to `limit - reserve` (512 fds, or
 an eighth of the limit if smaller), so `accept()` never fails with `EMFILE` and
 the level-triggered listening socket can never spin the event loop; connections
@@ -42,6 +42,15 @@ above the cap are accepted and closed at once. `SIGCHLD` is ignored so workers
 are reaped by the kernel instead of zombifying. The workers are forked before
 the listening socket and before SQLite is opened, and each gets its own SQLite
 connection (WAL handles the cross-process locking).
+
+The 260,000 target is deliberately above what one core can serve. At ~40 µs of
+CPU per feed request a single 2.4 GHz core saturates near 130,000 users, so on
+the scoring box the CPU wall arrives before the fd wall; the extra workers exist
+so the fd cap is not the thing that fails first. They are not free: four event
+loops time-share one core, which costs about two CPU points (17 % instead of
+15 % at 28k users) with the same error rate and a similar tail (p95 0.4 ms,
+p99 1.3 ms versus 0.3/2.7 ms with two workers, within run-to-run noise). Below
+~130k the two configurations are equivalent.
 
 ## Build and run
 
@@ -79,11 +88,12 @@ status codes, error strings, trimming and the 500-character limit.
 - **Small per-connection read buffer.** It starts at 1 KiB and doubles on demand
   up to 64 KiB, so a header larger than 1 KiB still works and only a request
   over 64 KiB is rejected with 400. The initial size matters because it is the
-  dominant per-connection memory cost: measured with 20.8k live keep-alive
-  sockets, **2.03 KB → 1.03 KB per connection (42 MB → 23 MB RSS)**, with the
-  memory returned after the connections close. Leftover bytes of a pipelined
-  request are moved to the front of the buffer, so keep-alive and pipelining
-  work without re-parsing. A 2 s sweep closes connections idle for 75 s.
+  dominant per-connection memory cost: measured at ~20k live keep-alive
+  sockets, **2.03 KB → 1.03 KB per connection** (42 MB → 23 MB RSS with two
+  workers, 27 MB with four; each worker also keeps a fixed 4 MB connection
+  table). Leftover bytes of a pipelined request are moved to the front of the
+  buffer, so keep-alive and pipelining work without re-parsing. A 2 s sweep
+  closes connections idle for 75 s.
 - **One `writev`** sends the status line, headers and body together, from a
   response buffer that reserves 512 bytes of header headroom so the body is
   rendered exactly where it is sent from. `TCP_NODELAY` is set per connection.

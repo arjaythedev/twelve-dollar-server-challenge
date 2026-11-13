@@ -236,7 +236,8 @@ main:
     ; Raise the soft limit to the hard one when allowed (it is not on the
     ; benchmark box: both are 65535). RLIMIT_NOFILE is per process, so fork a
     ; few SO_REUSEPORT workers, each with its own budget, until their caps add
-    ; up to ~130k connections (65,535 on the benchmark box means two workers).
+    ; up to CONN_TARGET connections (65,535 on the benchmark box means four
+    ; workers, ~260k connections).
     ; The worker count is capped at eight so they still fit one core.
     mov eax, SYS_getrlimit
     mov edi, RLIMIT_NOFILE
@@ -275,10 +276,11 @@ main:
 .cap_ok:
     mov [rel g_conn_cap], eax
 
-    ; Enough workers to reach ~130k connections (about what one core can serve
-    ; at 50-90 us per request), never fewer than one nor more than eight.
+    ; Enough workers to reach CONN_TARGET connections, never fewer than one nor
+    ; more than eight. Extra workers only split one core, so this is not a
+    ; throughput knob: it exists so the per-process fd limit is not the wall.
     mov rcx, rax
-    mov rax, 130000
+    mov eax, CONN_TARGET
     xor edx, edx
     div rcx
     test rdx, rdx

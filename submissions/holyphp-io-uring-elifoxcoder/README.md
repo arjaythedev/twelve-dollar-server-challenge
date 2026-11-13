@@ -666,7 +666,14 @@ is required.
 
 #### SQLite file locking and WAL write calls (WSL, 2026-11-13)
 
-`start.sh` now opens SQLite through the `unix-excl` VFS. The process holds the
+Both switches below are **off by default** now. The box run at `f1f8d45`, with
+both on, held 230,000 users (30 µs/req, 653 MB peak). 240,000 failed on
+p95/p99 at 77 % CPU. That is below the default VFS's 250,000, so `start.sh`
+leaves SQLite's default VFS in place and the next run measures the runtime
+changes alone. Set `HPHP_SQLITE_VFS=unix-excl` and
+`HPHP_SQLITE_WAL_COALESCE=1` to use them.
+
+With `HPHP_SQLITE_VFS=unix-excl`, SQLite opens through the `unix-excl` VFS. The process holds the
 database lock, so transactions take no `fcntl()` locks, and the WAL index
 lives in heap memory shared by the request and checkpoint connections. The
 checkpoint connection uses the same VFS as the request connection. A thin
@@ -675,7 +682,7 @@ sequential WAL frame writes and writes them with one call when the commit
 frame arrives. This happens inside SQLite's own write call, before the WAL
 index is updated and before `COMMIT` returns. Reads, syncs, truncates,
 unlocks and file controls flush first, so SQLite sees the same bytes in the
-same order. `HPHP_SQLITE_VFS=` and `HPHP_SQLITE_WAL_COALESCE=0` restore the
+same order. `HPHP_SQLITE_VFS=` and `HPHP_SQLITE_WAL_COALESCE=0` (the defaults) keep the
 previous behaviour.
 
 The runtime also changed in smaller ways:

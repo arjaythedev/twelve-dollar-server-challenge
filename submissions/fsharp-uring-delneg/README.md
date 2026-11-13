@@ -54,7 +54,9 @@
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  most 700 ms: late in a long run a pass can take most of a second on the disk, and a shorter hold ends before its
+  pass does, lets writes in, and starts the next hold at once, riding the same pass, so no hold completes and the WAL
+  never rewinds. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
   them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
   reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
   of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes

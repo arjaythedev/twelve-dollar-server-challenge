@@ -1018,7 +1018,8 @@ impl Rings {
         }
     }
     /// Enters each active ring once, rings 1..7 without waiting and ring 0 last.
-    /// k0 is ring 0's share of the request-completion target; the server caps the timeout at 1 ms.
+    /// k0 is ring 0's share of the request-completion target; the server caps the timeout at
+    /// --wake-wait-us (default 4 ms).
     /// Queued CQEs do not bypass batching.
     /// # Errors
     /// Returns a fatal enter error. Timeouts and retryable errors are WaitEnd values.

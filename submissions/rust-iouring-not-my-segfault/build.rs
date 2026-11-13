@@ -3,7 +3,6 @@
 //! startup line prints.
 
 use std::env;
-use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::unix::ffi::OsStrExt;
@@ -124,13 +123,7 @@ const RERUN_PATHS: [&str; 5] = [
 ];
 
 /// Environment inputs whose change reruns this script.
-const RERUN_VARS: [&str; 5] = [
-    "TWELVE_C_TARGET",
-    "TWELVE_PGO",
-    "TWELVE_PGO_DIR",
-    "CC",
-    "CARGO_ENCODED_RUSTFLAGS",
-];
+const RERUN_VARS: [&str; 3] = ["TWELVE_C_TARGET", "CC", "CARGO_ENCODED_RUSTFLAGS"];
 
 /// The cfg flags the crate's configurations pass in RUSTFLAGS, declared for rustc's unexpected_cfgs lint.
 const CFG_FLAGS: [&str; 3] = ["twelve_safe", "twelve_small_limits", "twelve_fault_inject"];
@@ -170,8 +163,6 @@ struct Config {
     out_dir: String,
     c_target: String,
     compiler: PathBuf,
-    /// Present only for a profile-use build; an existing canonical absolute directory, printable like `out_dir`.
-    pgo_dir: Option<String>,
     safe: bool,
     fault_inject: bool,
     /// The sanitizer kinds of the effective Rust flags, in order; empty outside the sanitizer test profile.
@@ -198,7 +189,7 @@ fn main() {
 
 fn run() -> Result<(), BuildFailure> {
     let config = read_config()?;
-    emit(&rerun_directives(&config))?;
+    emit(&rerun_directives())?;
     check_source_id(&config.manifest_dir)?;
     let digest = source_hash(&config.manifest_dir)?;
     let object = compile_unit(&config)?;
@@ -261,13 +252,6 @@ fn read_config() -> Result<Config, BuildFailure> {
         Some(_) => return Err(refuse("invalid CC")),
     };
 
-    let pgo = match env::var_os("TWELVE_PGO") {
-        None => false,
-        Some(value) if value == "0" => false,
-        Some(value) if value == "1" => true,
-        Some(_) => return Err(refuse("invalid TWELVE_PGO")),
-    };
-
     // Cargo sets CARGO_CFG_<cfg> for each --cfg the effective Rust flags carry.
     let release = profile == "release";
     let safe = env::var_os("CARGO_CFG_TWELVE_SAFE").is_some();
@@ -276,22 +260,7 @@ fn read_config() -> Result<Config, BuildFailure> {
     if release && (small_limits || fault_inject) {
         return Err(refuse("test configuration in release"));
     }
-    if pgo && !release {
-        return Err(refuse("PGO requires release"));
-    }
     let sanitizers = sanitizer_kinds(&rust_flags);
-    if pgo && !sanitizers.is_empty() {
-        return Err(refuse("PGO with sanitizer"));
-    }
-
-    let pgo_dir = match (pgo, env::var_os("TWELVE_PGO_DIR")) {
-        (false, None) => None,
-        (true, Some(dir)) => {
-            Some(canonical_profile_dir(dir).ok_or_else(|| refuse("invalid TWELVE_PGO_DIR"))?)
-        }
-        _ => return Err(refuse("invalid TWELVE_PGO_DIR")),
-    };
-
     if !sanitizers
         .iter()
         .all(|kind| SANITIZER_KINDS.contains(&kind.as_str()))
@@ -304,7 +273,6 @@ fn read_config() -> Result<Config, BuildFailure> {
         out_dir,
         c_target,
         compiler,
-        pgo_dir,
         safe,
         fault_inject,
         sanitizers,
@@ -361,23 +329,6 @@ fn is_target_token(token: &str) -> bool {
         && token
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
-}
-
-/// The profile directory when it is printable, absolute, existing and already canonical, byte for byte.
-fn canonical_profile_dir(dir: OsString) -> Option<String> {
-    let text = dir.into_string().ok()?;
-    if text.is_empty() || text.contains(['\r', '\n']) {
-        return None;
-    }
-    let path = Path::new(&text);
-    if !path.is_absolute() {
-        return None;
-    }
-    let canonical = fs::canonicalize(path).ok()?;
-    if canonical.as_os_str() != OsStr::new(&text) || !canonical.is_dir() {
-        return None;
-    }
-    Some(text)
 }
 
 /// Requires a regular vendor/sqlite3.h, then the pinned source id as the first
@@ -580,14 +531,9 @@ fn hash_record(
 }
 
 /// Compiles src/sqlite_unit.c alone with the C compile options for the mode read_config chose, into
-/// OUT_DIR/sqlite_unit.o. A profile-use build writes its object at the profile directory's sqlite_unit.o,
-/// the path build.sh's instrumented compile used, because GCC names the profile after the object's whole
-/// path and -fprofile-prefix-path strips nothing on GCC 13.
+/// OUT_DIR/sqlite_unit.o.
 fn compile_unit(config: &Config) -> Result<PathBuf, BuildFailure> {
-    let object = match &config.pgo_dir {
-        Some(dir) => Path::new(dir).join("sqlite_unit.o"),
-        None => Path::new(&config.out_dir).join("sqlite_unit.o"),
-    };
+    let object = Path::new(&config.out_dir).join("sqlite_unit.o");
     let sanitized = !config.sanitizers.is_empty();
     let mut command = Command::new(&config.compiler);
     command
@@ -626,19 +572,6 @@ fn compile_unit(config: &Config) -> Result<PathBuf, BuildFailure> {
         command
             .arg("-fno-sanitize-recover=all")
             .arg("-fno-omit-frame-pointer");
-    }
-    if let Some(dir) = &config.pgo_dir {
-        command
-            .arg(format!("-fprofile-use={dir}"))
-            .arg("-fprofile-correction")
-            .arg("-fprofile-partial-training")
-            .arg("-Werror=missing-profile")
-            // Under the training profile GCC inlines sqlite3Strlen30 into the vendored
-            // sqlite3ColumnSetColl and reports -Wstringop-overread there, a warning
-            // GCC raises in the optimizer after inlining, which -isystem cannot scope (as with
-            // -Wnull-dereference above). The finding is in vendored code, and our C keeps the
-            // warning in every compile without a profile, from the same source.
-            .arg("-Wno-stringop-overread");
     }
     command
         .arg("-c")
@@ -693,16 +626,11 @@ fn run_child(
     Err(BuildFailure::refusal(stage, detail))
 }
 
-fn rerun_directives(config: &Config) -> String {
+fn rerun_directives() -> String {
     let mut text = String::new();
     for path in RERUN_PATHS {
         text.push_str("cargo::rerun-if-changed=");
         text.push_str(path);
-        text.push('\n');
-    }
-    if let Some(dir) = &config.pgo_dir {
-        text.push_str("cargo::rerun-if-changed=");
-        text.push_str(dir);
         text.push('\n');
     }
     for name in RERUN_VARS {
@@ -713,14 +641,12 @@ fn rerun_directives(config: &Config) -> String {
     text
 }
 
-/// The five compile-time facts for main.rs, then the link directives and the cfg declarations.
+/// The four compile-time facts for main.rs, then the link directives and the cfg declarations.
 fn build_facts(config: &Config, digest: &str) -> String {
-    let pgo = if config.pgo_dir.is_some() { "1" } else { "0" };
     let mut text = format!(
         "cargo::rustc-env=TWELVE_SOURCE_SHA256={digest}\n\
          cargo::rustc-env=TWELVE_RUSTFLAGS={}\n\
          cargo::rustc-env=TWELVE_C_TARGET={}\n\
-         cargo::rustc-env=TWELVE_PGO={pgo}\n\
          cargo::rustc-env=TWELVE_SQLITE_SOURCE_ID={SOURCE_ID}\n\
          cargo::rustc-link-search=native={}\n\
          cargo::rustc-link-lib=static=sqlite3\n\

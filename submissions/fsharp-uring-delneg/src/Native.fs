@@ -59,5 +59,14 @@ extern int ``open``(byte[] path, int flags)
 [<DllImport(L)>]
 extern int posix_fadvise(int fd, int64 offset, int64 len, int advice)
 
+[<DllImport(L)>]
+extern int clock_gettime(int clk, int64[] ts)
+
+/// this thread's CPU time, in microseconds
+let threadCpuUs () =
+    let ts = Array.zeroCreate<int64> 2
+    clock_gettime (3, ts) |> ignore // CLOCK_THREAD_CPUTIME_ID
+    ts.[0] * 1000000L + ts.[1] / 1000L
+
 let errno () = Marshal.GetLastPInvokeError()
 

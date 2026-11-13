@@ -889,7 +889,7 @@ int main(int argc, char **argv) {
    * commit), but measured under a CPU quota they add 25-50 ms to p95 at high load: bigger
    * service bursts, more queueing variance. The tail is what the score is made of. */
   wait_min = (unsigned)env_long("WAIT_MIN", 64);
-  wait_ns = (uint64_t)env_long("WAIT_US", 2000) * 1000ULL;
+  wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
   ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
   ckpt_tail = (int)env_long("CKPT_TAIL", 64);
   hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;

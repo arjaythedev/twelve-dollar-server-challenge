@@ -42,21 +42,23 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
-  ring 0 waits for 64 completions or 2 ms (`WAIT_MIN`, `WAIT_US`), whichever comes first, so
+  ring 0 waits for 64 completions or 1 ms (`WAIT_MIN`, `WAIT_US`), whichever comes first, so
   bigger batches share one commit and a pass never spins; while a commit group is open the wait
   ends at the group's deadline, and a batch of fewer than 32 completions (`CG_MIN`) commits at
   once, so a lone request is answered within its batch (the heads before `2703df3` let it wait
-  for the idle timeout, which starved the PGO training client on the box). The window was 1 ms
-  and the count 256 until `2703df3`: 2 ms is 3-4 % less CPU on the loop thread for the same
-  requests (measured with 300,000 connections, user+sys of the thread), for about 1 ms on p50,
-  which the score does not count. The window must not grow further on this kernel: with
-  deferred task work (`IORING_SETUP_DEFER_TASKRUN`) and a wait for many completions, a window of
-  2.5 ms or more left requests unread in their sockets for over a second (6,000 server sockets
-  with bytes in their receive queue at 300,000 connections, nothing queued in user space; p99
-  1.4 s), a cliff that moves with the product of window and count: 3 ms with 128 completions
-  falls off it, 3 ms with 64 nearly, 2 ms with 64 or 256 does not. The count is 64 for the
-  margin; it costs nothing (the batches are bounded by the window at this load). Cooperative
-  task work instead of deferred has no cliff but costs 13-20 % more CPU, so it is not used.
+  for the idle timeout, which starved the PGO training client on the box). The window stays at
+  1 ms on purpose. A 2 ms window is 3-4 % less CPU on the loop thread locally (300,000
+  connections, user+sys of the thread), but on this kernel, with deferred task work
+  (`IORING_SETUP_DEFER_TASKRUN`) and a wait for many completions, a loop that sleeps long with
+  completions pending leaves requests unread in their sockets: locally a 2.5 ms window gave
+  6,000 server sockets with bytes in their receive queue and nothing queued in user space (p99
+  1.4 s), a cliff that moves with the product of window and count (3 ms with 128 falls off it,
+  3 ms with 64 nearly, 2 ms with 64 did not). On the box, whose core is slower and busier, the
+  2 ms window (`09b27be`) held 260,000 flat but failed the 270,000 probe on p99 (2.15 s at 78 %
+  CPU) where 1 ms (`1e7fb4d`) held 290,000: the box reaches the same regime one step earlier.
+  The count is 64 rather than 256 for the margin; at this load the batch is bounded by the
+  window, so it costs nothing. Cooperative task work instead of deferred has no cliff but costs
+  13-20 % more CPU, so it is not used.
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per

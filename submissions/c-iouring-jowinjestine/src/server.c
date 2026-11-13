@@ -25,6 +25,7 @@
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
 static unsigned answers_per_pass = 2048, wait_min = 256;
+static int defer_accept = 1; /* TCP_DEFER_ACCEPT seconds on the listeners (DEFER_ACCEPT=0: off) */
 static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
@@ -855,9 +856,14 @@ int main(int argc, char **argv) {
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
 
   const char *err = "";
+  defer_accept = (int)env_long("DEFER_ACCEPT", 1);
   for (unsigned l = 0; l < NLISTEN; l++) {
     LFD[l] = listen_socket(host, atoi(port), 4096, &err);
     if (LFD[l] < 0) { fprintf(stderr, "listen %s:%s: %s: %s\n", host, port, err, strerror(errno)); return 1; }
+    /* A connection reaches the accept queue only once its first request is in, so its accept and
+     * its first receive complete together. */
+    if (defer_accept && setsockopt(LFD[l], IPPROTO_TCP, TCP_DEFER_ACCEPT, &defer_accept, sizeof defer_accept) < 0)
+      fprintf(stderr, "TCP_DEFER_ACCEPT: %s\n", strerror(errno));
   }
   if (ring_create(0) < 0) return 1;
   NR = 1;

@@ -32,6 +32,9 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Eight listening sockets share the port (`SO_REUSEPORT`), each with its own accept queue of
   `somaxconn`, so together they hold ~32k pending connections through a ramp or a stall. Their
   multishot accepts are armed on the ring being filled and cancelled by user data when it moves on.
+  The listeners set `TCP_DEFER_ACCEPT` (1 s): the kernel hands a connection over only once its
+  first request has arrived, so its accept and its first receive complete together
+  (`DEFER_ACCEPT=0` turns it off).
 - Each connection has one **multishot receive** into the ring's provided-buffer ring (1,024 × 2 KB),
   so an idle connection holds no receive buffer and no heap, only a 32-byte record, and a request
   costs one completion. Requests are parsed in place in the kernel's buffer and the buffer goes

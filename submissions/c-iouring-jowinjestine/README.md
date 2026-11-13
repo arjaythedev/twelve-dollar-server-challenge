@@ -162,11 +162,13 @@ mostly idle sockets under `LimitNOFILE=65535`.
   nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
   writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
   fully copied; so that thread runs pass after pass, each copying what the previous one missed,
-  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). A
-  nice-19 thread gets no time while the loop is busy at the top of the load, and an unprivileged
-  process cannot raise a thread's priority back, so a second bulk thread at the normal priority
-  waits beside it and takes the passes whenever the log has reached 32,768 frames (128 MB): the
-  log cannot grow unbounded, and the extra priority is spent only when it is needed. Then
+  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). It
+  stays at nice 19 whatever the log's length: `297c8ea` added a second bulk thread at the normal
+  priority that took the passes once the log passed 128 MB, and on the box, where the nice-19
+  thread gets little time at the top of the load, the log reached that after a few minutes of a
+  hold and the passes then ran against the loop at equal priority: the 5-minute holds failed on
+  p99 (11.7 s at 270,000) while the 2-minute probes passed. A long log costs the loop nothing
+  while its page cache holds the hot pages; a thread competing for the core costs seconds. Then
   writes are held (reads go on; the next POST on each connection waits in its buffer) while a
   second thread at the normal priority copies that remainder: a few milliseconds of copying plus
   the syncs of the log and of the database, on a thread. That thread then restarts the log itself

@@ -36,7 +36,7 @@
   in constant time.
 - **Group commit.** Each loop pass is one SQLite transaction (WAL, `synchronous=NORMAL`), and no response of the pass
   is handed to the kernel before its `COMMIT` returns (rule 6). If a commit fails, the pass's connections close
-  without an answer, so no response claims a write that didn't land. Writes commit at most once per 10 ms (reads
+  without an answer, so no response claims a write that didn't land. Writes commit at most once per 20 ms (reads
   aren't held), so a commit carries more writes and fewer WAL frames per write. A pass that only reads doesn't
   commit: the next pass goes on in its read transaction, with its cursors where they are, so most passes skip
   `BEGIN`/`COMMIT` and the cursors' descents from the root. It ends once the WAL is all copied, so the next write
@@ -132,7 +132,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 10), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
 line a second on stderr).
 

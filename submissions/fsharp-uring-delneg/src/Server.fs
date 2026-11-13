@@ -22,7 +22,7 @@ let BufSize = 1024
 let MaxReq = 16384
 let private nBufs = env "BUFS" 1024 // receive buffers per ring, a power of two
 let private answers = env "ANSWERS" 64 // requests answered per pass (0: all)
-let private wwin = uint32 (env "WWIN" 10) // ms: writes commit at most once per window (group commit)
+let private wwin = uint32 (env "WWIN" 20) // ms: writes commit at most once per window (group commit)
 let private lifoOn = env "LIFO" 1 = 1
 let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0

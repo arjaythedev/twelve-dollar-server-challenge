@@ -29,29 +29,57 @@ foreground and reads the challenge's `HOST`, `PORT`, `SQLITE_PATH`, and
 ## Implementation
 
 - Six io_uring rings use sparse fixed-file tables, multishot direct accepts,
-  and 256 shared 2-KiB receive buffers per ring. Accepted TCP sockets use the
-  kernel's default send/receive buffer autotuning with `TCP_NODELAY`. An epoll
-  implementation is available if io_uring is unavailable. The bounded receive
-  recovery and deferred task-running approach was informed by the publicly
-  described work in
+  and 1,024 shared 2-KiB receive buffers per ring. If a multishot receive ends,
+  the connection enters a FIFO recovery queue instead of being immediately
+  re-armed. Bounded `MSG_DONTWAIT` reads use at most one receive per ring buffer;
+  each pass answers up to 2,048 queued requests. Completion batches contain up
+  to 256 entries. This bounded recovery and drain-first approach follows the
+  publicly described work in
   [rust-iouring-kensac #264](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
+  The event loop now waits on ring zero: multishot polls there watch the ring
+  eventfds, while secondary rings publish completions normally and signal
+  their eventfds. Only ring zero uses deferred task running. This adapts the
+  cross-ring wakeup design described by
+  [c-iouring-pavlyhalim #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245);
+  request parsing, response handling, and the ring state machine remain this
+  submission's own implementation.
+  Accepted TCP sockets use the kernel's default send/receive buffer autotuning
+  with `TCP_NODELAY`. An epoll implementation is available if io_uring is
+  unavailable.
 - The B-tree traversal helpers in `src/btree_feed.h` are adapted from
   [c-iouring-pavlyhalim #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Reads access the supplied SQLite database on each request. The feed and post
   fast paths use SQLite B-tree cursors against the existing schema and indexes,
   with prepared SQL fallbacks. No response, row, or JWT-verification result is
   cached across requests. SQLite's own page cache is configured to 64 MiB;
-  SQLite memory mapping is disabled.
+  SQLite memory mapping is disabled. A `SQLITE_CONFIG_PCACHE2` wrapper skips a
+  page-cache truncate only when its tracked page keys prove that no cached page
+  can be beyond the limit; uncertain cases use SQLite's original truncate. The
+  approach is inspired by the public truncate-skip work in
+  [Go io_uring PR #343](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/343),
+  which credits its underlying idea to
+  [C io_uring PR #245](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245).
 - Writes use WAL and `synchronous=NORMAL`. Multiple writes may share a SQLite
   transaction; affected responses are held until commit succeeds. A background
-  checkpoint thread manages WAL growth, and the VFS coalesces WAL writes while
-  preserving SQLite's I/O barriers. The program can advise the kernel to
-  release already-checkpointed WAL pages.
+  checkpoint thread runs at nice 5 and can briefly hold writes for tail catch-up.
+  SQLite uses 64 MiB database-file chunks backed by `posix_fallocate`; the VFS
+  coalesces WAL writes while preserving SQLite's I/O barriers. The thread
+  priority and chunk-allocation approach adapts techniques from
+  [Go io_uring PR #354](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/354).
+  The extra bulk rounds and database syncs tested at `4ea8223` were removed
+  after its official run; the maintainer reported that the extra passes did not
+  help on the challenge machine. The program can advise the kernel to release
+  already-checkpointed WAL pages.
+- HS256 keys are prepared once as inner and outer SHA-256 pad states. Every
+  request still hashes its token signing input and compares the full signature
+  in constant time; no JWT or verification result is cached. This key-schedule
+  technique follows the public design in
+  [rust-iouring-kensac #264](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
 
 The code makes no schema or index changes and does not modify kernel settings
-or pin CPUs. Dependency and source licenses are retained with the vendored
-SQLite source; the submission is offered under the challenge repository's MIT
-license.
+or pin CPUs. Source and design attribution is recorded in [CREDITS.md](CREDITS.md).
+Dependency licenses are retained with the vendored SQLite source; this
+submission is offered under the challenge repository's MIT license.
 
 ## Checks
 
@@ -65,3 +93,64 @@ challenge repository with a freshly generated seed. Optional additional checks:
   checks acknowledged writes after a server-process SIGKILL and restart.
 - `tests/test_auth_subject_overflow.sh http://127.0.0.1:3000` checks signed
   oversized JWT subjects against an already running server with disposable data.
+
+## Official benchmark history
+
+- The maintainer's official run at submission commit `3e10490` held **220,000
+  users for five minutes**: 21,431 req/s, p95 142.3 ms, p99 633.1 ms, zero
+  errors, 82% app CPU, and 702 MB peak RAM.
+- The 2026-11-08 rerun at `5318219` used the same submission files and held
+  **210,000 users for five minutes**: 20,573 req/s, p95 21.7 ms, p99 256.0 ms,
+  zero errors, 78% app CPU, and 670 MB peak RAM. Its 220,000-user two-minute
+  probe failed p95/p99 at 0.55/1.75 s.
+- A further official rerun at README-only head `9748f27` held **209,000 users
+  for five minutes**: 20,438 req/s, p95 49.6 ms, p99 608.4 ms, zero errors,
+  78% app CPU, and 700 MB peak RAM. The 220,000-user two-minute probe passed
+  (p99 331.6 ms), but its five-minute hold failed p95/p99 at 2.93/6.63 s
+  (84% CPU); the 230,000-user two-minute probe failed p99 at 1.45 s.
+- The maintainer reran the same executable tree at README-only head `66aff42`:
+  **209,000 users for five minutes**, 20,477 req/s, p95 18.7 ms, p99 218.3 ms,
+  zero errors, 76% app CPU, and 681 MB peak RAM. The 220,000-user two-minute
+  probe passed (p99 870 ms), but its five-minute hold failed p99 at 1.40 s
+  (82% CPU); the 230,000-user two-minute probe failed p99 at 1.49 s.
+- The official run at server-change head `806aaa6`, which moved passive WAL
+  checkpoints to a separate helper process, held **210,000 users for five
+  minutes**: 20,565 req/s, p95 77.6 ms, p99 246.0 ms, zero errors, 72% app
+  CPU, and 736 MB peak RAM. The 220,000-user two-minute probe failed p95/p99
+  at 1.00/2.15 s; the 240,000-user probe failed p95 at 2.7 s. The maintainer
+  confirmed the helper was rule-compliant but it did not beat the 220,000 row.
+- The official rerun at `0012110`, which restored the same thread-based server
+  tree as `3e10490`, held **200,000 users for five minutes**: 19,684 req/s,
+  p95 12.1 ms, p99 46.2 ms, zero errors, 74% app CPU, and 636 MB peak RAM.
+  The 210,000-user two-minute probe failed p99 at 1.99 s; 220,000 failed p99
+  at 2.4 s. The maintainer says this same tree has varied from 209,000 to
+  220,000 across runs, so this result is recorded as a footnote, not a new row.
+- The official rerun at `3949a1a` uses the same server files and held **219,000
+  users for five minutes**: 21,366 req/s, p95 69.5 ms, p99 231.7 ms, zero
+  errors, 81% app CPU, and 1,185 MB peak RAM. A 230,000-user two-minute probe
+  passed but its five-minute hold failed p99 at 1.08 s (85% CPU); 240,000
+  failed p95 at 1.0 s. The leaderboard row remains 220,000 at `3e10490`.
+- The official run at `4ea8223`, which added bulk passive-checkpoint rounds
+  and database-file syncs, held **210,000 users for five minutes**: 20,531
+  req/s, p95 143.7 ms, p99 713.3 ms, zero errors, 80% app CPU, and 667 MB
+  peak RAM. The 220,000-user two-minute probe failed p99 at 1.32 s; 240,000
+  failed p95 at 3.2 s. The maintainer said the p99 was higher than the
+  `3949a1a` rerun at similar CPU and that the extra checkpoint passes did not
+  help. The result is a footnote; the 220,000 row remains at `3e10490`.
+- The official rerun at `5e0cb7e`, which removed those extra checkpoint rounds
+  and syncs, held **210,000 users for five minutes**: 20,586 req/s, p95 17.1
+  ms, p99 58.7 ms, zero errors, 78% app CPU, and 648 MB peak RAM. The
+  220,000-user two-minute probe failed p95/p99 at 0.50/2.35 s; the 240,000
+  probe failed p95 at 3.9 s. The leaderboard row remains 220,000 at `3e10490`.
+
+The maintainer attributes the differences to run-to-run variation around the
+210,000–220,000-user edge. The leaderboard retains the 220,000 row from
+`3e10490` and records the subsequent 210,000, 209,000, 200,000, and 219,000
+runs in its footnote, including the 210,000-user result at `4ea8223` and the
+later `5e0cb7e` rerun. The helper-process experiment was reverted;
+`3949a1a` uses the same server tree as `3e10490`. The current candidate keeps
+the earlier server and WAL design, adds a ring-zero eventfd wait and per-request
+HMAC key-state reuse, and passes the official 42-check suite plus a 64-write
+SIGKILL/restart durability check. It is unscored. The 295,000-user result
+belongs to upstream #245 and is not claimed for this entry. Local diagnostics
+are not leaderboard scores.

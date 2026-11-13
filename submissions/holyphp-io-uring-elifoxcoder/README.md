@@ -663,3 +663,48 @@ pattern so far was 257k/270k passing the 2-minute probe but failing the
 5-minute hold, and 280k failing at 76% CPU. That pattern is consistent with
 WAL growth followed by a blocking checkpoint, but it is not proven. A Box run
 is required.
+
+#### SQLite file locking and WAL write calls (WSL, 2026-11-13)
+
+`start.sh` now opens SQLite through the `unix-excl` VFS. The process holds the
+database lock, so transactions take no `fcntl()` locks, and the WAL index
+lives in heap memory shared by the request and checkpoint connections. The
+checkpoint connection uses the same VFS as the request connection. A thin
+wrapper over that VFS (`HPHP_SQLITE_WAL_COALESCE=1`) buffers a commit's
+sequential WAL frame writes and writes them with one call when the commit
+frame arrives. This happens inside SQLite's own write call, before the WAL
+index is updated and before `COMMIT` returns. Reads, syncs, truncates,
+unlocks and file controls flush first, so SQLite sees the same bytes in the
+same order. `HPHP_SQLITE_VFS=` and `HPHP_SQLITE_WAL_COALESCE=0` restore the
+previous behaviour.
+
+The runtime also changed in smaller ways:
+- String builders keep headroom in front of the body, so the response header
+  is prepended without moving the body.
+- The response-buffer pool has separate small and large classes.
+- Integer formatting no longer goes through `snprintf`.
+- The small builder appends are inline.
+- The JWT check uses the CPU's SHA-256 instructions when present
+  (`HPHP_SHA_NI=0` disables them), and base64url decoding is table-driven.
+All of these are generic runtime changes; `server.hphp` only reads the VFS
+name from the environment.
+
+Syscalls per request at 8,000 connections (same load, perf tracepoints):
+
+| | before | after |
+|---|---|---|
+| `fcntl` | 0.28 | 0 |
+| `pwrite64` | 0.41 | 0.085 |
+| CPU per request | 42.5–43.6 µs | 38.7 µs |
+
+At 120,000 connections in the Box-like harness the CPU difference is smaller
+(68.2 → 67.2 µs per request in the same A/B sequence). Network processing
+dominates there.
+
+Checks:
+- Direct and Classic suites pass 42/42 with every VFS combination.
+- Three `kill -9` rounds under write load, with checkpoints forced every 64
+  frames, left `PRAGMA integrity_check` at `ok`.
+- No sampled acknowledged post was missing.
+
+These are WSL diagnostics, not Box results.

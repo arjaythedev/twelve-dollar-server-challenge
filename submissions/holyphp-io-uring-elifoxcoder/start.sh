@@ -12,6 +12,13 @@ export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
 # WAL tail is copied and SQLite can restart the log from frame 0. Without it
 # the WAL grew past 200 MB under sustained load. HPHP_CKPT_RESTART=0 disables.
 export HPHP_CKPT_RESTART="${HPHP_CKPT_RESTART:-1}"
+# Open SQLite through the unix-excl VFS: the process holds the database lock,
+# so transactions take no fcntl() locks and the WAL index lives in heap memory
+# shared by both connections. Set HPHP_SQLITE_VFS= for the default unix VFS.
+export HPHP_SQLITE_VFS="${HPHP_SQLITE_VFS-unix-excl}"
+# Write each commit's WAL frames with one pwrite through a thin wrapper over
+# that VFS (reads, syncs and locks flush first). Set 0 to compare.
+export HPHP_SQLITE_WAL_COALESCE="${HPHP_SQLITE_WAL_COALESCE:-1}"
 # Keep SQLite's request cache at the 64 MiB measured baseline. Larger caches
 # and the index warm-up remain opt-in via HPHP_SQLITE_CACHE_KIB / HPHP_SQLITE_WARM.
 export HPHP_SQLITE_CACHE_KIB="${HPHP_SQLITE_CACHE_KIB:-65536}"

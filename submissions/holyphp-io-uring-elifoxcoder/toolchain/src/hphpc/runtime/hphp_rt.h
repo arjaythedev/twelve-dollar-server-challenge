@@ -42,6 +42,25 @@ static inline void hbuf_write(Buf *b, const char *s, size_t n) {
     b->len += n;
     b->data[b->len] = 0;
 }
+/* Decimal digits of v, written so they end at `end`; returns the first
+ * character. `end` needs 20 bytes of room before it. Two digits per step. */
+static inline char *hp_fmt_i64(char *end, int64_t v) {
+    static const char d2[201] =
+        "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+        "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+        "8081828384858687888990919293949596979899";
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    char *p = end;
+    while (u >= 100) {
+        unsigned r = (unsigned)(u % 100);
+        u /= 100;
+        p -= 2; memcpy(p, d2 + 2 * r, 2);
+    }
+    if (u >= 10) { p -= 2; memcpy(p, d2 + 2 * u, 2); }
+    else *--p = (char)('0' + u);
+    if (v < 0) *--p = '-';
+    return p;
+}
 void hbuf_puts(Buf *b, const char *s);
 void hbuf_printf(Buf *b, const char *fmt, ...);
 char *hbuf_take(Buf *b); /* NUL-terminated, transfers ownership */
@@ -1138,15 +1157,40 @@ hval hpbi_sqlite_is_lock_error(hval db);
 hval hpbi_sqlite_busy_timeout(hval db, hval ms);
 
 /* ---- typed builtin fast paths (see hphp_std.c) ---- */
+/* String builder handle. head: free bytes in front of the contents, which
+ * are b.data[head .. b.len) (see hp_sb_reserve_pooled in hphp_std.c). The
+ * small appends are inline: generated code makes many of them per response. */
+typedef struct { Buf b; size_t head; } HpSb;
 int64_t hp_sb_new_t(void);
 bool hp_sb_reserve_t(int64_t h, int64_t n);
-bool hp_sb_put_t(int64_t h, hstr *s);
-bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len);
-int64_t hp_sb_data_ptr_t(int64_t h);
+static inline bool hp_sb_put_t(int64_t h, hstr *x) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    hbuf_write(&s->b, x->data, x->len);
+    return true;
+}
+static inline bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    const char *p = (const char *)(intptr_t)ptr;
+    if (p && len > 0) hbuf_write(&s->b, p, (size_t)len);
+    return true;
+}
+static inline int64_t hp_sb_data_ptr_t(int64_t h) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    return s->b.data ? (int64_t)(intptr_t)(s->b.data + s->head) : 0;
+}
 bool hp_sb_discard_t(int64_t h);
-int64_t hp_sb_len_t(int64_t h);
+static inline int64_t hp_sb_len_t(int64_t h) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    return (int64_t)(s->b.len - s->head);
+}
 bool hp_sb_prepend_t(int64_t h, hstr *s);
-bool hp_sb_int_t(int64_t h, int64_t n);
+static inline bool hp_sb_int_t(int64_t h, int64_t n) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    char tmp[24];
+    char *p = hp_fmt_i64(tmp + sizeof tmp, n);
+    hbuf_write(&s->b, p, (size_t)(tmp + sizeof tmp - p));
+    return true;
+}
 bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len);
 bool hp_sb_json_str_t(int64_t h, hstr *s);
 hstr *hp_sb_take_t(int64_t h);

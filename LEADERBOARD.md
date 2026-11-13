@@ -667,7 +667,11 @@ and 320,000 on p99 (5.07 s at 89 % CPU), all with 0 errors. Its next head, **`ca
 nice 12, checkpoint hold limit back to 400 ms and growing with the log; PGO build worked), held **270,000** (25,861
 req/s, p95 36.0 / p99 297.2 ms, 0 err, 73 % CPU, 26 µs/req, 1,308 MB, 2026-11-13), still below the merged row, so not
 merged: 280,000 failed the 2-minute probe on p99 (1.87 s at 79 % CPU) and 320,000 on p99 (5.49 s at 88 % CPU), all
-with 0 errors. #415 stays open.
+with 0 errors. Its next head, **`2f08e6d`** (the merged row's checkpoint policy: 4,096-frame checkpoints, 250 ms hold
+limit, checkpoint thread at nice 19, no database warm-up; PGO build worked), held **280,000** (26,676 req/s, p95 171.9 /
+p99 757.2 ms, 0 err, 79 % CPU, 27 µs/req, 860 MB, 2026-11-13), still below the merged row, so not merged: 290,000
+failed the 2-minute probe on p99 (1.34 s at 84 % CPU), 300,000 on p99 (1.70 s at 88 % CPU) and 320,000 on p99 (5.38 s
+at 96 % CPU), all with 0 errors. #415 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

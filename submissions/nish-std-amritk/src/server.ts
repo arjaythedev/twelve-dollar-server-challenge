@@ -602,21 +602,22 @@ export class FeedServer {
 
   /** Appends the text column `c` of `st`'s row to `out` as a JSON string; false when SQLite failed. */
   textColumn(st: Statement, c: i32, out: Out): boolean {
-    let r = st.columnInto(c, this.col, 0)
+    // Each Result is a `const`: one reassigned is boxed in the arena, and
+    // the loop's arena keeps it.
+    const r = st.columnInto(c, this.col, 0)
     if (r.isErr()) {
       return false
     }
-    if (r.value > toI32(this.col.length)) {
-      this.col = new Array<u8>(r.value)
-      r = st.columnInto(c, this.col, 0)
-      if (r.isErr()) {
-        return false
-      }
+    if (r.value <= toI32(this.col.length)) {
+      out.string(this.col, 0, r.value)
+      return true
     }
-    if (r.isErr()) {
+    this.col = new Array<u8>(r.value)
+    const again = st.columnInto(c, this.col, 0)
+    if (again.isErr()) {
       return false
     }
-    out.string(this.col, 0, r.value)
+    out.string(this.col, 0, again.value)
     return true
   }
 

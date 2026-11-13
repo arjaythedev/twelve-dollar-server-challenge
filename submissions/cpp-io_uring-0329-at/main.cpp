@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -51,8 +52,8 @@ static constexpr size_t kArenaFlush = 8u << 20;
 enum : int { kOpAccept = 0, kOpRecv = 1 };
 
 static constexpr uint64_t ud(int op, int slot, uint32_t gen) {
-  return (static_cast<uint64_t>(gen) << 32) | (static_cast<uint64_t>(op & 0xF) << 16) |
-         static_cast<uint64_t>(slot & 0xFFFF);
+  return (static_cast<uint64_t>(gen) << 32) | (static_cast<uint64_t>(op & 0xF) << 24) |
+         static_cast<uint64_t>(slot & 0xFFFFFF);
 }
 
 static constexpr size_t header_into(char* dst, int status, long long body_len) {
@@ -105,12 +106,27 @@ static bool g_txn = false;
 static std::string g_secret = "twelve-dollar-challenge";
 static SHA256_CTX g_hi, g_ho;
 static bool g_cursors = false;
+static std::chrono::steady_clock::time_point g_start;
 
 struct Req {
   std::string_view method, path, body;
   const phr_header* headers = nullptr;
   size_t nheaders = 0;
 };
+
+static long long uptime_s() {
+  long long s = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - g_start)
+                    .count();
+  return s < 1 ? 1 : s;
+}
+
+static void note_fallback() {
+  static bool once = false;
+  if (once) return;
+  once = true;
+  std::fprintf(stderr, "shim: cursor path unavailable, using SQL\n");
+}
 
 static constexpr int http_parse(const char* buf, size_t len, phr_header* headers, size_t* nh,
                                 Req* req, size_t* consumed) {
@@ -241,7 +257,11 @@ static constexpr int authenticate(const Req& r, long long* uid, std::string* nam
     return 401;
   }
   int64_t exp = 0;
-  if (p["exp"].get_int64().get(exp) == simdjson::SUCCESS && static_cast<int64_t>(time(nullptr)) >= exp) {
+  if (p["exp"].get_int64().get(exp) != simdjson::SUCCESS) {
+    set_body(out, "{\"error\":\"invalid or expired token\"}");
+    return 401;
+  }
+  if (static_cast<int64_t>(time(nullptr)) >= exp) {
     set_body(out, "{\"error\":\"invalid or expired token\"}");
     return 401;
   }
@@ -320,6 +340,7 @@ static constexpr int handle_feed(std::string& out) {
       out += "]}";
       return 200;
     }
+    note_fallback();
   }
   return handle_feed_sql(out);
 }
@@ -381,6 +402,7 @@ static constexpr int handle_get_post(std::string_view idstr, std::string& out) {
       set_body(out, "{\"error\":\"post not found\"}");
       return 404;
     }
+    note_fallback();
   }
   return handle_post_sql(id, out);
 }
@@ -502,7 +524,10 @@ static constexpr int route(const Req& r, std::string& out) {
   bool get = r.method == "GET", post = r.method == "POST";
 
   if (get && path == "/health") {
-    set_body(out, "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":1}");
+    out.resize(g_body_off);
+    out += "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":";
+    append_int(out, uptime_s());
+    out.push_back('}');
     return 200;
   }
   if (get && path == "/feed") return handle_feed(out);
@@ -601,6 +626,8 @@ static void send_batch() {
 }
 
 int main() {
+  g_start = std::chrono::steady_clock::now();
+
   if (const char* s = getenv("JWT_SECRET")) g_secret = s;
   const char* host = getenv("HOST");
   int port = getenv("PORT") ? atoi(getenv("PORT")) : 3000;
@@ -776,8 +803,8 @@ int main() {
       int res = cqe->res;
       uint32_t flags = cqe->flags;
       uint64_t u = cqe->user_data;
-      int op = static_cast<int>((u >> 16) & 0xF);
-      int slot = static_cast<int>(u & 0xFFFF);
+      int op = static_cast<int>((u >> 24) & 0xF);
+      int slot = static_cast<int>(u & 0xFFFFFF);
       uint32_t gen = static_cast<uint32_t>(u >> 32);
       io_uring_cqe_seen(&g_ring, cqe);
 

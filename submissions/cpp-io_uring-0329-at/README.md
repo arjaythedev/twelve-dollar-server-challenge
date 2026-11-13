@@ -2,7 +2,8 @@
 
 ## Language / deps
 - C++23, g++ 13 (Ubuntu 24.04 build-essential)
-- SQLite 3.54.1 amalgamation, downloaded and compiled by `install.sh` / `build.sh`
+- SQLite 3.54.1 amalgamation, downloaded and compiled by `install.sh` / `build.sh`;
+  the version string is verified after unzipping
 - simdjson 5.1.1 (xmake-repo, pinned)
 - picohttpparser v1.5 (commit-pinned in `install.sh`)
 - liburing 2.5, OpenSSL 3
@@ -17,19 +18,30 @@ over eight accept queues instead of one. Multishot accept (512 armed) and
 multishot receive over a provided-buffer ring: an idle connection holds no
 buffer.
 
+The slot number occupies 24 bits of the completion's `user_data`, so the
+connection table can hold up to 16.7 M slots (it is capped at 400,000).
+
 Each event-loop pass is one SQLite transaction. Responses are built into a
 shared bump arena (16 MiB, flushed every 8 MiB) and sent only after COMMIT
-returns, so a 201 never claims an uncommitted write. If COMMIT fails the batch is
-rolled back and every request of that batch receives a 500.
+returns, so a 201 never claims an uncommitted write. If COMMIT fails the batch
+is rolled back and every request of that batch receives a 500.
 
 `GET /feed` and `GET /posts/:id` read SQLite's own B-tree cursors
 (`src/sqlite_shim.c` includes the unmodified amalgamation): index walk on
 `posts_created_at_id_idx` for the 20 newest ids, records decoded by hand,
 authors by rowid in `users`, like counts from one range walk of
 `likes_post_id_idx` (falling back to a seek per post when ids are sparse).
+Records are decoded as they are stored — the `INTEGER PRIMARY KEY` column is a
+NULL placeholder in the record, so `posts` is `[NULL, user_id, body,
+created_at]` and `users` is `[NULL, username, created_at]`. Feed rows are
+copied into a per-call text buffer so all 20 entries stay valid until the
+response is built.
+
 Every page still goes through SQLite's pager, WAL and page cache; only the
-bytecode interpreter is skipped. The stored layout is checked at startup and any
-surprise falls back to the reference SQL, so the bytes on the wire stay golden.
+bytecode interpreter is skipped. The stored layout is checked at startup, and
+any surprise falls back to the reference SQL — a one-shot
+`shim: cursor path unavailable, using SQL` warning on stderr makes a silent
+fallback visible.
 
 WAL with `synchronous=NORMAL`, opened through the `unix-excl` VFS (one process
 owns the file, so the WAL index lives in heap and no fcntl is taken per
@@ -39,6 +51,14 @@ frames (16 MiB).
 `src/util.hpp` is `constexpr` throughout and verifies itself at build time with
 `consteval`/`static_assert`: base64url, JSON escaping, response framing, integer
 formatting, id parsing, trimming, UTF-8 length.
+
+A token must carry a numeric `exp`; a missing or non-numeric claim is a 401.
+
+## Known limitations
+- A request split across two TCP receives closes the connection. The load
+  generator writes each request in one go, so this does not occur in the
+  benchmark.
+- `/health` reports real uptime floored at 1 second.
 
 ## Correctness
 42/42 with `test/test.sh`; `SHIM_CURSORS=1` is set by `start.sh`.

@@ -16,6 +16,9 @@ static struct {
 
 static unsigned char g_a[8192], g_b[1024], g_c[256];
 
+static char g_text[64 * 1024];
+static size_t g_tp;
+
 static Pgno root_page(sqlite3 *db, const char *name) {
   sqlite3_stmt *s = 0;
   Pgno r = 0;
@@ -198,27 +201,43 @@ static int table_row(BtCursor *cur, long long rowid, unsigned char *buf, size_t 
   return decode(buf, (int)n, f, nf) == 0 ? 0 : -1;
 }
 
+static int put_text(const unsigned char *p, int n, const char **dst, int *dlen) {
+  if (n <= 0) {
+    *dst = "";
+    *dlen = 0;
+    return 0;
+  }
+  if (g_tp + (size_t)n > sizeof g_text) return -1;
+  memcpy(g_text + g_tp, p, (size_t)n);
+  *dst = g_text + g_tp;
+  *dlen = n;
+  g_tp += (size_t)n;
+  return 0;
+}
+
 int shim_get_post(sqlite3 *db, long long id, struct shim_post *out) {
   (void)db;
   if (!g.ok || !g.open) return -1;
 
-  struct col p[3];
-  int rc = table_row(g.posts, id, g_a, sizeof g_a, p, 3);
+  struct col p[4];
+  int rc = table_row(g.posts, id, g_a, sizeof g_a, p, 4);
   if (rc != 0) return rc;
-  if (p[0].type < 1 || p[0].type > 9) return -1;
-  if (p[1].type < 13 || (p[1].type & 1) == 0) return -1;
+  if (p[0].type != 0) return -1;
+  if (p[1].type < 1 || p[1].type > 9) return -1;
   if (p[2].type < 13 || (p[2].type & 1) == 0) return -1;
+  if (p[3].type < 13 || (p[3].type & 1) == 0) return -1;
 
-  struct col u[2];
-  if (table_row(g.users, p[0].i, g_b, sizeof g_b, u, 2) != 0) return -1;
-  if (u[0].type < 13 || (u[0].type & 1) == 0) return -1;
+  struct col u[3];
+  if (table_row(g.users, p[1].i, g_b, sizeof g_b, u, 3) != 0) return -1;
+  if (u[0].type != 0) return -1;
+  if (u[1].type < 13 || (u[1].type & 1) == 0) return -1;
 
-  out->body = (const char *)p[1].p;
-  out->body_len = p[1].n;
-  out->created_at = (const char *)p[2].p;
-  out->created_len = p[2].n;
-  out->author = (const char *)u[0].p;
-  out->author_len = u[0].n;
+  out->body = (const char *)p[2].p;
+  out->body_len = p[2].n;
+  out->created_at = (const char *)p[3].p;
+  out->created_len = p[3].n;
+  out->author = (const char *)u[1].p;
+  out->author_len = u[1].n;
   return 0;
 }
 
@@ -230,7 +249,7 @@ static int count_likes_one(long long post_id) {
   k->aMem[0].u.i = post_id;
   int res = 0;
   if (sqlite3BtreeIndexMoveto(g.likes_idx, k, &res) != SQLITE_OK) return -1;
-  if (res != 0) return 0;
+
   int n = 0;
   for (;;) {
     u32 sz = sqlite3BtreePayloadSize(g.likes_idx);
@@ -238,7 +257,13 @@ static int count_likes_one(long long post_id) {
     if (sqlite3BtreePayload(g.likes_idx, 0, sz, g_c) != SQLITE_OK) break;
     struct col f[2];
     if (decode(g_c, (int)sz, f, 2) != 0) break;
-    if (f[0].type < 1 || f[0].type > 9 || f[0].i != post_id) break;
+    if (f[0].type < 1 || f[0].type > 9) break;
+    long long pid = f[0].i;
+    if (pid < post_id) {
+      if (sqlite3BtreeNext(g.likes_idx, 0) != SQLITE_OK) break;
+      continue;
+    }
+    if (pid > post_id) break;
     n++;
     if (sqlite3BtreeNext(g.likes_idx, 0) != SQLITE_OK) break;
   }
@@ -267,9 +292,9 @@ static int count_likes_all(const long long *ids, int n, long long *counts) {
 
   int res = 0;
   if (sqlite3BtreeIndexMoveto(g.likes_idx, k, &res) != SQLITE_OK) return -1;
-  if (res != 0) return 0;
 
   int j = n - 1;
+  int started = 0;
   for (;;) {
     u32 sz = sqlite3BtreePayloadSize(g.likes_idx);
     if (sz == 0 || sz > sizeof g_c) break;
@@ -279,6 +304,13 @@ static int count_likes_all(const long long *ids, int n, long long *counts) {
     if (f[0].type < 1 || f[0].type > 9) break;
     long long pid = f[0].i;
     if (pid > hi) break;
+
+    if (!started && pid < lo) {
+      if (sqlite3BtreeNext(g.likes_idx, 0) != SQLITE_OK) break;
+      continue;
+    }
+    started = 1;
+
     while (j >= 0 && ids[j] < pid) j--;
     if (j >= 0 && ids[j] == pid) counts[j]++;
     if (sqlite3BtreeNext(g.likes_idx, 0) != SQLITE_OK) break;
@@ -289,6 +321,7 @@ static int count_likes_all(const long long *ids, int n, long long *counts) {
 int shim_feed(sqlite3 *db, struct shim_feed_entry *out, int max) {
   (void)db;
   if (!g.ok || !g.open) return -1;
+  if (max > 32) max = 32;
 
   long long ids[32];
   int n = 0;
@@ -310,21 +343,23 @@ int shim_feed(sqlite3 *db, struct shim_feed_entry *out, int max) {
   long long likes[32];
   if (count_likes_all(ids, n, likes) != 0) return -1;
 
+  g_tp = 0;
   for (int i = 0; i < n; i++) {
-    struct col p[3];
-    if (table_row(g.posts, ids[i], g_a, sizeof g_a, p, 3) != 0) return -1;
-    if (p[1].type < 13 || (p[1].type & 1) == 0) return -1;
+    struct col p[4];
+    if (table_row(g.posts, ids[i], g_a, sizeof g_a, p, 4) != 0) return -1;
+    if (p[0].type != 0) return -1;
+    if (p[1].type < 1 || p[1].type > 9) return -1;
     if (p[2].type < 13 || (p[2].type & 1) == 0) return -1;
-    struct col u[2];
-    if (table_row(g.users, p[0].i, g_b, sizeof g_b, u, 2) != 0) return -1;
-    if (u[0].type < 13 || (u[0].type & 1) == 0) return -1;
+    if (p[3].type < 13 || (p[3].type & 1) == 0) return -1;
+    struct col u[3];
+    if (table_row(g.users, p[1].i, g_b, sizeof g_b, u, 3) != 0) return -1;
+    if (u[0].type != 0) return -1;
+    if (u[1].type < 13 || (u[1].type & 1) == 0) return -1;
+
     out[i].id = ids[i];
-    out[i].body = (const char *)p[1].p;
-    out[i].body_len = p[1].n;
-    out[i].created_at = (const char *)p[2].p;
-    out[i].created_len = p[2].n;
-    out[i].author = (const char *)u[0].p;
-    out[i].author_len = u[0].n;
+    if (put_text(p[2].p, p[2].n, &out[i].body, &out[i].body_len) != 0) return -1;
+    if (put_text(p[3].p, p[3].n, &out[i].created_at, &out[i].created_len) != 0) return -1;
+    if (put_text(u[1].p, u[1].n, &out[i].author, &out[i].author_len) != 0) return -1;
     out[i].like_count = likes[i];
   }
   return n;

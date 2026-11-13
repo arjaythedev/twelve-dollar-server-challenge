@@ -22,12 +22,12 @@
 #define VFS_NAME "feed-wal"
 static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
-static uint64_t hold_max_ns = 250000000ULL; /* a hold's limit, whatever the log's length */
+static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
 static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
-#define CKPT_NICE 19
+static int ckpt_nice = 12; /* CKPT_NICE: the bulk checkpoint thread's nice value (a guaranteed ~6 % of a busy core) */
 static size_t dbwarm_bytes = (size_t)256 << 20; /* DBWARM_MB: the database file's first bytes kept in the page cache */
 static uint64_t dbwarm_s = 5;
 #define DBWARM_MIN_AVAIL_KB (512L << 10) /* no warming while MemAvailable is below this: it must never fight reclaim */
@@ -538,10 +538,10 @@ static void db_tick(struct db *d) {
     break;
   }
   default: { /* a thread is working */
-    /* The limit does not grow with the log: every held POST counts in the percentiles, and POSTs
-     * are ~8 % of requests, so a hold near its limit puts ~1 % of all requests at the limit. A log
-     * that misses restarts costs the loop nothing while its page cache holds the hot pages. */
-    uint64_t limit = hold_max_ns;
+    /* The limit grows with the log: a log that has missed restarts (the disk made the last tails
+     * slow) must restart before it reaches the inline last resort, whatever the sync costs. */
+    uint64_t limit = hold_max_ns * (uint64_t)(1 + d->wal_frames / (2 * ckpt_frames));
+    if (limit > 2 * hold_max_ns) limit = 2 * hold_max_ns; /* never a hold a POST would count as a failure */
     if (d->writes_held && now_ns() - d->hold_t0 > limit) { /* a slow sync: writes resume, the log restarts next cycle */
       d->writes_held = 0;
       d->n_hold_timeout++;
@@ -629,7 +629,7 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
   sqlite3_wal_hook(d->c, db_wal_hook, d);
   pthread_mutex_init(&d->mu, NULL);
   pthread_cond_init(&d->cv, NULL);
-  if (ck_start(d, path, CK_BULK, CKPT_NICE) || ck_start(d, path, CK_TAIL, 0)) {
+  if (ck_start(d, path, CK_BULK, ckpt_nice) || ck_start(d, path, CK_TAIL, 0)) {
     fprintf(stderr, "checkpoint threads: %s\n", strerror(errno));
     return -1;
   }

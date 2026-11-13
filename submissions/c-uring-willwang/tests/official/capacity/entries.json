@@ -1,0 +1,395 @@
+[
+  {
+    "entry": "kensac",
+    "submission": "rust-iouring-kensac",
+    "executable": "target/release/feed-server",
+    "commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+    "official_users": 310000,
+    "official_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264#issuecomment-6566431071",
+    "local_compiler": "rustc 1.94.0, GCC 13.3.0, target-cpu=native",
+    "local_server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "kensac-upstream-queue-statistics",
+    "submission": "rust-iouring-kensac",
+    "commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+    "diagnostic": true,
+    "local_compiler": "rustc 1.94.0 and GCC 13.3.0, target-cpu=native, upstream Cargo feature stats",
+    "local_server_sha256": "cbf00c33fe5544e46e8e128b44d83681d15b847d42fdbe1286393585d0c5390d",
+    "local_smoke": "Eight persistent HTTP sockets, 550 verified reads and 17 authenticated posts verified after reopening SQLite. The upstream diagnostic reported all ten fields."
+  },
+  {
+    "entry": "kensac-cascadelake-calibration",
+    "diagnostic": true,
+    "submission": "rust-iouring-kensac",
+    "base_entry": "kensac",
+    "commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+    "local_compiler": "Rust 1.94.0 target-cpu=cascadelake and GCC 13.3.0 -march=cascadelake, executed on AMD EPYC Genoa",
+    "local_api_checks_passed": 42,
+    "local_server_sha256": "4974766bf9452b9c7d2bbd5f7dd841edb71aaee26471d61cd7c309539249f009"
+  },
+  {
+    "entry": "mojo",
+    "submission": "mojo-iouring-oh-meh",
+    "executable": "bin/server",
+    "commit": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+    "official_users": 304000,
+    "official_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/257#issuecomment-6564516869",
+    "local_compiler": "Mojo 1.2.0 2016d0cd, znver4",
+    "local_server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "rkkautsar",
+    "submission": "rust-iouring-rkkautsar",
+    "executable": "target/release/feed-server",
+    "commit": "2daf23833a6653b5cc747b009d94705c009f5812",
+    "official_users": 300000,
+    "official_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/355#issuecomment-6732991635",
+    "other_official_hold_at_same_revision": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/355#issuecomment-6726240668",
+    "local_compiler": "rustc 1.94.0, GCC 13.3.0, target-cpu=native",
+    "local_server_sha256": "615b36997cd8429bc31c183d567e8a156c4b1b4daa3ff3bc425873795ea63e63",
+    "local_api_checks_passed": 42,
+    "local_compatibility_patch": "rkkautsar-ubuntu-6.8.patch",
+    "pristine_sha256_before_compatibility_patch": "162da31170c5a7dc022e22964e06b7ead040a6c6f822061b2e43b42e18011ff1"
+  },
+  {
+    "entry": "swift",
+    "submission": "swift-iouring-akbashev",
+    "executable": ".build/release/Feed",
+    "commit": "77d91a746b2905d06e0e70726d6407a45a040c7b",
+    "official_users": 300000,
+    "official_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/376#issuecomment-6752201104",
+    "local_compiler": "Swift 6.4.2 release, znver4",
+    "local_server_sha256": "3640c15706243a4fa39a7643914a7ac57860fa6140051f942633262be8f8cb4f",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "pavlyhalim",
+    "submission": "c-iouring-pavlyhalim",
+    "executable": "bin/server",
+    "commit": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+    "official_users": 295000,
+    "official_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245#issuecomment-6557252428",
+    "local_compiler": "GCC 13.3.0, x86-64-v3; mtune=cascadelake",
+    "local_server_sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-0142ba2",
+    "submission": "c-uring-willwang",
+    "executable": "bin/server",
+    "commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+    "official_users": 280000,
+    "official_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-fused-renderer",
+    "based_on_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "bec0b85c4f24f605e76df1f2ed993179dc7f739741372bae68914ffc79193b5a",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-fused-renderer-fragment-aware-ack",
+    "commit": "9632f45",
+    "based_on_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-fused-renderer-fragment-aware-ack-wal-worker",
+    "based_on_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "932db156fbfc5c1832fe702d1dbb9bb1178b061af1ed9f90b8153c39f26caa2d",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-bank-readiness-experiment",
+    "based_on_commit": "9632f45",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "109094e07e5da2d223f2ace7e87e41da10e3051cbf519e64acf8192b0a53b6f1",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-fixed-socket-poll-experiment",
+    "based_on_commit": "9632f45",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "844074f5ca94a038a9fb855e9ca7ff29732431afe6d6842115a0d5134fba0431",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-wal-worker-adaptive-bank-readiness",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "197f1437f2319badd9e585c6c2a0c898acd72a5a3e577f3c9f7b84b1bcb2afa2",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-profile-guided-renderer-fragment-aware-ack",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native and whole-server instrumentation profile",
+    "local_server_sha256": "8b4acc617d7b601ec5b34c9c70d54e5996a29f8b8f9033c10772f9dd36c016c3",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-profile-guided-wal-worker",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native and whole-server instrumentation profile",
+    "local_server_sha256": "0c0e94ff6e7b5aca1af84bb58a66c8e5f7cb64fbe6987b292f692c68e7b67ac3",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-compact-burst-drain-experiment",
+    "based_on_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "c8f83c46bdec3dddb246f0ab6076ef9d0240c85ed03fe080922e45f1d280ed81",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-direct-multishot-receive-experiment",
+    "based_on_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "38f39c86775fb09a9003c5e8b27f08ce3089af811f9d3976d270d72e2dd6afda",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-compact-commit-worker-experiment",
+    "based_on_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "b55418677566ba702ea14108dae27ef108fe92892658021706d64e3a838867a0",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-first-write-connection-huge-pages",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "26223ae7a87fe0d991d5bc62de6fe4049f51e50c3a4369885b29cf87a63dfb46",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-adaptive-bank-readiness",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "2770eb1d6fb7917680600fc520a1d8e4481877a8032c0d7dbd37d3b65605390d",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-bounded-ingress-fifo",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "c86f54ba89f01477af4d454aaedb6767b6b65f003d3a4da90311b22332c04462",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-direct-bounded-ingress-fifo",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "7d7461a10de0728d47f29e770ab872b1d5c04ae25bd48d3a4f066ae5652117de",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-bounded-first-receive-then-park",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native",
+    "local_server_sha256": "004b407268a77d8cd5ad17f4e33a2fc96c59c8c38a081ac84110734029220263",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "pavlyhalim-transport-with-willwang-rank-certificate-and-fused-renderer",
+    "based_on_commit": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+    "diagnostic": true,
+    "local_compiler": "GCC 13.3.0, x86-64-v3; mtune=cascadelake",
+    "local_server_sha256": "ed51c60d1f868ac1b96f8d622a5f565935ff41dd553a7e81ac3361bc566762eb",
+    "local_api_checks_passed": 42
+  },
+  {
+    "entry": "willwang-resident-multishot-receive",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native, bounded direct accepts and resident multishot receives",
+    "local_server_sha256": "21984bc15a1de203837ee9638841618ba21c147f6d8109fd628d3e95b64580da",
+    "reactor_patch_sha256": "b6cb2d79c9f85e533e089bf1b128e67e7b04852f8d59d0432203820ed27df52c",
+    "local_api_checks_passed": 42,
+    "local_differential_layouts_passed": 13
+  },
+  {
+    "entry": "willwang-source-trained-sqlite-and-http",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native; source-trained SQLite and HTTP with the ordinary O3/LTO reactor",
+    "local_server_sha256": "6cb7a6fe2d23efabf377e2c01b6b7da4b52a6b42647b988b3255d7ca4374250c",
+    "source_patch_sha256": "b820bd485e198db16e545d2e436fbc117f232fe09edc5349587c1be0d99671e3",
+    "local_api_checks_passed": 42,
+    "local_differential_layouts_passed": 13
+  },
+  {
+    "entry": "willwang-batched-epoll-cascade-lake",
+    "submission": "c-uring-willwang",
+    "commit": "43adbd73ec34bba4d3b0e3ea5bfbc064865c9e6e",
+    "diagnostic": true,
+    "local_compiler": "Clang 18.1.3, -march=cascadelake, executed on AMD EPYC Genoa",
+    "local_server_sha256": "90918183bc90ee3dcf22391d1bc37db7cc275639e3af0db54096f0c746bf3cb3",
+    "local_api_checks_passed": 42,
+    "sqlite_differential_cases_passed": 13
+  },
+  {
+    "entry": "willwang-explicit-slot-connection-pages",
+    "submission": "c-uring-willwang",
+    "base_entry": "willwang-explicit-slot-registration",
+    "source_patch": "explicit-slot/connection-pages.patch",
+    "component_evidence": "explicit-slot/connection-pages-validation.json",
+    "reactor_patch_sha256": "010e71f74b3a8ff5971a0138725e23d2bedd75aabd360f5f60e379a6b332a545",
+    "reactor_source_sha256": "275ecc2a0f74d38195077d98d58d119e3d6e16fc00481b627eecf39721dc482e",
+    "local_server_sha256": "e921724678795b39b96840837af7ed8078e512e105cadc76b9e04a2b8979589b",
+    "local_compiler": "Clang 18.1.3, native production flags and clean SQLite build",
+    "local_api_checks_passed": 42,
+    "sqlite_differential_cases_passed": 13,
+    "application_completion_model_scenarios": 195
+  },
+  {
+    "entry": "willwang-explicit-sqlite-sibling-swap",
+    "submission": "c-uring-willwang",
+    "base_entry": "willwang-explicit-slot-registration",
+    "sqlite_source_patch": "experimental-sqlite-sibling-swap.patch",
+    "sqlite_patch_sha256": "36ef53b437e83c7d8631b5803f3c2e74df933c92c25654208b8efd803fee82e9",
+    "sqlite_amalgamation_sha256": "200c362e7e677d1f81ac961a072cafdbaf341fc2612aa8b49fc8a974d8caa5ea",
+    "local_server_sha256": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+    "local_compiler": "Clang 18.1.3, native production flags and clean SQLite build",
+    "local_api_checks_passed": 42,
+    "sqlite_differential_cases_passed": 13,
+    "source_commit": "0b9d84c4cf7c7a90bdd27f26d54c0229afa64e10",
+    "reactor_source_sha256": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+    "production_validation": "production-validation.json",
+    "application_completion_model_scenarios": 195,
+    "experimental_only": "This build alters SQLite source. The organizer requires the unmodified engine."
+  },
+  {
+    "entry": "willwang-explicit-sqlite-cascadelake-calibration",
+    "diagnostic": true,
+    "submission": "c-uring-willwang",
+    "base_entry": "willwang-explicit-sqlite-sibling-swap",
+    "source_commit": "0b9d84c4cf7c7a90bdd27f26d54c0229afa64e10",
+    "local_compiler": "Clang 18.1.3 -march=cascadelake, executed on AMD EPYC Genoa",
+    "local_api_checks_passed": 42,
+    "sqlite_differential_cases_passed": 13,
+    "local_server_sha256": "0675fef4006d6531a4bd632d489e39220c99e54437bb888fb52c25252a3f3c8d"
+  },
+  {
+    "entry": "willwang-grouped-sqlite-sibling-swap",
+    "submission": "c-uring-willwang",
+    "base_entry": "willwang-batched-epoll-registration",
+    "sqlite_source_patch": "experimental-sqlite-sibling-swap.patch",
+    "sqlite_patch_sha256": "36ef53b437e83c7d8631b5803f3c2e74df933c92c25654208b8efd803fee82e9",
+    "sqlite_amalgamation_sha256": "200c362e7e677d1f81ac961a072cafdbaf341fc2612aa8b49fc8a974d8caa5ea",
+    "local_server_sha256": "b2802ff84c80719dfca39500a247c00b1764fc0a2e68961491ff3a3513929ce9",
+    "local_compiler": "Clang 18.1.3, native production flags and clean SQLite build",
+    "local_api_checks_passed": 42,
+    "sqlite_differential_cases_passed": 13,
+    "experimental_only": "This build alters SQLite source. The organizer requires the unmodified engine."
+  },
+  {
+    "entry": "willwang-explicit-slot-registration",
+    "submission": "c-uring-willwang",
+    "base": "43adbd73ec34bba4d3b0e3ea5bfbc064865c9e6e",
+    "source_patch": "explicit-slot/reactor.patch",
+    "component_evidence": "explicit-slot/component-results.json",
+    "reactor_patch_sha256": "ced4e9a4ca7aeb8ec65121b0717fbd860e9f5f3a4933013e71d572862160c38a",
+    "reactor_source_sha256": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+    "local_server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+    "local_compiler": "Clang 18.1.3, native production flags and clean SQLite build",
+    "local_api_checks_passed": 42,
+    "sqlite_differential_cases_passed": 13,
+    "completed_http_responses_checked_in_component_test": 213028,
+    "application_completion_model_scenarios": 195,
+    "commit": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+    "sqlite_amalgamation_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+    "reader_source_sha256": "c202d87d232540cf4d6381ee533bd6326699b5a59aa3af8805a25337b9d1af17"
+  },
+  {
+    "entry": "willwang-batched-epoll-registration",
+    "based_on_commit": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+    "local_compiler": "Clang 18.1.3, -march=native, per-batch epoll registration on the guarded release",
+    "local_server_sha256": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+    "reactor_patch_sha256": "bb25ab7299a8c8a9e77311d0890c9648b3b7f1e1b172158d3bb4bc08a53f426b",
+    "local_api_checks_passed": 42,
+    "local_differential_layouts_passed": 13,
+    "release_reactor_sha256": "189ae66ae62e8889355cb076bcb9c79dcb8c16f02d060223789cbcdc886d2b14",
+    "verified_kernel": "6.8.0-147-generic",
+    "native_regressions_passed": [
+      "batch-watch",
+      "held-writes",
+      "wake",
+      "render-guard",
+      "wal-recovery"
+    ],
+    "cascade_lake_correctness_build": {
+      "source_commit": "43adbd73ec34bba4d3b0e3ea5bfbc064865c9e6e",
+      "server_sha256": "90918183bc90ee3dcf22391d1bc37db7cc275639e3af0db54096f0c746bf3cb3",
+      "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+      "build_command": [
+        "make",
+        "-j4",
+        "CC=clang-18",
+        "CFLAGS=-O3 -march=cascadelake -fno-plt -std=gnu11 -flto"
+      ],
+      "executed_on": "AMD EPYC-Genoa Processor",
+      "kernel": "6.8.0-147-generic",
+      "official_checks_passed": 42,
+      "differential_layouts_passed": 13,
+      "native_regressions_passed": [
+        "batch-watch",
+        "held-writes",
+        "wake",
+        "render-guard",
+        "wal-recovery"
+      ],
+      "renderer_max_vector_bits": {
+        "buf_post_row": 256,
+        "buf_json_string": 128
+      }
+    }
+  },
+  {
+    "entry": "willwang-batched-registration-coverage-diagnostic",
+    "diagnostic": true,
+    "based_on_commit": "43adbd73ec34bba4d3b0e3ea5bfbc064865c9e6e",
+    "based_on_server_sha256": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+    "local_server_sha256": "25dce898956237321382c6c7a7ca26f0de62ffad52bf153a50e32a2f9e010799",
+    "measurement": "Single-issuer prefix width, descriptor and epoll registration counts. One ELF uses synchronous registration or groups prefixes of four or more.",
+    "instrumentation_patch": "admission-counter-diagnostic.patch",
+    "measured_pair": "admission-counter-comparison.json",
+    "reactor_source_sha256": "18c61b146676c456e6509e6d8ad5eae61ada3d34250e2bc63769b6f55572df48"
+  },
+  {
+    "entry": "willwang-consumed-sqlite-leaf",
+    "submission": "c-uring-willwang",
+    "base_entry": "willwang-explicit-sqlite-sibling-swap",
+    "source_patch": "sqlite-consumed-leaf.patch",
+    "source_patch_sha256": "881c13a66870a69c62ae5b8b14af607fb6161d6809cd0aaf9ba3132633c7146a",
+    "reader_source_sha256": "23f377cd7dc6c5ceaf1e3b13cf8bfcdfb5eb7d8a4e8fba59bbc1ea956ed867ea",
+    "local_server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+    "local_compiler": "Clang 18.1.3, release build.sh and native LTO",
+    "local_api_checks_passed": 42,
+    "sqlite_differential_cases_passed": 13,
+    "additional_sql_oracle_comparisons": 3067,
+    "source_commit": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+    "production_validation": "leaf-reader-production-validation.json",
+    "experimental_only": "This build alters SQLite source. The organizer requires the unmodified engine."
+  },
+  {
+    "entry": "willwang-stock-index-seek",
+    "submission": "c-uring-willwang",
+    "base_commit": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+    "application_patch": "stock-index-seek.patch",
+    "application_patch_sha256": "92166959658fccb3e88740f37438e941c8cec72eb3f26fbe132e4fbecff58f25",
+    "reader_source_sha256": "f583411d87254cf782c3ced11deb778d343dc0a1569076d2db9693fb79f7d4c0",
+    "sqlite_amalgamation_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+    "local_server_sha256": "5f295dac29915b7c0d8fdea5a91d1a4d3cb2209bc8c2277af1862394db6780c5",
+    "local_compiler": "Clang 18, native build.sh, LTO, unmodified SQLite",
+    "capacity_plan": "stock-index-seek-plan.json"
+  }
+]

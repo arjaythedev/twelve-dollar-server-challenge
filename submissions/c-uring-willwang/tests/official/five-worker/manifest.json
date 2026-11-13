@@ -1,0 +1,25 @@
+{
+  "files": {
+    "five-worker/assess_five.py": "f6924f7e87b9419b0143f15ebb222978d1d9ce07815ff61301bd568ff4ebec7c",
+    "five-worker/placement.py": "1557e1baeabb86c0c25ff091b6688fe90c69feb308a9cb093b73e308e1f8cdd7",
+    "five-worker/run_five.py": "1728ac43718aae2bb008ac45b0bc499afd8e0b74b10398bb852c6d6a5934f619",
+    "router/assess.py": "c68870d2cca273d86ba61c3414918dbd5afa1755ff33b1d1019d500d22afc37c",
+    "router/launch.py": "98c24a29eb025a06285efc35d6ef2574d684f39143ce91fcbeec496b56f9c14a",
+    "router/measure.py": "9b50602d44262fb1eedab8f5c3cbaa2e72066bbf5ad4f51c432ad54dc6fbcb7d",
+    "router/run.py": "d71e47a9ea917e5c1f935afe2615c79bf12cb7a9a7184a38c83f708f3e83e49d",
+    "router/scored_common.py": "467dedd76b453664cf9c45e22013059ebe416128eb356052fb266e71dc4dfd9a",
+    "tap-poll/check_flow.py": "f52c9bc46d97f05874341002d7235ecb8ffdd3014118aaeb985eb0220406099a",
+    "tap-poll/run_tap.py": "7c683348b11e6d46c9ce9f61bde2d4785e5d8bb3236bf2640bc89b3380b7ae9a",
+    "tap-poll/tap_napi.py": "661138577ffa2e55fa7f7b9c49848b2afabaaaaaa9c835bdb0a099888e032061",
+    "tap-ring4096/run_buffered.py": "45c8b55da0976ddce1de069bd160427cfb9c4526c147e78a307202c19d1b58e6",
+    "tap-sharded/run_sharded.py": "29b2c384d75b1d683a22a62e01d2c6eb1b55b4e6283cbfee9a1ed70ef53f73fc",
+    "tap-split/relay.c": "11c949f7105382c8bf06f7d974fe68371f178f2d8b9e959a8f662360ab781236",
+    "tap-split/run_split.py": "ba90efc0e2d16d05c63b8c3fe624d77e5a846452512eb863bef6b5376945b513",
+    "threaded-napi/run_threaded.py": "64bcb93ca54e2a5671313e06c4625b5a20202fe416b41c8d683c29749e27901f",
+    "threaded-napi/socket_probe.py": "d5501bc2cb7ea569f6c5a2fb49a76238da3ea9f784a902d7b549d92a9173fc90"
+  },
+  "primary_reference_shape_sha256": "7e637b307b068c589c8d3639513c78316a23edf132e0f59634fce83f209ee90a",
+  "profile": "single-queue-split-polling-tap-external-txring4096-five-workers",
+  "relay_sha256": "54935ba0c1222b0f2a1267e051c84c7d6c07bfbf1be070121be541e28e58c4f1",
+  "stock_mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6"
+}

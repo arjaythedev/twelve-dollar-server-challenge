@@ -1,0 +1,365 @@
+{
+  "profile": "single-queue-split-polling-tap-external-txring4096",
+  "load": 350000,
+  "ramp_s": 105,
+  "hold_s": 120,
+  "fields": [
+    "http_s",
+    "whole_core_us_per_http",
+    "app_us_per_http",
+    "app_user_us_per_http",
+    "app_system_us_per_http",
+    "napi_us_per_http",
+    "tap_out_per_http",
+    "out_control_proxy_per_http",
+    "tcp_original_out_per_http",
+    "tcp_in_per_http",
+    "tcp_retrans_per_1k",
+    "mean_accounted_tcp_buffer_mib",
+    "core_busy_pct"
+  ],
+  "runs": {
+    "guarded": {
+      "sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+      "tag": "ring4096-guarded-quiet-350-p1",
+      "locked_through_cutoff": true,
+      "stock_cutoff_unix": 1794501002.781,
+      "lock_inode": 1110842,
+      "eligible": true,
+      "qualified": false,
+      "healthy_environment": true,
+      "scorer_flags": [],
+      "native_relay_qdisc_softnet_errors_or_drops": 0,
+      "synchronized_full_ticks": 23,
+      "score": {
+        "reqs": 6078219,
+        "fails": 0,
+        "dials": 350000,
+        "p50_ms": 658.76391,
+        "p95_ms": 2174.175774,
+        "p99_ms": 3237.05146,
+        "req_per_s": 27014.289066
+      },
+      "phase_values": {
+        "immediate_hold": {
+          "stock_s": [
+            105,
+            115
+          ],
+          "values": [
+            34010.3,
+            29.4029,
+            14.6396,
+            2.4525,
+            12.1871,
+            14.7377,
+            2.0128,
+            0.995,
+            1.8725,
+            2.0841,
+            21.2843,
+            281.4325,
+            100.0
+          ]
+        },
+        "all_matched_full": {
+          "stock_s": [
+            115,
+            220
+          ],
+          "values": [
+            34203.1905,
+            29.227,
+            14.4874,
+            2.6433,
+            11.8441,
+            14.7294,
+            2.1629,
+            1.134,
+            1.9193,
+            2.2254,
+            26.9981,
+            104.1668,
+            99.9656
+          ]
+        },
+        "late_full": {
+          "stock_s": [
+            150,
+            220
+          ],
+          "values": [
+            33956.2857,
+            29.4387,
+            14.5017,
+            2.6783,
+            11.8234,
+            14.9274,
+            2.1687,
+            1.1413,
+            1.9243,
+            2.2323,
+            24.8671,
+            112.2847,
+            99.9627
+          ]
+        }
+      },
+      "budget_by_assumed_mean_latency_s": {
+        "0": {
+          "implied_http_s": 37048.780488,
+          "additional_achieved_qps_pct": 9.107282,
+          "cut_us_from_late_at_100pct_cpu": 2.447215,
+          "cut_us_from_late_at_98pct_cpu": 2.987044
+        },
+        "0.2": {
+          "implied_http_s": 36280.691698,
+          "additional_achieved_qps_pct": 6.845289,
+          "cut_us_from_late_at_100pct_cpu": 1.875787,
+          "cut_us_from_late_at_98pct_cpu": 2.427044
+        }
+      },
+      "thresholds": {
+        "p95": {
+          "n_in_scorer_hist": 6078212,
+          "slow_whole": 3720289,
+          "stock_allowed_slow_whole": 303910,
+          "slow_bounds_through_t105": [
+            28344,
+            580764
+          ],
+          "slow_bounds_t105_115": [
+            17010,
+            340103
+          ],
+          "slow_bounds_through_t115": [
+            353312,
+            920867
+          ],
+          "http_after_t115": 3764319,
+          "slow_bounds_after_t115": [
+            2799422,
+            3366977
+          ],
+          "slow_share_of_all_slow_after_t115_pct": [
+            75.247434,
+            90.503103
+          ],
+          "post115_alone_exceeds_whole_allowance_by_bounds": [
+            2495512,
+            3063067
+          ]
+        },
+        "p99": {
+          "n_in_scorer_hist": 6078212,
+          "slow_whole": 1665417,
+          "stock_allowed_slow_whole": 60782,
+          "slow_bounds_through_t105": [
+            28344,
+            580764
+          ],
+          "slow_bounds_t105_115": [
+            17010,
+            340103
+          ],
+          "slow_bounds_through_t115": [
+            353312,
+            920867
+          ],
+          "http_after_t115": 3764319,
+          "slow_bounds_after_t115": [
+            744550,
+            1312105
+          ],
+          "slow_share_of_all_slow_after_t115_pct": [
+            44.706521,
+            78.785373
+          ],
+          "post115_alone_exceeds_whole_allowance_by_bounds": [
+            683768,
+            1251323
+          ]
+        }
+      }
+    },
+    "grouped": {
+      "sha256": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+      "tag": "ring4096-batch-watch-quiet-350-p1",
+      "locked_through_cutoff": true,
+      "stock_cutoff_unix": 1794507409.903,
+      "lock_inode": 1110842,
+      "eligible": true,
+      "qualified": false,
+      "healthy_environment": true,
+      "scorer_flags": [],
+      "native_relay_qdisc_softnet_errors_or_drops": 0,
+      "synchronized_full_ticks": 23,
+      "score": {
+        "reqs": 6090675,
+        "fails": 0,
+        "dials": 350000,
+        "p50_ms": 742.311662,
+        "p95_ms": 1929.470606,
+        "p99_ms": 3079.943393,
+        "req_per_s": 27069.542046
+      },
+      "phase_values": {
+        "immediate_hold": {
+          "stock_s": [
+            105,
+            115
+          ],
+          "values": [
+            35237.4,
+            28.3751,
+            14.4192,
+            2.0778,
+            12.3414,
+            13.9367,
+            1.9885,
+            0.9588,
+            1.865,
+            2.0681,
+            22.7766,
+            247.9714,
+            99.9865
+          ]
+        },
+        "all_matched_full": {
+          "stock_s": [
+            115,
+            220
+          ],
+          "values": [
+            34161.181,
+            29.2371,
+            14.536,
+            2.731,
+            11.8049,
+            14.6886,
+            2.1608,
+            1.1306,
+            1.921,
+            2.2305,
+            30.5289,
+            102.4564,
+            99.8772
+          ]
+        },
+        "late_full": {
+          "stock_s": [
+            150,
+            220
+          ],
+          "values": [
+            34210.1714,
+            29.2185,
+            14.564,
+            2.6945,
+            11.8694,
+            14.6409,
+            2.161,
+            1.1302,
+            1.9222,
+            2.2264,
+            29.3638,
+            102.0762,
+            99.9571
+          ]
+        }
+      },
+      "budget_by_assumed_mean_latency_s": {
+        "0": {
+          "implied_http_s": 37048.780488,
+          "additional_achieved_qps_pct": 8.297559,
+          "cut_us_from_late_at_100pct_cpu": 2.227091,
+          "cut_us_from_late_at_98pct_cpu": 2.76692
+        },
+        "0.2": {
+          "implied_http_s": 36280.691698,
+          "additional_achieved_qps_pct": 6.052353,
+          "cut_us_from_late_at_100pct_cpu": 1.655663,
+          "cut_us_from_late_at_98pct_cpu": 2.20692
+        }
+      },
+      "thresholds": {
+        "p95": {
+          "n_in_scorer_hist": 6090675,
+          "slow_whole": 3934854,
+          "stock_allowed_slow_whole": 304533,
+          "slow_bounds_through_t105": [
+            63441,
+            579038
+          ],
+          "slow_bounds_t105_115": [
+            49465,
+            352374
+          ],
+          "slow_bounds_through_t115": [
+            400694,
+            931412
+          ],
+          "http_after_t115": 3760784,
+          "slow_bounds_after_t115": [
+            3003442,
+            3534160
+          ],
+          "slow_share_of_all_slow_after_t115_pct": [
+            76.329185,
+            89.816801
+          ],
+          "post115_alone_exceeds_whole_allowance_by_bounds": [
+            2698909,
+            3229627
+          ]
+        },
+        "p99": {
+          "n_in_scorer_hist": 6090675,
+          "slow_whole": 1431553,
+          "stock_allowed_slow_whole": 60906,
+          "slow_bounds_through_t105": [
+            56659,
+            437737
+          ],
+          "slow_bounds_t105_115": [
+            49465,
+            352374
+          ],
+          "slow_bounds_through_t115": [
+            386152,
+            790111
+          ],
+          "http_after_t115": 3760784,
+          "slow_bounds_after_t115": [
+            641442,
+            1045401
+          ],
+          "slow_share_of_all_slow_after_t115_pct": [
+            44.807422,
+            73.025658
+          ],
+          "post115_alone_exceeds_whole_allowance_by_bounds": [
+            580536,
+            984495
+          ]
+        }
+      }
+    }
+  },
+  "separate_profile_direct_cpu_us_per_http": {
+    "established_hash_lookup_instruction": 6.024768,
+    "outgoing_ack_regular_snd_check": 1.333482,
+    "epoll_ready_scan": 0.931831,
+    "outgoing_ack_duplicate_response_path": 0.321321,
+    "outgoing_ack_other_callers": 0.032132
+  },
+  "method": {
+    "cpu_and_wire": "Matched cumulative Linux and relay counters over the stated stock interval. Application CPU includes its system time. NAPI is the receive worker on the same core.",
+    "phase_bounds": "Per shard, assign all whole-run histogram counts to the five-second windows subject to their exact completion counts and p95 and p99 order-statistic ranks. Minimize and maximize the count in failing buckets after t115. Keep the reported whole-run totals and include the last partial interval.",
+    "first_failing_bucket_midpoints_ms": [
+      503.561718,
+      1000.523969
+    ],
+    "sampled_cpu_profile_source": "split-guarded-350-p1, smaller 1000-entry service TAP ring and the same 16384-bucket TCP socket hash. The per-request stack costs are estimates from that separate profile."
+  }
+}

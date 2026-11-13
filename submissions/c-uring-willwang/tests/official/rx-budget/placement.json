@@ -1,0 +1,103 @@
+{
+  "profile": "ordinary-tcp-remote-rx-82pct-approximation",
+  "date_utc": "2026-11-12",
+  "driver": {
+    "working_directory": "/",
+    "python_flags": [
+      "-I",
+      "-B"
+    ],
+    "mode": "proof",
+    "mload_started": false
+  },
+  "service": {
+    "uid": 1000,
+    "cpu_affinity": [
+      10
+    ],
+    "cgroup_controls": {
+      "cpu.max": "4100 5000",
+      "cpu.max.burst": "0",
+      "cpuset.cpus.effective": "10",
+      "memory.max": "1835008000",
+      "memory.swap.max": "0"
+    },
+    "tcp_ehash_entries": 16384
+  },
+  "tcp_connections": 8,
+  "payload_bytes_per_connection": [
+    1,
+    48,
+    1400,
+    4096
+  ],
+  "socket_option": "SO_INCOMING_CPU",
+  "lanes": [
+    {
+      "device": "eth1",
+      "rps_mask_hex": "0004",
+      "expected_cpu": 2,
+      "observations": 8,
+      "min_incoming_cpu": 2,
+      "max_incoming_cpu": 2
+    },
+    {
+      "device": "eth2",
+      "rps_mask_hex": "0020",
+      "expected_cpu": 5,
+      "observations": 8,
+      "min_incoming_cpu": 5,
+      "max_incoming_cpu": 5
+    },
+    {
+      "device": "eth3",
+      "rps_mask_hex": "0100",
+      "expected_cpu": 8,
+      "observations": 8,
+      "min_incoming_cpu": 8,
+      "max_incoming_cpu": 8
+    },
+    {
+      "device": "eth4",
+      "rps_mask_hex": "4000",
+      "expected_cpu": 14,
+      "observations": 8,
+      "min_incoming_cpu": 14,
+      "max_incoming_cpu": 14
+    }
+  ],
+  "external": {
+    "verified_routes": 16,
+    "router_interfaces": 8,
+    "netem_queues": 8,
+    "minimum_packets_per_router_rx_tx_or_qdisc": 16,
+    "router_rx_drops": 0,
+    "router_rx_errors": 0,
+    "router_tx_drops": 0,
+    "router_tx_errors": 0,
+    "qdisc_drops": 0
+  },
+  "cleanup": {
+    "namespaces_created": 6,
+    "namespaces_remaining": 0
+  },
+  "source_sha256": {
+    "fixture.py": "96f8525fd21f0d2b90000dad0e978703e5fc5b3bd7521e55187fe259757ed472",
+    "socket_probe.py": "d47c6efe9a15008674dc0f58deeefd4fbbbd35afd86335db2066d4126d229730",
+    "../router/run.py": "11c8d5ab51f1109e2aed86b7a07de5d0feeebbd5e45130d3e2c9b525f7bc3179"
+  },
+  "frozen_source_comparison": {
+    "launcher_sha256": "f27c36e07613cfa24c6caaf04aa515968a8dc96e2172809efecf97b8a03abd9b",
+    "launcher_difference": "Sibling import directory changed from harness to router.",
+    "socket_probe_and_shared_runner_byte_identical": true
+  },
+  "raw_proof_sha256": {
+    "setup.json": "5232db96e2691feea8c76483b9a2661c3fe83592efe996e7231d419040f4deff",
+    "rx-placement/routes.json": "32c08aa24f562d9690eed086fafdcec28f16a0e2c2e132bd089627283b9a15e1",
+    "rx-placement/ready.json": "a51fede559bbea93d3df8dbdcbab778ee7a87f11a37cdbf083d4f80f741ab05b",
+    "rx-placement/received.json": "30101408552fc5c92d387eb9afb5ff24bec308cba8e950758da0c04360e7d6ac",
+    "rx-placement/service-controls.json": "c16c0a7d4217111a6844fda525a1cdc040248d9708a789ac26d46e5db9a66018",
+    "rx-placement/proof.json": "313e0082d68a64a0d77049f8a246fa02962ca91681f159db8fc60e5b285e57f3",
+    "teardown.json": "16f66e6fc2ee2c2e98be525adea78a4550acad83ea373afb53ae61cece789035"
+  }
+}

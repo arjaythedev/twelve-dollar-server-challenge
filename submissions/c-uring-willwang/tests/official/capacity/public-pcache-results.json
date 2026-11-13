@@ -1,0 +1,948 @@
+{
+  "release": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+  "host": "AMD EPYC, one pinned CPU 15 for timed SQLite and its checkpoint worker, 1-vCPU official capacity not measured",
+  "normal_service": "IPv4 Linux TCP and io_uring",
+  "public_api_only": [
+    "sqlite3_config(SQLITE_CONFIG_GETPCACHE2)",
+    "sqlite3_config(SQLITE_CONFIG_PCACHE2)",
+    "sqlite3_pcache_methods2 callbacks"
+  ],
+  "mechanism": "one conservative monotone high bound plus the largest outstanding rename. Locks only on high fetch/rekey/truncate, no private state or file-format keys, retained overestimates across unpin/shrink. Comparisons include all runs.",
+  "input_source": {
+    "git": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+    "stock_server": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+    "sources": {
+      "Makefile": "671d6c5355de149564ab564abd7c247ee906ab4d35ec3ede850bae6165ee3da8",
+      "app.c": "08e1dea645b9ade17bad84b91f25d1bc9c19589a7eedb830e576548e8187ef53",
+      "buffer.c": "375101deaf6bf4e5922d315532cb670968190e36195f5fbabdb65fba36d91142",
+      "build.sh": "113a252867c151c95fdc2216e39c778f3ec5d7f7d621358b0611b28384fd1201",
+      "challenge.h": "21a9e3bca047f155e8eb126c74722a0bcf9138137c42285ad1940c6f1e292348",
+      "database.c": "1cc68bb29afbd487823cbde4d76611aef641bf9bedabd762a217a0688f9a0bc5",
+      "main.c": "8c98fd7d33fde7bbda83d612d2b29b8b527d2122820b9203c1ce60d6a8dad731",
+      "reactor.c": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+      "reader.c": "c202d87d232540cf4d6381ee533bd6326699b5a59aa3af8805a25337b9d1af17",
+      "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+      "wal.c": "e0af115bd229a38d2533ce0c50a9dbc9ced6d18d2c23ab315b0c1ae29fd85433"
+    },
+    "vendor": {
+      "sqlite3.c": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+      "sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c"
+    },
+    "stock_objects": {
+      "app.o": "8586840ad95843341f1066a81d874b0f9edc37b481929b9017d85684d91271f3",
+      "buffer.o": "381a10e453834fd6f3d362377a8fcf75e340328209aabd72e1a17b8318f09643",
+      "database.o": "1f005b1133e34e422e9fdb6ec40347f7a0fed250fd4b59971d8e4f114c97cfba",
+      "main.o": "32b7ef6c0b5b4404f3301161e8eef417337d663be1504bcea7ce0376af9bc04a",
+      "reactor.o": "9b80b313bb53ed02fb2e890e5fb7d9fae17edba856a4aa42595efb41cae73416",
+      "reader.o": "4af37d10281bb50a6ad0305609bb15deafcc7d88d2804b7be5c5d7ccc289f14e",
+      "wal.o": "1a9a003d04107451db3e984572169298da07ce79bfe08c7719a008a09e0df844"
+    }
+  },
+  "assets": {
+    "stock-server": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+    "adapter-server": "b4ed5678e37895d8323ecacf67707e2bdd08a4d499efcbfd7ee2e5b1a8362bdb",
+    "pcache.c": "af5d80d8817c94979ec3b246d3f9066246bcb9d8be17e10d82d5dccebe5cd168",
+    "driver.c": "1077eb0aaa690e67f2d2fa375db7647743ac97bf07eb3ad98cbf956ca941c6e2",
+    "source.json": "0e0c406143fbb6e3a30a51bb1c91d1eb7286b05d5e0ca50d6d633bfdf844b0b2",
+    "build.log": "009781b30309178c58786ee0fcc2145f8447aa72da87e02d8192f71eb6c23f7d",
+    "build-corrected.log": "a9411cbddd70ae782c4a7fdb957d6b48ad87a31926a145026c6dde81cd71e70e",
+    "mixed.jsonl": "f307bb9a5a947d4089de3b5d4a2a28edebd414da3c938473782d72e80be68488",
+    "checks.jsonl": "1ec23c1c913f998c8999fe01074f597c3e55551f42eb67e23e91a390902c417d",
+    "http-check/runtime.json": "da8570d3168d4751f5d07d470c3221d87b9e1fbd7962a41e5c23b28d060c4ba2",
+    "memory.json": "8639934d3d45c9ec90d38dd43c43a616d1ce62cc91af0efaeafb53b6d047b978"
+  },
+  "completion": {
+    "mixed_timing_runs": 24,
+    "diagnostic_runs": 0,
+    "callback_sql_wal_sanitizer_arms": 18,
+    "http": {
+      "kernel": "6.8.0-147-generic",
+      "service": {
+        "entrypoint": "/tmp/twelve-revisit/public-pcache/http-check/snapshot/submissions/c-uring-willwang/start.sh",
+        "process_executable": "/tmp/twelve-revisit/public-pcache/http-check/snapshot/submissions/c-uring-willwang/bin/server",
+        "running_elf_sha256": "b4ed5678e37895d8323ecacf67707e2bdd08a4d499efcbfd7ee2e5b1a8362bdb",
+        "uids": [
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "effective_capabilities": "0000000000000000",
+        "cpu_allowed": "9",
+        "io_uring_fds": 1,
+        "owned_ipv4_tcp_loopback_listener": true,
+        "healthy_sqlite_http_200": true,
+        "new_temp_seed_open_by_service": true,
+        "subprocess_cmdline": "/tmp/twelve-revisit/public-pcache/http-check/snapshot/submissions/c-uring-willwang/bin/server",
+        "network_namespace": "net:[4026533870]"
+      },
+      "checker_affinity": [
+        15
+      ],
+      "seed_sha256_before_after": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "host_network_namespace": "net:[4026531840]",
+      "private_interfaces": [
+        "lo"
+      ],
+      "soft_hard_nofile": [
+        65535,
+        65535
+      ],
+      "scratch": "private tmpfs /dev/shm",
+      "official": {
+        "command": [
+          "/bin/bash",
+          "test/run.sh",
+          "submissions/c-uring-willwang"
+        ],
+        "cwd": "/tmp/twelve-revisit/public-pcache/http-check/snapshot",
+        "passed": 42,
+        "failed": 0
+      },
+      "differential": {
+        "command": [
+          "/usr/bin/python3",
+          "-IB",
+          "/tmp/twelve-revisit/public-pcache/http-check/snapshot/submissions/c-uring-willwang/tests/differential.py",
+          "--server",
+          "/tmp/twelve-revisit/public-pcache/http-check/issuer9"
+        ],
+        "cwd": "/",
+        "passed": 13,
+        "layouts": [
+          "empty",
+          "short",
+          "dense",
+          "no-likes",
+          "no-recent-likes",
+          "partial",
+          "disorder",
+          "time-ties",
+          "sparse",
+          "sparse-ordered",
+          "small-pages",
+          "overflow",
+          "orphan"
+        ]
+      },
+      "organizer_and_differential_removed_all_temporary_databases": true
+    },
+    "memory_runs": 8
+  },
+  "mixed": {
+    "fresh": {
+      "completed_pairs": 6,
+      "paired_percent_candidate_minus_control": {
+        "process_cpu_ns": {
+          "pairs": [
+            -11.68396559781264,
+            -10.474093697219311,
+            -0.6915385535480878,
+            13.148516077542416,
+            -4.5125732820615605,
+            6.713790614639237
+          ],
+          "median": -2.602055917804824,
+          "wins": 4,
+          "pooled": -1.7164961045067595
+        },
+        "main_cpu_ns": {
+          "pairs": [
+            -10.62316950142117,
+            -10.008070605914076,
+            -0.7580518640928346,
+            12.559596793855988,
+            -4.112281167780518,
+            5.791599791792823
+          ],
+          "median": -2.435166515936676,
+          "wins": 4,
+          "pooled": -1.590493703678797
+        },
+        "wall_ns": {
+          "pairs": [
+            -9.383696141590248,
+            -7.8530581612973,
+            -2.134950071191788,
+            9.745344723525285,
+            -1.6136841804618052,
+            80.70885006278472
+          ],
+          "median": -1.8743171258267965,
+          "wins": 4,
+          "pooled": 10.700099372312932
+        },
+        "peak_rss_kib": {
+          "pairs": [
+            0.1700680272108901,
+            0.0,
+            -0.1697792869269965,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "wins": 1,
+          "pooled": 0.0
+        },
+        "feed/cpu_ns": {
+          "pairs": [
+            0.8666131031881408,
+            -1.7359118868338075,
+            0.04607900567639156,
+            6.286269184678517,
+            -1.4944728503397675,
+            1.8641877004378804
+          ],
+          "median": 0.45634605443226617,
+          "wins": 2,
+          "pooled": 0.9321030028318633
+        },
+        "point/cpu_ns": {
+          "pairs": [
+            1.4078237827043871,
+            -0.279352780789488,
+            -1.626342641276135,
+            3.062262964344331,
+            -0.18101488859511017,
+            -0.047926547220622506
+          ],
+          "median": -0.11447071790786634,
+          "wins": 4,
+          "pooled": 0.3738178509865131
+        },
+        "write_commit/cpu_ns": {
+          "pairs": [
+            -56.30480391402084,
+            -54.249166749216094,
+            -8.08056402783257,
+            76.4798357973502,
+            -22.493371002740716,
+            30.728398787734612
+          ],
+          "median": -15.286967515286644,
+          "wins": 4,
+          "pooled": -18.89089092448597
+        }
+      },
+      "responses_and_closed_database_equal": true,
+      "cases": [
+        "0-fresh-stock",
+        "0-fresh-adapter",
+        "4-fresh-stock",
+        "4-fresh-adapter",
+        "1-fresh-adapter",
+        "1-fresh-stock",
+        "5-fresh-adapter",
+        "5-fresh-stock",
+        "2-fresh-stock",
+        "2-fresh-adapter",
+        "3-fresh-adapter",
+        "3-fresh-stock"
+      ],
+      "trace_diagnostic": []
+    },
+    "mature": {
+      "completed_pairs": 6,
+      "paired_percent_candidate_minus_control": {
+        "process_cpu_ns": {
+          "pairs": [
+            -2.072511719761394,
+            -2.792733105359768,
+            10.520306427203053,
+            -0.06828612414142565,
+            -6.990868353838742,
+            -3.0815972088488963
+          ],
+          "median": -2.432622412560581,
+          "wins": 5,
+          "pooled": -0.8727845435227644
+        },
+        "main_cpu_ns": {
+          "pairs": [
+            -2.23136953952352,
+            -2.7603910139297305,
+            9.193001425372383,
+            -0.09409493631474808,
+            -5.8169476589734925,
+            -2.947179913800446
+          ],
+          "median": -2.4958802767266253,
+          "wins": 5,
+          "pooled": -0.8699450489239813
+        },
+        "wall_ns": {
+          "pairs": [
+            -0.029577920577039674,
+            -9.273134053905462,
+            7.644640719072049,
+            0.43656509992497927,
+            -7.287502150230196,
+            -8.764058323530454
+          ],
+          "median": -3.658540035403618,
+          "wins": 4,
+          "pooled": -2.948943464891718
+        },
+        "peak_rss_kib": {
+          "pairs": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "median": 0.0,
+          "wins": 0,
+          "pooled": 0.0
+        },
+        "feed/cpu_ns": {
+          "pairs": [
+            -2.8022068818436385,
+            0.7685033404007724,
+            3.1175219710968483,
+            2.2165381814977847,
+            0.29695067888968474,
+            0.34698731875986155
+          ],
+          "median": 0.557745329580317,
+          "wins": 1,
+          "pooled": 0.6367721081277367
+        },
+        "point/cpu_ns": {
+          "pairs": [
+            -2.8780701482566173,
+            -0.25650060489882387,
+            2.5017626039824936,
+            0.6816142958850024,
+            -2.3388859063020684,
+            -0.5572875669186406
+          ],
+          "median": -0.4068940859087322,
+          "wins": 4,
+          "pooled": -0.4934507952675027
+        },
+        "write_commit/cpu_ns": {
+          "pairs": [
+            -12.576077453243483,
+            -18.30113871674439,
+            55.03042812926297,
+            -11.046031583214145,
+            -27.40755355307015,
+            -14.106254993561329
+          ],
+          "median": -13.341166223402407,
+          "wins": 5,
+          "pooled": -7.565318203687122
+        }
+      },
+      "responses_and_closed_database_equal": true,
+      "cases": [
+        "0-mature-adapter",
+        "0-mature-stock",
+        "4-mature-adapter",
+        "4-mature-stock",
+        "1-mature-stock",
+        "1-mature-adapter",
+        "5-mature-stock",
+        "5-mature-adapter",
+        "2-mature-adapter",
+        "2-mature-stock",
+        "3-mature-stock",
+        "3-mature-adapter"
+      ],
+      "trace_diagnostic": []
+    }
+  },
+  "tests": [
+    {
+      "case": "callbacks",
+      "exe": "callbacks-adapter",
+      "args": [],
+      "low_relocated_lock": false
+    },
+    {
+      "case": "callbacks-asan",
+      "exe": "callbacks-debug-adapter",
+      "args": [],
+      "low_relocated_lock": false
+    },
+    {
+      "case": "512wal",
+      "exe": "sql-stock",
+      "args": [
+        "512",
+        "wal",
+        "full",
+        "0"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "d814f1bf8fc0d9ffc44b8ce35909971a300034ef81b2fdc9d765bf4d60e72bde",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 13518,
+        "original_swap_triples": 0,
+        "wrapped_caches": 0
+      }
+    },
+    {
+      "case": "512wal",
+      "exe": "sql-adapter",
+      "args": [
+        "512",
+        "wal",
+        "full",
+        "0"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "d814f1bf8fc0d9ffc44b8ce35909971a300034ef81b2fdc9d765bf4d60e72bde",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 13518,
+        "original_swap_triples": 0,
+        "wrapped_caches": 0
+      }
+    },
+    {
+      "case": "4kdelete",
+      "exe": "sql-stock",
+      "args": [
+        "4096",
+        "delete",
+        "none",
+        "1"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "a466732bb4a747765770556a27d9770a638b7669dd6ca372d183774abb6c1a83",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 799,
+        "original_swap_triples": 9027,
+        "wrapped_caches": 9
+      }
+    },
+    {
+      "case": "4kdelete",
+      "exe": "sql-adapter",
+      "args": [
+        "4096",
+        "delete",
+        "none",
+        "1"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "a466732bb4a747765770556a27d9770a638b7669dd6ca372d183774abb6c1a83",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 799,
+        "original_swap_triples": 9027,
+        "wrapped_caches": 9
+      }
+    },
+    {
+      "case": "64kwal",
+      "exe": "sql-stock",
+      "args": [
+        "65536",
+        "wal",
+        "incremental",
+        "1"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "c420c3fcdb17a668b7d9a5b15fff2a352862c4ffe0cc0b935fd01bbebeea05df",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 54,
+        "original_swap_triples": 411,
+        "wrapped_caches": 15
+      }
+    },
+    {
+      "case": "64kwal",
+      "exe": "sql-adapter",
+      "args": [
+        "65536",
+        "wal",
+        "incremental",
+        "1"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "c420c3fcdb17a668b7d9a5b15fff2a352862c4ffe0cc0b935fd01bbebeea05df",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 54,
+        "original_swap_triples": 411,
+        "wrapped_caches": 15
+      }
+    },
+    {
+      "case": "near32",
+      "exe": "sql-debug-stock",
+      "args": [
+        "512",
+        "wal",
+        "full",
+        "0"
+      ],
+      "low_relocated_lock": true,
+      "sha256": "1ed54184e82eeccb5dfd6e60f10aac5f1286c2ec906282b430d6efd152ad421d",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 13519,
+        "original_swap_triples": 0,
+        "wrapped_caches": 0
+      }
+    },
+    {
+      "case": "near32",
+      "exe": "sql-debug-adapter",
+      "args": [
+        "512",
+        "wal",
+        "full",
+        "0"
+      ],
+      "low_relocated_lock": true,
+      "sha256": "1ed54184e82eeccb5dfd6e60f10aac5f1286c2ec906282b430d6efd152ad421d",
+      "summary": {
+        "rows": 10285,
+        "sum": 175712421,
+        "child": 1144,
+        "pages": 13519,
+        "original_swap_triples": 0,
+        "wrapped_caches": 0
+      }
+    },
+    {
+      "case": "shared",
+      "exe": "concurrency-debug-stock",
+      "args": [
+        "1"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "f51da7ef02540e19c3e4efe136895dc47fb9a6e6dbb16cb03b044583971a3c19",
+      "summary": {
+        "reads": 216,
+        "busy": 0,
+        "release_calls": 6132,
+        "bytes_reclaimed": 42924816,
+        "rows": 12001
+      }
+    },
+    {
+      "case": "shared",
+      "exe": "concurrency-debug-adapter",
+      "args": [
+        "1"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "f51da7ef02540e19c3e4efe136895dc47fb9a6e6dbb16cb03b044583971a3c19",
+      "summary": {
+        "reads": 189,
+        "busy": 0,
+        "release_calls": 5312,
+        "bytes_reclaimed": 41399424,
+        "rows": 12001
+      }
+    },
+    {
+      "case": "private",
+      "exe": "concurrency-debug-stock",
+      "args": [
+        "0"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "f51da7ef02540e19c3e4efe136895dc47fb9a6e6dbb16cb03b044583971a3c19",
+      "summary": {
+        "reads": 22226,
+        "busy": 0,
+        "release_calls": 8568,
+        "bytes_reclaimed": 161315712,
+        "rows": 12001
+      }
+    },
+    {
+      "case": "private",
+      "exe": "concurrency-debug-adapter",
+      "args": [
+        "0"
+      ],
+      "low_relocated_lock": false,
+      "sha256": "f51da7ef02540e19c3e4efe136895dc47fb9a6e6dbb16cb03b044583971a3c19",
+      "summary": {
+        "reads": 22248,
+        "busy": 0,
+        "release_calls": 8485,
+        "bytes_reclaimed": 162325296,
+        "rows": 12001
+      }
+    },
+    {
+      "case": "wal-publication",
+      "exe": "wal-publication-stock",
+      "args": [],
+      "low_relocated_lock": false
+    },
+    {
+      "case": "wal-publication",
+      "exe": "wal-publication-adapter",
+      "args": [],
+      "low_relocated_lock": false
+    },
+    {
+      "case": "wal_recovery",
+      "exe": "wal_recovery-stock",
+      "args": [],
+      "low_relocated_lock": false
+    },
+    {
+      "case": "wal_recovery",
+      "exe": "wal_recovery-adapter",
+      "args": [],
+      "low_relocated_lock": false
+    }
+  ],
+  "eligibility": {
+    "organizer_unmodified_sqlite_required": true,
+    "organizer_explicitly_allows_public_pcache2": true,
+    "public_ruling": "https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/63a9b9ea449e686260bd55e6639a1545db18a407/LEADERBOARD.md#L1019-L1028",
+    "independently_merged_comparable_code": "https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/39efd02d5ff6ec220623dd7ba4778df137f2abef/submissions/go-iouring-trungdlp/shim.c#L181-L259",
+    "pristine_amalgamation_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+    "wrapper_reads_or_writes_private_sqlite_objects": false,
+    "wrapper_pages_retained": 0,
+    "wrapper_bytes_allocated_per_page": 0
+  },
+  "paired_arm_request_count": 597136,
+  "timing_order": "Counterbalanced within each database. Fresh stock first in phases 0, 2, 4 and mature stock first in 1, 3, 5. Every record retained including opposite-direction pairs.",
+  "correctness_build": {
+    "pinned_sqlite": "3.54.1",
+    "debug_flags": [
+      "-DSQLITE_DEBUG",
+      "-DSQLITE_THREADSAFE=1",
+      "-DSQLITE_ENABLE_MEMORY_MANAGEMENT",
+      "-fsanitize=address,undefined",
+      "-fno-sanitize=alignment",
+      "-fno-omit-frame-pointer"
+    ],
+    "sanitizer_leak_detection": "enabled in private process without sandbox ptrace restrictions",
+    "stock_extent": "Production and independent timed replays use the frozen stock 458c3f0 reader object. General SQL/WAL tests additionally verify complete file identity and stock readers.",
+    "historical_failed_initial_prototype": "initial-evidence/callbacks-asan-callbacks-debug-adapter.log"
+  },
+  "memory": {
+    "fresh": {
+      "stock": {
+        "process_entry": {
+          "rss_kib": 3348.0,
+          "pss_kib": 767.0,
+          "private_dirty_kib": 672.0,
+          "anonymous_kib": 524.0,
+          "glibc_live_heap_bytes": 2176.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "configured": {
+          "rss_kib": 3608.0,
+          "pss_kib": 779.5,
+          "private_dirty_kib": 676.0,
+          "anonymous_kib": 528.0,
+          "glibc_live_heap_bytes": 6288.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "opened": {
+          "rss_kib": 5214.0,
+          "pss_kib": 2322.5,
+          "private_dirty_kib": 2218.0,
+          "anonymous_kib": 884.0,
+          "glibc_live_heap_bytes": 626160.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "after_10240_routes": {
+          "rss_kib": 18162.0,
+          "pss_kib": 15208.5,
+          "private_dirty_kib": 15102.0,
+          "anonymous_kib": 13704.0,
+          "glibc_live_heap_bytes": 13537680.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "closed": {
+          "rss_kib": 6250.0,
+          "pss_kib": 3174.5,
+          "private_dirty_kib": 3062.0,
+          "anonymous_kib": 1664.0,
+          "glibc_live_heap_bytes": 37488.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "shutdown": {
+          "rss_kib": 6250.0,
+          "pss_kib": 3174.5,
+          "private_dirty_kib": 3062.0,
+          "anonymous_kib": 1664.0,
+          "glibc_live_heap_bytes": 37488.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        }
+      },
+      "adapter": {
+        "process_entry": {
+          "rss_kib": 3370.0,
+          "pss_kib": 771.0,
+          "private_dirty_kib": 674.0,
+          "anonymous_kib": 526.0,
+          "glibc_live_heap_bytes": 2176.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "configured": {
+          "rss_kib": 3694.0,
+          "pss_kib": 847.0,
+          "private_dirty_kib": 742.0,
+          "anonymous_kib": 530.0,
+          "glibc_live_heap_bytes": 6288.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "opened": {
+          "rss_kib": 5250.0,
+          "pss_kib": 2338.0,
+          "private_dirty_kib": 2234.0,
+          "anonymous_kib": 886.0,
+          "glibc_live_heap_bytes": 626224.0,
+          "adapter_instances_live": 2.0,
+          "adapter_instances_created": 2.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        },
+        "after_10240_routes": {
+          "rss_kib": 18198.0,
+          "pss_kib": 15223.5,
+          "private_dirty_kib": 15118.0,
+          "anonymous_kib": 13706.0,
+          "glibc_live_heap_bytes": 13538016.0,
+          "adapter_instances_live": 2.0,
+          "adapter_instances_created": 258.0,
+          "adapter_instances_destroyed": 256.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        },
+        "closed": {
+          "rss_kib": 6286.0,
+          "pss_kib": 3189.5,
+          "private_dirty_kib": 3078.0,
+          "anonymous_kib": 1666.0,
+          "glibc_live_heap_bytes": 37776.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 258.0,
+          "adapter_instances_destroyed": 258.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        },
+        "shutdown": {
+          "rss_kib": 6286.0,
+          "pss_kib": 3189.5,
+          "private_dirty_kib": 3078.0,
+          "anonymous_kib": 1666.0,
+          "glibc_live_heap_bytes": 37776.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 258.0,
+          "adapter_instances_destroyed": 258.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        }
+      }
+    },
+    "mature": {
+      "stock": {
+        "process_entry": {
+          "rss_kib": 3350.0,
+          "pss_kib": 769.0,
+          "private_dirty_kib": 674.0,
+          "anonymous_kib": 526.0,
+          "glibc_live_heap_bytes": 2176.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "configured": {
+          "rss_kib": 3610.0,
+          "pss_kib": 781.0,
+          "private_dirty_kib": 678.0,
+          "anonymous_kib": 530.0,
+          "glibc_live_heap_bytes": 6288.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "opened": {
+          "rss_kib": 5238.0,
+          "pss_kib": 2346.5,
+          "private_dirty_kib": 2242.0,
+          "anonymous_kib": 886.0,
+          "glibc_live_heap_bytes": 626160.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "after_10240_routes": {
+          "rss_kib": 18020.0,
+          "pss_kib": 15066.0,
+          "private_dirty_kib": 14960.0,
+          "anonymous_kib": 13568.0,
+          "glibc_live_heap_bytes": 13480560.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "closed": {
+          "rss_kib": 12492.0,
+          "pss_kib": 9416.5,
+          "private_dirty_kib": 9304.0,
+          "anonymous_kib": 7912.0,
+          "glibc_live_heap_bytes": 37072.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "shutdown": {
+          "rss_kib": 12492.0,
+          "pss_kib": 9416.5,
+          "private_dirty_kib": 9304.0,
+          "anonymous_kib": 7912.0,
+          "glibc_live_heap_bytes": 37072.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 0.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        }
+      },
+      "adapter": {
+        "process_entry": {
+          "rss_kib": 3370.0,
+          "pss_kib": 771.0,
+          "private_dirty_kib": 674.0,
+          "anonymous_kib": 526.0,
+          "glibc_live_heap_bytes": 2176.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "configured": {
+          "rss_kib": 3694.0,
+          "pss_kib": 847.0,
+          "private_dirty_kib": 742.0,
+          "anonymous_kib": 530.0,
+          "glibc_live_heap_bytes": 6288.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 0.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 0.0
+        },
+        "opened": {
+          "rss_kib": 5248.0,
+          "pss_kib": 2338.0,
+          "private_dirty_kib": 2232.0,
+          "anonymous_kib": 886.0,
+          "glibc_live_heap_bytes": 626224.0,
+          "adapter_instances_live": 2.0,
+          "adapter_instances_created": 2.0,
+          "adapter_instances_destroyed": 0.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        },
+        "after_10240_routes": {
+          "rss_kib": 18060.0,
+          "pss_kib": 15088.0,
+          "private_dirty_kib": 14980.0,
+          "anonymous_kib": 13570.0,
+          "glibc_live_heap_bytes": 13481664.0,
+          "adapter_instances_live": 2.0,
+          "adapter_instances_created": 258.0,
+          "adapter_instances_destroyed": 256.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        },
+        "closed": {
+          "rss_kib": 7032.0,
+          "pss_kib": 3938.0,
+          "private_dirty_kib": 3824.0,
+          "anonymous_kib": 2414.0,
+          "glibc_live_heap_bytes": 38128.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 258.0,
+          "adapter_instances_destroyed": 258.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        },
+        "shutdown": {
+          "rss_kib": 7032.0,
+          "pss_kib": 3938.0,
+          "private_dirty_kib": 3824.0,
+          "anonymous_kib": 2414.0,
+          "glibc_live_heap_bytes": 38128.0,
+          "adapter_instances_live": 0.0,
+          "adapter_instances_created": 258.0,
+          "adapter_instances_destroyed": 258.0,
+          "adapter_requested_bytes_per_cache": 56.0,
+          "adapter_usable_bytes_per_cache": 56.0
+        }
+      }
+    }
+  }
+}

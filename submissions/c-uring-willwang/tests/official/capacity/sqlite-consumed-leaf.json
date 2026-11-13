@@ -1,0 +1,206 @@
+{
+  "old_server_sha256": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+  "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+  "repo_relative_patch_sha256": "881c13a66870a69c62ae5b8b14af607fb6161d6809cd0aaf9ba3132633c7146a",
+  "reader_sha256": "23f377cd7dc6c5ceaf1e3b13cf8bfcdfb5eb7d8a4e8fba59bbc1ea956ed867ea",
+  "sqlite_amalgamation_sha256": "200c362e7e677d1f81ac961a072cafdbaf341fc2612aa8b49fc8a974d8caa5ea",
+  "untouched_inputs_byte_equal": 15,
+  "untouched_objects_byte_equal": 6,
+  "changed_object": "reader.o",
+  "independent_lto_link_identical": true,
+  "timing_method": "Six independently started counterbalanced pairs on local AMD Genoa. Negative paired percent uses less CPU/time. Timed captures exclude kernel networking.",
+  "measurements_ns_and_paired_changes": {
+    "moving": {
+      "feed": {
+        "old_ns": 2801.95,
+        "candidate_ns": 2792.35,
+        "paired_percent": -0.5,
+        "pairs_improved": 5,
+        "n_pairs": 6
+      },
+      "point": {
+        "old_ns": 1625.5,
+        "candidate_ns": 1610.8,
+        "paired_percent": -0.56,
+        "pairs_improved": 3,
+        "n_pairs": 6
+      },
+      "weighted_read": {
+        "old_ns": 2220.97,
+        "candidate_ns": 2199.59,
+        "paired_percent": -0.75,
+        "pairs_improved": 6,
+        "n_pairs": 6
+      }
+    },
+    "http": {
+      "whole_process": {
+        "old_ns": 2737.72,
+        "candidate_ns": 2724.28,
+        "paired_percent": -0.92,
+        "pairs_improved": 4,
+        "n_pairs": 6
+      },
+      "issuer": {
+        "old_ns": 2491.23,
+        "candidate_ns": 2482.22,
+        "paired_percent": -0.67,
+        "pairs_improved": 4,
+        "n_pairs": 6
+      },
+      "feed_p50": {
+        "old_ns": 2093.0,
+        "candidate_ns": 2098.5,
+        "paired_percent": 0.26,
+        "pairs_improved": 1,
+        "n_pairs": 6
+      },
+      "feed_p99": {
+        "old_ns": 5007.0,
+        "candidate_ns": 4952.5,
+        "paired_percent": -2.13,
+        "pairs_improved": 5,
+        "n_pairs": 6
+      },
+      "point_p50": {
+        "old_ns": 481.0,
+        "candidate_ns": 491.0,
+        "paired_percent": 1.98,
+        "pairs_improved": 1,
+        "n_pairs": 6
+      },
+      "point_p99": {
+        "old_ns": 1026.5,
+        "candidate_ns": 1036.0,
+        "paired_percent": -0.41,
+        "pairs_improved": 3,
+        "n_pairs": 6
+      },
+      "read_ready_p99": {
+        "old_ns": 3505.0,
+        "candidate_ns": 3465.0,
+        "paired_percent": -3.62,
+        "pairs_improved": 4,
+        "n_pairs": 6
+      }
+    },
+    "hot": {
+      "feed": {
+        "old_ns": 56892.23,
+        "candidate_ns": 15196.64,
+        "paired_percent": -73.45,
+        "pairs_improved": 6,
+        "n_pairs": 6
+      },
+      "point": {
+        "old_ns": 8908.81,
+        "candidate_ns": 6619.1,
+        "paired_percent": -24.91,
+        "pairs_improved": 6,
+        "n_pairs": 6
+      },
+      "feed_p99": {
+        "old_ns": 94530.5,
+        "candidate_ns": 38687.5,
+        "paired_percent": -59.36,
+        "pairs_improved": 6,
+        "n_pairs": 6
+      },
+      "point_p99": {
+        "old_ns": 31196.5,
+        "candidate_ns": 25072.0,
+        "paired_percent": -22.44,
+        "pairs_improved": 6,
+        "n_pairs": 6
+      }
+    }
+  },
+  "geometry": {
+    "moving": {
+      "counts": [
+        28008,
+        255437,
+        0,
+        0,
+        0,
+        0
+      ],
+      "measured_requests": 120000
+    },
+    "http": {
+      "counts": [
+        42751,
+        386219,
+        0,
+        0,
+        0,
+        0
+      ],
+      "measured_requests": 179999
+    },
+    "hot": {
+      "counts": [
+        300,
+        5100,
+        14534,
+        5764811,
+        14534,
+        0
+      ],
+      "measured_requests": 600
+    }
+  },
+  "correctness": {
+    "official_http": 42,
+    "http_differential_layouts": 13,
+    "stock_sql_differential_cases": 17,
+    "byte_checks_release": 3067,
+    "byte_checks_sqlite_assert_asan_ubsan": 3067,
+    "http_semantic_checks_per_arm": 200001,
+    "http_wire_sha256": "72c63241d806a8589eae2949361684d9f9478c73d9e58e04edfe2b2f2aabec60",
+    "external_persisted_rows_sha256": "5d8aaa429f0192b5eb8d9b1b76b8b314d606cafdcfd96bff11491536fa203d05",
+    "persisted_http_creates": 1825,
+    "persisted_http_likes": 13616,
+    "independent_native_vfs_handles": [
+      {
+        "fixture": "hot4096",
+        "result": "12 feed/point byte comparisons across independent WAL commit, anchored snapshot, rollback and completed checkpoint passed"
+      },
+      {
+        "fixture": "overflow512",
+        "result": "12 feed/point byte comparisons across independent WAL commit, anchored snapshot, rollback and completed checkpoint passed"
+      }
+    ],
+    "independent_sqlite_process": [
+      {
+        "fixture": "hot4096",
+        "before_likes": 123,
+        "after_new": 124,
+        "after_delete": 123,
+        "concurrent_other_process": "SQLITE_BUSY",
+        "separate_writer": "original system SQLite updates before independent server reopen"
+      },
+      {
+        "fixture": "overflow512",
+        "before_likes": 123,
+        "after_new": 124,
+        "after_delete": 123,
+        "concurrent_other_process": "SQLITE_BUSY",
+        "separate_writer": "original system SQLite updates before independent server reopen"
+      }
+    ],
+    "high_like_fixtures_integrity_and_foreign_keys": 5
+  },
+  "geometry_fields": [
+    "post_leaf_crossings",
+    "within_post_steps_saved",
+    "likes_leaf_crossings",
+    "within_like_steps_saved",
+    "index_separator_rows",
+    "fallbacks"
+  ],
+  "limitations": [
+    "Two ordinary mixes never crossed a likes-index leaf; the isolated high-like speedup applies only where the live B-tree actually spans those leaves.",
+    "The captured HTTP whole-process paired changes include both gains and regressions, and median point service increased. No official or local stock concurrency score follows from component timings."
+  ]
+}

@@ -1,0 +1,144 @@
+{
+  "base": "43adbd73ec34bba4d3b0e3ea5bfbc064865c9e6e",
+  "release_elf": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+  "candidate_elf": "8b5761b7a880501f9aca608fc55637b05a437147c563d6e340ddb70e2bdcd628",
+  "scope": "At most 768 accepted ordinary TCP connections per process, at most 512 concurrent. Instrumented syscall counts and uninstrumented paired timings came from separate builds.",
+  "http_and_sql_checks": {
+    "control": {
+      "official_http_passes": 42,
+      "official_http_failures": 0,
+      "sql_differential_passes": 13,
+      "transport": "io_uring on ordinary Linux TCP"
+    },
+    "candidate": {
+      "official_http_passes": 42,
+      "official_http_failures": 0,
+      "sql_differential_passes": 13,
+      "transport": "io_uring on ordinary Linux TCP"
+    }
+  },
+  "normal_http_results": {
+    "max_simultaneous_connections": 512,
+    "clean_fin_count_per_arm": 768,
+    "timed_launches": 32,
+    "parity_launches": 4,
+    "verified_http_responses_including_unmeasured_384_warm_per_launch": 213028,
+    "new_likes_covered": 7748,
+    "all_clean_fins": 27648,
+    "all_remaining_tcp_zero": true,
+    "all_integrity_ok": true,
+    "sum_listen_drops": 0,
+    "sum_attempt_fails": 0,
+    "sum_estab_resets": 0,
+    "sum_tcp_retrans_segments": 0
+  },
+  "geometry": {
+    "one-bank": {
+      "pairs": 8,
+      "trace_arms": {
+        "trace-control": {
+          "actual_close_syscalls": 2727,
+          "aliases_per_close_syscall": 1.1265126512651265,
+          "blocking_waits": 11070,
+          "blocking_waits_with_retired_aliases": 0
+        },
+        "trace-candidate": {
+          "actual_close_syscalls": 2282,
+          "aliases_per_close_syscall": 1.3461875547765119,
+          "max_carried": 15,
+          "blocking_waits": 12181,
+          "blocking_waits_with_retired_aliases": 0
+        }
+      },
+      "entire_client_lifetime": {},
+      "reconnect_mix": {
+        "server_cpu_us_per_response": {
+          "paired_delta_pct_median": 2.278894654427377,
+          "candidate_lower_pairs": 3,
+          "n_pairs": 8
+        },
+        "schedule_to_http_p99_us": {
+          "paired_delta_pct_median": -2.3398666794205325,
+          "candidate_lower_pairs": 4,
+          "n_pairs": 8
+        },
+        "submit_p99_us": {
+          "paired_delta_pct_median": -3.8250493636066034,
+          "candidate_lower_pairs": 5,
+          "n_pairs": 8
+        },
+        "measured_whole_core_busy_us_per_response": {
+          "paired_delta_pct_median": 0.0,
+          "candidate_lower_pairs": 2,
+          "n_pairs": 8
+        },
+        "new_p99_us": {
+          "paired_delta_pct_median": -1.4384469305515735,
+          "candidate_lower_pairs": 4,
+          "n_pairs": 8
+        },
+        "established_p99_us": {
+          "paired_delta_pct_median": -2.069014469260455,
+          "candidate_lower_pairs": 4,
+          "n_pairs": 8
+        }
+      }
+    },
+    "multiple-banks": {
+      "pairs": 8,
+      "trace_arms": {
+        "trace-control": {
+          "actual_close_syscalls": 2591,
+          "aliases_per_close_syscall": 1.185642609031262,
+          "blocking_waits": 9859,
+          "blocking_waits_with_retired_aliases": 0
+        },
+        "trace-candidate": {
+          "actual_close_syscalls": 2100,
+          "aliases_per_close_syscall": 1.4628571428571429,
+          "max_carried": 7,
+          "blocking_waits": 9037,
+          "blocking_waits_with_retired_aliases": 0
+        }
+      },
+      "entire_client_lifetime": {},
+      "reconnect_mix": {
+        "server_cpu_us_per_response": {
+          "paired_delta_pct_median": -0.0750774097648621,
+          "candidate_lower_pairs": 4,
+          "n_pairs": 8
+        },
+        "schedule_to_http_p99_us": {
+          "paired_delta_pct_median": -3.2034020280223507,
+          "candidate_lower_pairs": 5,
+          "n_pairs": 8
+        },
+        "submit_p99_us": {
+          "paired_delta_pct_median": -1.4372733085770917,
+          "candidate_lower_pairs": 4,
+          "n_pairs": 8
+        },
+        "measured_whole_core_busy_us_per_response": {
+          "paired_delta_pct_median": 0.0,
+          "candidate_lower_pairs": 3,
+          "n_pairs": 8
+        },
+        "new_p99_us": {
+          "paired_delta_pct_median": -18.988118379849766,
+          "candidate_lower_pairs": 7,
+          "n_pairs": 8
+        },
+        "established_p99_us": {
+          "paired_delta_pct_median": -4.8060633937599295,
+          "candidate_lower_pairs": 7,
+          "n_pairs": 8
+        }
+      }
+    }
+  },
+  "source_digests": {
+    "summary.json": "91910adc1b347a13cdd14ab15ab2b732441373196ffbf6e3582ba581a8f53ace",
+    "paired-alias-summary.json": "63bf96f9c928e77cd3a129bc9c23c4e4124a49f2b9b670529fe5c2bb85944e14",
+    "alias-retirement.patch": "feefe10a50db5f7db5cf99879ad9779d4a4a184f22d72dd59a366c70a4f524c9"
+  }
+}

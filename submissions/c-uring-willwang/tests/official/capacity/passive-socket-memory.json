@@ -1,0 +1,287 @@
+{
+  "kernel": "6.8.0-147-generic",
+  "source": "Two ordinary applications in different private network namespaces and 128-MiB service cgroups. Each private single-queue veth used GRO/threaded NAPI, TSO off and CPU 9. Result reads subtract the matching post-close state to keep the enlarged descriptor table fixed. All runtime files were in tmpfs.",
+  "physical_cache_geometry": {
+    "TCP": {
+      "object_size": 2304,
+      "slab_size": 2368,
+      "order": 3,
+      "objs_per_slab": 13,
+      "align": 64
+    },
+    "sock_inode_cache": {
+      "object_size": 768,
+      "slab_size": 832,
+      "order": 3,
+      "objs_per_slab": 39,
+      "align": 64
+    },
+    "filp": {
+      "object_size": 232,
+      "slab_size": 256,
+      "order": 1,
+      "objs_per_slab": 32,
+      "align": 64
+    },
+    "dentry": {
+      "object_size": 192,
+      "slab_size": 192,
+      "order": 1,
+      "objs_per_slab": 42,
+      "align": 8
+    }
+  },
+  "trials": [
+    {
+      "pairs": 3072,
+      "order": "unconnected-first",
+      "private_ehash_buckets": {
+        "server": 4096,
+        "client": 4096
+      },
+      "server_payload_cpu_range": [
+        9,
+        9
+      ],
+      "server_payload_napi_id": 8616,
+      "napi_kernel_thread_cgroup": "0::/",
+      "queued_verified_bytes": 3072,
+      "server_namespace_inuse_before_accept": 3073,
+      "server_namespace_inuse_after_accept": 3073,
+      "server_namespace_initial_inuse": 1,
+      "server_namespace_snmp_currestab_before_accept": null,
+      "server_slab_bytes_per_socket_at_handshake_before_accept": 0.0,
+      "accepted_socket_file_slab_bytes_per_socket": 1304.0,
+      "unconnected_tcp_socket_slab_bytes_per_socket": 3680.0,
+      "passive_socket_omitted_bytes_per_socket": 2376.0,
+      "one_byte_unread_memcg_sock_increment_per_socket": 4096.0,
+      "cgroup_events": {
+        "server": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "client": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "pairs": 1536,
+      "order": "accepted-first",
+      "private_ehash_buckets": {
+        "server": 4096,
+        "client": 4096
+      },
+      "server_payload_cpu_range": [
+        9,
+        9
+      ],
+      "server_payload_napi_id": 8618,
+      "napi_kernel_thread_cgroup": "0::/",
+      "queued_verified_bytes": 1536,
+      "server_namespace_inuse_before_accept": 1537,
+      "server_namespace_inuse_after_accept": 1537,
+      "server_namespace_initial_inuse": 1,
+      "server_namespace_snmp_currestab_before_accept": 1536,
+      "server_slab_bytes_per_socket_at_handshake_before_accept": 0.0,
+      "accepted_socket_file_slab_bytes_per_socket": 1304.0,
+      "unconnected_tcp_socket_slab_bytes_per_socket": 3680.0,
+      "passive_socket_omitted_bytes_per_socket": 2376.0,
+      "one_byte_unread_memcg_sock_increment_per_socket": 4096.0,
+      "cgroup_events": {
+        "server": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "client": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    }
+  ],
+  "source_sha256": {
+    "endpoints.c": "ed0c30336e5c733963f912fe664aa654939cd9991903212351edbe12bf323813",
+    "probe.py": "2353b23e11c7e26dcb215b7a90ad60e8334ac77fa27039f6f0aac9b7a740d137",
+    "analyze.py": "97d57024f6490a158b2085fdd584794b8db4e1ebb20c05e9772cf6e83c28a412",
+    "forward.json": "ef2bae2b8e2946e3fc4ccd1df39a1ffb8159ccd7a1ce8a294cdfdce8b77aefc2",
+    "reverse.json": "8a3642416b58b8cd544c63033410ca3100dde65dc657c63cb260ce30c7b30966"
+  },
+  "local_memory_view": {
+    "split-guarded-350-p1": {
+      "established_at_max": 349485,
+      "app_current_mib_at_max": 1175.94,
+      "added_socket_mib_at_max": 791.91,
+      "combined_mib_at_max": 1967.85,
+      "t_s_at_max": 108.71
+    }
+  },
+  "official_ram_definition": "Peak of the application cgroup. The organizer separately reports machine RAM of 1,967 MB.",
+  "mojo_admission_replay": {
+    "pause_below_mib": 160,
+    "resume_above_mib": 256,
+    "missing_bytes_per_live_socket": 2376,
+    "total_guest_mib": 1967,
+    "other_os_reserve_mib": 0,
+    "formulas": {
+      "A": "guest bytes minus memory.current and 2376 times namespace TCP CurrEstab",
+      "F": "memory.stat file",
+      "K": "max(0, F - file_dirty - file_writeback)",
+      "E": "min(K, max(0, -A))",
+      "guest_full_file": "A + F",
+      "guest_half_after_reclaim": "A + E + (K - E) / 2",
+      "guest_raw_free": "A"
+    },
+    "runs": {
+      "ring4096-mojo-280-h1": {
+        "host_visible_mem_pause_messages": 0,
+        "max_observation_gap_s": 2.267607,
+        "sources_sha256": {
+          "server.log": "aca5145391dba118dadcbed73a147304418c277046a6e097c5113c3f582a91c7",
+          "telemetry.jsonl": "823641f1343c21ea6832a05afed3cb40213378ffda8c7c331711b0e62ac7be5b"
+        },
+        "ramp": {
+          "samples": 41,
+          "guest_full_file": {
+            "minimum_signed_mib": 884.09,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_half_after_reclaim": {
+            "minimum_signed_mib": 824.37,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_raw_free": {
+            "minimum_signed_mib": 796.53,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          }
+        },
+        "hold": {
+          "samples": 147,
+          "guest_full_file": {
+            "minimum_signed_mib": 796.5,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_half_after_reclaim": {
+            "minimum_signed_mib": 716.36,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_raw_free": {
+            "minimum_signed_mib": 679.32,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          }
+        }
+      },
+      "ring4096-mojo-290-h1": {
+        "host_visible_mem_pause_messages": 0,
+        "max_observation_gap_s": 2.244545,
+        "sources_sha256": {
+          "server.log": "fb69532c302a7a610a2dae523059f4d083116ef8744a9ffe38de8bebe0c3cb31",
+          "telemetry.jsonl": "9c74f6e9857c4e859b0c487e84ebd5e1c3dabd25fe25720f2a48e85ee9f81c80"
+        },
+        "ramp": {
+          "samples": 43,
+          "guest_full_file": {
+            "minimum_signed_mib": 837.27,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_half_after_reclaim": {
+            "minimum_signed_mib": 770.67,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_raw_free": {
+            "minimum_signed_mib": 728.84,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          }
+        },
+        "hold": {
+          "samples": 147,
+          "guest_full_file": {
+            "minimum_signed_mib": 653.58,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_half_after_reclaim": {
+            "minimum_signed_mib": 513.01,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_raw_free": {
+            "minimum_signed_mib": 389.7,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          }
+        }
+      },
+      "ring4096-mojo-300-h1": {
+        "host_visible_mem_pause_messages": 0,
+        "max_observation_gap_s": 2.265692,
+        "sources_sha256": {
+          "server.log": "6992287639d49e4fcea5d4e4b7f6f567b25a8cb65e18cc3bb4981f130ab44e84",
+          "telemetry.jsonl": "6a1d103c8aa4774eb82af72241176f0a8c434b4a5016b14f0aefbd18b3c05e8e"
+        },
+        "ramp": {
+          "samples": 44,
+          "guest_full_file": {
+            "minimum_signed_mib": 803.94,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_half_after_reclaim": {
+            "minimum_signed_mib": 752.62,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_raw_free": {
+            "minimum_signed_mib": 728.51,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          }
+        },
+        "hold": {
+          "samples": 147,
+          "guest_full_file": {
+            "minimum_signed_mib": 327.62,
+            "positive_samples_below_160_mib": 0,
+            "first_positive_crossing_s": null
+          },
+          "guest_half_after_reclaim": {
+            "minimum_signed_mib": 141.18,
+            "positive_samples_below_160_mib": 13,
+            "first_positive_crossing_s": 174.004
+          },
+          "guest_raw_free": {
+            "minimum_signed_mib": -418.88,
+            "positive_samples_below_160_mib": 22,
+            "first_positive_crossing_s": 161.838
+          }
+        }
+      }
+    }
+  }
+}

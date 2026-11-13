@@ -1,0 +1,261 @@
+{
+  "method": "The six orders at each width used the same 256-socket private TCP fixture with real fixed-file io_uring, HTTP, SQLite and byte-for-byte response checks. One CPU runs both ends. Median within-block changes use epoll as the reference.",
+  "arms": 36,
+  "timed_verified_responses": 181440,
+  "timed_response_bytes": 238209303,
+  "timed_results_by_ready_count": {
+    "1": {
+      "epoll": {
+        "cpu_ns": {
+          "median": 34058.6,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "collector_cpu_ns": {
+          "median": 2238.0,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "p99_ns": {
+          "median": 63979.5,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "registration_cpu_ns": {
+          "median": 1971.9,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "collector_bytes": {
+          "median": 12.0,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        }
+      },
+      "sigio": {
+        "cpu_ns": {
+          "median": 35198.8,
+          "median_pair_pct": 3.31,
+          "higher_pairs": 5,
+          "pairs": 6
+        },
+        "collector_cpu_ns": {
+          "median": 2625.6,
+          "median_pair_pct": 17.98,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "p99_ns": {
+          "median": 66764.5,
+          "median_pair_pct": 3.06,
+          "higher_pairs": 5,
+          "pairs": 6
+        },
+        "registration_cpu_ns": {
+          "median": 2852.1,
+          "median_pair_pct": 54.9,
+          "higher_pairs": 5,
+          "pairs": 6
+        },
+        "collector_bytes": {
+          "median": 128.0,
+          "median_pair_pct": 966.67,
+          "higher_pairs": 6,
+          "pairs": 6
+        }
+      },
+      "both": {
+        "cpu_ns": {
+          "median": 35325.1,
+          "median_pair_pct": 3.72,
+          "higher_pairs": 5,
+          "pairs": 6
+        },
+        "collector_cpu_ns": {
+          "median": 2641.2,
+          "median_pair_pct": 17.99,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "p99_ns": {
+          "median": 66198.5,
+          "median_pair_pct": 3.12,
+          "higher_pairs": 5,
+          "pairs": 6
+        },
+        "registration_cpu_ns": {
+          "median": 4595.4,
+          "median_pair_pct": 149.08,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "collector_bytes": {
+          "median": 128.0,
+          "median_pair_pct": 966.67,
+          "higher_pairs": 6,
+          "pairs": 6
+        }
+      }
+    },
+    "32": {
+      "epoll": {
+        "cpu_ns": {
+          "median": 22135.1,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "collector_cpu_ns": {
+          "median": 222.3,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "p99_ns": {
+          "median": 647567.5,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "registration_cpu_ns": {
+          "median": 1688.0,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        },
+        "collector_bytes": {
+          "median": 12.0,
+          "median_pair_pct": 0.0,
+          "higher_pairs": 0,
+          "pairs": 6
+        }
+      },
+      "sigio": {
+        "cpu_ns": {
+          "median": 22843.4,
+          "median_pair_pct": 3.7,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "collector_cpu_ns": {
+          "median": 274.6,
+          "median_pair_pct": 23.75,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "p99_ns": {
+          "median": 680070.5,
+          "median_pair_pct": 3.22,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "registration_cpu_ns": {
+          "median": 2819.0,
+          "median_pair_pct": 65.4,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "collector_bytes": {
+          "median": 128.0,
+          "median_pair_pct": 966.67,
+          "higher_pairs": 6,
+          "pairs": 6
+        }
+      },
+      "both": {
+        "cpu_ns": {
+          "median": 23286.0,
+          "median_pair_pct": 4.53,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "collector_cpu_ns": {
+          "median": 282.9,
+          "median_pair_pct": 25.24,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "p99_ns": {
+          "median": 748407.5,
+          "median_pair_pct": 3.76,
+          "higher_pairs": 5,
+          "pairs": 6
+        },
+        "registration_cpu_ns": {
+          "median": 4731.8,
+          "median_pair_pct": 174.26,
+          "higher_pairs": 6,
+          "pairs": 6
+        },
+        "collector_bytes": {
+          "median": 128.0,
+          "median_pair_pct": 966.67,
+          "higher_pairs": 6,
+          "pairs": 6
+        }
+      }
+    }
+  },
+  "overflow_recovery_per_notification": {
+    "256": {
+      "scan_cpu_ns": 233172,
+      "epoll_cpu_ns": 1985,
+      "scan_enters": 4,
+      "scan_probes": 256
+    },
+    "2048": {
+      "scan_cpu_ns": 1909391,
+      "epoll_cpu_ns": 2539,
+      "scan_enters": 32,
+      "scan_probes": 2048
+    }
+  },
+  "observed_linux_events": [
+    "fixed_cookie_A=588647 fixed_cookie_B=588648 signal=36 alias=117 code=1 band=65 epoll_tags=65537,131074 already_readable=(signalfd:0,epoll:1) partial_no_second_edge=(0,0)",
+    "back_to_back_small_writes=6 rt_records=6 epoll_records=1 queued_record_bytes=(768,12)",
+    "old_pending_rt_after_slot_reuse=(signal:36,alias:117,new_slot_read:EAGAIN) old_cookie=588647 new_cookie=588649",
+    "peer_fin=(signal_count:2,signo:36,code:1,band:65,epoll:0x2001,fixed_read:0)",
+    "overflow=(soft_original:200602,soft_test:0,ready:48,rt:0,SIGIO:1,ssi_fd:0,ssi_band:0,ssi_code:128,epoll_recovered:48)"
+  ],
+  "identity": {
+    "kernel": "6.8.0-147-generic",
+    "machine": "x86_64",
+    "build": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+    "sha256": {
+      "exchange": "54541896355d00f32103d7d69b0a973b58a69a8d619a8cbc9e82ab8784cf5a77",
+      "semantics": "d634feaa33f0e9dd5d323385bddce7b9f284af22522fb9154788e35a2e343a2a",
+      "fallback": "be4d4578b13d19770a4f1768c0eba690ef290c07e4b7c2501a991ad132da5317",
+      "exchange.c": "2a6b6059ef2ca298e774e86b6253b7b4af6ab33da1c707de9fd385ac8dc53c30",
+      "semantics.c": "00ddda72faf20c4d48ae42bb5b8659aa97f8e7b480f69d8ad9ad16b0c848f861",
+      "fallback.c": "ffc0b4be7f3db68f54bf1f7b89afc450ed655b6037786b0577ea40eba8b23739",
+      "tcp.h": "1aa1288d1b633015162d9c06910be6f61d0fbf53581260648688380dd3859638",
+      "build.py": "e445c2b66c4c558649736c868e7b081c5d162d5abc952ac1458c43dd25adff3f",
+      "compare.py": "ef7a34f86457f34d417046bc8f99dbe1a4976583032071141eeee942f9055936",
+      "series.py": "40b87390f14eb0ae93fe98e8abdbc23066cce2577af5f2688600f692776f2c46",
+      "private-semantics.py": "f90799afade7d8ef525be358ad5f172e054a6ef94543f676f5e0b19a11063be6",
+      "private-fallback.py": "2779fd4e67695ba03ab25cad43f4bd48f2dc5de67ffed3476ad69158e002a236",
+      "summary.py": "8bae775d88094d276d6991147cbf01dcba1f21a8c516166d0abdadb3e6b3804e",
+      "../explicit-compact/control/reactor.c": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+      "../explicit-compact/mixed-http.fixture": "04671f9e307454b2e6ef442da06eb27ea6f41cfbca25597aa29b83b8e3148169",
+      "../explicit-compact/mixed-seed.db": "837454e3be58bef1a4fa51399f3fa37aeb532604fd8286544b2ef608fbd133fc",
+      "../explicit-compact/control/build/app.o": "8586840ad95843341f1066a81d874b0f9edc37b481929b9017d85684d91271f3",
+      "../explicit-compact/control/build/buffer.o": "381a10e453834fd6f3d362377a8fcf75e340328209aabd72e1a17b8318f09643",
+      "../explicit-compact/control/build/database.o": "1f005b1133e34e422e9fdb6ec40347f7a0fed250fd4b59971d8e4f114c97cfba",
+      "../explicit-compact/control/build/reader.o": "78eb8f82994d25b822696f3fdc4593b5820d1e1a870fcf4de4c47e12ba516b40",
+      "../explicit-compact/control/build/wal.o": "1a9a003d04107451db3e984572169298da07ce79bfe08c7719a008a09e0df844"
+    }
+  },
+  "raw_block_sha256": {
+    "block-0.json": "b9c88d27278fe4bd2a25c33b50f93a0e7c135951b838d6192c08a484afb98338",
+    "block-1.json": "e7456fc9264311becbd3b8c34cc2b0b4107867778c8671ee34c7f7b90de57f39",
+    "block-2.json": "2c54b4ffb1b3f48453dbb1e569fc6fa5c825b14b0464b2f8bbe794f6dac67277",
+    "block-3.json": "155be5496ce2ef2ad2469f8c62af983b56aba080faea91ee8d3041a1575241f7",
+    "block-4.json": "bc3e91595e30f92e00a9edd6bdf8964c8d8d46c24b99adf2b794f3a05c7d3255",
+    "block-5.json": "0a0f2137653f90b8ee5acebc77a24d39159d7ad89d6fae6364c6f9ec5507ab9e"
+  }
+}

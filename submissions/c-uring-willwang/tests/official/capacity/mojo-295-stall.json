@@ -1,0 +1,650 @@
+{
+  "ring4096-mojo-quiet-295-h1": {
+    "lock_recorded": true,
+    "score": {
+      "stock_pass": false,
+      "eligible": true,
+      "qualified": false,
+      "scored_healthy_environment": true,
+      "wire_eligible": true,
+      "p95_ms": 10577.74477,
+      "p99_ms": 22985.83256,
+      "req_per_s": 23209.18736,
+      "reqs": 9028392,
+      "fails": 0,
+      "dials": 295000,
+      "app_peak_mib": 1768.9,
+      "oom_kill_at_cutoff": 0,
+      "simultaneous_connections": {
+        "all_expected_full": true,
+        "expected_5s_ticks": 59,
+        "first_observed_s": 95,
+        "full_ticks": 59,
+        "last_observed_s": 385,
+        "max_established": 295000,
+        "min_established": 295000,
+        "min_users": 295000,
+        "synchronized_ticks": 59
+      },
+      "infrastructure_flags": [],
+      "target_network_flags": []
+    },
+    "zero_buckets": [
+      120,
+      125
+    ],
+    "zero_original_segments_intervals": [
+      [
+        113.69599,
+        123.87712
+      ]
+    ],
+    "same_elapsed_interval": {
+      "span_s": 10.18113,
+      "app_cpu_pct": 0.83044,
+      "napi_cpu_pct": 21.07579,
+      "cpu10_idle_s": 6.96,
+      "cpu10_iowait_s": 0.0,
+      "cpu10_steal_s": 0.01,
+      "original_data_segments": 0,
+      "in_tcp": 259393,
+      "out_tcp": 259731,
+      "retrans": 0,
+      "timeouts": 0,
+      "mib_sock": [
+        154.94141,
+        929.57031
+      ],
+      "mib_leaf": [
+        880.27734,
+        1655.30469
+      ],
+      "mib_file": [
+        172.84766,
+        173.34766
+      ],
+      "memstat_delta": {
+        "pgscan": 0,
+        "pgsteal": 0,
+        "pgmajfault": 0,
+        "workingset_refault_file": 0
+      },
+      "memory_events": {
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0
+      },
+      "leaf_io_mib_written": 0.50391,
+      "device_mib_written": 1345.96094,
+      "device_minus_leaf_writes_mib": 1345.45703,
+      "device_busy_pct": 17.52261,
+      "guest_io_full_psi_pct": 0.05714,
+      "leaf_full_psi_pct": {
+        "cpu": 2.82722,
+        "io": 0.0,
+        "memory": 0.0
+      }
+    },
+    "service_read_queue": [
+      [
+        101.4988,
+        1,
+        0
+      ],
+      [
+        109.68805,
+        4,
+        1
+      ],
+      [
+        117.86177,
+        524,
+        0
+      ],
+      [
+        126.06071,
+        865,
+        0
+      ],
+      [
+        134.24998,
+        590,
+        0
+      ]
+    ],
+    "scored_drops": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "worker_accounting_hits": [],
+    "whole_scored_storage_mib": {
+      "guest_device": 8204.71094,
+      "service": 3991.94922,
+      "guest_minus_service": 4212.76172
+    },
+    "first_memory_events": {
+      "max": [
+        [
+          238.31912,
+          240.32165,
+          33
+        ]
+      ],
+      "oom": [],
+      "oom_kill": []
+    },
+    "wal_final_holds_restarts_expired_truncates": [
+      254,
+      34,
+      210,
+      78
+    ],
+    "wal_markers": {
+      "memory_pause": 0,
+      "capacity_or_ring_open_pause": 0,
+      "epoll_fallback": 0
+    },
+    "final_endpoint_p95_p99_ms": {
+      "GET /feed": [
+        11684.41091,
+        24643.92368
+      ],
+      "GET /posts/:id": [
+        9768.36983,
+        20398.7593
+      ],
+      "POST /posts/:id/like": [
+        10473.01462,
+        21227.03072
+      ],
+      "POST /posts": [
+        9964.71406,
+        20196.79138
+      ]
+    }
+  },
+  "ring4096-mojo-290-h1": {
+    "lock_recorded": true,
+    "score": {
+      "stock_pass": false,
+      "eligible": false,
+      "qualified": false,
+      "scored_healthy_environment": true,
+      "wire_eligible": false,
+      "p95_ms": 811.85533,
+      "p99_ms": 1746.72457,
+      "req_per_s": 27047.66536,
+      "reqs": 10467473,
+      "fails": 0,
+      "dials": 290000,
+      "app_peak_mib": 962.6,
+      "oom_kill_at_cutoff": 0,
+      "simultaneous_connections": {
+        "all_expected_full": false,
+        "expected_5s_ticks": 59,
+        "first_observed_s": 95,
+        "full_ticks": 57,
+        "last_observed_s": 385,
+        "max_established": 290000,
+        "min_established": 288124,
+        "min_users": 290000,
+        "synchronized_ticks": 59
+      },
+      "infrastructure_flags": [],
+      "target_network_flags": []
+    },
+    "zero_buckets": [],
+    "zero_original_segments_intervals": [],
+    "same_elapsed_interval": {
+      "span_s": 10.17861,
+      "app_cpu_pct": 53.1196,
+      "napi_cpu_pct": 46.05092,
+      "cpu10_idle_s": 0.05,
+      "cpu10_iowait_s": 0.03,
+      "cpu10_steal_s": 0.0,
+      "original_data_segments": 589348,
+      "in_tcp": 682481,
+      "out_tcp": 923801,
+      "retrans": 5455,
+      "timeouts": 0,
+      "mib_sock": [
+        1.12109,
+        1.42578
+      ],
+      "mib_leaf": [
+        739.44531,
+        742.27734
+      ],
+      "mib_file": [
+        196.46094,
+        198.39844
+      ],
+      "memstat_delta": {
+        "pgscan": 0,
+        "pgsteal": 0,
+        "pgmajfault": 0,
+        "workingset_refault_file": 0
+      },
+      "memory_events": {
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0
+      },
+      "leaf_io_mib_written": 180.30469,
+      "device_mib_written": 182.66797,
+      "device_minus_leaf_writes_mib": 2.36328,
+      "device_busy_pct": 11.48487,
+      "guest_io_full_psi_pct": 0.11398,
+      "leaf_full_psi_pct": {
+        "cpu": 37.26789,
+        "io": 0.91703,
+        "memory": 0.0
+      }
+    },
+    "service_read_queue": [
+      [
+        102.34167,
+        5,
+        0
+      ],
+      [
+        110.52444,
+        2,
+        0
+      ],
+      [
+        118.7016,
+        4,
+        2
+      ],
+      [
+        126.85954,
+        3,
+        0
+      ],
+      [
+        135.04048,
+        0,
+        0
+      ]
+    ],
+    "scored_drops": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "worker_accounting_hits": [],
+    "whole_scored_storage_mib": {
+      "guest_device": 6322.47656,
+      "service": 6167.13672,
+      "guest_minus_service": 155.33984
+    },
+    "first_memory_events": {
+      "max": [],
+      "oom": [],
+      "oom_kill": []
+    },
+    "wal_final_holds_restarts_expired_truncates": [
+      209,
+      104,
+      100,
+      61
+    ],
+    "wal_markers": {
+      "memory_pause": 0,
+      "capacity_or_ring_open_pause": 0,
+      "epoll_fallback": 0
+    },
+    "final_endpoint_p95_p99_ms": {
+      "GET /feed": [
+        764.80445,
+        1764.19181
+      ],
+      "GET /posts/:id": [
+        734.96204,
+        1565.63066
+      ],
+      "POST /posts/:id/like": [
+        1403.31189,
+        2089.34018
+      ],
+      "POST /posts": [
+        1362.0407,
+        2007.81485
+      ]
+    }
+  },
+  "ring4096-mojo-quiet-300-h2": {
+    "lock_recorded": true,
+    "score": {
+      "stock_pass": false,
+      "eligible": false,
+      "qualified": false,
+      "scored_healthy_environment": true,
+      "wire_eligible": false,
+      "p95_ms": 811.85533,
+      "p99_ms": 1403.31189,
+      "req_per_s": 27694.73972,
+      "reqs": 10800960,
+      "fails": 0,
+      "dials": 302650,
+      "app_peak_mib": 937.6,
+      "oom_kill_at_cutoff": 0,
+      "simultaneous_connections": {
+        "all_expected_full": false,
+        "expected_5s_ticks": 59,
+        "first_observed_s": 95,
+        "full_ticks": 52,
+        "last_observed_s": 385,
+        "max_established": 300000,
+        "min_established": 292197,
+        "min_users": 300000,
+        "synchronized_ticks": 59
+      },
+      "infrastructure_flags": [],
+      "target_network_flags": []
+    },
+    "zero_buckets": [],
+    "zero_original_segments_intervals": [],
+    "same_elapsed_interval": {
+      "span_s": 10.15941,
+      "app_cpu_pct": 55.05764,
+      "napi_cpu_pct": 42.14629,
+      "cpu10_idle_s": 0.15,
+      "cpu10_iowait_s": 0.08,
+      "cpu10_steal_s": 0.0,
+      "original_data_segments": 591315,
+      "in_tcp": 687996,
+      "out_tcp": 899409,
+      "retrans": 4177,
+      "timeouts": 349,
+      "mib_sock": [
+        1.69141,
+        4.50781
+      ],
+      "mib_leaf": [
+        878.83594,
+        886.86328
+      ],
+      "mib_file": [
+        313.75391,
+        316.48438
+      ],
+      "memstat_delta": {
+        "pgscan": 0,
+        "pgsteal": 0,
+        "pgmajfault": 0,
+        "workingset_refault_file": 0
+      },
+      "memory_events": {
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0
+      },
+      "leaf_io_mib_written": 285.41016,
+      "device_mib_written": 291.53906,
+      "device_minus_leaf_writes_mib": 6.12891,
+      "device_busy_pct": 12.41214,
+      "guest_io_full_psi_pct": 0.14863,
+      "leaf_full_psi_pct": {
+        "cpu": 30.94456,
+        "io": 2.38748,
+        "memory": 0.0
+      }
+    },
+    "service_read_queue": [
+      [
+        102.97395,
+        60,
+        0
+      ],
+      [
+        111.14025,
+        18,
+        0
+      ],
+      [
+        119.29435,
+        0,
+        0
+      ],
+      [
+        127.46732,
+        9,
+        0
+      ],
+      [
+        135.61796,
+        19,
+        0
+      ]
+    ],
+    "scored_drops": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "worker_accounting_hits": [],
+    "whole_scored_storage_mib": {
+      "guest_device": 5741.46484,
+      "service": 5580.22266,
+      "guest_minus_service": 161.24219
+    },
+    "first_memory_events": {
+      "max": [],
+      "oom": [],
+      "oom_kill": []
+    },
+    "wal_final_holds_restarts_expired_truncates": [
+      230,
+      73,
+      148,
+      101
+    ],
+    "wal_markers": {
+      "memory_pause": 0,
+      "capacity_or_ring_open_pause": 0,
+      "epoll_fallback": 0
+    },
+    "final_endpoint_p95_p99_ms": {
+      "GET /feed": [
+        742.31166,
+        1220.82938
+      ],
+      "GET /posts/:id": [
+        727.68519,
+        1116.25292
+      ],
+      "POST /posts/:id/like": [
+        1431.51846,
+        1764.19181
+      ],
+      "POST /posts": [
+        1403.31189,
+        1746.72457
+      ]
+    }
+  },
+  "ring4096-mojo-300-h1": {
+    "lock_recorded": false,
+    "score": {
+      "stock_pass": false,
+      "eligible": false,
+      "qualified": false,
+      "scored_healthy_environment": true,
+      "wire_eligible": false,
+      "p95_ms": 10473.01462,
+      "p99_ms": 20398.7593,
+      "req_per_s": 22983.81304,
+      "reqs": 8963695,
+      "fails": 76,
+      "dials": 300076,
+      "app_peak_mib": 1763.2,
+      "oom_kill_at_cutoff": 0,
+      "simultaneous_connections": {
+        "all_expected_full": false,
+        "expected_5s_ticks": 59,
+        "first_observed_s": 95,
+        "full_ticks": 48,
+        "last_observed_s": 385,
+        "max_established": 300000,
+        "min_established": 296906,
+        "min_users": 300000,
+        "synchronized_ticks": 59
+      },
+      "infrastructure_flags": [],
+      "target_network_flags": []
+    },
+    "zero_buckets": [],
+    "zero_original_segments_intervals": [],
+    "same_elapsed_interval": {
+      "span_s": 10.16222,
+      "app_cpu_pct": 52.57423,
+      "napi_cpu_pct": 46.43653,
+      "cpu10_idle_s": 0.05,
+      "cpu10_iowait_s": 0.03,
+      "cpu10_steal_s": 0.0,
+      "original_data_segments": 565808,
+      "in_tcp": 672738,
+      "out_tcp": 926667,
+      "retrans": 6418,
+      "timeouts": 0,
+      "mib_sock": [
+        0.05078,
+        33.52344
+      ],
+      "mib_leaf": [
+        634.12109,
+        680.05859
+      ],
+      "mib_file": [
+        73.90234,
+        84.77734
+      ],
+      "memstat_delta": {
+        "pgscan": 0,
+        "pgsteal": 0,
+        "pgmajfault": 0,
+        "workingset_refault_file": 0
+      },
+      "memory_events": {
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0
+      },
+      "leaf_io_mib_written": 171.05859,
+      "device_mib_written": 174.77344,
+      "device_minus_leaf_writes_mib": 3.71484,
+      "device_busy_pct": 10.69648,
+      "guest_io_full_psi_pct": 0.10598,
+      "leaf_full_psi_pct": {
+        "cpu": 36.66694,
+        "io": 0.96145,
+        "memory": 0.0
+      }
+    },
+    "service_read_queue": [
+      [
+        102.71136,
+        56,
+        0
+      ],
+      [
+        110.85939,
+        4,
+        0
+      ],
+      [
+        119.01828,
+        7,
+        0
+      ],
+      [
+        127.18727,
+        81,
+        0
+      ],
+      [
+        135.35576,
+        138,
+        0
+      ]
+    ],
+    "scored_drops": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "worker_accounting_hits": [
+      [
+        0.13257,
+        92.13155,
+        94.13413
+      ],
+      [
+        0.14371,
+        231.18729,
+        233.19099
+      ],
+      [
+        0.27878,
+        263.89528,
+        265.93407
+      ]
+    ],
+    "whole_scored_storage_mib": {
+      "guest_device": 4007.26953,
+      "service": 3834.89844,
+      "guest_minus_service": 172.37109
+    },
+    "first_memory_events": {
+      "max": [
+        [
+          231.18729,
+          233.19099,
+          6840
+        ]
+      ],
+      "oom": [],
+      "oom_kill": []
+    },
+    "wal_final_holds_restarts_expired_truncates": [
+      281,
+      31,
+      247,
+      28
+    ],
+    "wal_markers": {
+      "memory_pause": 0,
+      "capacity_or_ring_open_pause": 0,
+      "epoll_fallback": 0
+    },
+    "final_endpoint_p95_p99_ms": {
+      "GET /feed": [
+        10577.74477,
+        20602.74689
+      ],
+      "GET /posts/:id": [
+        10266.65486,
+        19996.82315
+      ],
+      "POST /posts/:id/like": [
+        10790.35744,
+        20602.74689
+      ],
+      "POST /posts": [
+        10790.35744,
+        20398.7593
+      ]
+    }
+  }
+}

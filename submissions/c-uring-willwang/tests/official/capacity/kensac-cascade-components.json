@@ -1,0 +1,276 @@
+{
+  "host": {
+    "system": "Linux",
+    "node": "willwang-codex-2",
+    "release": "6.8.0-147-generic",
+    "version": "#147-Ubuntu SMP PREEMPT_DYNAMIC Thu Sep 24 11:33:16 UTC 2026",
+    "machine": "x86_64",
+    "processor": "x86_64"
+  },
+  "per_arm": {
+    "kn": {
+      "server_cpu_us": {
+        "median": 22.725884993108203,
+        "min": 21.105539800137834,
+        "max": 24.00069228118539
+      },
+      "physical_busy_us": {
+        "median": 37.90489317711923,
+        "min": 36.75626005053986,
+        "max": 39.0535263036986
+      },
+      "client_cpu_us": {
+        "median": 38.54603566505858,
+        "min": 37.59763898460832,
+        "max": 40.38728061107282
+      },
+      "p99_scheduled_us": {
+        "median": 7039.872,
+        "min": 2389.525,
+        "max": 46842.647
+      },
+      "p99_after_submit_us": {
+        "median": 6220.3035,
+        "min": 2236.155,
+        "max": 13355.949
+      },
+      "server_by_phase_us": {
+        "established": 21.207873077392577,
+        "ramp": 38.471726167315175
+      }
+    },
+    "kc": {
+      "server_cpu_us": {
+        "median": 23.832083620491616,
+        "min": 21.05551975648978,
+        "max": 25.79120715598438
+      },
+      "physical_busy_us": {
+        "median": 40.48931771192281,
+        "min": 36.75626005053986,
+        "max": 56.857339765678844
+      },
+      "client_cpu_us": {
+        "median": 38.545840885596135,
+        "min": 37.18331380657018,
+        "max": 39.491809958649206
+      },
+      "p99_scheduled_us": {
+        "median": 45534.478,
+        "min": 2331.359,
+        "max": 54903.775
+      },
+      "p99_after_submit_us": {
+        "median": 16802.591,
+        "min": 2201.303,
+        "max": 17923.554
+      },
+      "server_by_phase_us": {
+        "established": 22.326834075927735,
+        "ramp": 36.61005593385214
+      }
+    },
+    "on": {
+      "server_cpu_us": {
+        "median": 40.528000086147486,
+        "min": 40.08029341833218,
+        "max": 42.38634671490926
+      },
+      "physical_busy_us": {
+        "median": 82.41442683206984,
+        "min": 43.64805881001608,
+        "max": 97.6338157592465
+      },
+      "client_cpu_us": {
+        "median": 48.5467164599127,
+        "min": 47.96856013094418,
+        "max": 50.12491861934298
+      },
+      "p99_scheduled_us": {
+        "median": 12098.988500000001,
+        "min": 3933.518,
+        "max": 26249.565
+      },
+      "p99_after_submit_us": {
+        "median": 4183.464,
+        "min": 3913.046,
+        "max": 6777.63
+      },
+      "server_by_phase_us": {
+        "established": 40.56743829345703,
+        "ramp": 39.56425437743191
+      }
+    },
+    "oc": {
+      "server_cpu_us": {
+        "median": 41.10391290489318,
+        "min": 40.916089019067314,
+        "max": 42.661131518492994
+      },
+      "physical_busy_us": {
+        "median": 81.55295198713532,
+        "min": 55.708706639099475,
+        "max": 98.78244888582587
+      },
+      "client_cpu_us": {
+        "median": 48.353564610613375,
+        "min": 47.336275269928784,
+        "max": 49.50262043418332
+      },
+      "p99_scheduled_us": {
+        "median": 4038.508,
+        "min": 3983.935,
+        "max": 26667.721
+      },
+      "p99_after_submit_us": {
+        "median": 4011.786,
+        "min": 3955.991,
+        "max": 8390.224
+      },
+      "server_by_phase_us": {
+        "established": 41.17968365478516,
+        "ramp": 39.659681906614786
+      }
+    }
+  },
+  "paired_cascade_changes_pct": {
+    "kensac": {
+      "server_cpu_us": {
+        "median": 6.996962552069297,
+        "ordered_blocks": [
+          7.452963186645767,
+          -12.271198222912883,
+          6.540961917492827,
+          17.232249634107788
+        ]
+      },
+      "physical_busy_us": {
+        "median": 6.818181818181824,
+        "ordered_blocks": [
+          0.0,
+          -5.88235294117646,
+          13.636363636363647,
+          54.6875
+        ]
+      },
+      "client_cpu_us": {
+        "median": -0.6676046052321583,
+        "ordered_blocks": [
+          1.3145023309255377,
+          -6.694154188542056,
+          -2.649711541389854,
+          5.038005112013355
+        ]
+      },
+      "p99_scheduled_us": {
+        "median": 908.8598360027192,
+        "ordered_blocks": [
+          1821.3146545861625,
+          -79.87972152851562,
+          -3.5949825807239266,
+          2102.6417446932624
+        ]
+      },
+      "p99_after_submit_us": {
+        "median": 321.53533462781445,
+        "ordered_blocks": [
+          647.5358371848105,
+          -78.11406381999093,
+          34.199029960356995,
+          608.871639295272
+        ]
+      }
+    },
+    "explicit_sqlite": {
+      "server_cpu_us": {
+        "median": 1.5520651028550492,
+        "ordered_blocks": [
+          5.297678008080076,
+          1.018827106724185,
+          2.0853030989859134,
+          -2.67250551209518
+        ]
+      },
+      "physical_busy_us": {
+        "median": -3.1002892960462933,
+        "ordered_blocks": [
+          -41.2121212121212,
+          1.17647058823529,
+          125.0,
+          -7.377049180327877
+        ]
+      },
+      "client_cpu_us": {
+        "median": 0.3795424102646938,
+        "ordered_blocks": [
+          -5.563387285656496,
+          1.5993746914940488,
+          1.0872632499719703,
+          -0.3281784294425827
+        ]
+      },
+      "p99_scheduled_us": {
+        "median": 0.2717992407300862,
+        "ordered_blocks": [
+          32.596245032747404,
+          -0.7381294780915537,
+          1.2817279595517261,
+          -84.68099566602342
+        ]
+      },
+      "p99_after_submit_us": {
+        "median": 0.12102228687809746,
+        "ordered_blocks": [
+          95.07879787237259,
+          -0.8554380523105531,
+          1.097482626066748,
+          -41.094940266730404
+        ]
+      }
+    }
+  },
+  "server_cpu_ratio_by_block": [
+    {
+      "native_ours_over_kensac": 1.9196281574823855,
+      "cascade_ours_over_kensac": 1.8811243694668554,
+      "relative_shift_pct": -2.00579408389322
+    },
+    {
+      "native_ours_over_kensac": 1.6891684297317655,
+      "cascade_ours_over_kensac": 1.9450603462109173,
+      "relative_shift_pct": 15.148987630545907
+    },
+    {
+      "native_ours_over_kensac": 1.7090589351997543,
+      "cascade_ours_over_kensac": 1.6375842330859516,
+      "relative_shift_pct": -4.182108682252594
+    },
+    {
+      "native_ours_over_kensac": 1.9266437391268478,
+      "cascade_ours_over_kensac": 1.599520682109887,
+      "relative_shift_pct": -16.978907432321265
+    }
+  ],
+  "per_vcpu_stat_wall_coverage": {
+    "min": 0.5298916660770554,
+    "max": 1.0745222387780737,
+    "note": "Coarse guest /proc/stat clock diverged from monotonic elapsed time in short windows. Treat process CPU as the primary measure."
+  },
+  "median_relative_shift_pct": -3.0939513830729073,
+  "http_requests_per_arm": 69648,
+  "http_measured_total": 278592,
+  "true_eofs_total": 12288,
+  "real_likes_per_database": 705,
+  "db_hash": "b1ebcb02f552e4f0532366cf169b5fd3137fa372665d3feff4ed4c8734bda286",
+  "table_counts": {
+    "users": 38,
+    "posts": 4116,
+    "likes": 792
+  },
+  "organizer_http": {
+    "kn": "42/42",
+    "kc": "42/42",
+    "on": "42/42",
+    "oc": "42/42"
+  }
+}

@@ -1,0 +1,433 @@
+{
+  "recorded_utc": "2026-11-13T10:19:52.632599+00:00",
+  "last_dispatched_tag": "hash512k-quiet-stock-300-p1",
+  "previous_dispatch_sha256": "58f3eac2fb40495ce5196100bded6cac292d4ff8b2d332049d48ac228e034ae0",
+  "retained_dispatch_sha256": "bafeeeaeb5ef98212144b0b2d902d1c6637c08c43a23df891bd65338c76320b0",
+  "reason": "Stop the existing serialized controller after the registered public calibration block. Later legacy diagnostics were unstarted when retired.",
+  "skipped_jobs": [
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "400000",
+      "hold_s": "300",
+      "tag": "ring4096-leaf-cursor-quiet-400-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "400000",
+      "hold_s": "300",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-400-h1"
+    },
+    {
+      "profile": "five4096",
+      "entry": "leaf-cursor",
+      "users": "400000",
+      "hold_s": "300",
+      "tag": "five4096-leaf-cursor-quiet-400-h1"
+    },
+    {
+      "profile": "five4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "400000",
+      "hold_s": "300",
+      "tag": "five4096-named-slot-sqlite-swap-quiet-400-h1"
+    },
+    {
+      "profile": "five4096",
+      "entry": "guarded-batch-watch",
+      "users": "400000",
+      "hold_s": "300",
+      "tag": "five4096-batch-watch-quiet-400-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "swift",
+      "users": "220000",
+      "hold_s": "300",
+      "tag": "ring4096-swift-quiet-220-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-310-h2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "310000",
+      "hold_s": "120",
+      "tag": "ring4096-leaf-cursor-quiet-310-p1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "pavlyhalim",
+      "users": "290000",
+      "hold_s": "120",
+      "tag": "ring4096-pavlyhalim-quiet-290-p1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "ring4096-leaf-cursor-quiet-310-h2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "310000",
+      "hold_s": "120",
+      "tag": "ring4096-leaf-cursor-quiet-310-p2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "305000",
+      "hold_s": "120",
+      "tag": "ring4096-leaf-cursor-quiet-305-p1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "305000",
+      "hold_s": "300",
+      "tag": "ring4096-leaf-cursor-quiet-305-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "pavlyhalim",
+      "users": "290000",
+      "hold_s": "300",
+      "tag": "ring4096-pavlyhalim-quiet-290-h2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "312500",
+      "hold_s": "300",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-312500-h2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "312500",
+      "hold_s": "300",
+      "tag": "ring4096-leaf-cursor-quiet-312500-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "305000",
+      "hold_s": "120",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-305-p1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "305000",
+      "hold_s": "300",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-305-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "mojo",
+      "users": "295000",
+      "hold_s": "300",
+      "tag": "ring4096-mojo-quiet-volume-295-h2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "315000",
+      "hold_s": "120",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-315-p1"
+    },
+    {
+      "profile": "hash512k",
+      "entry": "named-slot-sqlite-swap",
+      "users": "400000",
+      "hold_s": "300",
+      "tag": "large512k-quiet-submitted-400-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "315000",
+      "hold_s": "120",
+      "tag": "ring4096-leaf-cursor-quiet-315-p1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "leaf-cursor",
+      "users": "315000",
+      "hold_s": "300",
+      "tag": "ring4096-leaf-cursor-quiet-315-h1"
+    },
+    {
+      "profile": "hash512k",
+      "entry": "kensac",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "hash512k-quiet-kensac-310-h2"
+    },
+    {
+      "profile": "hash16k",
+      "entry": "stock",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "hash16k-quiet-stock-310-h2"
+    },
+    {
+      "profile": "hash512k",
+      "entry": "stock",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "hash512k-quiet-stock-310-h2"
+    },
+    {
+      "profile": "hash16k",
+      "entry": "kensac",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "hash16k-quiet-kensac-310-h2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "312500",
+      "hold_s": "120",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-312500-p2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "kensac-stats",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "ring4096-kensac-stats-quiet-310-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "320000",
+      "hold_s": "300",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-320-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "327500",
+      "hold_s": "120",
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-327500-p1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "kensac",
+      "users": "270000",
+      "hold_s": "300",
+      "tag": "ring4096-kensac-quiet-270-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "stock",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "ram4096-stock-280-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "stock",
+      "users": "290000",
+      "hold_s": "120",
+      "tag": "ram4096-stock-290-p1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "kensac",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "ram4096-kensac-quiet-310-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "kensac-cascade",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "ring4096-kensac-cascade-quiet-300-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "named-sqlite-cascade",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "ring4096-named-sqlite-cascade-quiet-300-h1"
+    },
+    {
+      "profile": "rps4096",
+      "entry": "kensac",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "rps4096-kensac-quiet-280-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "mojo",
+      "users": "304000",
+      "hold_s": "300",
+      "tag": "ring4096-mojo-quiet-304-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "kensac",
+      "users": "295000",
+      "hold_s": "300",
+      "tag": "ring4096-kensac-quiet-295-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "rkkautsar",
+      "users": "295000",
+      "hold_s": "300",
+      "tag": "ring4096-rkkautsar-quiet-295-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "swift",
+      "users": "295000",
+      "hold_s": "300",
+      "tag": "ring4096-swift-quiet-295-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "pavly-rank",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "ring4096-pavly-rank-quiet-300-h1"
+    },
+    {
+      "profile": "disk4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "disk4096-named-slot-sqlite-swap-quiet-300-h1"
+    },
+    {
+      "profile": "disk4096",
+      "entry": "pavlyhalim",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "disk4096-pavlyhalim-300-h1"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "mojo",
+      "users": "290000",
+      "hold_s": "300",
+      "tag": "ring4096-mojo-quiet-290-h2"
+    },
+    {
+      "profile": "ring4096",
+      "entry": "mojo",
+      "users": "285000",
+      "hold_s": "300",
+      "tag": "ring4096-mojo-quiet-285-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "mojo",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "ram4096-mojo-280-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "pavlyhalim",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "ram4096-pavlyhalim-280-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "guarded-batch-watch",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "ram4096-batch-watch-quiet-280-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "kensac",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "ram4096-kensac-280-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "rkkautsar",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "ram4096-rkkautsar-280-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "swift",
+      "users": "280000",
+      "hold_s": "300",
+      "tag": "ram4096-swift-280-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "guarded-batch-watch",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "ram4096-batch-watch-quiet-300-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "named-slot-sqlite-swap",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "ram4096-named-slot-sqlite-swap-quiet-300-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "mojo",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "ram4096-mojo-300-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "pavlyhalim",
+      "users": "300000",
+      "hold_s": "300",
+      "tag": "ram4096-pavlyhalim-300-h1"
+    },
+    {
+      "profile": "ram4096",
+      "entry": "guarded-batch-watch",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "ram4096-batch-watch-quiet-310-h1"
+    }
+  ],
+  "anchor_prefix_before_removing_privileged_diagnostics_sha256": "8dcd24c9cc5edd1edee63b892cd549ae6d38fb8b18c6fe2a09684a93a4f6b382",
+  "skipped_privileged_observers": [
+    {
+      "profile": "hash512k",
+      "entry": "pavlyhalim",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "napiprof-quiet-pavly-310-r2"
+    },
+    {
+      "profile": "hash512k",
+      "entry": "named-slot-sqlite-swap",
+      "users": "310000",
+      "hold_s": "300",
+      "tag": "napiprof-quiet-d04-310-r2"
+    }
+  ],
+  "privileged_observer_reason": "These legacy ABBA arms launch sudo perf. The authorized root scope covers the private namespace and cgroup fixture only."
+}

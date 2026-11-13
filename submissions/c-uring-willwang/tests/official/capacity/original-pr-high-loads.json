@@ -1,0 +1,3872 @@
+{
+  "applications": {
+    "leaf-cursor": "Historical experiment with a modified SQLite source and a private cursor write. Its results are excluded from production claims.",
+    "stock": "Original PR #403, officially scored at 280,000.",
+    "stock-sqlite": "Eligible production build, with the same reader and unchanged SQLite as PR #403."
+  },
+  "method": "Compare the original organizer-scored executable to the production stock-SQLite executable at the same loads on the 524,288-bucket/one-core fixture. The production executable changes the TCP reactor and JSON renderer and shares the original reader and unmodified SQLite. Each stock score includes a full ramp and five-minute hold, after a fresh process restart, database copy and random user schedules. Historical private-cursor experiments are explicitly labeled.",
+  "original_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650",
+  "published_original_users": 280000,
+  "trials": [
+    {
+      "app": "stock",
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5358799,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 53587,
+            "stock_remaining": 53587,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 9.986916892166434,
+          "p99_ms": 29.25093847466475
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5283477,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 52834,
+            "stock_remaining": 52834,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 9.790135175145997,
+          "p99_ms": 27.55570721677187
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 779713,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 7797,
+            "stock_remaining": 7797,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 37.887462778032585,
+          "p99_ms": 59.87957602976951
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 103987,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 1039,
+            "stock_remaining": 1039,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 38.26633740581291,
+          "p99_ms": 59.28670894036585
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.726266,
+          "app_sys_us_per_completion": 12.625414,
+          "app_us_per_completion": 15.776489,
+          "app_us_per_outgoing_tap_record": 12.953736,
+          "app_user_us_per_completion": 3.151076,
+          "completed_requests": 9508210,
+          "completions_per_s": 32786.931034,
+          "core_busy_pct": 96.613313,
+          "incoming_tcp_segments_per_completion": 2.204305,
+          "largest_minimum_of_four_shard_p99_ms": 104.53835180271867,
+          "max_individual_shard_window_p99_ms": 243.55240366510262,
+          "napi_cpu_pct": 44.356843,
+          "napi_slices_per_kcompletions": 358.345923,
+          "napi_us_per_completion": 13.528818,
+          "napi_us_per_incoming_tcp_segment": 6.137453,
+          "retransmitted_segments_interpolated": 14320.38,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.21791,
+          "whole_core_busy_us_per_completion": 29.467019,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 40.363594,
+          "app_sys_us_per_completion": 17.599512,
+          "app_us_per_completion": 21.782655,
+          "app_us_per_outgoing_tap_record": 14.522052,
+          "app_user_us_per_completion": 4.183144,
+          "completed_requests": 1575063,
+          "completions_per_s": 18530.152941,
+          "core_busy_pct": 78.137222,
+          "incoming_tcp_segments_per_completion": 2.497089,
+          "largest_minimum_of_four_shard_p99_ms": 47.630717063595256,
+          "max_individual_shard_window_p99_ms": 58.11852655657861,
+          "napi_cpu_pct": 35.134115,
+          "napi_slices_per_kcompletions": 643.615114,
+          "napi_us_per_completion": 18.96051,
+          "napi_us_per_incoming_tcp_segment": 7.593045,
+          "retransmitted_segments_interpolated": 1606.07,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.499971,
+          "whole_core_busy_us_per_completion": 42.167608,
+          "whole_windows": 17
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "5b8cc6fdbabfc65d7cc86a628e3503bf3324d6bf8c6d95c565e2e039d7a5b950",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 772878336,
+        "first_after_cutoff_memory_sample_s": 0.2002,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 391.9688,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2622,
+          391.8034
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 25826135,
+          "OutSegs": 25207045,
+          "RetransSegs": 17443
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 3.5130731159818125,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 115259,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11525974,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115259,
+          "stock_remaining": 115259,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 576298,
+          "stock_remaining": 576298,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 21.918961037346264,
+        "p99_ms": 39.42584569554644,
+        "pass": true,
+        "requests": 11525976
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794535092.4,
+        "hold_starts_unix": 1794534792.4,
+        "stock_start_unix": 1794534699.4
+      },
+      "tag": "hash512k-quiet-stock-310-h1",
+      "target": 310000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock",
+      "assigned_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          105
+        ],
+        "any_shard_p99_above_1s": [
+          105
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 105,
+        "last_end_s": 395,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5740931,
+          "over_1s": {
+            "over_threshold_lower": 16710,
+            "over_threshold_upper": 17312,
+            "stock_bucket_count_at_or_above": 17312,
+            "stock_quantile_allowance": 57409,
+            "stock_remaining": 40097,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 66.14430454272582,
+          "p99_ms": 727.6851899910963
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5660106,
+          "over_1s": {
+            "over_threshold_lower": 12970,
+            "over_threshold_upper": 13459,
+            "stock_bucket_count_at_or_above": 13459,
+            "stock_quantile_allowance": 56601,
+            "stock_remaining": 43142,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 61.693987063047565,
+          "p99_ms": 699.2911645526872
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 835618,
+          "over_1s": {
+            "over_threshold_lower": 2258,
+            "over_threshold_upper": 2384,
+            "stock_bucket_count_at_or_above": 2384,
+            "stock_quantile_allowance": 8356,
+            "stock_remaining": 5972,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 83.15417354549099,
+          "p99_ms": 720.4803861297981
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 111474,
+          "over_1s": {
+            "over_threshold_lower": 320,
+            "over_threshold_upper": 342,
+            "stock_bucket_count_at_or_above": 342,
+            "stock_quantile_allowance": 1114,
+            "stock_remaining": 772,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 80.70862160231911,
+          "p99_ms": 720.4803861297981
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 52.771899,
+          "app_sys_us_per_completion": 12.209717,
+          "app_us_per_completion": 15.131615,
+          "app_us_per_outgoing_tap_record": 11.694757,
+          "app_user_us_per_completion": 2.921898,
+          "completed_requests": 10113825,
+          "completions_per_s": 34875.258621,
+          "core_busy_pct": 98.19996,
+          "incoming_tcp_segments_per_completion": 2.204427,
+          "largest_minimum_of_four_shard_p99_ms": 191.81362337926382,
+          "max_individual_shard_window_p99_ms": 195.66907720918704,
+          "napi_cpu_pct": 45.125205,
+          "napi_slices_per_kcompletions": 306.147882,
+          "napi_us_per_completion": 12.939031,
+          "napi_us_per_incoming_tcp_segment": 5.869568,
+          "retransmitted_segments_interpolated": 20731.92,
+          "scored_clock_s": [
+            105,
+            395
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.29388,
+          "whole_core_busy_us_per_completion": 28.157486,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.116838,
+          "app_sys_us_per_completion": 17.327534,
+          "app_us_per_completion": 21.331594,
+          "app_us_per_outgoing_tap_record": 13.976477,
+          "app_user_us_per_completion": 4.00406,
+          "completed_requests": 1734758,
+          "completions_per_s": 19275.088889,
+          "core_busy_pct": 79.137912,
+          "incoming_tcp_segments_per_completion": 2.495664,
+          "largest_minimum_of_four_shard_p99_ms": 373.6039787952214,
+          "max_individual_shard_window_p99_ms": 373.6039787952214,
+          "napi_cpu_pct": 35.967248,
+          "napi_slices_per_kcompletions": 612.367009,
+          "napi_us_per_completion": 18.659965,
+          "napi_us_per_incoming_tcp_segment": 7.476953,
+          "retransmitted_segments_interpolated": 2261.32,
+          "scored_clock_s": [
+            5,
+            95
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.52625,
+          "whole_core_busy_us_per_completion": 41.057093,
+          "whole_windows": 18
+        }
+      },
+      "ramp_s": 99,
+      "raw_manifest_sha256": "1e7dacee065b2bb561d88d9871404b2ac84b68e0e493c47436bf138a5dbd947e",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 829366272,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 398.0762,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2882,
+          397.9378
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 27683681,
+          "OutSegs": 28084008,
+          "RetransSegs": 27721
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 4.641791774199861,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 123481,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12348129,
+        "over_1s": {
+          "over_threshold_lower": 32258,
+          "over_threshold_upper": 33497,
+          "stock_bucket_count_at_or_above": 33497,
+          "stock_quantile_allowance": 123481,
+          "stock_remaining": 89984,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 230012,
+          "over_threshold_upper": 231685,
+          "stock_bucket_count_at_or_above": 230012,
+          "stock_quantile_allowance": 617406,
+          "stock_remaining": 387394,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 65.48941043834239,
+        "p99_ms": 713.3469169601964,
+        "pass": true,
+        "requests": 12348129
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794560407.31,
+        "hold_starts_unix": 1794560107.31,
+        "stock_start_unix": 1794560008.31
+      },
+      "tag": "hash512k-quiet-stock-330-h1",
+      "target": 330000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6031977,
+          "over_1s": {
+            "over_threshold_lower": 37904,
+            "over_threshold_upper": 40850,
+            "stock_bucket_count_at_or_above": 40850,
+            "stock_quantile_allowance": 60319,
+            "stock_remaining": 19469,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 238.7534591364598,
+          "p99_ms": 914.8189098566575
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5945624,
+          "over_1s": {
+            "over_threshold_lower": 40936,
+            "over_threshold_upper": 43784,
+            "stock_bucket_count_at_or_above": 43784,
+            "stock_quantile_allowance": 59456,
+            "stock_remaining": 15672,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 236.3895635014453,
+          "p99_ms": 923.9670989552242
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 878653,
+          "over_1s": {
+            "over_threshold_lower": 6747,
+            "over_threshold_upper": 7044,
+            "stock_bucket_count_at_or_above": 7044,
+            "stock_quantile_allowance": 8786,
+            "stock_remaining": 1742,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 261.12114205999353,
+          "p99_ms": 942.5388376442241
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 116919,
+          "over_1s": {
+            "over_threshold_lower": 874,
+            "over_threshold_upper": 909,
+            "stock_bucket_count_at_or_above": 909,
+            "stock_quantile_allowance": 1169,
+            "stock_remaining": 260,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 255.97602397803496,
+          "p99_ms": 933.2067699447765
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.413039,
+          "app_sys_us_per_completion": 11.917054,
+          "app_us_per_completion": 14.660881,
+          "app_us_per_outgoing_tap_record": 10.55325,
+          "app_user_us_per_completion": 2.743827,
+          "completed_requests": 10565382,
+          "completions_per_s": 36432.351724,
+          "core_busy_pct": 98.951708,
+          "incoming_tcp_segments_per_completion": 2.204345,
+          "largest_minimum_of_four_shard_p99_ms": 567.4259475889926,
+          "max_individual_shard_window_p99_ms": 567.4259475889926,
+          "napi_cpu_pct": 45.333565,
+          "napi_slices_per_kcompletions": 270.669551,
+          "napi_us_per_completion": 12.443217,
+          "napi_us_per_incoming_tcp_segment": 5.64486,
+          "retransmitted_segments_interpolated": 35025.96,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.389229,
+          "whole_core_busy_us_per_completion": 27.160396,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.266104,
+          "app_sys_us_per_completion": 16.788107,
+          "app_us_per_completion": 20.697683,
+          "app_us_per_outgoing_tap_record": 13.132041,
+          "app_user_us_per_completion": 3.909577,
+          "completed_requests": 1894067,
+          "completions_per_s": 19937.547368,
+          "core_busy_pct": 78.675076,
+          "incoming_tcp_segments_per_completion": 2.489808,
+          "largest_minimum_of_four_shard_p99_ms": 713.3469169601964,
+          "max_individual_shard_window_p99_ms": 720.4803861297981,
+          "napi_cpu_pct": 35.774793,
+          "napi_slices_per_kcompletions": 594.315834,
+          "napi_us_per_completion": 17.943427,
+          "napi_us_per_incoming_tcp_segment": 7.20675,
+          "retransmitted_segments_interpolated": 3127.72,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.576121,
+          "whole_core_busy_us_per_completion": 39.46076,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "a6e531be7af08d81a36efe8f2c9cb52c88b068c0a84028a90c00e2a8e04c228f",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 937709568,
+        "first_after_cutoff_memory_sample_s": 0.0748,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 402.0703,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.3013,
+          401.9327
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29020326,
+          "OutSegs": 30577242,
+          "RetransSegs": 42910
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.552267513372289,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 129731,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12973173,
+        "over_1s": {
+          "over_threshold_lower": 86461,
+          "over_threshold_upper": 92587,
+          "stock_bucket_count_at_or_above": 92587,
+          "stock_quantile_allowance": 129731,
+          "stock_remaining": 37144,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 353619,
+          "over_threshold_upper": 355769,
+          "stock_bucket_count_at_or_above": 353619,
+          "stock_quantile_allowance": 648658,
+          "stock_remaining": 295039,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 238.7534591364598,
+        "p99_ms": 923.9670989552242,
+        "pass": true,
+        "requests": 12973173
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794560856.166,
+        "hold_starts_unix": 1794560556.166,
+        "stock_start_unix": 1794560452.166
+      },
+      "tag": "hash512k-quiet-stock-345-h1",
+      "target": 345000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock",
+      "assigned_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6120678,
+          "over_1s": {
+            "over_threshold_lower": 79742,
+            "over_threshold_upper": 80934,
+            "stock_bucket_count_at_or_above": 80934,
+            "stock_quantile_allowance": 61206,
+            "stock_remaining": -19728,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 180.6971099612804,
+          "p99_ms": 1105.2009130328227
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 6034733,
+          "over_1s": {
+            "over_threshold_lower": 80580,
+            "over_threshold_upper": 81601,
+            "stock_bucket_count_at_or_above": 81601,
+            "stock_quantile_allowance": 60347,
+            "stock_remaining": -21254,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 178.90802966463406,
+          "p99_ms": 1105.2009130328227
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 892068,
+          "over_1s": {
+            "over_threshold_lower": 12510,
+            "over_threshold_upper": 12754,
+            "stock_bucket_count_at_or_above": 12754,
+            "stock_quantile_allowance": 8920,
+            "stock_remaining": -3834,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 203.61402637687965,
+          "p99_ms": 1127.415451384782
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 118594,
+          "over_1s": {
+            "over_threshold_lower": 1601,
+            "over_threshold_upper": 1628,
+            "stock_bucket_count_at_or_above": 1628,
+            "stock_quantile_allowance": 1185,
+            "stock_remaining": -443,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 203.61402637687965,
+          "p99_ms": 1127.415451384782
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": false,
+        "raw_eligible": true,
+        "stock": false,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.14249,
+          "app_sys_us_per_completion": 11.763083,
+          "app_us_per_completion": 14.377045,
+          "app_us_per_outgoing_tap_record": 8.999168,
+          "app_user_us_per_completion": 2.613962,
+          "completed_requests": 10719395,
+          "completions_per_s": 36963.431034,
+          "core_busy_pct": 99.379931,
+          "incoming_tcp_segments_per_completion": 2.203443,
+          "largest_minimum_of_four_shard_p99_ms": 961.483868280873,
+          "max_individual_shard_window_p99_ms": 961.483868280873,
+          "napi_cpu_pct": 46.095043,
+          "napi_slices_per_kcompletions": 249.279482,
+          "napi_us_per_completion": 12.470445,
+          "napi_us_per_incoming_tcp_segment": 5.659528,
+          "retransmitted_segments_interpolated": 47778.24,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.597597,
+          "whole_core_busy_us_per_completion": 26.886014,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 42.039234,
+          "app_sys_us_per_completion": 16.716476,
+          "app_us_per_completion": 20.285476,
+          "app_us_per_outgoing_tap_record": 11.862139,
+          "app_user_us_per_completion": 3.569,
+          "completed_requests": 2072381,
+          "completions_per_s": 20723.81,
+          "core_busy_pct": 80.826979,
+          "incoming_tcp_segments_per_completion": 2.488519,
+          "largest_minimum_of_four_shard_p99_ms": 1196.7742197438686,
+          "max_individual_shard_window_p99_ms": 1196.7742197438686,
+          "napi_cpu_pct": 37.165207,
+          "napi_slices_per_kcompletions": 542.267142,
+          "napi_us_per_completion": 17.933578,
+          "napi_us_per_incoming_tcp_segment": 7.206525,
+          "retransmitted_segments_interpolated": 6748.13,
+          "scored_clock_s": [
+            5,
+            105
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.710103,
+          "whole_core_busy_us_per_completion": 39.001988,
+          "whole_windows": 20
+        }
+      },
+      "ramp_s": 105,
+      "raw_manifest_sha256": "aab1d6069182adf6e1382b5f440bf1a054a8b4c587b107b35e3392faf40b35ce",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 871923712,
+        "first_after_cutoff_memory_sample_s": 0.0817,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 403.0774,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.265,
+          402.9324
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29461178,
+          "OutSegs": 33444947,
+          "RetransSegs": 57098
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.607790188506012,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 131660,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 13166071,
+        "over_1s": {
+          "over_threshold_lower": 174433,
+          "over_threshold_upper": 176917,
+          "stock_bucket_count_at_or_above": 176917,
+          "stock_quantile_allowance": 131660,
+          "stock_remaining": -45257,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 362202,
+          "over_threshold_upper": 364297,
+          "stock_bucket_count_at_or_above": 362202,
+          "stock_quantile_allowance": 658303,
+          "stock_remaining": 296101,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 180.6971099612804,
+        "p99_ms": 1105.2009130328227,
+        "pass": false,
+        "requests": 13166073
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794565392.202,
+        "hold_starts_unix": 1794565092.202,
+        "stock_start_unix": 1794564987.202
+      },
+      "tag": "hash512k-quiet-original-pr-350-h1",
+      "target": 350000,
+      "verified_qualified_pass": false
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6032625,
+          "over_1s": {
+            "over_threshold_lower": 6268,
+            "over_threshold_upper": 7931,
+            "stock_bucket_count_at_or_above": 7931,
+            "stock_quantile_allowance": 60326,
+            "stock_remaining": 52395,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 224.91655857996184,
+          "p99_ms": 749.7347789330165
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5947266,
+          "over_1s": {
+            "over_threshold_lower": 7212,
+            "over_threshold_upper": 9265,
+            "stock_bucket_count_at_or_above": 9265,
+            "stock_quantile_allowance": 59472,
+            "stock_remaining": 50207,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 227.16572416576147,
+          "p99_ms": 772.4524924694659
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 878360,
+          "over_1s": {
+            "over_threshold_lower": 1725,
+            "over_threshold_upper": 2026,
+            "stock_bucket_count_at_or_above": 2026,
+            "stock_quantile_allowance": 8783,
+            "stock_remaining": 6757,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 253.4416078990445,
+          "p99_ms": 787.9787875681022
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 117021,
+          "over_1s": {
+            "over_threshold_lower": 232,
+            "over_threshold_upper": 262,
+            "stock_bucket_count_at_or_above": 262,
+            "stock_quantile_allowance": 1170,
+            "stock_remaining": 908,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 250.9322850485589,
+          "p99_ms": 795.8585754437834
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.01405,
+          "app_sys_us_per_completion": 11.978921,
+          "app_us_per_completion": 14.569093,
+          "app_us_per_outgoing_tap_record": 9.721206,
+          "app_user_us_per_completion": 2.590171,
+          "completed_requests": 10552527,
+          "completions_per_s": 36388.024138,
+          "core_busy_pct": 98.971998,
+          "incoming_tcp_segments_per_completion": 2.205918,
+          "largest_minimum_of_four_shard_p99_ms": 377.3400185831735,
+          "max_individual_shard_window_p99_ms": 678.7251148476875,
+          "napi_cpu_pct": 45.760703,
+          "napi_slices_per_kcompletions": 268.182527,
+          "napi_us_per_completion": 12.575759,
+          "napi_us_per_incoming_tcp_segment": 5.700918,
+          "retransmitted_segments_interpolated": 40268.93,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.498692,
+          "whole_core_busy_us_per_completion": 27.199058,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.302718,
+          "app_sys_us_per_completion": 17.008308,
+          "app_us_per_completion": 20.61695,
+          "app_us_per_outgoing_tap_record": 14.570302,
+          "app_user_us_per_completion": 3.608642,
+          "completed_requests": 1903171,
+          "completions_per_s": 20033.378947,
+          "core_busy_pct": 79.354982,
+          "incoming_tcp_segments_per_completion": 2.484151,
+          "largest_minimum_of_four_shard_p99_ms": 503.56171758319704,
+          "max_individual_shard_window_p99_ms": 513.6833081066195,
+          "napi_cpu_pct": 35.790744,
+          "napi_slices_per_kcompletions": 612.987881,
+          "napi_us_per_completion": 17.865555,
+          "napi_us_per_incoming_tcp_segment": 7.191816,
+          "retransmitted_segments_interpolated": 4169.73,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.414998,
+          "whole_core_busy_us_per_completion": 39.611382,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "1c04c4d9d00c9592093aa740eb617584c97e3c99c396df8a057035ddbd271e74",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 911675392,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 402.2883,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2776,
+          402.1411
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29048917,
+          "OutSegs": 31399450,
+          "RetransSegs": 50582
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.178700154286226,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 129752,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12975272,
+        "over_1s": {
+          "over_threshold_lower": 15437,
+          "over_threshold_upper": 19484,
+          "stock_bucket_count_at_or_above": 19484,
+          "stock_quantile_allowance": 129752,
+          "stock_remaining": 110268,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 238521,
+          "over_threshold_upper": 240880,
+          "stock_bucket_count_at_or_above": 238521,
+          "stock_quantile_allowance": 648763,
+          "stock_remaining": 410242,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 227.16572416576147,
+        "p99_ms": 764.8044479895701,
+        "pass": true,
+        "requests": 12975272
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794562367.47,
+        "hold_starts_unix": 1794562067.47,
+        "stock_start_unix": 1794561963.47
+      },
+      "tag": "large512k-quiet-stock-sqlite-345-h1",
+      "target": 345000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6119993,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 61199,
+            "stock_remaining": 61199,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 362.6163410452104,
+          "p99_ms": 844.819914862182
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 6034684,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 60346,
+            "stock_remaining": 60346,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 359.0260802427826,
+          "p99_ms": 836.4553612496852
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 891236,
+          "over_1s": {
+            "over_threshold_lower": 243,
+            "over_threshold_upper": 592,
+            "stock_bucket_count_at_or_above": 592,
+            "stock_quantile_allowance": 8912,
+            "stock_remaining": 8320,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 388.7737984862623,
+          "p99_ms": 861.8007951509119
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 119013,
+          "over_1s": {
+            "over_threshold_lower": 32,
+            "over_threshold_upper": 86,
+            "stock_bucket_count_at_or_above": 86,
+            "stock_quantile_allowance": 1190,
+            "stock_remaining": 1104,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 388.7737984862623,
+          "p99_ms": 870.418803102421
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.411893,
+          "app_sys_us_per_completion": 11.894407,
+          "app_us_per_completion": 14.46988,
+          "app_us_per_outgoing_tap_record": 9.170966,
+          "app_user_us_per_completion": 2.575472,
+          "completed_requests": 10704615,
+          "completions_per_s": 36912.465517,
+          "core_busy_pct": 99.191673,
+          "incoming_tcp_segments_per_completion": 2.203762,
+          "largest_minimum_of_four_shard_p99_ms": 933.2067699447765,
+          "max_individual_shard_window_p99_ms": 933.2067699447765,
+          "napi_cpu_pct": 45.615515,
+          "napi_slices_per_kcompletions": 249.972961,
+          "napi_us_per_completion": 12.357753,
+          "napi_us_per_incoming_tcp_segment": 5.607572,
+          "retransmitted_segments_interpolated": 51846.1,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.577792,
+          "whole_core_busy_us_per_completion": 26.872134,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.605986,
+          "app_sys_us_per_completion": 16.35291,
+          "app_us_per_completion": 19.952498,
+          "app_us_per_outgoing_tap_record": 14.134148,
+          "app_user_us_per_completion": 3.599588,
+          "completed_requests": 2085252,
+          "completions_per_s": 20852.52,
+          "core_busy_pct": 80.067401,
+          "incoming_tcp_segments_per_completion": 2.482664,
+          "largest_minimum_of_four_shard_p99_ms": 923.9670989552242,
+          "max_individual_shard_window_p99_ms": 923.9670989552242,
+          "napi_cpu_pct": 36.736691,
+          "napi_slices_per_kcompletions": 575.830326,
+          "napi_us_per_completion": 17.617387,
+          "napi_us_per_incoming_tcp_segment": 7.096162,
+          "retransmitted_segments_interpolated": 4195.15,
+          "scored_clock_s": [
+            5,
+            105
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.411652,
+          "whole_core_busy_us_per_completion": 38.39699,
+          "whole_windows": 20
+        }
+      },
+      "ramp_s": 105,
+      "raw_manifest_sha256": "19c3143b6005f9e6b9329e46e8ca4e1e17533fd23958d9d0961afd93e70e8ddc",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 922394624,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 404.2662,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2588,
+          404.0979
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29552767,
+          "OutSegs": 32710671,
+          "RetransSegs": 60147
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 4.68820969194186,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 131649,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 13164926,
+        "over_1s": {
+          "over_threshold_lower": 275,
+          "over_threshold_upper": 678,
+          "stock_bucket_count_at_or_above": 678,
+          "stock_quantile_allowance": 131649,
+          "stock_remaining": 130971,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 325324,
+          "over_threshold_upper": 330741,
+          "stock_bucket_count_at_or_above": 325324,
+          "stock_quantile_allowance": 658246,
+          "stock_remaining": 332922,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 362.6163410452104,
+        "p99_ms": 836.4553612496852,
+        "pass": true,
+        "requests": 13164926
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794563095.746,
+        "hold_starts_unix": 1794562795.746,
+        "stock_start_unix": 1794562690.746
+      },
+      "tag": "large512k-quiet-stock-sqlite-350-h1",
+      "target": 350000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 105,
+        "last_end_s": 395,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5745881,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 57458,
+            "stock_remaining": 57458,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 95.58357821362796,
+          "p99_ms": 291.3245928414322
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5665589,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 56655,
+            "stock_remaining": 56655,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 94.6372061521069,
+          "p99_ms": 285.58434745753567
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 835710,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 8357,
+            "stock_remaining": 8357,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 121.36578108850368,
+          "p99_ms": 309.24692566681216
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 111608,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 1116,
+            "stock_remaining": 1116,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 118.97439573424536,
+          "p99_ms": 309.24692566681216
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 52.39457,
+          "app_sys_us_per_completion": 12.197042,
+          "app_us_per_completion": 15.023316,
+          "app_us_per_outgoing_tap_record": 11.268881,
+          "app_user_us_per_completion": 2.826274,
+          "completed_requests": 10113896,
+          "completions_per_s": 34875.503448,
+          "core_busy_pct": 97.961418,
+          "incoming_tcp_segments_per_completion": 2.204516,
+          "largest_minimum_of_four_shard_p99_ms": 306.1850749176358,
+          "max_individual_shard_window_p99_ms": 309.24692566681216,
+          "napi_cpu_pct": 45.227914,
+          "napi_slices_per_kcompletions": 308.627155,
+          "napi_us_per_completion": 12.96839,
+          "napi_us_per_incoming_tcp_segment": 5.882648,
+          "retransmitted_segments_interpolated": 25564.89,
+          "scored_clock_s": [
+            105,
+            395
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.333168,
+          "whole_core_busy_us_per_completion": 28.08889,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 40.902446,
+          "app_sys_us_per_completion": 17.288065,
+          "app_us_per_completion": 21.128533,
+          "app_us_per_outgoing_tap_record": 15.51344,
+          "app_user_us_per_completion": 3.840468,
+          "completed_requests": 1742298,
+          "completions_per_s": 19358.866667,
+          "core_busy_pct": 77.974034,
+          "incoming_tcp_segments_per_completion": 2.488089,
+          "largest_minimum_of_four_shard_p99_ms": 135.40396032875566,
+          "max_individual_shard_window_p99_ms": 138.1255799313637,
+          "napi_cpu_pct": 35.328712,
+          "napi_slices_per_kcompletions": 613.236048,
+          "napi_us_per_completion": 18.24937,
+          "napi_us_per_incoming_tcp_segment": 7.334693,
+          "retransmitted_segments_interpolated": 2353.55,
+          "scored_clock_s": [
+            5,
+            95
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.36195,
+          "whole_core_busy_us_per_completion": 40.278202,
+          "whole_windows": 18
+        }
+      },
+      "ramp_s": 99,
+      "raw_manifest_sha256": "acedf2fd732bba392abe38476353f79786b54489440e36eb90eb9e0a95aa7b60",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 828092416,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 398.1993,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2572,
+          398.065
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 27717018,
+          "OutSegs": 28194355,
+          "RetransSegs": 31517
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.835488957398012,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 123587,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12358788,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 123587,
+          "stock_remaining": 123587,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 27691,
+          "over_threshold_upper": 28170,
+          "stock_bucket_count_at_or_above": 27691,
+          "stock_quantile_allowance": 617939,
+          "stock_remaining": 590248,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 97.50480813572189,
+        "p99_ms": 291.3245928414322,
+        "pass": true,
+        "requests": 12358788
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794564203.309,
+        "hold_starts_unix": 1794563903.309,
+        "stock_start_unix": 1794563804.309
+      },
+      "tag": "large512k-quiet-stock-sqlite-330-h1",
+      "target": 330000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6038833,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 60388,
+            "stock_remaining": 60388,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 148.08931727469755,
+          "p99_ms": 529.2484260255582
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5954340,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 59543,
+            "stock_remaining": 59543,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 149.5702104474445,
+          "p99_ms": 534.5409102858137
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 878634,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 1,
+            "stock_bucket_count_at_or_above": 1,
+            "stock_quantile_allowance": 8786,
+            "stock_remaining": 8785,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 178.90802966463406,
+          "p99_ms": 567.4259475889926
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 116992,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 1169,
+            "stock_remaining": 1169,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 177.13666303429113,
+          "p99_ms": 561.8078688999926
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 52.942141,
+          "app_sys_us_per_completion": 11.939915,
+          "app_us_per_completion": 14.532272,
+          "app_us_per_outgoing_tap_record": 9.66386,
+          "app_user_us_per_completion": 2.592357,
+          "completed_requests": 10564914,
+          "completions_per_s": 36430.737931,
+          "core_busy_pct": 99.149675,
+          "incoming_tcp_segments_per_completion": 2.204729,
+          "largest_minimum_of_four_shard_p99_ms": 534.5409102858137,
+          "max_individual_shard_window_p99_ms": 803.8171611982209,
+          "napi_cpu_pct": 46.025522,
+          "napi_slices_per_kcompletions": 262.724995,
+          "napi_us_per_completion": 12.633706,
+          "napi_us_per_incoming_tcp_segment": 5.730276,
+          "retransmitted_segments_interpolated": 38996.15,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.503775,
+          "whole_core_busy_us_per_completion": 27.215939,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.492859,
+          "app_sys_us_per_completion": 16.999958,
+          "app_us_per_completion": 20.615446,
+          "app_us_per_outgoing_tap_record": 14.734707,
+          "app_user_us_per_completion": 3.615488,
+          "completed_requests": 1912072,
+          "completions_per_s": 20127.073684,
+          "core_busy_pct": 78.518548,
+          "incoming_tcp_segments_per_completion": 2.477347,
+          "largest_minimum_of_four_shard_p99_ms": 170.22485146322967,
+          "max_individual_shard_window_p99_ms": 171.92709997786196,
+          "napi_cpu_pct": 35.411816,
+          "napi_slices_per_kcompletions": 613.710186,
+          "napi_us_per_completion": 17.59412,
+          "napi_us_per_incoming_tcp_segment": 7.102001,
+          "retransmitted_segments_interpolated": 3194.06,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.399108,
+          "whole_core_busy_us_per_completion": 39.011408,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "5fb7d9f9a7c201f59a18fae1e5d32c1eda55b738a405f428dcbc6cbd1d1e377b",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 892612608,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 402.2,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2883,
+          402.0487
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29060598,
+          "OutSegs": 31440896,
+          "RetransSegs": 46772
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.335619947661253,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 129887,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12988799,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 1,
+          "stock_bucket_count_at_or_above": 1,
+          "stock_quantile_allowance": 129887,
+          "stock_remaining": 129886,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 175371,
+          "over_threshold_upper": 181087,
+          "stock_bucket_count_at_or_above": 175371,
+          "stock_quantile_allowance": 649439,
+          "stock_remaining": 474068,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 152.57657167743815,
+        "p99_ms": 534.5409102858137,
+        "pass": true,
+        "requests": 12988799
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794565915.435,
+        "hold_starts_unix": 1794565615.435,
+        "stock_start_unix": 1794565511.435
+      },
+      "tag": "large512k-quiet-stock-sqlite-345-h2",
+      "target": 345000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6126473,
+          "over_1s": {
+            "over_threshold_lower": 56017,
+            "over_threshold_upper": 58122,
+            "stock_bucket_count_at_or_above": 58122,
+            "stock_quantile_allowance": 61264,
+            "stock_remaining": 3142,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 178.90802966463406,
+          "p99_ms": 980.8096940333187
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 6041866,
+          "over_1s": {
+            "over_threshold_lower": 59239,
+            "over_threshold_upper": 61387,
+            "stock_bucket_count_at_or_above": 61387,
+            "stock_quantile_allowance": 60418,
+            "stock_remaining": -969,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 177.13666303429113,
+          "p99_ms": 1000.5239688833885
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 892872,
+          "over_1s": {
+            "over_threshold_lower": 9496,
+            "over_threshold_upper": 9949,
+            "stock_bucket_count_at_or_above": 9949,
+            "stock_quantile_allowance": 8928,
+            "stock_remaining": -1021,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 201.59804591770256,
+          "p99_ms": 1020.6345006579444
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 119205,
+          "over_1s": {
+            "over_threshold_lower": 1288,
+            "over_threshold_upper": 1347,
+            "stock_bucket_count_at_or_above": 1347,
+            "stock_quantile_allowance": 1192,
+            "stock_remaining": -155,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 201.59804591770256,
+          "p99_ms": 1020.6345006579444
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.715916,
+          "app_sys_us_per_completion": 11.938124,
+          "app_us_per_completion": 14.518179,
+          "app_us_per_outgoing_tap_record": 10.079057,
+          "app_user_us_per_completion": 2.580055,
+          "completed_requests": 10729731,
+          "completions_per_s": 36999.072414,
+          "core_busy_pct": 99.308241,
+          "incoming_tcp_segments_per_completion": 2.203102,
+          "largest_minimum_of_four_shard_p99_ms": 836.4553612496852,
+          "max_individual_shard_window_p99_ms": 836.4553612496852,
+          "napi_cpu_pct": 45.438478,
+          "napi_slices_per_kcompletions": 248.77394,
+          "napi_us_per_completion": 12.280978,
+          "napi_us_per_incoming_tcp_segment": 5.574402,
+          "retransmitted_segments_interpolated": 39075.21,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.44043,
+          "whole_core_busy_us_per_completion": 26.840738,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 42.283414,
+          "app_sys_us_per_completion": 16.986344,
+          "app_us_per_completion": 20.412373,
+          "app_us_per_outgoing_tap_record": 13.366317,
+          "app_user_us_per_completion": 3.426028,
+          "completed_requests": 2071460,
+          "completions_per_s": 20714.6,
+          "core_busy_pct": 80.699019,
+          "incoming_tcp_segments_per_completion": 2.48966,
+          "largest_minimum_of_four_shard_p99_ms": 1196.7742197438686,
+          "max_individual_shard_window_p99_ms": 1196.7742197438686,
+          "napi_cpu_pct": 36.791288,
+          "napi_slices_per_kcompletions": 546.964926,
+          "napi_us_per_completion": 17.761042,
+          "napi_us_per_incoming_tcp_segment": 7.133924,
+          "retransmitted_segments_interpolated": 6436.43,
+          "scored_clock_s": [
+            5,
+            105
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.52715,
+          "whole_core_busy_us_per_completion": 38.957556,
+          "whole_windows": 20
+        }
+      },
+      "ramp_s": 105,
+      "raw_manifest_sha256": "310b45aa9e6dfbdabd86e6c391e3212d112d0d04dd565f84a6f0d6e9d867e5eb",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 889761792,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 404.0904,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2717,
+          403.9282
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29565322,
+          "OutSegs": 31398959,
+          "RetransSegs": 47988
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.442865908609245,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 131804,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 13180414,
+        "over_1s": {
+          "over_threshold_lower": 126040,
+          "over_threshold_upper": 130805,
+          "stock_bucket_count_at_or_above": 130805,
+          "stock_quantile_allowance": 131804,
+          "stock_remaining": 999,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 356243,
+          "over_threshold_upper": 357693,
+          "stock_bucket_count_at_or_above": 356243,
+          "stock_quantile_allowance": 659020,
+          "stock_remaining": 302777,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 180.6971099612804,
+        "p99_ms": 990.6177909736518,
+        "pass": true,
+        "requests": 13180416
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794567530.599,
+        "hold_starts_unix": 1794567230.599,
+        "stock_start_unix": 1794567125.599
+      },
+      "tag": "large512k-quiet-stock-sqlite-350-h2",
+      "target": 350000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5358391,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 53583,
+            "stock_remaining": 53583,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 6.774821518943535,
+          "p99_ms": 19.646484641122125
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5283005,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 52830,
+            "stock_remaining": 52830,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 6.641330770457343,
+          "p99_ms": 19.068684434084922
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 781555,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 7815,
+            "stock_remaining": 7815,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 35.6917037859167,
+          "p99_ms": 49.07397542133925
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 103937,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 1039,
+            "stock_remaining": 1039,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 36.04862082377587,
+          "p99_ms": 49.07397542133925
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.432753,
+          "app_sys_us_per_completion": 12.668004,
+          "app_us_per_completion": 15.68509,
+          "app_us_per_outgoing_tap_record": 12.957228,
+          "app_user_us_per_completion": 3.017086,
+          "completed_requests": 9509348,
+          "completions_per_s": 32790.855172,
+          "core_busy_pct": 96.199884,
+          "incoming_tcp_segments_per_completion": 2.203886,
+          "largest_minimum_of_four_shard_p99_ms": 34.29902579936887,
+          "max_individual_shard_window_p99_ms": 91.85393991863242,
+          "napi_cpu_pct": 44.23441,
+          "napi_slices_per_kcompletions": 361.15607,
+          "napi_us_per_completion": 13.489862,
+          "napi_us_per_incoming_tcp_segment": 6.120945,
+          "retransmitted_segments_interpolated": 12108.54,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.210528,
+          "whole_core_busy_us_per_completion": 29.337412,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 40.17298,
+          "app_sys_us_per_completion": 17.737867,
+          "app_us_per_completion": 21.678894,
+          "app_us_per_outgoing_tap_record": 16.401168,
+          "app_user_us_per_completion": 3.941027,
+          "completed_requests": 1575128,
+          "completions_per_s": 18530.917647,
+          "core_busy_pct": 76.384592,
+          "incoming_tcp_segments_per_completion": 2.497515,
+          "largest_minimum_of_four_shard_p99_ms": 74.53305795941519,
+          "max_individual_shard_window_p99_ms": 241.1409937278244,
+          "napi_cpu_pct": 34.371897,
+          "napi_slices_per_kcompletions": 651.720315,
+          "napi_us_per_completion": 18.548405,
+          "napi_us_per_incoming_tcp_segment": 7.426744,
+          "retransmitted_segments_interpolated": 1556.34,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.32179,
+          "whole_core_busy_us_per_completion": 41.220081,
+          "whole_windows": 17
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "22516fd694d92fd86b56cc078ad975ecad298b10831b0a47ce32005f9688c5d4",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 772624384,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 391.9221,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.4158,
+          391.7883
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 25822770,
+          "OutSegs": 24843098,
+          "RetransSegs": 14628
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 3.9982049069697387,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 115268,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11526888,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115268,
+          "stock_remaining": 115268,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 576344,
+          "stock_remaining": 576344,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 19.45196499121003,
+        "p99_ms": 34.98843621793618,
+        "pass": true,
+        "requests": 11526888
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794569588.781,
+        "hold_starts_unix": 1794569288.781,
+        "stock_start_unix": 1794569195.781
+      },
+      "tag": "large512k-quiet-stock-sqlite-310-h1",
+      "target": 310000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "leaf-cursor",
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5359256,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 53592,
+            "stock_remaining": 53592,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 7.120405504043403,
+          "p99_ms": 18.879885578301902
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5283613,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 52836,
+            "stock_remaining": 52836,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 6.9801053857890425,
+          "p99_ms": 18.143198946832715
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 781297,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 7812,
+            "stock_remaining": 7812,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 35.33832058011555,
+          "p99_ms": 47.630717063595256
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 104247,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 1042,
+            "stock_remaining": 1042,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 36.04862082377587,
+          "p99_ms": 48.107024234231204
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.197607,
+          "app_sys_us_per_completion": 12.73189,
+          "app_us_per_completion": 15.612449,
+          "app_us_per_outgoing_tap_record": 12.929983,
+          "app_user_us_per_completion": 2.880559,
+          "completed_requests": 9509915,
+          "completions_per_s": 32792.810345,
+          "core_busy_pct": 96.163421,
+          "incoming_tcp_segments_per_completion": 2.203851,
+          "largest_minimum_of_four_shard_p99_ms": 33.95943148452363,
+          "max_individual_shard_window_p99_ms": 107.70596840069283,
+          "napi_cpu_pct": 44.429359,
+          "napi_slices_per_kcompletions": 359.832952,
+          "napi_us_per_completion": 13.548506,
+          "napi_us_per_incoming_tcp_segment": 6.14765,
+          "retransmitted_segments_interpolated": 10823.6,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.207461,
+          "whole_core_busy_us_per_completion": 29.324544,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 40.925382,
+          "app_sys_us_per_completion": 17.483105,
+          "app_us_per_completion": 21.14186,
+          "app_us_per_outgoing_tap_record": 16.044827,
+          "app_user_us_per_completion": 3.658755,
+          "completed_requests": 1548601,
+          "completions_per_s": 19357.5125,
+          "core_busy_pct": 79.018788,
+          "incoming_tcp_segments_per_completion": 2.486256,
+          "largest_minimum_of_four_shard_p99_ms": 76.03117242439947,
+          "max_individual_shard_window_p99_ms": 77.55939899012988,
+          "napi_cpu_pct": 36.402778,
+          "napi_slices_per_kcompletions": 649.811514,
+          "napi_us_per_completion": 18.805504,
+          "napi_us_per_incoming_tcp_segment": 7.563785,
+          "retransmitted_segments_interpolated": 1326.88,
+          "scored_clock_s": [
+            10,
+            90
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.317675,
+          "whole_core_busy_us_per_completion": 40.820735,
+          "whole_windows": 16
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "69df4dbf555b999d30ed8499425ccaa59499d62bf00ba12d99fedb56d0b7b9bc",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 771104768,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 391.2364,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.9631,
+          391.1014
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 25773387,
+          "OutSegs": 24739730,
+          "RetransSegs": 13277
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 3.766489882180831,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 115284,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11528412,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115284,
+          "stock_remaining": 115284,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 576420,
+          "stock_remaining": 576420,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 19.068684434084922,
+        "p99_ms": 33.95943148452363,
+        "pass": true,
+        "requests": 11528413
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794540535.894,
+        "hold_starts_unix": 1794540235.894,
+        "stock_start_unix": 1794540142.894
+      },
+      "tag": "large512k-quiet-leaf-cursor-310-h1",
+      "target": 310000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "leaf-cursor",
+      "assigned_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 105,
+        "last_end_s": 395,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5750642,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 57506,
+            "stock_remaining": 57506,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 16.101167849198244,
+          "p99_ms": 151.06591255191896
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5669868,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 56698,
+            "stock_remaining": 56698,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 16.101167849198244,
+          "p99_ms": 157.19979437583626
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 837134,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 8371,
+            "stock_remaining": 8371,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 44.42602976386252,
+          "p99_ms": 180.6971099612804
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 111625,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 1116,
+            "stock_remaining": 1116,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 43.550661468348714,
+          "p99_ms": 178.90802966463406
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.925612,
+          "app_sys_us_per_completion": 12.156702,
+          "app_us_per_completion": 14.879828,
+          "app_us_per_outgoing_tap_record": 11.975679,
+          "app_user_us_per_completion": 2.723126,
+          "completed_requests": 10120028,
+          "completions_per_s": 34896.648276,
+          "core_busy_pct": 97.561315,
+          "incoming_tcp_segments_per_completion": 2.204488,
+          "largest_minimum_of_four_shard_p99_ms": 173.64637097764057,
+          "max_individual_shard_window_p99_ms": 429.44813958808237,
+          "napi_cpu_pct": 45.246008,
+          "napi_slices_per_kcompletions": 319.850795,
+          "napi_us_per_completion": 12.965718,
+          "napi_us_per_incoming_tcp_segment": 5.881511,
+          "retransmitted_segments_interpolated": 17573.9,
+          "scored_clock_s": [
+            105,
+            395
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.242504,
+          "whole_core_busy_us_per_completion": 27.957217,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.946323,
+          "app_sys_us_per_completion": 16.925205,
+          "app_us_per_completion": 20.759945,
+          "app_us_per_outgoing_tap_record": 15.314048,
+          "app_user_us_per_completion": 3.83474,
+          "completed_requests": 1717460,
+          "completions_per_s": 20205.411765,
+          "core_busy_pct": 80.4471,
+          "incoming_tcp_segments_per_completion": 2.476412,
+          "largest_minimum_of_four_shard_p99_ms": 209.78373499012548,
+          "max_individual_shard_window_p99_ms": 211.88157234002674,
+          "napi_cpu_pct": 36.564213,
+          "napi_slices_per_kcompletions": 598.108787,
+          "napi_us_per_completion": 18.096247,
+          "napi_us_per_incoming_tcp_segment": 7.307446,
+          "retransmitted_segments_interpolated": 1819.71,
+          "scored_clock_s": [
+            10,
+            95
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.355614,
+          "whole_core_busy_us_per_completion": 39.81463,
+          "whole_windows": 17
+        }
+      },
+      "ramp_s": 99,
+      "raw_manifest_sha256": "ee23cdf375f7532796ac71296abf6d2e2d2d570d06e0fb7e88099f6677697d05",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 811102208,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 398.5994,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.8982,
+          398.4611
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 27764999,
+          "OutSegs": 27254968,
+          "RetransSegs": 22008
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 3.9982049069697387,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 123692,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12369265,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 123692,
+          "stock_remaining": 123692,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 4,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 618463,
+          "stock_remaining": 618463,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 30.137271161385563,
+        "p99_ms": 157.19979437583626,
+        "pass": true,
+        "requests": 12369269
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794551070.376,
+        "hold_starts_unix": 1794550770.376,
+        "stock_start_unix": 1794550671.376
+      },
+      "tag": "large512k-quiet-leaf-cursor-330-h1",
+      "target": 330000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "leaf-cursor",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6036045,
+          "over_1s": {
+            "over_threshold_lower": 33102,
+            "over_threshold_upper": 35724,
+            "stock_bucket_count_at_or_above": 35724,
+            "stock_quantile_allowance": 60360,
+            "stock_remaining": 24636,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 120.16413969158782,
+          "p99_ms": 905.7612968877797
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5951513,
+          "over_1s": {
+            "over_threshold_lower": 36960,
+            "over_threshold_upper": 39500,
+            "stock_bucket_count_at_or_above": 39500,
+            "stock_quantile_allowance": 59515,
+            "stock_remaining": 20015,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 118.97439573424536,
+          "p99_ms": 914.8189098566575
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 878024,
+          "over_1s": {
+            "over_threshold_lower": 6311,
+            "over_threshold_upper": 6722,
+            "stock_bucket_count_at_or_above": 6722,
+            "stock_quantile_allowance": 8780,
+            "stock_remaining": 2058,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 145.1713726837541,
+          "p99_ms": 933.2067699447765
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 117356,
+          "over_1s": {
+            "over_threshold_lower": 832,
+            "over_threshold_upper": 896,
+            "stock_bucket_count_at_or_above": 896,
+            "stock_quantile_allowance": 1173,
+            "stock_remaining": 277,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 146.6230864105916,
+          "p99_ms": 942.5388376442241
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.949991,
+          "app_sys_us_per_completion": 11.884024,
+          "app_us_per_completion": 14.253664,
+          "app_us_per_outgoing_tap_record": 10.042564,
+          "app_user_us_per_completion": 2.369641,
+          "completed_requests": 10569561,
+          "completions_per_s": 36446.762069,
+          "core_busy_pct": 99.134597,
+          "incoming_tcp_segments_per_completion": 2.204483,
+          "largest_minimum_of_four_shard_p99_ms": 300.1520193291204,
+          "max_individual_shard_window_p99_ms": 420.9863146633491,
+          "napi_cpu_pct": 46.999221,
+          "napi_slices_per_kcompletions": 274.830659,
+          "napi_us_per_completion": 12.895308,
+          "napi_us_per_incoming_tcp_segment": 5.849582,
+          "retransmitted_segments_interpolated": 34400.56,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.419325,
+          "whole_core_busy_us_per_completion": 27.199836,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.23354,
+          "app_sys_us_per_completion": 17.023415,
+          "app_us_per_completion": 20.570627,
+          "app_us_per_outgoing_tap_record": 14.272851,
+          "app_user_us_per_completion": 3.547212,
+          "completed_requests": 1904262,
+          "completions_per_s": 20044.863158,
+          "core_busy_pct": 79.441247,
+          "incoming_tcp_segments_per_completion": 2.482255,
+          "largest_minimum_of_four_shard_p99_ms": 508.597334759029,
+          "max_individual_shard_window_p99_ms": 508.597334759029,
+          "napi_cpu_pct": 36.37541,
+          "napi_slices_per_kcompletions": 588.253087,
+          "napi_us_per_completion": 18.146999,
+          "napi_us_per_incoming_tcp_segment": 7.310691,
+          "retransmitted_segments_interpolated": 4253.91,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.441242,
+          "whole_core_busy_us_per_completion": 39.631724,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "c9591ab3f1ff390078f9efe40a427d04e5b2dd567fba9fd57d255a8bb2d331f8",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 852369408,
+        "first_after_cutoff_memory_sample_s": 0.2002,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 401.8814,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.287,
+          403.8876
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29194188,
+          "OutSegs": 30770869,
+          "RetransSegs": 43150
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 4.782442706749891,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 129829,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12982937,
+        "over_1s": {
+          "over_threshold_lower": 77205,
+          "over_threshold_upper": 82842,
+          "stock_bucket_count_at_or_above": 82842,
+          "stock_quantile_allowance": 129829,
+          "stock_remaining": 46987,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 280070,
+          "over_threshold_upper": 281743,
+          "stock_bucket_count_at_or_above": 280070,
+          "stock_quantile_allowance": 649146,
+          "stock_remaining": 369076,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 122.57943889938875,
+        "p99_ms": 914.8189098566575,
+        "pass": true,
+        "requests": 12982938
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794547426.04,
+        "hold_starts_unix": 1794547126.04,
+        "stock_start_unix": 1794547022.04
+      },
+      "tag": "large512k-quiet-leaf-cursor-345-h1",
+      "target": 345000,
+      "verified_qualified_pass": true
+    },
+    {
+      "app": "leaf-cursor",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6044168,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 60441,
+            "stock_remaining": 60441,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 123.80523328838261,
+          "p99_ms": 498.5759580031654
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5959947,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 59599,
+            "stock_remaining": 59599,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 126.2937184774791,
+          "p99_ms": 513.6833081066195
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 880718,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 8807,
+            "stock_remaining": 8807,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 151.06591255191896,
+          "p99_ms": 539.8863193886717
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 117113,
+          "over_1s": {
+            "over_threshold_lower": 0,
+            "over_threshold_upper": 0,
+            "stock_bucket_count_at_or_above": 0,
+            "stock_quantile_allowance": 1171,
+            "stock_remaining": 1171,
+            "straddling_bucket": 1388
+          },
+          "p95_ms": 154.10233739421255,
+          "p99_ms": 545.2851825825585
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 52.532774,
+          "app_sys_us_per_completion": 11.882235,
+          "app_us_per_completion": 14.407739,
+          "app_us_per_outgoing_tap_record": 10.792454,
+          "app_user_us_per_completion": 2.525504,
+          "completed_requests": 10573834,
+          "completions_per_s": 36461.496552,
+          "core_busy_pct": 98.920935,
+          "incoming_tcp_segments_per_completion": 2.204488,
+          "largest_minimum_of_four_shard_p99_ms": 263.7323534805934,
+          "max_individual_shard_window_p99_ms": 263.7323534805934,
+          "napi_cpu_pct": 46.17462,
+          "napi_slices_per_kcompletions": 285.646694,
+          "napi_us_per_completion": 12.66394,
+          "napi_us_per_incoming_tcp_segment": 5.744617,
+          "retransmitted_segments_interpolated": 26870.69,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.334983,
+          "whole_core_busy_us_per_completion": 27.130246,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 40.981451,
+          "app_sys_us_per_completion": 16.614298,
+          "app_us_per_completion": 20.389796,
+          "app_us_per_outgoing_tap_record": 13.90434,
+          "app_user_us_per_completion": 3.775499,
+          "completed_requests": 1909405,
+          "completions_per_s": 20099.0,
+          "core_busy_pct": 79.049895,
+          "incoming_tcp_segments_per_completion": 2.479894,
+          "largest_minimum_of_four_shard_p99_ms": 216.14039194406132,
+          "max_individual_shard_window_p99_ms": 218.3017958635019,
+          "napi_cpu_pct": 35.782983,
+          "napi_slices_per_kcompletions": 589.151949,
+          "napi_us_per_completion": 17.803365,
+          "napi_us_per_incoming_tcp_segment": 7.179083,
+          "retransmitted_segments_interpolated": 4221.2,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.466434,
+          "whole_core_busy_us_per_completion": 39.330263,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "833632b28a9d387fc9d3623d102ed62b67a1bbc8635f3a9d6f08cf77c7799427",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 866250752,
+        "first_after_cutoff_memory_sample_s": 0.2002,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 402.5725,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2882,
+          402.4349
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29114097,
+          "OutSegs": 29824818,
+          "RetransSegs": 36372
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.127425895332896,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 130019,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 13001945,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 130019,
+          "stock_remaining": 130019,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 134624,
+          "over_threshold_upper": 137625,
+          "stock_bucket_count_at_or_above": 134624,
+          "stock_quantile_allowance": 650097,
+          "stock_remaining": 515473,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 127.55665566225392,
+        "p99_ms": 508.597334759029,
+        "pass": true,
+        "requests": 13001946
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794553306.231,
+        "hold_starts_unix": 1794553006.231,
+        "stock_start_unix": 1794552902.231
+      },
+      "tag": "large512k-quiet-leaf-cursor-345-h2",
+      "target": 345000,
+      "verified_qualified_pass": true
+    }
+  ]
+}

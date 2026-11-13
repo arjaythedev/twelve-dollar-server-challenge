@@ -1,0 +1,136 @@
+{
+  "tag": "ring4096-kensac-quiet-310-h1",
+  "stock_start_unix": 1794511537.081,
+  "hold_starts_unix": 1794511630.081,
+  "cutoff_unix": 1794511930.081,
+  "cutoff_utc": "2026-11-12T19:32:10.081000+00:00",
+  "telemetry_brackets": {
+    "stock_start": [
+      {
+        "unix": 1794511535.336216,
+        "elapsed_stock_s": -1.744784,
+        "retrans": 6,
+        "rto": 0
+      },
+      {
+        "unix": 1794511537.3387187,
+        "elapsed_stock_s": 0.257719,
+        "retrans": 6,
+        "rto": 0
+      }
+    ],
+    "hold_start": [
+      {
+        "unix": 1794511629.5408647,
+        "elapsed_stock_s": 92.459865,
+        "retrans": 7987,
+        "rto": 0
+      },
+      {
+        "unix": 1794511631.5438814,
+        "elapsed_stock_s": 94.462881,
+        "retrans": 8815,
+        "rto": 0
+      }
+    ],
+    "stock_cutoff": [
+      {
+        "unix": 1794511929.3413084,
+        "elapsed_stock_s": 392.260308,
+        "retrans": 160443,
+        "rto": 0
+      },
+      {
+        "unix": 1794511930.2821875,
+        "elapsed_stock_s": 393.201187,
+        "retrans": 160637,
+        "rto": 0
+      }
+    ]
+  },
+  "latest_possible_end_of_preboundary_mib_read_elapsed_s": {
+    "stock_start_previous": -1.742281,
+    "hold_start_previous": 92.462881,
+    "cutoff_previous": 392.261773
+  },
+  "observed_inside_hold": {
+    "begin": {
+      "unix": 1794511631.5438814,
+      "elapsed_stock_s": 94.462881,
+      "retrans": 8815,
+      "rto": 0
+    },
+    "end": {
+      "unix": 1794511929.3413084,
+      "elapsed_stock_s": 392.260308,
+      "retrans": 160443,
+      "rto": 0
+    },
+    "retrans": 151628,
+    "rto": 0
+  },
+  "true_scored_hold": {
+    "retrans_min_max": [
+      151628,
+      152650
+    ],
+    "rto_min_max": [
+      0,
+      0
+    ]
+  },
+  "full_scored_ramp_and_hold": {
+    "retrans_min_max": [
+      160437,
+      160631
+    ],
+    "rto_min_max": [
+      0,
+      0
+    ]
+  },
+  "after_score_before_nstat": {
+    "retrans_min_max": [
+      28623,
+      28817
+    ],
+    "rto_min_max": [
+      12117,
+      12117
+    ]
+  },
+  "nstat_outside_observed_hold": {
+    "total_retrans": 37632,
+    "through_first_in_hold_observation": 8815,
+    "after_last_in_hold_observation": 28817
+  },
+  "final_nstat_file": "net-tr62a5fa7s.txt",
+  "final_nstat_file_mtime_unix": 1794511932.009136,
+  "final_nstat_file_mtime_after_cutoff_s": 1.928136,
+  "final_namespace_counters": {
+    "TcpRetransSegs": 189260,
+    "TcpExtTCPLossProbes": 177143,
+    "TcpExtTCPLossProbeRecovery": 0,
+    "TcpExtTCPDSACKRecv": 161649,
+    "TcpExtTCPDSACKRecvSegs": 161649,
+    "TcpExtTCPFastRetrans": 0,
+    "TcpExtTCPSlowStartRetrans": 0,
+    "TcpExtTCPSynRetrans": 0,
+    "TcpExtTCPTimeouts": 12117,
+    "TcpExtTCPSpuriousRTOs": 0,
+    "TcpExtTCPSACKReorder": 0,
+    "TcpExtTCPRenoReorder": 0,
+    "TcpExtTCPTSReorder": 0,
+    "TcpExtTCPLossUndo": 597,
+    "TcpExtTCPLostRetransmit": 1388,
+    "TcpExtTCPZeroWindowDrop": 0,
+    "TcpExtTCPWinProbe": 0,
+    "TcpExtTCPRetransFail": 0
+  },
+  "files_sha256": {
+    "net-tr62a5fa7s.txt": "953a299fee583caa5ee74d4bce483dec2b5b7aa60bbb696768334b85170a3ff8",
+    "timing.json": "471cdf3518205bf7113548f7a1e373070b34b455ce753a78f5d86fd57f63ddca",
+    "telemetry.jsonl": "2aa2628a94c0c266cb8efb6d9a877beb1e79dc5286d7a9f4c109ec65026dfded",
+    "network-samples.jsonl": "565b8573b9329f0de82498230817819435994c07e902f9cfa4cfe82af52cb29d"
+  }
+}

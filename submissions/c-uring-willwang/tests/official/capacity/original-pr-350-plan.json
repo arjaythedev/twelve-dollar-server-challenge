@@ -1,0 +1,16 @@
+{
+  "purpose": "Compare the exact organizer-scored PR with the release at its 350,000-user target. The prior PR already passed 345,000 locally. A same-load result measures the size of the release improvement independent of the five published competitors.",
+  "tag": "hash512k-quiet-original-pr-350-h1",
+  "entry": "stock",
+  "source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+  "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+  "users": 350000,
+  "ramp_s": 105,
+  "hold_s": 300,
+  "fixture_reference_sha256": "38ee68575fdb739e745c4f83cfa64be26dcab8f367fd8117c7d311bdac1b0b83",
+  "prior_dispatch_sha256": "f43741f8f06f85fdd25e40e5d641ccf397b2c7ac46b2b54fc1ca85a091b90160",
+  "new_dispatch_sha256": "58f3eac2fb40495ce5196100bded6cac292d4ff8b2d332049d48ac228e034ae0",
+  "after": "large512k-quiet-stock-sqlite-350-p1",
+  "release_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+  "official_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650"
+}

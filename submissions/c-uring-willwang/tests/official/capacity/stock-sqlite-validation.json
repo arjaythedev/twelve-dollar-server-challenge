@@ -1,0 +1,90 @@
+{
+  "checkout_validation": {
+    "details": {
+      "cpu_allowed": "9",
+      "effective_capabilities": "0000000000000000",
+      "entrypoint": "/home/dev-user/code/twelve-dollar-server-challenge/submissions/c-uring-willwang/start.sh",
+      "healthy_sqlite_http_200": true,
+      "io_uring_fds": 1,
+      "network_namespace": "net:[4026533867]",
+      "new_temp_seed_open_by_service": true,
+      "owned_ipv4_tcp_loopback_listener": true,
+      "process_executable": "/home/dev-user/code/twelve-dollar-server-challenge/submissions/c-uring-willwang/bin/server",
+      "running_elf_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "subprocess_cmdline": "/home/dev-user/code/twelve-dollar-server-challenge/submissions/c-uring-willwang/bin/server",
+      "uids": [
+        1000,
+        1000,
+        1000,
+        1000
+      ]
+    },
+    "differential_layouts": [
+      "empty",
+      "short",
+      "dense",
+      "no-likes",
+      "no-recent-likes",
+      "partial",
+      "disorder",
+      "time-ties",
+      "sparse",
+      "sparse-ordered",
+      "small-pages",
+      "overflow",
+      "orphan"
+    ],
+    "log_sha256": {
+      "differential.log": "c9b01abe68559cc6f239907e102f1e8b3408f868f9deccb3345c9051be106ee8",
+      "official.log": "fbaeec6e6490fa0a4aea68392efd1c40bc27733108e63d1dce3e0b4244cad798"
+    },
+    "official_api_passes": 42,
+    "runtime_report_sha256": "35aec4e69eccb3f8ae526dabe0db405eeb9578aef51e4edc069af17d992ed82d"
+  },
+  "earlier_official_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+  "earlier_official_source_differences": [
+    "buffer.c",
+    "reactor.c"
+  ],
+  "identical_object_hashes_vs_independent_clean_build": {
+    "app.o": "8586840ad95843341f1066a81d874b0f9edc37b481929b9017d85684d91271f3",
+    "buffer.o": "381a10e453834fd6f3d362377a8fcf75e340328209aabd72e1a17b8318f09643",
+    "database.o": "1f005b1133e34e422e9fdb6ec40347f7a0fed250fd4b59971d8e4f114c97cfba",
+    "main.o": "32b7ef6c0b5b4404f3301161e8eef417337d663be1504bcea7ce0376af9bc04a",
+    "reactor.o": "9b80b313bb53ed02fb2e890e5fb7d9fae17edba856a4aa42595efb41cae73416",
+    "reader.o": "4af37d10281bb50a6ad0305609bb15deafcc7d88d2804b7be5c5d7ccc289f14e",
+    "wal.o": "1a9a003d04107451db3e984572169298da07ce79bfe08c7719a008a09e0df844"
+  },
+  "independent_native_api": {
+    "official_http_failures": 0,
+    "official_http_passes": 42,
+    "sql_differential_passes": 13,
+    "transport": "io_uring on ordinary Linux TCP"
+  },
+  "independent_qualification_log_sha256": {
+    "differential.log": "c9b01abe68559cc6f239907e102f1e8b3408f868f9deccb3345c9051be106ee8",
+    "official.log": "e8d3685a60990831040f105298144b4f0238fe35b0ccd62c84b7a2d188bda2c9"
+  },
+  "local_native_elf_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+  "make_recorded_sqlite_dependency": "build/reader.o: reader.c vendor/sqlite3.c challenge.h",
+  "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+  "source_sha256": {
+    "Makefile": "671d6c5355de149564ab564abd7c247ee906ab4d35ec3ede850bae6165ee3da8",
+    "app.c": "08e1dea645b9ade17bad84b91f25d1bc9c19589a7eedb830e576548e8187ef53",
+    "buffer.c": "375101deaf6bf4e5922d315532cb670968190e36195f5fbabdb65fba36d91142",
+    "build.sh": "113a252867c151c95fdc2216e39c778f3ec5d7f7d621358b0611b28384fd1201",
+    "challenge.h": "21a9e3bca047f155e8eb126c74722a0bcf9138137c42285ad1940c6f1e292348",
+    "database.c": "1cc68bb29afbd487823cbde4d76611aef641bf9bedabd762a217a0688f9a0bc5",
+    "install.sh": "e7c1e7c0fb06317e990014a375559c996026b9a51d3aa9de16f0a363eedc15e9",
+    "json_input.h": "25ace3c600a1c765a9345c1da7cb35457ec408cb8ce917a5d7a32b00af610429",
+    "main.c": "8c98fd7d33fde7bbda83d612d2b29b8b527d2122820b9203c1ce60d6a8dad731",
+    "reactor.c": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+    "reader.c": "c202d87d232540cf4d6381ee533bd6326699b5a59aa3af8805a25337b9d1af17",
+    "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+    "wal.c": "e0af115bd229a38d2533ce0c50a9dbc9ced6d18d2c23ab315b0c1ae29fd85433"
+  },
+  "vendor_sha256": {
+    "sqlite3.c": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+    "sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "tag": "hash512k-quiet-pcache-selected-400-h1",
+  "app": "adapter",
+  "order": 7,
+  "users": 400000,
+  "hold": 300,
+  "ramp_s": 120,
+  "server_sha256": "b4ed5678e37895d8323ecacf67707e2bdd08a4d499efcbfd7ee2e5b1a8362bdb",
+  "scope": "One selected-executable diagnostic after the independently registered continuation. No retry or duplicate launch.",
+  "launch_preflight": [
+    {
+      "log": "selected-400k-launch-import.log",
+      "sha256": "6ec1525c773cc2fa22c80781d123d19f36efcfc03cbd909e7864bddbfa4e8a6a",
+      "result": "Python import rejected before runner invocation.",
+      "trial_created": false,
+      "load_started": false
+    },
+    {
+      "log": "selected-400k-launch-affinity.log",
+      "sha256": "6003bf84a082279961e44a8a1867587fb0830b7664f0a8f16cfa20242c575a5f",
+      "result": "Runner rejected manager-only CPU affinity with exit 2 before fixture creation.",
+      "trial_created": false,
+      "load_started": false
+    }
+  ],
+  "orchestrator_cpus": "0-15",
+  "frozen_fixture_reference_sha256": "38ee68575fdb739e745c4f83cfa64be26dcab8f367fd8117c7d311bdac1b0b83",
+  "score_hold_lock": "cpu9-bench.lock"
+}

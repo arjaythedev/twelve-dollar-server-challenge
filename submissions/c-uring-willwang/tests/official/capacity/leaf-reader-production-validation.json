@@ -1,0 +1,63 @@
+{
+  "verified_at_utc": "2026-11-13T03:38:17.015732+00:00",
+  "production_elf_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+  "build": {
+    "verified_production_inputs": 16,
+    "verified_release_objects": 7,
+    "generated_sqlite_sha256": "200c362e7e677d1f81ac961a072cafdbaf341fc2612aa8b49fc8a974d8caa5ea",
+    "actual_checkout_and_frozen_sources_objects_and_elf_identical": true
+  },
+  "network": {
+    "kernel": "6.8.0-147-generic",
+    "interfaces": [
+      "lo"
+    ],
+    "isolated_namespace_observed_distinct_from_parent": true,
+    "service_uid": 1000,
+    "effective_capabilities": "0000000000000000",
+    "service_cpu": "9",
+    "live_io_uring_descriptors": 1,
+    "owned_ipv4_tcp_loopback_listener_and_200_sqlite_health": true,
+    "startup": "actual submissions/c-uring-willwang/start.sh execs bin/server"
+  },
+  "fresh_tests": {
+    "organizer": "test/run.sh",
+    "official_passed": 42,
+    "official_failed": 0,
+    "differential_started_checkout_start_sh": true,
+    "differential_layouts_passed": 13,
+    "new_databases_in_private_tmpfs_and_removed_after_suite": true
+  },
+  "rehash_of_prior_tests": {
+    "checked_in_receipt": {
+      "path": "submissions/c-uring-willwang/tests/official/capacity/sqlite-consumed-leaf.json",
+      "commit": "f063c55eb339b272b60d4fc73373631d82b936e2",
+      "sha256": "edac75a1b126f6846202de548186d24ba0eec06cfb8c6f97f5bfb4976970d9f2"
+    },
+    "oracle_layouts": 17,
+    "sqlite_release_comparisons": 3067,
+    "sqlite_debug_asan_ubsan_comparisons": 3067,
+    "visibility_comparisons_per_database": 12,
+    "visibility_databases": [
+      "hot4096",
+      "overflow512"
+    ],
+    "visibility_total": 24,
+    "sqlite_scope": "Archived candidate SQL bytes and independent-handle commit, snapshot, rollback and checkpoint checks; reproduced from case-level evidence. They were not rerun during HTTP validation."
+  },
+  "test_entrypoints_sha256": {
+    "test/run.sh": "4be46e55b8e9f96b1453eb47c6a0ec60b70df6885aac4eb4eaa5e7513e8c5536",
+    "test/test.sh": "679e722044fd1f366d85093232e7f2ec2e3398ea312032dd9eb6cbdf8b17306a",
+    "submissions/c-uring-willwang/tests/differential.py": "d9e674e572816890f5dad2299ccb30946bc4ae73e2bf1d27ea5d916a59a6aabe"
+  },
+  "evidence_sha256": {
+    "identity.json": "a57f1e8ce050cad426e5d1f30e71b55d90f031184986048fa10aba7e8cd1477d",
+    "runtime.json": "8065cd9de1526559b92fcf7d5db35dd240f98b0310cba545e093eee5e98dd55e",
+    "official.log": "d87318d74021c200ba9acef30f0d27b43c5a30b89be2655f81b513c41a163336",
+    "differential.log": "c9b01abe68559cc6f239907e102f1e8b3408f868f9deccb3345c9051be106ee8",
+    "server.log": "fc3d42bf28c6cd8b54901c097a52f5cbf2b7a5346eedd626333abcbe370cf384",
+    "identity.py": "053ad049e55e30ead7503fb7d3f4fe63cf28b64e52f6b1c996e4cf0f41d197c3",
+    "runtime.py": "b57df8633d01e425f266031c7b3dc27c83997e02787ebaeb25736e859f1f6e7c",
+    "receipt.py": "b2cc0d01809238b0485f8b534676b6e70671d597943d4b1467e84ee55d2cddd2"
+  }
+}

@@ -1,0 +1,229 @@
+{
+  "experiment": "Application-only stock SQLite cursor calls to traverse consumed pages. Official submission eligibility rulings preserved in upstream leaderboard 63a9b9ea449e686260bd55e6639a1545db18a407. Capacity must be measured separately.",
+  "before": {
+    "source": "0142ba23cd06969938941dac17e424ca7f3357cd reader with the branch\u2019s explicit-slot reactor and fused JSON rendering",
+    "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+    "reader_sha256": "c202d87d232540cf4d6381ee533bd6326699b5a59aa3af8805a25337b9d1af17"
+  },
+  "candidate": {
+    "server_sha256": "5f295dac29915b7c0d8fdea5a91d1a4d3cb2209bc8c2277af1862394db6780c5",
+    "reader_sha256": "f583411d87254cf782c3ced11deb778d343dc0a1569076d2db9693fb79f7d4c0",
+    "pristine_sqlite_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+    "patch_sha256": "92166959658fccb3e88740f37438e941c8cec72eb3f26fbe132e4fbecff58f25"
+  },
+  "test_cpu": 9,
+  "owns_exclusive_component_lock": true,
+  "service_cpu": 10,
+  "all_6_pairs": {
+    "hot": {
+      "feed": {
+        "pairs": 6,
+        "baseline_median": 57936.4,
+        "candidate_median": 24203.06,
+        "paired_pct": [
+          -58.176520264713915,
+          -59.28631718951824,
+          -57.984793920048446,
+          -58.436372925638366,
+          -58.35312067814803,
+          -57.96441471367855
+        ],
+        "median_paired_pct": -58.26482047143097,
+        "faster_pairs": 6
+      },
+      "point": {
+        "pairs": 6,
+        "baseline_median": 10127.33,
+        "candidate_median": 8406.885,
+        "paired_pct": [
+          -16.656764400876668,
+          -19.732821952503375,
+          -15.969925392209339,
+          -16.995821350831765,
+          -17.18776660324899,
+          -16.861474114049834
+        ],
+        "median_paired_pct": -16.9286477324408,
+        "faster_pairs": 6
+      },
+      "feed_p99": {
+        "pairs": 6,
+        "baseline_median": 83363.5,
+        "candidate_median": 49218.5,
+        "paired_pct": [
+          -40.55348080053625,
+          -46.335032711200576,
+          -40.29549306949737,
+          -41.35773331880953,
+          -44.716263639543676,
+          -40.22899469874852
+        ],
+        "median_paired_pct": -40.955607059672886,
+        "faster_pairs": 6
+      },
+      "point_p99": {
+        "pairs": 6,
+        "baseline_median": 33334.5,
+        "candidate_median": 30541.0,
+        "paired_pct": [
+          -9.630258727895901,
+          -7.58059745637385,
+          -4.783382789317503,
+          -6.818744583384917,
+          -8.27065442700622,
+          -13.042284459088416
+        ],
+        "median_paired_pct": -7.9256259416900345,
+        "faster_pairs": 6
+      }
+    },
+    "moving": {
+      "feed": {
+        "pairs": 6,
+        "baseline_median": 2953.3999999999996,
+        "candidate_median": 2895.0,
+        "paired_pct": [
+          -0.2673796791443861,
+          -6.335954438080449,
+          -2.7196019766699053,
+          -0.1003203779812889,
+          1.3016925492933318,
+          -1.2482521059991147
+        ],
+        "median_paired_pct": -0.7578158925717504,
+        "faster_pairs": 5
+      },
+      "point": {
+        "pairs": 6,
+        "baseline_median": 1670.5,
+        "candidate_median": 1663.85,
+        "paired_pct": [
+          -0.09788327419552045,
+          -1.3045569315859096,
+          -2.149472825770382,
+          -0.675064794165503,
+          0.6855030996661959,
+          -0.8842775452455376
+        ],
+        "median_paired_pct": -0.7796711697055203,
+        "faster_pairs": 5
+      },
+      "weighted": {
+        "pairs": 6,
+        "baseline_median": 2330.209287018787,
+        "candidate_median": 2287.8524664123106,
+        "paired_pct": [
+          -0.20552742804181845,
+          -4.576335254953634,
+          -2.511087552084801,
+          -0.3009946927377882,
+          1.0742757734621522,
+          -1.1149263889965177
+        ],
+        "median_paired_pct": -0.707960540867153,
+        "faster_pairs": 5
+      }
+    },
+    "http": {
+      "whole_process": {
+        "pairs": 6,
+        "baseline_median": 2736.2202623347907,
+        "candidate_median": 2741.843676909316,
+        "paired_pct": [
+          -0.8951117182916857,
+          -2.1640642217799155,
+          -0.6338104863657379,
+          -0.514654993574204,
+          1.325964013414782,
+          2.5313970110629747
+        ],
+        "median_paired_pct": -0.5742327399699709,
+        "faster_pairs": 4
+      },
+      "issuer": {
+        "pairs": 6,
+        "baseline_median": 2494.697387207707,
+        "candidate_median": 2505.8736770759833,
+        "paired_pct": [
+          -0.5732484830899831,
+          -0.3565592496459047,
+          -0.6885902772338914,
+          -0.5072226772956157,
+          1.4357843488469024,
+          1.8994393661954323
+        ],
+        "median_paired_pct": -0.43189096347076017,
+        "faster_pairs": 4
+      },
+      "feed_p99": {
+        "pairs": 6,
+        "baseline_median": 4797.0,
+        "candidate_median": 4877.5,
+        "paired_pct": [
+          3.5512847294756567,
+          1.054372544965898,
+          1.3080444735120933,
+          1.4562096941959535,
+          0.8321198252548401,
+          1.9009818257781586
+        ],
+        "median_paired_pct": 1.3821270838540234,
+        "faster_pairs": 0
+      },
+      "point_p99": {
+        "pairs": 6,
+        "baseline_median": 991.5,
+        "candidate_median": 1001.5,
+        "paired_pct": [
+          0.0,
+          -0.09980039920159944,
+          -2.059732234809475,
+          -1.9569471624266144,
+          5.252317198764156,
+          1.0080645161290258
+        ],
+        "median_paired_pct": -0.04990019960079972,
+        "faster_pairs": 3
+      }
+    }
+  },
+  "pooled_http": {
+    "baseline_process_ns_per_request": 2744.4589136606314,
+    "candidate_process_ns_per_request": 2742.4616349720463,
+    "change_pct": -0.07277495314809146,
+    "requests": 2159988
+  },
+  "verification": {
+    "native_separate_sql_oracle_checks": 3275,
+    "oracle_layouts": 19,
+    "signed_rowid_layouts": [
+      "signed512.db",
+      "signed4096.db"
+    ],
+    "two_open_connections": 24,
+    "proof_streams": [
+      {
+        "arm": "base",
+        "all": 200001,
+        "sha256": "72c63241d806a8589eae2949361684d9f9478c73d9e58e04edfe2b2f2aabec60",
+        "reopened_sha256": "5d8aaa429f0192b5eb8d9b1b76b8b314d606cafdcfd96bff11491536fa203d05"
+      },
+      {
+        "arm": "edge",
+        "all": 200001,
+        "sha256": "72c63241d806a8589eae2949361684d9f9478c73d9e58e04edfe2b2f2aabec60",
+        "reopened_sha256": "5d8aaa429f0192b5eb8d9b1b76b8b314d606cafdcfd96bff11491536fa203d05"
+      }
+    ],
+    "asan_ubsan_sqlite_debug_sql_oracle_checks": 3275,
+    "leak_detection": "disabled because LeakSanitizer cannot suspend threads in this ptraced execution environment; native ASan bounds and UBSan remained enabled",
+    "official_api_and_independent_differential": {
+      "official": 42,
+      "differential": 13,
+      "network": "isolated loopback",
+      "cpu": 9,
+      "server": "server"
+    }
+  },
+  "input_sha256": "e2a5ef7f29cd8ff63eadd7f6af54c4bac1dc9aca810b6dcbb8a0148100ec4ddd"
+}

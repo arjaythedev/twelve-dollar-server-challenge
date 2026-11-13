@@ -1,0 +1,383 @@
+{
+  "conservative": {
+    "checks": {
+      "differential_sql_control_candidate": [
+        13,
+        13
+      ],
+      "durable_likes": 16912,
+      "http": 359936,
+      "official_api_control_candidate": [
+        42,
+        42
+      ],
+      "primary_responses": 322048,
+      "six_real_handoff_checks_all_passing": true,
+      "tcp_connections": 37888
+    },
+    "coverage": {
+      "fatal_spill_errors": 0,
+      "ordinary_admissions": 15,
+      "peak_ordinary": 10,
+      "promoted": 15,
+      "still_ordinary_after_drain": 0
+    },
+    "mixed": [
+      {
+        "application_and_napi_cpu_delta_us_per_http": 4.078057069510265,
+        "block": 0,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          3.749156,
+          2.025364
+        ],
+        "offer": 18000,
+        "sched_p99_current_cohort_ms": [
+          24.722429,
+          4.079314
+        ],
+        "throughput_delta_pct": 1.7968456847610836,
+        "whole_cpu_delta_us_per_http": 8.886255924170612
+      },
+      {
+        "application_and_napi_cpu_delta_us_per_http": 0.06752700434439163,
+        "block": 1,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          13.730261,
+          5.920571
+        ],
+        "offer": 27000,
+        "sched_p99_current_cohort_ms": [
+          24.876656,
+          24.535940999999998
+        ],
+        "throughput_delta_pct": 0.14306356497866268,
+        "whole_cpu_delta_us_per_http": 0.0
+      },
+      {
+        "application_and_napi_cpu_delta_us_per_http": -0.3371561018957294,
+        "block": 2,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          1.3144179999999999,
+          1.373594
+        ],
+        "offer": 18000,
+        "sched_p99_current_cohort_ms": [
+          4.06241,
+          4.093292
+        ],
+        "throughput_delta_pct": -0.005971097751678034,
+        "whole_cpu_delta_us_per_http": -1.9747235387045805
+      },
+      {
+        "application_and_napi_cpu_delta_us_per_http": 0.015059784755131034,
+        "block": 3,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          11.706318,
+          5.461889
+        ],
+        "offer": 27000,
+        "sched_p99_current_cohort_ms": [
+          13.769604,
+          24.201815
+        ],
+        "throughput_delta_pct": 5.859341680034635,
+        "whole_cpu_delta_us_per_http": 0.0
+      }
+    ]
+  },
+  "conservative_prototype_elf": "19431b73e206980336cc21001b7762910d823e4f54d276a631509e804512314e",
+  "current_elf": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+  "decision": "Keep the current release. The working set and handoff work, and two higher-offer pairs improved fresh p99. Whole-core cost and throughput did not improve repeatedly. A favorably placed CPU saving of 10.7\u201311.6ms at the first observed 350k divergence is small compared with its 284.0ms service-equivalent cost. Scope is component measurements; the high-load capacity boundary of these scratch prototypes was not measured.",
+  "earlier": {
+    "checks": {
+      "differential_sql_control_candidate": [
+        13,
+        13
+      ],
+      "durable_likes": 16912,
+      "http": 359936,
+      "official_api_control_candidate": [
+        42,
+        42
+      ],
+      "primary_responses": 322048,
+      "six_actual_ownership_tests_base_handoff_path_all_passing": true,
+      "tcp_connections": 37888
+    },
+    "coverage": {
+      "fatal_spill_errors": 0,
+      "ordinary_admissions": 1961,
+      "peak_ordinary": 341,
+      "promoted": 1642,
+      "still_ordinary_after_drain": 0
+    },
+    "excluded_established_phase": {
+      "cohort": {
+        "client_retrans": 0,
+        "client_tx_drops": 0,
+        "service_retrans": 0,
+        "service_rx_drops": 0
+      },
+      "current": {
+        "client_retrans": 0,
+        "client_tx_drops": 642,
+        "service_retrans": 256,
+        "service_rx_drops": 0
+      }
+    },
+    "mixed": [
+      {
+        "application_and_napi_cpu_delta_us_per_http": 1.533402498025275,
+        "block": 0,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          0.967264,
+          15.457336999999999
+        ],
+        "offer": 18000,
+        "sched_p99_current_cohort_ms": [
+          3.9946439999999996,
+          24.379209
+        ],
+        "throughput_delta_pct": -2.668617812199392,
+        "whole_cpu_delta_us_per_http": 0.4936808846761451
+      },
+      {
+        "application_and_napi_cpu_delta_us_per_http": -0.015053268167456224,
+        "block": 1,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          14.905999,
+          6.922814000000001
+        ],
+        "offer": 27000,
+        "sched_p99_current_cohort_ms": [
+          24.235536,
+          23.871523
+        ],
+        "throughput_delta_pct": -2.5296243239858462,
+        "whole_cpu_delta_us_per_http": 0.4936808846761451
+      },
+      {
+        "application_and_napi_cpu_delta_us_per_http": -0.49347585900474655,
+        "block": 2,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          4.016943,
+          1.855958
+        ],
+        "offer": 18000,
+        "sched_p99_current_cohort_ms": [
+          4.1331869999999995,
+          4.206427
+        ],
+        "throughput_delta_pct": 0.6007089839293878,
+        "whole_cpu_delta_us_per_http": 2.4684044233807256
+      },
+      {
+        "application_and_napi_cpu_delta_us_per_http": 0.4830560821485008,
+        "block": 3,
+        "equal_phase_counters": true,
+        "fresh_p99_current_cohort_ms": [
+          38.368867,
+          5.095299
+        ],
+        "offer": 27000,
+        "sched_p99_current_cohort_ms": [
+          27.944016,
+          24.451670999999997
+        ],
+        "throughput_delta_pct": 0.8835490843746463,
+        "whole_cpu_delta_us_per_http": 0.9873617693522903
+      }
+    ]
+  },
+  "earlier_prototype_elf": "6431b93c5311678993ba868f92db6e1d25f58138bd0cf7c80df0f1896e35da58",
+  "hashes": {
+    "component.json": "76078f0e5f7e2dfe09bb784d24e8411255f3ecaf5435b02e9d4aa09afc870e4c",
+    "early-http-summary.json": "37789c2e8a0c5267a5efa4b094cb9d8d888f351fb614593ebaf1fa7433a5a181",
+    "early-identity.json": "eb76f37fedc7a3b85010a5cf64d826b0f632905241bc4b9e4f48d1e955e70ae5",
+    "fixture.json": "e90fa0f3d903beb3eab6e45c27eeeb8ae34a3e1c0a159ddeb1bd93a10eb9cc0a",
+    "http-summary.json": "dbd666ad224229fd2bf06c74e8e7daef497e51e11086667d209c7611a9ccf946",
+    "identity.json": "2e50b98378cb1384d0b75ed3af786bd2fdc84b2a807a8c282e6e64eb2f45b14b",
+    "qa-early/result.json": "dc6be4df7ddf4ca9a6ea1a69ec5703a3376cffaf877adde489d93209510f041e",
+    "state-0.log": "a7d1a7786b30306d4a4694c5c6a4a4fe4de70a6dfc57f670b865850b01441459",
+    "state.c": "eedabe93494b6030dfb164830528f7916c76f25c27de32b636994f1e95edc87f",
+    "stock-windows.json": "05b491f737654e888505a9c910c5973102099cc942a3c0354fd248a742ed7f20"
+  },
+  "known_source_elf": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+  "known_source_revision": "cd4b88d",
+  "linux_kernel_data": {
+    "arms": 228,
+    "blocks": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "data_path_us": {
+      "1": {
+        "fixed_us_per_one_read_send_pair": 11.931443359374999,
+        "ordinary_minus_fixed_us_range_median": [
+          -2.0067500000000003,
+          0.4961953124999994,
+          0.8117656249999996
+        ],
+        "ordinary_slower_pairs": 4,
+        "ordinary_us_per_one_read_send_pair": 12.330640625000001
+      },
+      "16": {
+        "fixed_us_per_one_read_send_pair": 7.7234576822916665,
+        "ordinary_minus_fixed_us_range_median": [
+          -0.23386914062499997,
+          0.02661425781249971,
+          0.2612884114583336
+        ],
+        "ordinary_slower_pairs": 3,
+        "ordinary_us_per_one_read_send_pair": 7.628646809895833
+      },
+      "64": {
+        "fixed_us_per_one_read_send_pair": 7.499382649739584,
+        "ordinary_minus_fixed_us_range_median": [
+          -0.11589176432291648,
+          0.12657112630208367,
+          1.0901139322916675
+        ],
+        "ordinary_slower_pairs": 5,
+        "ordinary_us_per_one_read_send_pair": 7.7977954915364585
+      }
+    },
+    "groups": 39168,
+    "moved_work_estimate": {
+      "ordinary": {
+        "historical_weighted_issuer_us_moved_per_admission_range_median": [
+          0.48709746751473515,
+          0.6963395665753598,
+          0.8015025714920794
+        ],
+        "illustrative_ms_60000_fully_unmigrated": 41.78037399452159,
+        "illustrative_t85_to_90_ms_with_perfect_16718_deferrals": 11.641404874006865,
+        "method": "Weights from the precursor actual FILES_UPDATE width distribution at 300k, selecting measured lower width for any grouped bucket. The 350k arm did not record width. Excludes delayed migrations, extra ordinary data ops, watch rejection, close path and bookkeeping.",
+        "percent_initial_deficit_cost_explained_if_fully_busy": 4.098803589757767
+      },
+      "ordinary-sync": {
+        "historical_weighted_issuer_us_moved_per_admission_range_median": [
+          0.49353879369555753,
+          0.6389055825722116,
+          0.6740035909971447
+        ],
+        "illustrative_ms_60000_fully_unmigrated": 38.3343349543327,
+        "illustrative_t85_to_90_ms_with_perfect_16718_deferrals": 10.681223529442233,
+        "method": "Weights from the precursor actual FILES_UPDATE width distribution at 300k, selecting measured lower width for any grouped bucket. The 350k arm did not record width. Excludes delayed migrations, extra ordinary data ops, watch rejection, close path and bookkeeping.",
+        "percent_initial_deficit_cost_explained_if_fully_busy": 3.760734878591522
+      }
+    },
+    "observed_repeat_divergence": {
+      "lost_completions_first_minus_repeat": 8856,
+      "repeat_new_real_connections": 16718,
+      "repeat_whole_core_us_per_http": 32.07086531768694,
+      "required_cpu_ms_at_repeat_cost": 284.0195832534355,
+      "required_us_per_admitted_socket_at_repeat_cost_to_match": 16.988849339241266
+    },
+    "socket_iterations": 433152
+  },
+  "purpose": "Regular Linux TCP with a bounded, single-issuer ordinary descriptor working set and later fixed io_uring file handoff. Both prototypes tested only in a local component fixture.",
+  "request_totals_uninstrumented": {
+    "genuine_likes": 33824,
+    "http": 719872,
+    "tcp": 75776
+  },
+  "separate_untimed_recovery": {
+    "recovery_patch_sha256": "162b74c39a4c0db2832a9c4ddc0605939ba0dc0591eb36ed8a11e6adf1f23393",
+    "tested": {
+      "hashes": {
+        "early.c": "0f4ec5c634288509ebd56fa83e627e89d3a625115dd44abad4886d499b63340f",
+        "recovery-0.log": "5c091ea9b895c2d562ae8c86b2e30b7b2fe6e28e58fc65a226baab5477afa164",
+        "recovery-1.log": "5c091ea9b895c2d562ae8c86b2e30b7b2fe6e28e58fc65a226baab5477afa164",
+        "recovery-2.log": "5c091ea9b895c2d562ae8c86b2e30b7b2fe6e28e58fc65a226baab5477afa164",
+        "recovery-3.log": "5c091ea9b895c2d562ae8c86b2e30b7b2fe6e28e58fc65a226baab5477afa164",
+        "recovery-state": "4cbad9ebb9b8750104a53207afce40c5a632577b628d659595b3c43719efd999",
+        "recovery-state.c": "f8c224ee1e358e4b3071ac70f4516471cf42ad0aca72ea8530b256685b6b7b54",
+        "recovery.c": "3b86fc6c7b12b44fce6a0f9ebf9e4756079f1665192ac0053d304fff80441108",
+        "recovery.patch": "162b74c39a4c0db2832a9c4ddc0605939ba0dc0591eb36ed8a11e6adf1f23393"
+      },
+      "purpose": "Recovery-only experiment after timed comparisons; separate source SHA and executable. An earlier permanent rejection could defer unrelated accepted descriptors behind the long-lived rejected owner. This fix reassigns an unissued batch to another eligible fixed table without changing the active stream. Full comparison results correspond to the earlier source.",
+      "repeated_real_socket_checks": [
+        [
+          "ok partial registration, early edge, ordinary/fixed reads, fd reuse",
+          "ok close racing successful promotion and fixed teardown",
+          "ok new queued admission completes on a second bank while failed original owner remains idle",
+          "ok retained ordinary service after rejected handoff"
+        ],
+        [
+          "ok partial registration, early edge, ordinary/fixed reads, fd reuse",
+          "ok close racing successful promotion and fixed teardown",
+          "ok new queued admission completes on a second bank while failed original owner remains idle",
+          "ok retained ordinary service after rejected handoff"
+        ],
+        [
+          "ok partial registration, early edge, ordinary/fixed reads, fd reuse",
+          "ok close racing successful promotion and fixed teardown",
+          "ok new queued admission completes on a second bank while failed original owner remains idle",
+          "ok retained ordinary service after rejected handoff"
+        ],
+        [
+          "ok partial registration, early edge, ordinary/fixed reads, fd reuse",
+          "ok close racing successful promotion and fixed teardown",
+          "ok new queued admission completes on a second bank while failed original owner remains idle",
+          "ok retained ordinary service after rejected handoff"
+        ]
+      ],
+      "topology": {
+        "client": "bp4ed248dc",
+        "client_device": "tx4ed248d",
+        "client_mask": "0000",
+        "client_tso": [
+          "tcp-segmentation-offload: off"
+        ],
+        "cpu": 9,
+        "delay_us_client_to_server": 0,
+        "device": "np4ed248d",
+        "ehash": {
+          "bp4ed248dc": 8192,
+          "bp4ed248ds": 8192
+        },
+        "global_controls_read_only": {
+          "busy_poll": "0",
+          "busy_read": "0"
+        },
+        "mtu": 1500,
+        "napi": {
+          "device": "np4ed248d",
+          "ifindex": 2,
+          "namespace_inode": 4026534167,
+          "napi": [
+            {
+              "comm": "napi/np4ed248d-8910",
+              "cpus": [
+                9
+              ],
+              "id": 8910,
+              "ifindex": 2,
+              "pid": 3419218,
+              "starttime": "12286860"
+            }
+          ],
+          "rx_rps_cpus": [
+            "0000"
+          ],
+          "threaded": "1"
+        },
+        "server": "bp4ed248ds",
+        "server_mask": "0000"
+      }
+    },
+    "timing_scope": "The reported HTTP timings used the earlier executables. A separate recovery patch rerouted an unpublished admission after the kernel permanently rejected the original bank. Four real-kernel runs exercised both live connections."
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "decision": "retain every ADD completion in selected reactor",
+  "selected_elf_sha256": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+  "kernel_release": "6.8.0-147-generic",
+  "selected_reactor_sha256": "189ae66ae62e8889355cb076bcb9c79dcb8c16f02d060223789cbcdc886d2b14",
+  "results_rows": 33,
+  "fully_registered_at_last_completion_across_split_submissions": {
+    "complete": 0,
+    "trials": 16,
+    "registered_at_that_instant": 2,
+    "group_size": 4
+  },
+  "all_registrations_reported_individually_when_fallback_used": true,
+  "native_evidence_sha256": {
+    "kernel-extended.jsonl": "5b450666feb677dd707506e0c9a370281479092135bc6595c265d86cf4bbfe7b",
+    "restriction.jsonl": "25e37c3ddf43ad7aee843d0acd4bae51159e2d63196dca5cb7b8f5ee9e54a889"
+  }
+}

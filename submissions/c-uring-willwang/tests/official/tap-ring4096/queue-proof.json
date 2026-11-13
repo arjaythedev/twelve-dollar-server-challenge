@@ -1,0 +1,688 @@
+{
+  "profile": "single-queue-split-polling-tap-external-txring4096",
+  "switch_elf_sha256": "54935ba0c1222b0f2a1267e051c84c7d6c07bfbf1be070121be541e28e58c4f1",
+  "linux_6_8_unread_native_driver_controls": [
+    {
+      "new_device_initial_txqlen": 1000,
+      "private_test_txqlen": 1000,
+      "attempted_ipv4_frames": 1100,
+      "socket_errors": 0,
+      "service_tap_tx_drop_delta": 100,
+      "qdisc_packets_delta": 1100,
+      "qdisc_drop_delta": 0,
+      "current_sender_trace_drop_sites": [
+        {
+          "count": 100,
+          "reason": "FULL_RING",
+          "site": "tun_net_xmit+0x31b"
+        }
+      ],
+      "raw_proof_sha256": "b08a71ace26e597f71a4478cae320b811dbdf43b9629fde5e1bc7ae631cd1b40"
+    },
+    {
+      "new_device_initial_txqlen": 1000,
+      "private_test_txqlen": 4096,
+      "attempted_ipv4_frames": 4196,
+      "socket_errors": 0,
+      "service_tap_tx_drop_delta": 100,
+      "qdisc_packets_delta": 4196,
+      "qdisc_drop_delta": 0,
+      "current_sender_trace_drop_sites": [
+        {
+          "count": 100,
+          "reason": "FULL_RING",
+          "site": "tun_net_xmit+0x31b"
+        }
+      ],
+      "raw_proof_sha256": "7014f9ce5789e0b2a7764be31e366a85e09954fee42a920146176511d78f2136"
+    }
+  ],
+  "capacity_diagnostic_source_sha256": "7712f52a4a3d8a749303be49ca577286cb98248d471882c08619251173be518e",
+  "four_core_route": {
+    "service_cpu": [
+      10
+    ],
+    "service_napi_count": 1,
+    "external_cpus": [
+      2,
+      5,
+      8,
+      14
+    ],
+    "service_ehash": 16384,
+    "one_way_delay_us": 75,
+    "service_and_four_generator_interfaces": [
+      {
+        "mtu": 1500,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "txqlen": 4096
+      },
+      {
+        "mtu": 1500,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "txqlen": 4096
+      },
+      {
+        "mtu": 1500,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "txqlen": 4096
+      },
+      {
+        "mtu": 1500,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "txqlen": 4096
+      },
+      {
+        "mtu": 1500,
+        "num_rx_queues": 1,
+        "num_tx_queues": 1,
+        "txqlen": 4096
+      }
+    ],
+    "native_ring_original_and_after_by_endpoint": {
+      "generator-1": {
+        "ifindex": 2,
+        "new": 4096,
+        "original": 1000
+      },
+      "generator-2": {
+        "ifindex": 2,
+        "new": 4096,
+        "original": 1000
+      },
+      "generator-3": {
+        "ifindex": 2,
+        "new": 4096,
+        "original": 1000
+      },
+      "generator-4": {
+        "ifindex": 2,
+        "new": 4096,
+        "original": 1000
+      },
+      "service": {
+        "ifindex": 2,
+        "new": 4096,
+        "original": 1000
+      }
+    },
+    "workers": [
+      {
+        "cpu": 14,
+        "role": "server-egress",
+        "sources": [
+          0
+        ],
+        "destinations": []
+      },
+      {
+        "cpu": 2,
+        "role": "client-ingress",
+        "sources": [
+          1,
+          4
+        ],
+        "destinations": [
+          1
+        ]
+      },
+      {
+        "cpu": 5,
+        "role": "client-ingress",
+        "sources": [
+          2
+        ],
+        "destinations": [
+          2,
+          4
+        ]
+      },
+      {
+        "cpu": 8,
+        "role": "client-ingress",
+        "sources": [
+          3
+        ],
+        "destinations": [
+          3
+        ]
+      }
+    ],
+    "handoff_destinations": [
+      {
+        "source": 0,
+        "destination": 1,
+        "producer_cpu": 14,
+        "consumer_cpu": 2,
+        "enqueued": 75,
+        "delivered": 75,
+        "written": 75,
+        "queue_peak": 6,
+        "queue_depth": 0,
+        "full_polls": 0,
+        "write_retries": 0,
+        "dropped": 0
+      },
+      {
+        "source": 0,
+        "destination": 2,
+        "producer_cpu": 14,
+        "consumer_cpu": 5,
+        "enqueued": 74,
+        "delivered": 74,
+        "written": 74,
+        "queue_peak": 6,
+        "queue_depth": 0,
+        "full_polls": 0,
+        "write_retries": 0,
+        "dropped": 0
+      },
+      {
+        "source": 0,
+        "destination": 3,
+        "producer_cpu": 14,
+        "consumer_cpu": 8,
+        "enqueued": 74,
+        "delivered": 74,
+        "written": 74,
+        "queue_peak": 6,
+        "queue_depth": 0,
+        "full_polls": 0,
+        "write_retries": 0,
+        "dropped": 0
+      },
+      {
+        "source": 0,
+        "destination": 4,
+        "producer_cpu": 14,
+        "consumer_cpu": 5,
+        "enqueued": 74,
+        "delivered": 74,
+        "written": 74,
+        "queue_peak": 6,
+        "queue_depth": 0,
+        "full_polls": 0,
+        "write_retries": 0,
+        "dropped": 0
+      }
+    ],
+    "checked_tcp": [
+      {
+        "count": 32,
+        "mss": 1448,
+        "bytes": 86296,
+        "service_receive_cpus": [
+          10
+        ],
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      },
+      {
+        "count": 32,
+        "mss": 1448,
+        "bytes": 86296,
+        "service_receive_cpus": [
+          10
+        ],
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      },
+      {
+        "count": 32,
+        "mss": 1448,
+        "bytes": 86296,
+        "service_receive_cpus": [
+          10
+        ],
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      },
+      {
+        "count": 32,
+        "mss": 1448,
+        "bytes": 86296,
+        "service_receive_cpus": [
+          10
+        ],
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      }
+    ],
+    "independent_socket_cpu_napi_per_lane": [
+      [
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ]
+      ],
+      [
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ]
+      ],
+      [
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ]
+      ],
+      [
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ],
+        [
+          10,
+          0
+        ]
+      ]
+    ],
+    "icmp_rtt_ms": [
+      {
+        "responses": 20,
+        "min": 0.227,
+        "median": 0.248,
+        "max": 0.283
+      },
+      {
+        "responses": 20,
+        "min": 0.212,
+        "median": 0.232,
+        "max": 1.09
+      },
+      {
+        "responses": 20,
+        "min": 0.228,
+        "median": 0.2455,
+        "max": 1.06
+      },
+      {
+        "responses": 20,
+        "min": 0.222,
+        "median": 0.244,
+        "max": 1.08
+      }
+    ],
+    "relay_at_exit": {
+      "gso": 52,
+      "partial_checksum": 415,
+      "forwarded_events": 642,
+      "bad_frame": 0,
+      "queue_overflow": 0,
+      "full_polls": 0,
+      "write_retries": 0
+    },
+    "native_drop_count_at_proof": 0,
+    "port_write_drops_after_join": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "reclaimed_napi": {
+      "created_threads": 1,
+      "unreclaimed_threads": []
+    }
+  },
+  "loss_timing_earlier_default_1000": {
+    "split-bank-300-p1": {
+      "raw_stock_pass": true,
+      "external_flags": [
+        "private TAP TX in tr2a557a8s reported a drop or error",
+        "private TAP TX in tr2a557a8c1 reported a drop or error"
+      ],
+      "strict_qualified": false,
+      "pre_cutoff_drop_intervals": [
+        {
+          "previous_sample_s": [
+            77.912,
+            78.052
+          ],
+          "loss_sample_s": [
+            86.067,
+            86.219
+          ],
+          "native_drop_delta": [
+            {
+              "endpoint": "generator-2",
+              "direction": "tx",
+              "driver_drop_delta": 144
+            }
+          ],
+          "last_fully_preceding_stock_window": {
+            "ending_s": 75,
+            "earliest_shard_window_start_s": 70,
+            "latest_shard_window_end_upper_bound_s": 76,
+            "scheduled_users": 250004,
+            "generator_open_connections": 241722,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              32.31,
+              32.31,
+              31.67,
+              31.99
+            ]
+          },
+          "first_fully_following_stock_window": {
+            "ending_s": 95,
+            "earliest_shard_window_start_s": 90,
+            "latest_shard_window_end_upper_bound_s": 96,
+            "scheduled_users": 300000,
+            "generator_open_connections": 300000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              1041.15,
+              1051.56,
+              1041.15,
+              1041.15
+            ]
+          },
+          "app_cgroup_pct_in_interval": 47.999,
+          "private_napi_pct_in_interval": [
+            51.188
+          ]
+        },
+        {
+          "previous_sample_s": [
+            143.238,
+            143.396
+          ],
+          "loss_sample_s": [
+            151.425,
+            151.582
+          ],
+          "native_drop_delta": [
+            {
+              "endpoint": "service",
+              "direction": "tx",
+              "driver_drop_delta": 1839
+            }
+          ],
+          "last_fully_preceding_stock_window": {
+            "ending_s": 140,
+            "earliest_shard_window_start_s": 135,
+            "latest_shard_window_end_upper_bound_s": 141,
+            "scheduled_users": 300000,
+            "generator_open_connections": 300000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              36.77,
+              36.77,
+              36.77,
+              36.77
+            ]
+          },
+          "first_fully_following_stock_window": {
+            "ending_s": 160,
+            "earliest_shard_window_start_s": 155,
+            "latest_shard_window_end_upper_bound_s": 161,
+            "scheduled_users": 300000,
+            "generator_open_connections": 300000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              91.85,
+              93.7,
+              91.85,
+              90.94
+            ]
+          },
+          "app_cgroup_pct_in_interval": 45.263,
+          "private_napi_pct_in_interval": [
+            48.627
+          ]
+        }
+      ],
+      "loss_timing_json_sha256": "9ba4e6a54168071c5e27872ad85349916ec52546c00d90f9ab0f74705b130c4b"
+    },
+    "split-kensac-280-h1": {
+      "raw_stock_pass": false,
+      "external_flags": [
+        "private TAP TX in tr53c7a5as reported a drop or error"
+      ],
+      "strict_qualified": false,
+      "pre_cutoff_drop_intervals": [
+        {
+          "previous_sample_s": [
+            94.736,
+            94.888
+          ],
+          "loss_sample_s": [
+            102.907,
+            103.054
+          ],
+          "native_drop_delta": [
+            {
+              "endpoint": "service",
+              "direction": "tx",
+              "driver_drop_delta": 697
+            }
+          ],
+          "last_fully_preceding_stock_window": {
+            "ending_s": 90,
+            "earliest_shard_window_start_s": 85,
+            "latest_shard_window_end_upper_bound_s": 91,
+            "scheduled_users": 280000,
+            "generator_open_connections": 280000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              10683.52,
+              10683.52,
+              10683.52,
+              10683.52
+            ]
+          },
+          "first_fully_following_stock_window": {
+            "ending_s": 110,
+            "earliest_shard_window_start_s": 105,
+            "latest_shard_window_end_upper_bound_s": 111,
+            "scheduled_users": 280000,
+            "generator_open_connections": 280000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              10369.32,
+              10266.65,
+              10266.65,
+              10064.36
+            ]
+          },
+          "app_cgroup_pct_in_interval": 48.399,
+          "private_napi_pct_in_interval": [
+            51.548
+          ]
+        }
+      ],
+      "loss_timing_json_sha256": "e6688e55aadb7e48417b4b4e5df8367bb222bcb90e5a3d4d9d5f66afc0044487"
+    },
+    "split-fixedpoll-300-p1": {
+      "raw_stock_pass": false,
+      "external_flags": [
+        "private TAP TX in tr7551711s reported a drop or error",
+        "private TAP TX in tr7551711c1 reported a drop or error"
+      ],
+      "strict_qualified": false,
+      "pre_cutoff_drop_intervals": [
+        {
+          "previous_sample_s": [
+            88.14,
+            88.412
+          ],
+          "loss_sample_s": [
+            96.448,
+            96.667
+          ],
+          "native_drop_delta": [
+            {
+              "endpoint": "service",
+              "direction": "tx",
+              "driver_drop_delta": 2221
+            },
+            {
+              "endpoint": "generator-2",
+              "direction": "tx",
+              "driver_drop_delta": 1759
+            }
+          ],
+          "last_fully_preceding_stock_window": {
+            "ending_s": 85,
+            "earliest_shard_window_start_s": 80,
+            "latest_shard_window_end_upper_bound_s": 86,
+            "scheduled_users": 283341,
+            "generator_open_connections": 274942,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              685.51,
+              539.89,
+              518.82,
+              518.82
+            ]
+          },
+          "first_fully_following_stock_window": {
+            "ending_s": 105,
+            "earliest_shard_window_start_s": 100,
+            "latest_shard_window_end_upper_bound_s": 106,
+            "scheduled_users": 300000,
+            "generator_open_connections": 300000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              271.72,
+              269.03,
+              269.03,
+              269.03
+            ]
+          },
+          "app_cgroup_pct_in_interval": 46.143,
+          "private_napi_pct_in_interval": [
+            53.74
+          ]
+        }
+      ],
+      "loss_timing_json_sha256": "09eff45c1dd4dceb3763f1e5b2350eb8563c95156bdf821d21ee942aebe814d0"
+    },
+    "split-rkkautsar-280-h1": {
+      "raw_stock_pass": false,
+      "external_flags": [
+        "private TAP TX in traca72eas reported a drop or error"
+      ],
+      "strict_qualified": false,
+      "pre_cutoff_drop_intervals": [
+        {
+          "previous_sample_s": [
+            197.068,
+            197.333
+          ],
+          "loss_sample_s": [
+            205.36,
+            205.648
+          ],
+          "native_drop_delta": [
+            {
+              "endpoint": "service",
+              "direction": "tx",
+              "driver_drop_delta": 1531
+            }
+          ],
+          "last_fully_preceding_stock_window": {
+            "ending_s": 195,
+            "earliest_shard_window_start_s": 190,
+            "latest_shard_window_end_upper_bound_s": 196,
+            "scheduled_users": 280000,
+            "generator_open_connections": 280000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              1321.98,
+              1321.98,
+              1321.98,
+              1321.98
+            ]
+          },
+          "first_fully_following_stock_window": {
+            "ending_s": 215,
+            "earliest_shard_window_start_s": 210,
+            "latest_shard_window_end_upper_bound_s": 216,
+            "scheduled_users": 280000,
+            "generator_open_connections": 280000,
+            "failures_in_window": 0,
+            "p99_ms_by_shard": [
+              2474.41,
+              2449.92,
+              2449.92,
+              2474.41
+            ]
+          },
+          "app_cgroup_pct_in_interval": 53.976,
+          "private_napi_pct_in_interval": [
+            46.023
+          ]
+        }
+      ],
+      "loss_timing_json_sha256": "dc0be2af3cbb992a6d445ab2b241d73d7203b0aded10ead9a9ca34f1a6386b08"
+    }
+  },
+  "python_fixture_sources_sha256": {
+    "router/assess.py": "c68870d2cca273d86ba61c3414918dbd5afa1755ff33b1d1019d500d22afc37c",
+    "router/launch.py": "98c24a29eb025a06285efc35d6ef2574d684f39143ce91fcbeec496b56f9c14a",
+    "router/measure.py": "9b50602d44262fb1eedab8f5c3cbaa2e72066bbf5ad4f51c432ad54dc6fbcb7d",
+    "router/run.py": "11c8d5ab51f1109e2aed86b7a07de5d0feeebbd5e45130d3e2c9b525f7bc3179",
+    "tap-poll/check_flow.py": "f52c9bc46d97f05874341002d7235ecb8ffdd3014118aaeb985eb0220406099a",
+    "tap-poll/run_tap.py": "7c683348b11e6d46c9ce9f61bde2d4785e5d8bb3236bf2640bc89b3380b7ae9a",
+    "tap-poll/tap_napi.py": "661138577ffa2e55fa7f7b9c49848b2afabaaaaaa9c835bdb0a099888e032061",
+    "tap-ring4096/run_buffered.py": "45c8b55da0976ddce1de069bd160427cfb9c4526c147e78a307202c19d1b58e6",
+    "tap-sharded/run_sharded.py": "ba70cc0b8e0331003bdd11d3c33f23efa3acfc6f6c929c998b2c00fe6222e596",
+    "tap-split/run_split.py": "ba90efc0e2d16d05c63b8c3fe624d77e5a846452512eb863bef6b5376945b513",
+    "threaded-napi/run_threaded.py": "64bcb93ca54e2a5671313e06c4625b5a20202fe416b41c8d683c29749e27901f",
+    "threaded-napi/socket_probe.py": "d5501bc2cb7ea569f6c5a2fb49a76238da3ea9f784a902d7b549d92a9173fc90"
+  },
+  "measured_raw_file_sha256": {
+    "shape.json": "e43ac31c8b74983e1218825c161b2a4e5f8c49c99e6ce31489a37537a356ef46",
+    "tap-relay-current.json": "46358e51a2486bb023ca8a8d0702d6e9bfe67c02601851220c9932c3ef4d6ebb",
+    "wire-proof.json": "1836fb866eba7d59135414e36addc2e95c0d7417c92b33bb8a9aecde571fcd73",
+    "tap-cleanup.json": "5a9fcdce0555ccf94e141c27933e9e32b6e6a2502c188f3f2e3db116dc805447"
+  },
+  "portable_python_manifest_matches_all_twelve": true
+}

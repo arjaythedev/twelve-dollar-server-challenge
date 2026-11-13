@@ -1,0 +1,47 @@
+{
+  "affinity": [
+    9
+  ],
+  "guest_frames_rx": 0,
+  "guest_frames_tx": 0,
+  "loopback_rps_before_after": [
+    "0000",
+    "0000"
+  ],
+  "mtu": 1500,
+  "offloads": {
+    "generic-receive-offload": "on",
+    "generic-segmentation-offload": "on",
+    "tcp-segmentation-offload": "on",
+    "tx-checksumming": "on"
+  },
+  "private_namespaces_removed": true,
+  "private_tcp_ehash_entries": 16384,
+  "queue_after_configure": {
+    "device": "tab2538e",
+    "ifindex": 2,
+    "namespace_inode": 4026533522,
+    "napi": [],
+    "original_mask": "0000",
+    "rps_flow_cnt": 0,
+    "rx_rps_cpus": [
+      "0200"
+    ],
+    "socket_napi_id": 0,
+    "threaded": "0"
+  },
+  "queue_reread": {
+    "device": "tab2538e",
+    "ifindex": 2,
+    "namespace_inode": 4026533522,
+    "napi": [],
+    "rps_flow_cnt": 0,
+    "rx_rps_cpus": [
+      "0200"
+    ],
+    "socket_napi_id": 0,
+    "threaded": "0"
+  },
+  "threaded": "0",
+  "txqlen": 4096
+}

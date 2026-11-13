@@ -1,0 +1,347 @@
+{
+  "ending_archive": "ring4096-swift-260-h1",
+  "scored_cutoff_at_or_before_unix": 1794523793.646,
+  "native_order": [
+    "service",
+    "c0",
+    "c1",
+    "c2",
+    "c3"
+  ],
+  "verified_elf_sha": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+  "frozen_relay_sha": "54935ba0c1222b0f2a1267e051c84c7d6c07bfbf1be070121be541e28e58c4f1",
+  "archived_trials": 71,
+  "protected_trials": 61,
+  "regular_pair_count": 12010,
+  "physical_screen_hits": 20,
+  "hits_with_multipeer_transition": 1,
+  "protected_named_cohort_trials": 23,
+  "protected_named_cohort_other_hit_cases": [],
+  "all_accounting_positive_cases": {
+    "ring4096-batch-watch-quiet-310-p2": 1,
+    "ring4096-guarded-300-h2": 2,
+    "ring4096-mojo-300-h1": 3,
+    "ring4096-pavlyhalim-280-h1": 5,
+    "ring4096-pavlyhalim-300-h1": 2,
+    "ring4096-rkkautsar-260-h1": 1,
+    "ring4096-rkkautsar-280-h1": 3,
+    "ring4096-selective-pgo-quiet-310-h1": 2,
+    "ring4096-stock-quiet-300-p1": 1
+  },
+  "shape": {
+    "relay": "54935ba0c1222b0f2a1267e051c84c7d6c07bfbf1be070121be541e28e58c4f1",
+    "fixture_source_sha256_digest": "009e1242a10b1b0fb14ccc9f21ddb46fd47a79c73e2b8f61ba2ba080cf9c0059",
+    "fixture_source_count": 12,
+    "stock": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "seed": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "tokens": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+    "kernel": "6.8.0-147-generic",
+    "app_cpu": 10,
+    "manager_cpu": 15,
+    "app_limit_bytes": 1835008000,
+    "worker_cpus": [
+      2,
+      5,
+      8,
+      14
+    ],
+    "generator_cpus": [
+      "0,1",
+      "3,4",
+      "6,7",
+      "11,12,13"
+    ],
+    "user_offsets": "disjoint",
+    "txrings": [
+      4096,
+      4096,
+      4096,
+      4096,
+      4096
+    ],
+    "napi": [
+      10
+    ],
+    "ehash": "16384",
+    "wire_delay_each_us": 75
+  },
+  "runs": [
+    {
+      "tag": "ring4096-batch-watch-quiet-310-p1",
+      "eligible": true,
+      "stock_pass": true,
+      "p95_ms": 177.13666,
+      "p99_ms": 416.81813,
+      "req_per_s": 26336.14817,
+      "scored_native_tx": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "last_scored_sample_elapsed_s": 212.53297,
+      "unscored_client_exit_native_tx": [
+        0,
+        98958,
+        99772,
+        37307,
+        109309
+      ],
+      "fully_connected_5s_ticks": 23,
+      "scheduled_5s_ticks": 23,
+      "peak_4core_common_deficit_s": 0.03254,
+      "full_count_accounting_triggers": 0
+    },
+    {
+      "tag": "ring4096-batch-watch-quiet-310-p2",
+      "eligible": false,
+      "stock_pass": false,
+      "p95_ms": 13700.89071,
+      "p99_ms": 14984.46239,
+      "req_per_s": 21531.52629,
+      "scored_native_tx": [
+        0,
+        27051,
+        101625,
+        0,
+        29714
+      ],
+      "last_scored_sample_elapsed_s": 211.20498,
+      "unscored_client_exit_native_tx": [
+        0,
+        29682,
+        101625,
+        0,
+        33836
+      ],
+      "fully_connected_5s_ticks": 23,
+      "scheduled_5s_ticks": 23,
+      "peak_4core_common_deficit_s": 0.15249,
+      "full_count_accounting_triggers": 1
+    },
+    {
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-312500-p1",
+      "eligible": true,
+      "stock_pass": false,
+      "p95_ms": 567.42595,
+      "p99_ms": 1010.52921,
+      "req_per_s": 26399.28976,
+      "scored_native_tx": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "last_scored_sample_elapsed_s": 212.74253,
+      "unscored_client_exit_native_tx": [
+        0,
+        94489,
+        92928,
+        20447,
+        94286
+      ],
+      "fully_connected_5s_ticks": 23,
+      "scheduled_5s_ticks": 23,
+      "peak_4core_common_deficit_s": 0.04286,
+      "full_count_accounting_triggers": 0
+    },
+    {
+      "tag": "ring4096-swift-260-h1",
+      "eligible": true,
+      "stock_pass": false,
+      "p95_ms": 140.9019,
+      "p99_ms": 1504.54029,
+      "req_per_s": 24837.81637,
+      "scored_native_tx": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "last_scored_sample_elapsed_s": 376.38618,
+      "unscored_client_exit_native_tx": [
+        0,
+        38584,
+        25980,
+        0,
+        28608
+      ],
+      "fully_connected_5s_ticks": 59,
+      "scheduled_5s_ticks": 59,
+      "peak_4core_common_deficit_s": 0.04945,
+      "full_count_accounting_triggers": 0
+    }
+  ],
+  "trigger": {
+    "start_s": 157.43491,
+    "end_s": 159.4474,
+    "per_cpu_unaccounted_ms": {
+      "0": 312.4867,
+      "1": 282.4867,
+      "2": 242.4867,
+      "3": 312.4867,
+      "4": 292.4867,
+      "5": 242.4867,
+      "6": 312.4867,
+      "7": 322.4867,
+      "8": 152.4867,
+      "9": 302.4867,
+      "10": 222.4867,
+      "11": 302.4867,
+      "12": 382.4867,
+      "13": 262.4867,
+      "14": 172.4867,
+      "15": 362.4867
+    },
+    "service_cpu_s": 1.07496,
+    "napi_cpu_s": 0.88947,
+    "newly_slow_ping_streams": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "longest_interprobe_gap_s": [
+      1.02498,
+      1.02506,
+      1.18467,
+      1.0241
+    ]
+  },
+  "incident_network_columns": [
+    "end_s",
+    "native_drops",
+    "CPU5_productive_wall_pct",
+    "CPU5_idle_scans_pct",
+    "CPU5_sched_wait_pct",
+    "CPU5_late_250us_pct",
+    "sampled_txqueued_sockets_of_1024",
+    "service_tap_rx_minus_tcp_interpolated",
+    "outer_counter_gap_range"
+  ],
+  "incident_network": [
+    [
+      151.4235,
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      39.43341,
+      95.71683,
+      0.00163,
+      4.01321,
+      0,
+      -3050.3689,
+      [
+        -150617,
+        2372
+      ]
+    ],
+    [
+      159.78868,
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      38.73103,
+      96.03335,
+      0.08951,
+      4.18192,
+      17,
+      -10895.79521,
+      [
+        -204088,
+        4413
+      ]
+    ],
+    [
+      167.94845,
+      [
+        0,
+        23001,
+        44837,
+        0,
+        24307
+      ],
+      93.42556,
+      92.45427,
+      0.01235,
+      56.13516,
+      178,
+      840022.97616,
+      [
+        647723,
+        846697
+      ]
+    ],
+    [
+      176.13596,
+      [
+        0,
+        4050,
+        56788,
+        0,
+        5407
+      ],
+      100.0,
+      0.0,
+      0.00181,
+      66.50581,
+      407,
+      1588501.74307,
+      [
+        1382256,
+        1597128
+      ]
+    ],
+    [
+      184.31996,
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      83.6067,
+      95.58784,
+      0.00175,
+      48.02194,
+      505,
+      1775055.43327,
+      [
+        1532625,
+        1785002
+      ]
+    ],
+    [
+      192.61995,
+      [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      74.45462,
+      96.22979,
+      0.0017,
+      42.99487,
+      612,
+      1601789.60393,
+      [
+        1380801,
+        1616441
+      ]
+    ]
+  ]
+}

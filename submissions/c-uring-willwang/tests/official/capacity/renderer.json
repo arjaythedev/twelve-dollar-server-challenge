@@ -1,0 +1,72 @@
+{
+  "candidate": {
+    "source_file": "buffer.c",
+    "baseline_reference": "0142ba2",
+    "baseline_buffer_sha256": "c09dfc08f019cfc6baa91b698e1185c67edf27580eefd999fcc626447544bc45",
+    "candidate_buffer_sha256": "375101deaf6bf4e5922d315532cb670968190e36195f5fbabdb65fba36d91142",
+    "test_binary_sha256": "bec0b85c4f24f605e76df1f2ed993179dc7f739741372bae68914ffc79193b5a"
+  },
+  "method": "Each request-local test calls the unchanged DB reader twice in the same SQLite transaction and alternates which renderer goes first. Compares every response byte with the partner. Measured clock is CLOCK_MONOTONIC_RAW. CPU 15 on AMD EPYC Genoa. Each run replays 40,000 mixed routes, with sampled bodies and authors from prior live load; fresh data copy for each process.",
+  "trials": [
+    {
+      "feeds": 18442,
+      "posts": 18451,
+      "combined_response_sha256": "98baf3f6ad70e0234f0731305ff4ff5883e3b5d29dab8ae454f415df6cb288e8",
+      "baseline_ns_per_feed": 2018.4,
+      "candidate_ns_per_feed": 1783.9,
+      "reduction_pct": 11.62
+    },
+    {
+      "feeds": 18442,
+      "posts": 18451,
+      "combined_response_sha256": "98baf3f6ad70e0234f0731305ff4ff5883e3b5d29dab8ae454f415df6cb288e8",
+      "baseline_ns_per_feed": 2222.2,
+      "candidate_ns_per_feed": 1870.5,
+      "reduction_pct": 15.83
+    },
+    {
+      "feeds": 18442,
+      "posts": 18451,
+      "combined_response_sha256": "98baf3f6ad70e0234f0731305ff4ff5883e3b5d29dab8ae454f415df6cb288e8",
+      "baseline_ns_per_feed": 2252.4,
+      "candidate_ns_per_feed": 1893.9,
+      "reduction_pct": 15.92
+    },
+    {
+      "feeds": 18442,
+      "posts": 18451,
+      "combined_response_sha256": "98baf3f6ad70e0234f0731305ff4ff5883e3b5d29dab8ae454f415df6cb288e8",
+      "baseline_ns_per_feed": 1988.1,
+      "candidate_ns_per_feed": 1693.1,
+      "reduction_pct": 14.84
+    },
+    {
+      "feeds": 18442,
+      "posts": 18451,
+      "combined_response_sha256": "98baf3f6ad70e0234f0731305ff4ff5883e3b5d29dab8ae454f415df6cb288e8",
+      "baseline_ns_per_feed": 2012.7,
+      "candidate_ns_per_feed": 1677.9,
+      "reduction_pct": 16.63
+    }
+  ],
+  "match_count": 92210,
+  "median_reduction_percent": 15.82665826658266,
+  "median_paired_ns_saved": 334.79999999999995,
+  "checks": {
+    "sql_oracle_cases": 3073,
+    "guarded_rows_per_architecture": 30000,
+    "decimal_values_compared_to_snprintf_per_architecture": 322269,
+    "repeatable_guard_regression": {
+      "source": "../../render-guard.c",
+      "rows_per_build": 16384,
+      "tested_builds": ["native AVX2", "x86-64 SSE2", "native ASan, UBSan and LSan"],
+      "reference": "The general JSON encoder and snprintf rendered the same full object, including an existing output prefix. Inputs touched the first or last byte of a writable page between inaccessible guard pages."
+    },
+    "architectures": [
+      "native AVX2",
+      "x86-64 SSE2 fallback"
+    ],
+    "sanitizers": "clang-18 ASan + UBSan exercising the native path"
+  },
+  "comparison_note": "Microbenchmark of live reads plus serialization. End-to-end capacity is measured separately by the organizer’s full-load generator."
+}

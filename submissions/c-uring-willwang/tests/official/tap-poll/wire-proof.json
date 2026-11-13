@@ -1,0 +1,611 @@
+{
+  "kernel": "6.8.0-147-generic",
+  "task_scoped_traces": {
+    "proof-v2": [
+      {
+        "mode": "veth",
+        "device_tx_stack_ipi": 122,
+        "all_task_ipi": 122,
+        "service": {
+          "count": 128,
+          "cpus": [
+            9
+          ],
+          "mss": 1448,
+          "napi_ids": [
+            8388
+          ]
+        },
+        "client": {
+          "bytes": 360160,
+          "count": 128,
+          "mss": 1448,
+          "sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596"
+        },
+        "server_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        },
+        "client_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        }
+      },
+      {
+        "mode": "tap",
+        "device_tx_stack_ipi": 0,
+        "all_task_ipi": 2,
+        "service": {
+          "count": 128,
+          "cpus": [
+            9
+          ],
+          "mss": 1448,
+          "napi_ids": [
+            0
+          ]
+        },
+        "client": {
+          "bytes": 360160,
+          "count": 128,
+          "mss": 1448,
+          "sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596"
+        },
+        "server_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 1
+        },
+        "client_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        }
+      }
+    ],
+    "proof-v3": [
+      {
+        "mode": "veth",
+        "device_tx_stack_ipi": 128,
+        "all_task_ipi": 130,
+        "service": {
+          "count": 128,
+          "cpus": [
+            9
+          ],
+          "mss": 1448,
+          "napi_ids": [
+            8390
+          ]
+        },
+        "client": {
+          "bytes": 360160,
+          "count": 128,
+          "mss": 1448,
+          "sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596"
+        },
+        "server_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        },
+        "client_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        },
+        "napi_trace": {
+          "cpus": [
+            9
+          ],
+          "devices": [
+            "svc"
+          ],
+          "polls": 179,
+          "work": 184
+        }
+      },
+      {
+        "mode": "tap",
+        "device_tx_stack_ipi": 0,
+        "all_task_ipi": 3,
+        "service": {
+          "count": 128,
+          "cpus": [
+            9
+          ],
+          "mss": 1448,
+          "napi_ids": [
+            0
+          ]
+        },
+        "client": {
+          "bytes": 360160,
+          "count": 128,
+          "mss": 1448,
+          "sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596"
+        },
+        "server_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 1
+        },
+        "client_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        },
+        "napi_trace": {
+          "cpus": [
+            9
+          ],
+          "devices": [
+            "tdb38fec"
+          ],
+          "polls": 183,
+          "work": 185
+        }
+      }
+    ],
+    "proof-final": [
+      {
+        "mode": "veth",
+        "device_tx_stack_ipi": 129,
+        "all_task_ipi": 133,
+        "service": {
+          "count": 128,
+          "cpus": [
+            9
+          ],
+          "mss": 1448,
+          "napi_ids": [
+            8392
+          ]
+        },
+        "client": {
+          "bytes": 360160,
+          "count": 128,
+          "mss": 1448,
+          "sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596"
+        },
+        "server_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        },
+        "client_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        },
+        "napi_trace": {
+          "cpus": [
+            9
+          ],
+          "devices": [
+            "svc"
+          ],
+          "polls": 182,
+          "work": 186
+        }
+      },
+      {
+        "mode": "tap",
+        "device_tx_stack_ipi": 0,
+        "all_task_ipi": 2,
+        "service": {
+          "count": 128,
+          "cpus": [
+            9
+          ],
+          "mss": 1448,
+          "napi_ids": [
+            0
+          ]
+        },
+        "client": {
+          "bytes": 360160,
+          "count": 128,
+          "mss": 1448,
+          "sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596"
+        },
+        "server_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 2
+        },
+        "client_stats": {
+          "IpExtInCsumErrors": 0,
+          "IpInHdrErrors": 0,
+          "TcpInCsumErrors": 0,
+          "TcpInErrs": 0,
+          "TcpRetransSegs": 0
+        },
+        "napi_trace": {
+          "cpus": [
+            9
+          ],
+          "devices": [
+            "t2a99b21"
+          ],
+          "polls": 183,
+          "work": 186
+        }
+      }
+    ]
+  },
+  "final_relay": {
+    "pid": 1591777,
+    "cpu": 15,
+    "uid": 1000,
+    "loops": 784407,
+    "idle_loops": 784125,
+    "queue_peak": 3,
+    "queue_overflow": 0,
+    "bad_frame": 0,
+    "gso": 51,
+    "partial_checksum": 321,
+    "forwarded_events": 339,
+    "late_over_50us": 0,
+    "late_over_250us": 0,
+    "max_late_ns": 35895,
+    "ports": [
+      {
+        "read": 144,
+        "wire_bytes": 373864,
+        "written": 195,
+        "write_drop": 0
+      },
+      {
+        "read": 195,
+        "wire_bytes": 16406,
+        "written": 144,
+        "write_drop": 0
+      }
+    ]
+  },
+  "four_source_route_tests": {
+    "wire-four-100us": [
+      {
+        "median_rtt_ms": 0.266,
+        "max_rtt_ms": 0.28,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 0.271,
+        "max_rtt_ms": 0.299,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 0.2655,
+        "max_rtt_ms": 0.293,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 0.265,
+        "max_rtt_ms": 0.354,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      }
+    ],
+    "wire-four-90us": [
+      {
+        "median_rtt_ms": 0.2685,
+        "max_rtt_ms": 38.8,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 0.2625,
+        "max_rtt_ms": 0.304,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 0.263,
+        "max_rtt_ms": 0.283,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 0.26,
+        "max_rtt_ms": 0.292,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      }
+    ],
+    "wire-final": [
+      {
+        "median_rtt_ms": 0.8115000000000001,
+        "max_rtt_ms": 3.28,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 1.3595,
+        "max_rtt_ms": 3.27,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 1.0145,
+        "max_rtt_ms": 3.4,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      },
+      {
+        "median_rtt_ms": 0.6955,
+        "max_rtt_ms": 3.26,
+        "received": 20,
+        "observed_cpu_napi": [
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ],
+          [
+            9,
+            0
+          ]
+        ]
+      }
+    ]
+  },
+  "proof_cores": {
+    "application": 9,
+    "remote": 15
+  },
+  "final_link_readback": [
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    }
+  ]
+}

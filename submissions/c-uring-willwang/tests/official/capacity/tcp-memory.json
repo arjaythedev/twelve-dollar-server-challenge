@@ -1,0 +1,202 @@
+{
+  "kernel": "6.8.0-147-generic",
+  "page_bytes": 4096,
+  "host_tcp_mem_pages_low_pressure_high": [
+    599811,
+    799751,
+    1199622
+  ],
+  "host_untouched_control": {
+    "initial_before": "TCP: inuse 23 orphan 0 tw 33 alloc 26 mem 1959",
+    "empty_private": "TCP: inuse 0 orphan 0 tw 0 alloc 26 mem 1959",
+    "private_tcp_mem_sysctl_present": false,
+    "initial_after": "TCP: inuse 23 orphan 0 tw 33 alloc 26 mem 1959"
+  },
+  "samples": {
+    "split-guarded-280-h1": {
+      "hold_s": 300.0,
+      "hold_samples": 147,
+      "service_sock_mib": {
+        "min": 0.008,
+        "median": 0.113,
+        "max": 20.191
+      },
+      "service_slab_mib": {
+        "min": 409.863,
+        "median": 420.978,
+        "max": 421.881
+      },
+      "host_tcp_mib_at_service_sock_peak": 23.43359375,
+      "server_tcp_hold_counter_deltas": {
+        "TCPMemoryPressures": 0,
+        "TCPRcvQDrop": 0,
+        "TCPBacklogDrop": 0,
+        "TCPRcvCoalesce": 0
+      }
+    },
+    "split-guarded-300-h1": {
+      "hold_s": 300.0,
+      "hold_samples": 146,
+      "service_sock_mib": {
+        "min": 0.008,
+        "median": 0.176,
+        "max": 69.801
+      },
+      "service_slab_mib": {
+        "min": 440.584,
+        "median": 450.275,
+        "max": 451.163
+      },
+      "host_tcp_mib_at_service_sock_peak": 73.35546875,
+      "server_tcp_hold_counter_deltas": {
+        "TCPMemoryPressures": 0,
+        "TCPRcvQDrop": 0,
+        "TCPBacklogDrop": 0,
+        "TCPRcvCoalesce": 0
+      }
+    },
+    "split-guarded-300-p1": {
+      "hold_s": 120.0,
+      "hold_samples": 59,
+      "service_sock_mib": {
+        "min": 0.02,
+        "median": 0.316,
+        "max": 118.562
+      },
+      "service_slab_mib": {
+        "min": 438.317,
+        "median": 448.981,
+        "max": 449.462
+      },
+      "host_tcp_mib_at_service_sock_peak": 130.0390625,
+      "server_tcp_hold_counter_deltas": {
+        "TCPMemoryPressures": 0,
+        "TCPRcvQDrop": 0,
+        "TCPBacklogDrop": 0,
+        "TCPRcvCoalesce": 0
+      }
+    },
+    "split-guarded-320-p1": {
+      "hold_s": 120.0,
+      "hold_samples": 59,
+      "service_sock_mib": {
+        "min": 0.039,
+        "median": 17.926,
+        "max": 224.207
+      },
+      "service_slab_mib": {
+        "min": 467.008,
+        "median": 479.872,
+        "max": 480.247
+      },
+      "host_tcp_mib_at_service_sock_peak": 225.9609375,
+      "server_tcp_hold_counter_deltas": {
+        "TCPMemoryPressures": 0,
+        "TCPRcvQDrop": 0,
+        "TCPBacklogDrop": 0,
+        "TCPRcvCoalesce": 0
+      }
+    },
+    "split-guarded-350-p1": {
+      "hold_s": 120.0,
+      "hold_samples": 58,
+      "service_sock_mib": {
+        "min": 16.805,
+        "median": 137.289,
+        "max": 488.449
+      },
+      "service_slab_mib": {
+        "min": 517.819,
+        "median": 524.806,
+        "max": 525.185
+      },
+      "host_tcp_mib_at_service_sock_peak": 489.703125,
+      "server_tcp_hold_counter_deltas": {
+        "TCPMemoryPressures": 0,
+        "TCPRcvQDrop": 0,
+        "TCPBacklogDrop": 0,
+        "TCPRcvCoalesce": 0
+      }
+    },
+    "split-writer-300-p1": {
+      "hold_s": 120.0,
+      "hold_samples": 59,
+      "service_sock_mib": {
+        "min": 0.02,
+        "median": 0.102,
+        "max": 113.547
+      },
+      "service_slab_mib": {
+        "min": 439.902,
+        "median": 450.944,
+        "max": 451.321
+      },
+      "host_tcp_mib_at_service_sock_peak": 118.0,
+      "server_tcp_hold_counter_deltas": {
+        "TCPMemoryPressures": 0,
+        "TCPRcvQDrop": 0,
+        "TCPBacklogDrop": 0,
+        "TCPRcvCoalesce": 0
+      }
+    }
+  },
+  "service_sockets_at_350k": {
+    "rows_seen": {
+      "min": 1024,
+      "median": 1024,
+      "max": 1024
+    },
+    "established": {
+      "min": 1016,
+      "median": 1016,
+      "max": 1016
+    },
+    "rx_queued_sockets": {
+      "min": 22,
+      "median": 97,
+      "max": 316
+    },
+    "tx_queued_sockets": {
+      "min": 0,
+      "median": 0,
+      "max": 3
+    },
+    "rx_payload_bytes": {
+      "min": 2455,
+      "median": 8327,
+      "max": 25471
+    },
+    "tx_payload_bytes": {
+      "min": 0,
+      "median": 0,
+      "max": 7582
+    },
+    "samples": 15
+  },
+  "near_peak_socket_samples_350k": [
+    {
+      "sec": 5.87,
+      "nearest_service_sock_mib": 420.02,
+      "nearest_time_distance_sec": 0.161,
+      "rows_seen": 1024,
+      "established": 1016,
+      "close_wait": 0,
+      "rx_queued_sockets": 316,
+      "rx_payload_bytes": 25471,
+      "tx_queued_sockets": 1,
+      "tx_payload_bytes": 267
+    },
+    {
+      "sec": 14.044,
+      "nearest_service_sock_mib": 270.28,
+      "nearest_time_distance_sec": 0.152,
+      "rows_seen": 1024,
+      "established": 1016,
+      "close_wait": 0,
+      "rx_queued_sockets": 198,
+      "rx_payload_bytes": 19131,
+      "tx_queued_sockets": 0,
+      "tx_payload_bytes": 0
+    }
+  ]
+}

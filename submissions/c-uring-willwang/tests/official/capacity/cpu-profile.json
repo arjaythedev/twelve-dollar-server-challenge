@@ -1,0 +1,52 @@
+{
+  "trial": "split-guarded-350-p1",
+  "server_revision": "9632f45ccf32ad1e66ceccc136e8eed66e1bf588",
+  "server_sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+  "event": "cpu-clock",
+  "frequency_hz": 97,
+  "sample_wall_seconds": 38,
+  "sample_start_seconds_relative_to_ramp_end": -8,
+  "profiled_tasks": ["server", "guest NAPI thread", "guest CPU ksoftirqd"],
+  "approximate_event_count_ns": 37319586360,
+  "lost_samples": 0,
+  "steady_all_connections": {
+    "score_seconds": [115, 135],
+    "confirmed_connections": 350000,
+    "requests_completed": 641681,
+    "cpu_samples": 1910,
+    "tcp_response_page_fragment_refill_samples": 55,
+    "tcp_response_payload_copy_samples": 26,
+    "combined_percent_of_cpu": 4.24084,
+    "combined_cpu_us_per_request": 1.30135,
+    "sqlite_page_cache_fetch_samples": 27
+  },
+  "independent_sender_only_control": {
+    "system": "Linux 6.8, 64 connected TCP streams per cell, SG-capable test egress, registered-buffer io_uring SEND_ZC versus ordinary SEND",
+    "measurement": "Median within-pair difference in primary sender CPU for 3744-byte responses. The egress device accepted data; no receiving client consumed it in this experiment.",
+    "first_sweep": {"pairs": 28, "zerocopy_minus_send_us": 0.135, "zerocopy_faster_pairs": 6, "csv_sha256": "d0e7d10a7b7e7d2fa133ad829a63ed5249585e34e752ca515c0f209f22508595"},
+    "second_sweep": {"pairs": 32, "zerocopy_minus_send_us": 0.102, "csv_sha256": "2e546a2650dcc681d3a6216f41928f1e75b078c81d25219e92310a8f246eaea5"}
+  },
+  "host_socket_observation_self_samples": {
+    "all_cpu_clock_samples": 3620,
+    "server_thread_samples": 1998,
+    "send_observer_jit_instructions": 85,
+    "receive_observer_jit_instructions": 17,
+    "socket_trampoline_instructions": 12,
+    "total_disjoint_samples": 114,
+    "percent_of_all_samples": 3.15,
+    "percent_of_server_thread_samples": 5.71,
+    "method": "Count sampled instruction pointers in recorded BPF JIT code only when the corresponding socket send or receive observation program is also on the stack. Add the disjoint samples whose instruction pointer is directly in the two socket trampolines. Native helper instructions and the wrapped Linux TCP path are excluded."
+  },
+  "selected_self_percent_of_all_samples": [
+    {"task": "guest NAPI", "symbol": "__inet_lookup_established", "pct": 19.12},
+    {"task": "server", "symbol": "finish_task_switch.isra.0", "pct": 4.23},
+    {"task": "guest NAPI", "symbol": "finish_task_switch.isra.0", "pct": 3.76},
+    {"task": "server", "symbol": "clear_page_erms", "pct": 2.07},
+    {"task": "server", "symbol": "sock_poll", "pct": 1.71},
+    {"task": "server", "symbol": "pcache1Fetch", "pct": 1.35},
+    {"task": "server", "symbol": "_copy_from_iter", "pct": 1.22},
+    {"task": "guest NAPI", "symbol": "sock_def_readable", "pct": 1.16}
+  ],
+  "raw_perf_sha256": "46f3719dfa46dd56aecfaa8e9bf95a4131d7f0c982c33d66104d96985ed7d599",
+  "perf_report_sha256": "03fb7aa6139d698f4757eba345384063f94e892977d777d9167ced8b138c4997"
+}

@@ -701,6 +701,11 @@ on p99 (6.06 s at 97 % CPU), all with 0 errors. #432 stays open. Its companion *
 plus `TCP_DEFER_ACCEPT` on the listeners; PGO build worked) held **270,000** (25,874 req/s, p95 39.4 / p99 140.9 ms,
 0 err, 74 % CPU, 26 µs/req, 1,138 MB, 2026-11-14), below the merged row, so not merged: 280,000 failed the 2-minute
 probe on p99 (3.17 s at 78 % CPU) and 320,000 on p99 (11.2 s at 96 % CPU), all with 0 errors. #433 stays open.
+**#435** (`b686fea`: #432's shim fix plus admission at the door, a 64-connection listen backlog and no accepting while
+the loop is behind) held **280,000** (26,722 req/s, p95 68.8 / p99 220.5 ms, 0 err, 77 % CPU, 26 µs/req, 907 MB; TCP
+connect p99 1,031 ms, which k6 counts outside request latency; 2026-11-14), below the merged row, so not merged:
+290,000 failed the 2-minute probe on p99 (4.11 s at 83 % CPU), 300,000 on p99 (3.24 s at 86 % CPU) and 320,000 on p99
+(8.58 s, 0.1 % timeouts, 97 % CPU). #435 stays open; whether connect-time waits should count is a question for Arjay.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

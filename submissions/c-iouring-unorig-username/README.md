@@ -94,10 +94,10 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   SQL. Writes always use prepared SQL. A like's post check is a B-tree seek.
 - **A worker thread copies the log back, and the event loop decides when.** The worker runs at nice 19 on its own connection,
   through the `unix-excl` VFS: the process owns the file, the WAL index lives in its heap, and a transaction takes no file locks.
-  The loop asks for a `PASSIVE` pass over an eventfd after 1,024 WAL frames (4 MB) and the outcome comes back on a second
+  The loop asks for a `PASSIVE` pass over an eventfd after 8,192 WAL frames (32 MB) and the outcome comes back on a second
   eventfd as an ordinary ring completion, so the loop never waits for an fsync. A log only restarts once fully copied, which
   steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, for at most 250 ms (reads go
-  on). Past 4,096 frames (a CPU saturated long enough to starve the worker) they wait for that pass with no time limit, so the log stays bounded. Small passes keep each hold short: in local runs at 290,000 and 300,000 users with disk writes capped at 25 MB/s, POST p99 was 274-334 ms against 291-493 ms at 8,192 frames. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
+  on). Past 32,768 frames (a CPU saturated long enough to starve the worker) they wait for that pass with no time limit, so the log stays bounded. 1,024-frame passes were tried and scored lower on the benchmark box (270,000 and 260,000 against 280,000). Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
   waits for its `COMMIT`. If a commit fails, nothing from a batch with writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
@@ -162,7 +162,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   kernel memory (measured at 330,000: 3.3 KB unreclaimable slab, 1 KB of dentries and inodes that count as
   reclaimable but stay pinned while the socket is open), so every 100 MB the process keeps is about 23,000
   users. The page cache is 32 MB, the receive pools 2 MB per ring, the send pool at most 512 x 8 KB. WAL
-  checkpoints start at 1,024 frames: larger thresholds cost less CPU but keep the WAL in page cache, and
+  checkpoints start at 8,192 frames: larger thresholds cost less CPU but keep the WAL in page cache, and
   32,000 frames brought the out-of-memory kill forward from about 350,000 connections to about 330,000.
 - **HTTP/1.1 keep-alive** with no idle timeout, pipelining, `Connection: close`, HTTP/1.0 and
   `Expect: 100-continue`. Chunked request bodies aren't supported (they're out of scope).
@@ -252,7 +252,7 @@ the setup of the index seek in `likes_from` follow it closely, including some na
 reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds, `SO_REUSEPORT` listeners,
 `DEFER_TASKRUN` on every ring, and bounded reads and answers after a burst (#264). Checkpoint coordination and the likes count
 were rewritten for this entry, and its read bound was chosen by the sweep above. The `resv[0]` retry is also from
-rust-iouring-kensac and from c-iouring-pavlyhalim (#245), as do the 1,024-frame passes. From objc-uring-delneg (#326, `1baccb2`): the newest-first order
+rust-iouring-kensac and from c-iouring-pavlyhalim (#245). From objc-uring-delneg (#326, `1baccb2`): the newest-first order
 of the parked list with its aging bound, 128 answers per pass, and `journal_size_limit=0` (ideas, no code copied; the list
 here is this entry's own queue). Locking code in RAM follows c-iouring-pavlyhalim (#245), mojo-iouring-oh-meh (#257) and
 #326; sizing the completion queue over the connection count follows #245.

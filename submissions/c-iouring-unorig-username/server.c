@@ -1170,7 +1170,7 @@ static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anyth
 // loop stops taking POSTs (reads go on) for one more pass. Past WAL_MAX frames it waits for that pass however long
 // it takes, because a saturated CPU starves the worker and the log would otherwise grow without bound.
 #ifndef WAL_START
-#define WAL_START 1024  // small passes: each copy-back is short, so a held POST waits less
+#define WAL_START 8192
 #endif
 #define WAL_MAX (4 * WAL_START)
 #define POST_WAIT_NS 250000000LL

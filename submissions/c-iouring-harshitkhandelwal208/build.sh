@@ -47,7 +47,7 @@ CC="gcc -O3 $MARCH -flto -fno-plt -fomit-frame-pointer -fno-semantic-interpositi
 
 rm -rf deps/pgo
 echo "== compiling PGO instrumented binary"
-$CC -DPGO_TRAIN -fprofile-generate -fprofile-update=single
+$CC -DPGO_TRAIN -fprofile-generate -fprofile-update=atomic
 echo "== training PGO profile (300k synthetic requests)"
 PGO_TRAIN_DB=deps/train.db bin/server
 rm -f deps/train.db*

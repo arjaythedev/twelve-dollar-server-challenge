@@ -5,13 +5,34 @@ import Syscalls
 
 /// Byte search and comparison.
 nonisolated enum Bytes {
-    /// The first `needle` in `hay[from..<end]` (memchr: glibc's vectorized search).
+    /// The first `needle` in `hay[from..<end]`: 16 bytes a step, then a word, then bytes, inline. (A call to memchr
+    /// cost more than the search on the short spans of a request head.)
     @inline(__always) static func find(_ hay: Span<UInt8>, _ needle: UInt8, from: Int = 0, end: Int? = nil) -> Int? {
         let end = end ?? hay.count
         guard from < end else { return nil }
-        return hay.withUnsafeBufferPointer { buf -> Int? in
-            guard let hit = memchr(buf.baseAddress! + from, Int32(needle), end - from) else { return nil }
-            return UnsafeRawPointer(buf.baseAddress!).distance(to: UnsafeRawPointer(hit))
+        return hay.withUnsafeBytes { raw -> Int? in
+            let p = raw.baseAddress.unsafelyUnwrapped
+            var i = from
+            let pattern = SIMD16<UInt8>(repeating: needle)
+            while i + 16 <= end {
+                let hits = unsafeBitCast(p.loadUnaligned(fromByteOffset: i, as: SIMD16<UInt8>.self) .== pattern, to: SIMD2<UInt64>.self)
+                if hits[0] != 0 { return i + hits[0].trailingZeroBitCount >> 3 }
+                if hits[1] != 0 { return i + 8 + hits[1].trailingZeroBitCount >> 3 }
+                i += 16
+            }
+            if i + 8 <= end {
+                // The lowest byte equal to the needle sets the lowest flag (flags above it may be false; none is read).
+                let lo: UInt64 = 0x0101_0101_0101_0101
+                let x = p.loadUnaligned(fromByteOffset: i, as: UInt64.self) ^ (lo &* UInt64(needle))
+                let found = (x &- lo) & ~x & (lo &* 0x80)
+                if found != 0 { return i + found.trailingZeroBitCount >> 3 }
+                i += 8
+            }
+            while i < end {
+                if p.load(fromByteOffset: i, as: UInt8.self) == needle { return i }
+                i += 1
+            }
+            return nil
         }
     }
 
@@ -89,12 +110,12 @@ nonisolated extension OutputRawSpan {
         }
     }
 
-    /// `value` in decimal, at most 20 bytes.
+    /// `value` in decimal, at most 20 bytes, written as one or two 16-byte stores: it needs 32 bytes of room.
     @inline(__always) @_lifetime(self: copy self)
     mutating func appendDecimal(_ value: Int64) {
         if value < 0 { append(0x2D) }
-        var digits = InlineArray<20, UInt8>(repeating: 0)
-        var pos = 20
+        var digits = InlineArray<48, UInt8>(repeating: 0)
+        var pos = 48
         var n = value.magnitude
         let lut = JSON.decDigits.utf8Start
         while n >= 100 {
@@ -113,28 +134,69 @@ nonisolated extension OutputRawSpan {
             digits[pos] = lut[rem]
             digits[pos + 1] = lut[rem + 1]
         }
-        for k in pos..<20 { append(digits[k]) }
+        let count = 48 - pos
+        digits.span.withUnsafeBytes { d in
+            withUnsafeMutableBytes { buffer, initialized in
+                precondition(32 <= buffer.count - initialized, "OutputRawSpan: no room for the digits")
+                let out = buffer.baseAddress.unsafelyUnwrapped + initialized
+                out.storeBytes(of: d.loadUnaligned(fromByteOffset: pos, as: SIMD16<UInt8>.self), as: SIMD16<UInt8>.self)
+                if count > 16 {
+                    out.storeBytes(of: d.loadUnaligned(fromByteOffset: pos + 16, as: SIMD16<UInt8>.self), toByteOffset: 16, as: SIMD16<UInt8>.self)
+                }
+                initialized += count
+            }
+        }
     }
 
     /// `text` as a JSON string's contents, quotes not included; at most 6 bytes per byte. Checked 32 bytes at a time
     /// (one AVX2 compare where the CPU has it) and copied whole when none needs escaping; escaped as `JSON.writeString`
-    /// does.
+    /// does. The last bytes are copied whole too: the last 16, overlapping a chunk copied as it was (rewriting its end
+    /// with the same bytes), or two overlapping words for a string of 8 to 15 bytes. Only a byte that needs escaping,
+    /// and a string under 8 bytes, go one byte at a time.
     @inline(__always) @_lifetime(self: copy self)
     mutating func appendJSONStringContents(_ text: Span<UInt8>) {
         let bytes = text.bytes
         let n = text.count
         var i = 0
+        var lastClean = false
         while i + 32 <= n {
             let v = bytes.unsafeLoadUnaligned(fromByteOffset: i, as: SIMD32<UInt8>.self)
-            if JSON.clean32(v) { appendBytes(of: v) } else { appendEscaping(text.extracting(i..<(i + 32))) }
+            lastClean = JSON.clean32(v)
+            if lastClean { appendBytes(of: v) } else { appendEscaping(text.extracting(i..<(i + 32))) }
             i += 32
         }
         if i + 16 <= n {
             let v = bytes.unsafeLoadUnaligned(fromByteOffset: i, as: SIMD16<UInt8>.self)
-            if JSON.clean16(v) { appendBytes(of: v) } else { appendEscaping(text.extracting(i..<(i + 16))) }
+            lastClean = JSON.clean16(v)
+            if lastClean { appendBytes(of: v) } else { appendEscaping(text.extracting(i..<(i + 16))) }
             i += 16
         }
-        if i < n { appendEscaping(text.extracting(i..<n)) }
+        let rest = n - i
+        if rest == 0 { return }
+        if n >= 16 && lastClean {
+            let v = bytes.unsafeLoadUnaligned(fromByteOffset: n - 16, as: SIMD16<UInt8>.self)
+            if JSON.clean16(v) {
+                withUnsafeMutableBytes { buffer, initialized in
+                    buffer.baseAddress.unsafelyUnwrapped.storeBytes(of: v, toByteOffset: initialized - (16 - rest), as: SIMD16<UInt8>.self)
+                    initialized += rest
+                }
+                return
+            }
+        } else if n < 16 && n >= 8 {
+            let first = bytes.unsafeLoadUnaligned(fromByteOffset: 0, as: UInt64.self)
+            let last = bytes.unsafeLoadUnaligned(fromByteOffset: n - 8, as: UInt64.self)
+            if !JSON.hasSpecial8(UInt64(littleEndian: first)) && !JSON.hasSpecial8(UInt64(littleEndian: last)) {
+                withUnsafeMutableBytes { buffer, initialized in
+                    precondition(n <= buffer.count - initialized, "OutputRawSpan: no room for the string")
+                    let out = buffer.baseAddress.unsafelyUnwrapped + initialized
+                    out.storeBytes(of: first, as: UInt64.self)
+                    out.storeBytes(of: last, toByteOffset: n - 8, as: UInt64.self)
+                    initialized += n
+                }
+                return
+            }
+        }
+        appendEscaping(text.extracting(i..<n))
     }
 
     @inline(__always) @_lifetime(self: copy self)
@@ -172,23 +234,26 @@ nonisolated enum JSON {
     private static let maskHi: UInt64 = 0x8080_8080_8080_8080
 
     /// Whether any of 8 bytes is a control character, a quote or a backslash (SWAR).
-    @inline(__always) private static func hasSpecial8(_ word: UInt64) -> Bool {
+    @inline(__always) fileprivate static func hasSpecial8(_ word: UInt64) -> Bool {
         let q = word ^ (maskLo &* 0x22)
         let bs = word ^ (maskLo &* 0x5C)
         let ctrl = (word &- maskLo &* 0x20) | ((q &- maskLo) & ~q) | ((bs &- maskLo) & ~bs)
         return (ctrl & ~word & maskHi) != 0
     }
 
-    /// Whether 16 bytes need no escaping (portable SIMD).
+    /// Whether 16 bytes need no escaping (portable SIMD). The mask is read as two words: `any(_:)` compiled to a call
+    /// (a specialized `SIMD.min()`) on each check.
     @inline(__always) fileprivate static func clean16(_ v: SIMD16<UInt8>) -> Bool {
         let special = (v .== SIMD16(repeating: 0x22)) .| (v .== SIMD16(repeating: 0x5C)) .| (v .< SIMD16(repeating: 0x20))
-        return !any(special)
+        let words = unsafeBitCast(special, to: SIMD2<UInt64>.self)
+        return words[0] | words[1] == 0
     }
 
-    /// Whether 32 bytes need no escaping (one AVX2 compare where the CPU has it).
+    /// Whether 32 bytes need no escaping (one AVX2 compare where the CPU has it), the mask read as four words.
     @inline(__always) fileprivate static func clean32(_ v: SIMD32<UInt8>) -> Bool {
         let special = (v .== SIMD32(repeating: 0x22)) .| (v .== SIMD32(repeating: 0x5C)) .| (v .< SIMD32(repeating: 0x20))
-        return !any(special)
+        let words = unsafeBitCast(special, to: SIMD4<UInt64>.self)
+        return (words[0] | words[1]) | (words[2] | words[3]) == 0
     }
 
     fileprivate static let hexDigits: StaticString = "0123456789abcdef"
@@ -395,6 +460,40 @@ nonisolated enum Base64 {
         if dst.count < needed { return nil }
         var si = 0
         var di = 0
+        // 16 characters a step into 12 bytes: each class of character found by range compares, its values made by one
+        // subtraction, and each group of four packed in a 32-bit lane, stored 4 bytes at a time (so 16 bytes of room).
+        // The rest one group of four at a time below.
+        var invalid = false
+        src.withUnsafeBytes { s in
+            dst.withUnsafeMutableBytes { d in
+                guard let sp = s.baseAddress, let dp = d.baseAddress else { return }
+                while si + 16 <= s.count && di + 16 <= d.count {
+                    let v = sp.loadUnaligned(fromByteOffset: si, as: SIMD16<UInt8>.self)
+                    let upper = (v .>= SIMD16(repeating: 0x41)) .& (v .<= SIMD16(repeating: 0x5A))
+                    let lower = (v .>= SIMD16(repeating: 0x61)) .& (v .<= SIMD16(repeating: 0x7A))
+                    let digit = (v .>= SIMD16(repeating: 0x30)) .& (v .<= SIMD16(repeating: 0x39))
+                    let dash = v .== SIMD16(repeating: 0x2D)
+                    let underscore = v .== SIMD16(repeating: 0x5F)
+                    let valid = unsafeBitCast(upper .| lower .| digit .| dash .| underscore, to: SIMD2<UInt64>.self)
+                    if valid[0] & valid[1] != ~0 {
+                        invalid = true
+                        return
+                    }
+                    var six = SIMD16<UInt8>(repeating: 63)
+                    six.replace(with: v &- SIMD16(repeating: 0x41), where: upper)
+                    six.replace(with: v &- SIMD16(repeating: 0x47), where: lower)
+                    six.replace(with: v &+ SIMD16(repeating: 4), where: digit)
+                    six.replace(with: SIMD16(repeating: 62), where: dash)
+                    let w = unsafeBitCast(six, to: SIMD4<UInt32>.self)
+                    let n = (w & 0xFF) &<< 18 | ((w &>> 8) & 0xFF) &<< 12 | ((w &>> 16) & 0xFF) &<< 6 | w &>> 24
+                    let bytes = (n &>> 16) & 0xFF | ((n &>> 8) & 0xFF) &<< 8 | (n & 0xFF) &<< 16
+                    for k in 0..<4 { dp.storeBytes(of: bytes[k], toByteOffset: di + 3 * k, as: UInt32.self) }
+                    si += 16
+                    di += 12
+                }
+            }
+        }
+        if invalid { return nil }
         while si + 4 <= src.count {
             let a = urlValue(src[si]), b = urlValue(src[si + 1]), c = urlValue(src[si + 2]), d = urlValue(src[si + 3])
             if (a | b | c | d) & 0x80 != 0 { return nil }

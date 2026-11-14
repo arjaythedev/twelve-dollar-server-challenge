@@ -325,7 +325,11 @@ held **230,000** (22,342 req/s, p95 84.8 / p99 483.9 ms, 0 err, 74 % CPU, 30 µs
 failed the 2-minute probe on p95/p99 (529 / 742 ms, 77 % CPU) and 320,000 on p95 (4.2 s, 100 %). Re-run at
 `71bd2c7` (`start.sh` back to the default VFS, runtime speedups kept; held, not merged: ties 250,000, not above it) it
 held **250,000** (24,106 req/s, p95 149.6 / p99 300.2 ms, 0 err, 82 % CPU, 31 µs/req, 1,282 MB, 2026-11-13); 260,000
-failed the 2-minute probe on p95/p99 (1.6 / 2.9 s, 87 % CPU). Before that
+failed the 2-minute probe on p95/p99 (1.6 / 2.9 s, 87 % CPU). Its next follow-up **#447** (`aa6f126`, shim VFS for WAL
+write coalescing on by default, B-tree cursors reused per batch; held, not merged: not above 250,000) held **240,000**
+(23,257 req/s, p95 39.0 / p99 182.5 ms, 0 err, 73 % CPU, 29 µs/req, 770 MB, 2026-11-14); 250,000 and 260,000 failed the
+2-minute probe on p95/p99 (1.3 / 5.4 s at 79 % CPU, 9.0 / 10.3 s at 89 %), 280,000 on p95/p99 (1.6 / 2.2 s, 88 %) and
+320,000 on p95 (2.9 s, 100 %). Before that
 it was scored at **#336** at commit **`4758859`** (**244,000**, 23,557 req/s, p95 128.8 / p99 735.0 ms, 81 % CPU, 31
 µs/req, 907 MB, 2026-11-07; forced PASSIVE checkpoint through `sqlite3_wal_checkpoint_v2`, extended error codes; merged
 2026-11-07, above the 230,000 row). That 244,000 hold had 0 errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed

@@ -63,18 +63,21 @@ batch in one SQLite transaction and then sends the answers.
 - **WAL: the request thread never syncs.** PASSIVE checkpoints run on two helper threads.
   - Every 4096 frames (16 MiB) a nice 19 thread copies the log to the database and syncs both
     files, while writes go on. So the disk never gets more than 16 MiB at a time.
-  - Every 32768 frames (128 MiB) the log is restarted. The same thread copies until little is
-    left, then POSTs are parked (GETs continue) and a second thread at normal priority copies
-    the rest.
+  - Now and then the log is restarted. The same thread copies until little is left, then POSTs
+    are parked (GETs continue) and a second thread at normal priority copies the rest.
   - That second thread then makes the first commit into the restarted log itself, a one-frame
     transaction that sets `user_version` to the value it already has. SQLite syncs the header
     of a restarted log inside the first commit that writes to it. Before, that commit was one
     of mine, on the request thread, and with a slow fsync it stopped every request.
-  - POSTs stay parked until that commit is done: 1 s at most, doubled after a cycle that could
-    not restart the log. Afterwards they are released 256 per pass, so they do not fill a pass.
+  - POSTs stay parked until that commit is done (three syncs, 4 s at most), then they are
+    released 256 per pass, so they do not fill a pass.
+  - How often: the first restart is at 32768 frames (128 MiB). Then the hold is timed, and the
+    next restart comes 32 hold lengths later at the current write rate, between 128 and
+    512 MiB of log. A hold makes POSTs wait, so on a slow disk they must be rare: POSTs are 8%
+    of the requests, and with holds 3% of the time 0.25% of the requests wait.
   - The header of the first log is written the same way at startup.
 - **File sizes stay put.** The WAL file is not truncated after a restart, the next cycle writes
-  over it (`journal_size_limit` is 512 MiB, only for a log that grew far past its normal size).
+  over it (`journal_size_limit` is 1 GiB, only for a log that grew far past its normal size).
   The database file grows in 64 MiB steps (`SQLITE_FCNTL_CHUNK_SIZE`, built with
   `HAVE_POSIX_FALLOCATE`). A file that changes size makes ext4 commit its journal at the next
   sync, and a commit on the request thread that extends the log at that moment has to wait for it.
@@ -96,15 +99,28 @@ memory cgroup, 250,000 users from the organizer's `mload`:
   thread: one pass of 434 ms with the sync at 400 ms, for every request, not only for POSTs.
   The very first commit after startup did the same (814 ms).
 
-What changed: the checkpoint policy described above (copies every 16 MiB, restart every 128 MiB,
-the restarting commit on the helper thread, a hold that lasts as long as that takes, parked POSTs
-released a few per pass).
+What changed: the checkpoint policy described above (copies every 16 MiB, the restarting commit on
+the helper thread, a hold that lasts as long as that takes, parked POSTs released a few per pass).
 
-Same test after the change, sync at 150 ms: the log restarts every time and stays at 160 MiB, the
-cgroup at 1,250 MB with no reclaim (#430: at the 1,750 MB limit, 534k pages reclaimed), and the
-longest commit on the request thread is under 2 ms with the sync at 400 ms. With a fast disk the
-two versions use the same CPU (40.4% against 41.2% of a core at 22k requests/s). Killed with
-SIGKILL seven times under a write-heavy load, `integrity_check` said ok each time.
+The first commit of #439 (`7d8b606`) restarted the log every 128 MiB with a hold of 1 s, doubled
+after a failure. On the box it held 230k with p95 10.5 / p99 34 ms and 674 MB, and failed 240k
+with p99 1.39 s at 63% CPU. That p99 is the length of a hold: with the sync at 450 ms my shim
+gives the same picture, a hold of 1.4 s every 10 s, POST p95 962 ms, 0.98% of all requests
+waiting. One more hold and p99 becomes the hold. So restarts are now spaced by the hold length
+(see above).
+
+With the sync at 450 ms, 250,000 users, 24k requests/s:
+
+| | p99 | POST p95 | log |
+|---|---:|---:|---:|
+| #430 | 88 ms | 134 ms | 2.7 GB, never restarted |
+| #439 first commit | 208 ms | 962 ms | 221 MiB |
+| this commit | 41 ms | 72 ms | 602 MiB |
+
+The longest commit on the request thread is under 2 ms with the sync at 400 ms. With a fast disk
+this version and #430 use the same CPU (40.4% against 41.2% of a core at 22k requests/s) and the
+log restarts every 128 MiB (later after a slow hold). Killed with SIGKILL seven times under a write-heavy load, with and
+without the slow sync, `integrity_check` said ok each time.
 
 ## Changes since #406 (250k)
 

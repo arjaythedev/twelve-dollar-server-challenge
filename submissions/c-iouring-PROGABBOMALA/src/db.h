@@ -15,8 +15,10 @@
 #define CKPT_FRAMES_DEFAULT 32768 /* restart the log every 128 MiB of WAL */
 #define CKPT_PASS_FRAMES 4096     /* copy and sync in between, every 16 MiB */
 #define CKPT_INLINE_FRAMES 524288 /* last resort: checkpoint on the loop */
-#define HOLD_MAX_MS 1000          /* longest time POSTs are parked for the tail copy */
-#define HOLD_GROW 3               /* doubled after each cycle that did not restart the log */
+#define CKPT_MAX_FRAMES 131072    /* the log is never left to pass 512 MiB by plan */
+#define HOLD_MAX_MS 4000          /* longest time POSTs are parked for the tail copy */
+#define HOLD_SPACING 32           /* a restart is this many hold lengths after the last */
+#define CKPT_FAILS_INLINE 3
 
 enum { CK_IDLE = 0, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_COPIED, CK_RESTART, CK_TAIL_DONE };
 
@@ -50,6 +52,10 @@ struct db_engine {
   int writes_held;
   int64_t hold_since_ms;
   int ck_fails; /* cycles in a row that left the log running */
+  int ck_fixed; /* CKPT_FRAMES given: no spacing by hold length */
+  int64_t copy_since_ms;
+  uint32_t copy_frames; /* log length at the last copy */
+  uint32_t rate;        /* frames a second, over the last stretch between copies */
 };
 
 static int db_exec_fwd(sqlite3 *db, const char *sql);
@@ -123,7 +129,7 @@ static int db_open_ckpt(const char *path, sqlite3 **out) {
   sqlite3_busy_timeout(*out, 2000);
   db_chunk(*out);
   return db_exec_fwd(*out, "PRAGMA synchronous=NORMAL") && db_exec_fwd(*out, "PRAGMA wal_autocheckpoint=0") &&
-         db_exec_fwd(*out, "PRAGMA journal_size_limit=536870912") && db_exec_fwd(*out, "PRAGMA cache_size=-2048") &&
+         db_exec_fwd(*out, "PRAGMA journal_size_limit=1073741824") && db_exec_fwd(*out, "PRAGMA cache_size=-2048") &&
          db_exec_fwd(*out, "SELECT 1 FROM sqlite_schema LIMIT 1");
 }
 
@@ -148,13 +154,23 @@ static int db_user_version(void *out, int n, char **v, char **c) {
 }
 
 /* 1 = held POSTs can go on */
-static int db_cycle_end(struct db_engine *d, int restarted) {
+static int db_cycle_end(struct db_engine *d, int restarted, int64_t now_ms) {
   if (restarted) {
+    /* the longer a hold lasts, the rarer the restarts */
+    uint64_t next = d->ck_frames;
+    int64_t hold = now_ms - d->hold_since_ms;
+    if (!d->ck_fixed && hold > 0) {
+      next = (uint64_t)d->rate * (uint64_t)hold * HOLD_SPACING / 1000;
+      if (next < d->ck_frames) next = d->ck_frames;
+      if (next > CKPT_MAX_FRAMES) next = CKPT_MAX_FRAMES;
+    }
     d->wal_frames = 1;
-    d->ck_next = d->ck_frames;
+    d->ck_next = (uint32_t)next;
     d->ck_fails = 0;
+    d->copy_frames = 1;
+    d->copy_since_ms = now_ms;
   } else {
-    d->ck_next = d->wal_frames + d->ck_frames / 4;
+    d->ck_next = d->wal_frames + d->ck_frames;
     d->ck_fails++;
   }
   d->ck_copy_at = d->wal_frames + d->ck_pass;
@@ -168,13 +184,17 @@ static int db_tick(struct db_engine *d, int64_t now_ms) {
   int released = 0;
   switch (atomic_load(&d->ck_state)) {
     case CK_IDLE:
-      if (d->wal_frames >= CKPT_INLINE_FRAMES && d->ck_fails > HOLD_GROW) {
+      if (d->wal_frames >= CKPT_INLINE_FRAMES && d->ck_fails > CKPT_FAILS_INLINE) {
         int nlog = 0, ndone = 0;
         sqlite3_wal_checkpoint_v2(d->db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
         d->ck_next = d->wal_frames + d->ck_frames;
         d->ck_copy_at = d->wal_frames + d->ck_pass;
         d->ck_fails = 0;
       } else if (d->wal_frames >= d->ck_copy_at) {
+        if (d->copy_since_ms && now_ms > d->copy_since_ms && d->wal_frames > d->copy_frames)
+          d->rate = (uint32_t)((uint64_t)(d->wal_frames - d->copy_frames) * 1000 / (uint64_t)(now_ms - d->copy_since_ms));
+        d->copy_frames = d->wal_frames;
+        d->copy_since_ms = now_ms;
         atomic_store(&d->ck_final, d->wal_frames >= d->ck_next);
         db_ckpt_kick(d, CK_BULK); /* copy the bulk while writes continue */
       }
@@ -190,8 +210,7 @@ static int db_tick(struct db_engine *d, int64_t now_ms) {
       db_ckpt_kick(d, CK_TAIL);
       break;
     case CK_TAIL:
-      if (d->writes_held &&
-          now_ms - d->hold_since_ms > (int64_t)HOLD_MAX_MS << (d->ck_fails < HOLD_GROW ? d->ck_fails : HOLD_GROW)) {
+      if (d->writes_held && now_ms - d->hold_since_ms > HOLD_MAX_MS) {
         d->writes_held = 0;
         released = 1;
       }
@@ -199,10 +218,10 @@ static int db_tick(struct db_engine *d, int64_t now_ms) {
     case CK_TAIL_COPIED:
       /* all copied, writes still parked: the thread restarts the log */
       if (d->writes_held && atomic_load(&d->ck_full)) db_ckpt_kick(d, CK_RESTART);
-      else released = db_cycle_end(d, 0);
+      else released = db_cycle_end(d, 0, now_ms);
       break;
     case CK_TAIL_DONE: /* no time limit while the thread holds the write lock */
-      released = db_cycle_end(d, atomic_load(&d->ck_full));
+      released = db_cycle_end(d, atomic_load(&d->ck_full), now_ms);
       break;
     default:
       break;
@@ -267,7 +286,7 @@ static int db_init(struct db_engine *d, const char *path) {
   }
   if (!db_exec(d->db, "PRAGMA synchronous=NORMAL") || !db_exec(d->db, "PRAGMA temp_store=MEMORY") ||
       !db_exec(d->db, "PRAGMA cache_size=-65536") || !db_exec(d->db, "PRAGMA mmap_size=0") ||
-      !db_exec(d->db, "PRAGMA wal_autocheckpoint=0") || !db_exec(d->db, "PRAGMA journal_size_limit=536870912"))
+      !db_exec(d->db, "PRAGMA wal_autocheckpoint=0") || !db_exec(d->db, "PRAGMA journal_size_limit=1073741824"))
     return 0;
 
   if (!db_prep(d, "BEGIN", &d->st_begin) || !db_prep(d, "COMMIT", &d->st_commit) ||
@@ -285,6 +304,7 @@ static int db_init(struct db_engine *d, const char *path) {
   const char *e = getenv("CKPT_FRAMES");
   long cf = e ? atol(e) : 0;
   d->ck_frames = cf > 0 ? (uint32_t)cf : CKPT_FRAMES_DEFAULT;
+  d->ck_fixed = cf > 0;
   d->ck_pass = d->ck_frames < CKPT_PASS_FRAMES ? d->ck_frames : CKPT_PASS_FRAMES;
   d->ck_next = d->ck_frames;
   d->ck_copy_at = d->ck_pass;

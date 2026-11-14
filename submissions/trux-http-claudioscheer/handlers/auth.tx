@@ -1,0 +1,31 @@
+package handlers
+
+import "http"
+import "jwt"
+import "time"
+
+func requireUser(request int) (int, string, bool) {
+  let header string = http.header(request, "Authorization")
+  if len(header) < 7 || header[:7] != "Bearer " {
+    let _ int = fail(request, 401, "missing bearer token")
+    return 0, "", false
+  }
+  let claims *jwt.Claims, verr error = jwt.verify(header[7:], setting("JWT_SECRET"))
+  if verr != nil {
+    let _ int = fail(request, 401, "invalid or expired token")
+    return 0, "", false
+  }
+  let exp int = jwt.getInt(claims, "exp")
+  if exp != 0 && time.nowUnixMillis() / 1000 >= exp {
+    let _ int = fail(request, 401, "invalid or expired token")
+    return 0, "", false
+  }
+  let sub string = jwt.getString(claims, "sub")
+  let username string = jwt.getString(claims, "username")
+  let userId int = positiveId(sub)
+  if userId < 0 || len(username) == 0 {
+    let _ int = fail(request, 401, "invalid token payload")
+    return 0, "", false
+  }
+  return userId, username, true
+}

@@ -1,0 +1,108 @@
+package handlers
+
+import "http"
+import "json"
+import "sqlite"
+
+pub func getPost(request int) int {
+  let id int = positiveId(http.param(request, "id"))
+  if id < 0 {
+    return fail(request, 400, "invalid post id")
+  }
+  let db *sqlite.DB, err error = openDB()
+  if err != nil {
+    return serverError(request)
+  }
+  let sql string = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?"
+  let stmt *sqlite.Stmt, perr error = sqlite.prepare(db, sql)
+  if perr != nil {
+    return serverError(request)
+  }
+  let berr error = sqlite.bindInt(stmt, 1, id)
+  if berr != nil {
+    let _ error = sqlite.finalize(stmt)
+    return serverError(request)
+  }
+  let has bool, serr error = sqlite.step(stmt)
+  if serr != nil {
+    let _ error = sqlite.finalize(stmt)
+    return serverError(request)
+  }
+  if !has {
+    let _ error = sqlite.finalize(stmt)
+    return fail(request, 404, "post not found")
+  }
+  let doc *json.MutDoc = json.newDoc()
+  let root *json.MutVal = json.newObject(doc)
+  json.setRoot(doc, root)
+  let post *json.MutVal = json.newObject(doc)
+  json.addVal(doc, root, "post", post)
+  let _ int = fillPost(doc, post, stmt)
+  let _ error = sqlite.finalize(stmt)
+  http.json(request, 200, json.write(doc))
+  return 0
+}
+
+pub func createPost(request int) int {
+  let userId int, username string, ok bool = requireUser(request)
+  if !ok {
+    return 0
+  }
+  let parsed *json.Doc, perr error = json.parse(http.body(request))
+  if perr != nil {
+    return fail(request, 400, "malformed JSON body")
+  }
+  let root *json.Val = json.root(parsed)
+  if !json.isObject(root) {
+    return fail(request, 400, "body is required")
+  }
+  let bodyVal *json.Val = json.get(root, "body")
+  if !json.isString(bodyVal) {
+    return fail(request, 400, "body is required")
+  }
+  let body string = trim(json.getString(bodyVal))
+  if len(body) == 0 {
+    return fail(request, 400, "body is required")
+  }
+  if len(body) > 500 {
+    return fail(request, 400, "body must be at most 500 characters")
+  }
+  let db *sqlite.DB, err error = openDB()
+  if err != nil {
+    return serverError(request)
+  }
+  let stmt *sqlite.Stmt, ierr error = sqlite.prepare(db, "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at")
+  if ierr != nil {
+    return serverError(request)
+  }
+  let uerr error = sqlite.bindInt(stmt, 1, userId)
+  let terr error = sqlite.bindText(stmt, 2, body)
+  if uerr != nil || terr != nil {
+    let _ error = sqlite.finalize(stmt)
+    return serverError(request)
+  }
+  let has bool, serr error = sqlite.step(stmt)
+  if serr != nil || !has {
+    let _ error = sqlite.finalize(stmt)
+    return serverError(request)
+  }
+  let id int = sqlite.columnInt(stmt, 0)
+  let created string = sqlite.columnText(stmt, 1)
+  let done bool, derr error = sqlite.step(stmt)
+  let _ error = sqlite.finalize(stmt)
+  if derr != nil || done {
+    return serverError(request)
+  }
+  let doc *json.MutDoc = json.newDoc()
+  let wrap *json.MutVal = json.newObject(doc)
+  json.setRoot(doc, wrap)
+  let post *json.MutVal = json.newObject(doc)
+  json.addVal(doc, wrap, "post", post)
+  json.addInt(doc, post, "id", id)
+  json.addString(doc, post, "body", body)
+  json.addString(doc, post, "created_at", created)
+  json.addString(doc, post, "author", username)
+  json.addInt(doc, post, "like_count", 0)
+  http.json(request, 201, json.write(doc))
+  return 0
+}

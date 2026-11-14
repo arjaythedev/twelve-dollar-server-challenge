@@ -1,16 +1,18 @@
 ; Feed API server: raw Linux syscalls for sockets/HTTP, SQLite through its C
-; API, one worker thread per accepted keep-alive connection (Nginx mode).
+; API. A single-threaded epoll event loop owns every connection (Nginx mode),
+; with non-blocking reads and blocking writes, one SQLite handle, and shared
+; request/response scratch buffers.
 
 %include "common.inc"
 
 extern malloc
+extern free
+extern realloc
 extern getenv
 extern strlen
 extern atoi
 extern inet_pton
 extern signal
-extern pthread_create
-extern pthread_join
 
 extern db_init
 extern db_close
@@ -35,8 +37,6 @@ extern append_bytes
 extern append_u64
 extern json_parse_body
 extern ci_eq
-
-%define N_WORKERS 64
 
 section .data
 one:            dd 1
@@ -129,22 +129,30 @@ msg_no_db: db 'feed: SQLITE_PATH is required',10
 msg_no_db_len equ $ - msg_no_db
 msg_listen: db 'feed: cannot listen',10
 msg_listen_len equ $ - msg_listen
+msg_db: db 'feed: cannot initialise database',10
+msg_db_len equ $ - msg_db
 
 section .bss
 g_listen_fd:     resd 1
+g_epfd:          resd 1
 g_jwt_secret:    resq 1
 g_jwt_secret_len: resq 1
 g_start_sec:     resq 1
 g_start_nsec:    resq 1
 g_timeout:       resq 2
+g_now_ms:        resq 1
+g_last_sweep:    resq 1
 sockaddr_in:     resb 16
-worker_ctxs:     resb W_SIZE * N_WORKERS
-thread_ids:      resq N_WORKERS
+rlim:            resq 2
+g_conn_cap:      resd 1
+evtmp:           resb 16
+g_wctx:          resb W_SIZE
+conns:           resb CONN_SIZE * MAX_CONN
+evbuf:           resb 12 * MAX_EVENTS
 
 section .text
 
 global main
-global worker_entry
 
 ; -----------------------------------------------------------------------------
 ; die(rdi=msg, rsi=len) - write to stderr and exit(1)
@@ -173,6 +181,10 @@ main:
     sub rsp, 24
     ; SIGPIPE -> ignore
     mov edi, 13
+    mov esi, 1
+    call signal
+    ; SIGCHLD -> ignore: workers are never waited for and must not zombify
+    mov edi, 17
     mov esi, 1
     call signal
     call b64url_init
@@ -220,6 +232,82 @@ main:
     mov rax, [rbp-56]
     mov [rel g_start_nsec], rax
 
+    ; direct mode: one connection per client, so the fd budget is a hard wall.
+    ; Raise the soft limit to the hard one when allowed (it is not on the
+    ; benchmark box: both are 65535). RLIMIT_NOFILE is per process, so fork a
+    ; few SO_REUSEPORT workers, each with its own budget, until their caps add
+    ; up to CONN_TARGET connections (65,535 on the benchmark box means four
+    ; workers, ~260k connections).
+    ; The worker count is capped at eight so they still fit one core.
+    mov eax, SYS_getrlimit
+    mov edi, RLIMIT_NOFILE
+    lea rsi, [rel rlim]
+    syscall
+    mov rax, [rel rlim+8]
+    mov [rel rlim], rax
+    mov eax, SYS_setrlimit
+    mov edi, RLIMIT_NOFILE
+    lea rsi, [rel rlim]
+    syscall
+    mov eax, SYS_getrlimit
+    mov edi, RLIMIT_NOFILE
+    lea rsi, [rel rlim]
+    syscall
+    mov rax, [rel rlim]
+    cmp rax, 1000000            ; RLIM_INFINITY and huge limits: cap the input
+    jbe .limit_ok
+    mov eax, 1000000
+.limit_ok:
+    ; Per-worker connection cap: leave the reserve for stdio, the epoll fd,
+    ; the listener and SQLite, so accept() never fails with EMFILE. Keeping the
+    ; cap below the limit is what stops the level-triggered listener from
+    ; spinning at 100% once the fd budget is gone.
+    mov rcx, rax
+    shr rcx, 3
+    mov rdx, 512
+    cmp rcx, rdx
+    jae .reserve
+    mov rdx, rcx
+.reserve:
+    sub rax, rdx
+    cmp rax, MAX_CONN
+    jbe .cap_ok
+    mov eax, MAX_CONN
+.cap_ok:
+    mov [rel g_conn_cap], eax
+
+    ; Enough workers to reach CONN_TARGET connections, never fewer than one nor
+    ; more than eight. Extra workers only split one core, so this is not a
+    ; throughput knob: it exists so the per-process fd limit is not the wall.
+    mov rcx, rax
+    mov eax, CONN_TARGET
+    xor edx, edx
+    div rcx
+    test rdx, rdx
+    jz .exact
+    inc rax
+.exact:
+    test rax, rax
+    jnz .atleast1
+    mov eax, 1
+.atleast1:
+    cmp rax, 8
+    jbe .atmost8
+    mov eax, 8
+.atmost8:
+    mov r9d, eax
+.fork_loop:
+    cmp r9d, 1
+    jbe .forked
+    mov eax, SYS_fork
+    syscall
+    test rax, rax
+    jz .forked                  ; child serves too, but forks no further
+    js .forked
+    dec r9d                     ; rcx/r11 are clobbered by syscall
+    jmp .fork_loop              ; parent keeps forking until the count is met
+.forked:
+
     ; listening socket
     mov eax, SYS_socket
     mov edi, AF_INET
@@ -235,6 +323,13 @@ main:
     mov edi, r12d
     mov esi, SOL_SOCKET
     mov edx, SO_REUSEADDR
+    lea r10, [rel one]
+    mov r8d, 4
+    syscall
+    mov eax, SYS_setsockopt
+    mov edi, r12d
+    mov esi, SOL_SOCKET
+    mov edx, SO_REUSEPORT
     lea r10, [rel one]
     mov r8d, 4
     syscall
@@ -264,49 +359,70 @@ main:
     js .bad_listen
     mov eax, SYS_listen
     mov edi, r12d
-    mov esi, 512
+    mov esi, 4096
     syscall
     test rax, rax
     js .bad_listen
 
-    xor r15d, r15d
-.spawn:
-    cmp r15d, N_WORKERS
-    jae .join_all
-    mov rax, W_SIZE
-    imul rax, r15
-    lea rcx, [rel worker_ctxs]
-    add rcx, rax
-    lea rdi, [rel thread_ids]
-    lea rdi, [rdi+r15*8]
-    xor esi, esi
-    lea rdx, [rel worker_entry]
-    call pthread_create
-    inc r15d
-    jmp .spawn
-.join_all:
-    xor r15d, r15d
-.join_loop:
-    cmp r15d, N_WORKERS
-    jae .hang
-    lea rax, [rel thread_ids]
-    mov rdi, [rax+r15*8]
-    xor esi, esi
-    call pthread_join
-    inc r15d
-    jmp .join_loop
-.hang:
-    mov qword [rel g_timeout], 1000000
-    mov qword [rel g_timeout+8], 0
-    mov eax, 35                 ; nanosleep
-    lea rdi, [rel g_timeout]
-    xor esi, esi
+    ; the listening socket never blocks: accept() drains, then reports EAGAIN
+    mov eax, SYS_fcntl
+    mov edi, r12d
+    mov esi, F_SETFL
+    mov edx, O_NONBLOCK
     syscall
-    jmp .hang
+
+    mov eax, SYS_epoll_create1
+    xor edi, edi
+    syscall
+    test rax, rax
+    js .bad_listen
+    mov [rel g_epfd], eax
+
+    mov dword [rel evtmp], EPOLLIN
+    mov [rel evtmp+4], r12
+    mov eax, SYS_epoll_ctl
+    mov edi, [rel g_epfd]
+    mov esi, EPOLL_CTL_ADD
+    mov edx, r12d
+    lea r10, [rel evtmp]
+    syscall
+    test rax, rax
+    js .bad_listen
+
+    ; one SQLite connection for the whole process
+    lea rdi, [rel g_wctx]
+    call db_init
+    test eax, eax
+    jnz .bad_db
+
+    mov edi, RESP_SIZE
+    call malloc
+    test rax, rax
+    jz .bad_db
+    mov [rel g_wctx+W_RESP], rax
+    mov edi, TMP_SIZE
+    call malloc
+    test rax, rax
+    jz .bad_db
+    mov [rel g_wctx+W_TMP], rax
+    mov edi, USER_SIZE
+    call malloc
+    test rax, rax
+    jz .bad_db
+    mov [rel g_wctx+W_USER], rax
+
+    call now_ms
+    mov [rel g_now_ms], rax
+    mov [rel g_last_sweep], rax
+    call event_loop             ; never returns
 
 .bad_listen:
     lea rdi, [rel msg_listen]
     mov esi, msg_listen_len
+    call die
+.bad_db:
+    lea rdi, [rel msg_db]
+    mov esi, msg_db_len
     call die
 .no_db:
     lea rdi, [rel msg_no_db]
@@ -314,9 +430,31 @@ main:
     call die
 
 ; -----------------------------------------------------------------------------
-; worker_entry(rdi=wctx) -> rax=0
+; now_ms() -> rax = CLOCK_MONOTONIC milliseconds
 ; -----------------------------------------------------------------------------
-worker_entry:
+now_ms:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    mov eax, SYS_clock_gettime
+    mov edi, CLOCK_MONOTONIC
+    mov rsi, rsp
+    syscall
+    mov rax, [rsp]
+    imul rax, rax, 1000
+    mov r8, rax
+    mov rax, [rsp+8]
+    xor edx, edx
+    mov rcx, 1000000
+    div rcx
+    add rax, r8
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; event_loop() - epoll_wait, then service connection events, then accepts.
+; -----------------------------------------------------------------------------
+event_loop:
     push rbp
     mov rbp, rsp
     push rbx
@@ -325,49 +463,110 @@ worker_entry:
     push r14
     push r15
     sub rsp, 24
-    mov r12, rdi
-    mov rdi, r12
-    call db_init
-    test eax, eax
-    jnz .exit
-    mov edi, REQ_SIZE
-    call malloc
-    test rax, rax
-    jz .exit_db
-    mov [r12+W_REQ], rax
-    mov edi, RESP_SIZE
-    call malloc
-    test rax, rax
-    jz .exit_db
-    mov [r12+W_RESP], rax
-    mov edi, TMP_SIZE
-    call malloc
-    test rax, rax
-    jz .exit_db
-    mov [r12+W_TMP], rax
-    mov edi, USER_SIZE
-    call malloc
-    test rax, rax
-    jz .exit_db
-    mov [r12+W_USER], rax
 .loop:
-    mov eax, SYS_accept
+    mov eax, SYS_epoll_wait
+    mov edi, [rel g_epfd]
+    lea rsi, [rel evbuf]
+    mov edx, MAX_EVENTS
+    mov r10d, 1000
+    syscall
+    test rax, rax
+    js .loop                    ; EINTR: just re-enter
+    mov r15, rax
+    call now_ms
+    mov [rel g_now_ms], rax
+    mov rcx, [rel g_last_sweep]
+    add rcx, SWEEP_INTERVAL_MS
+    cmp rax, rcx
+    jb .events
+    mov [rel g_last_sweep], rax
+    call sweep_idle
+.events:
+    ; connections first, so an accept later in this batch cannot recycle a
+    ; descriptor that still has an event queued for it
+    xor r14d, r14d
+.ev1:
+    cmp r14, r15
+    jae .phase2
+    lea rbx, [rel evbuf]
+    lea rax, [r14+r14*2]
+    shl rax, 2
+    add rbx, rax
+    mov r12d, [rbx+4]
+    cmp r12d, [rel g_listen_fd]
+    je .ev1_next
+    mov eax, [rbx]
+    test eax, EPOLLIN
+    jnz .ev1_read
+    test eax, EPOLLOUT
+    jnz .ev1_out
+    test eax, EPOLLERR | EPOLLHUP | EPOLLRDHUP
+    jz .ev1_next
+    mov rdi, r12
+    call conn_close
+    jmp .ev1_next
+.ev1_read:
+    mov rdi, r12
+    call conn_read
+    jmp .ev1_next
+.ev1_out:
+    mov rdi, r12
+    call conn_flush
+    test eax, eax
+    js .ev1_close
+    jnz .ev1_next
+    mov rdi, r12
+    call conn_process
+    test eax, eax
+    jz .ev1_next
+.ev1_close:
+    mov rdi, r12
+    call conn_close
+.ev1_next:
+    inc r14
+    jmp .ev1
+.phase2:
+    xor r14d, r14d
+.ev2:
+    cmp r14, r15
+    jae .loop
+    lea rbx, [rel evbuf]
+    lea rax, [r14+r14*2]
+    shl rax, 2
+    add rbx, rax
+    mov r12d, [rbx+4]
+    cmp r12d, [rel g_listen_fd]
+    jne .ev2_next
+    call accept_new
+.ev2_next:
+    inc r14
+    jmp .ev2
+
+; -----------------------------------------------------------------------------
+; accept_new() - drain the accept queue
+; -----------------------------------------------------------------------------
+accept_new:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 40
+.acc:
+    mov eax, SYS_accept4
     mov edi, [rel g_listen_fd]
     xor esi, esi
     xor edx, edx
+    mov r10d, SOCK_NONBLOCK
     syscall
     test rax, rax
-    js .accept_err
+    js .out                     ; EAGAIN: queue drained
     mov r13d, eax
-    mov qword [rel g_timeout], 75
-    mov qword [rel g_timeout+8], 0
-    mov eax, SYS_setsockopt
-    mov edi, r13d
-    mov esi, SOL_SOCKET
-    mov edx, SO_RCVTIMEO
-    lea r10, [rel g_timeout]
-    mov r8d, 16
-    syscall
+    cmp r13d, [rel g_conn_cap]
+    jae .reject
+    ; already non-blocking, so neither read nor write can stall the loop
     mov eax, SYS_setsockopt
     mov edi, r13d
     mov esi, IPPROTO_TCP
@@ -375,29 +574,47 @@ worker_entry:
     lea r10, [rel one]
     mov r8d, 4
     syscall
+    mov eax, r13d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    mov edi, CONN_INIT_CAP
+    call malloc
+    test rax, rax
+    jz .reject
+    mov [rbx+CONN_BUF], rax
+    mov qword [rbx+CONN_LEN], 0
+    mov qword [rbx+CONN_CAP], CONN_INIT_CAP
+    mov qword [rbx+CONN_OUTLEN], 0
+    mov qword [rbx+CONN_OUTOFF], 0
+    mov qword [rbx+CONN_OUTBUF], 0
+    mov qword [rbx+CONN_OUTCAP], 0
+    mov rcx, [rel g_now_ms]
+    mov [rbx+CONN_LAST], rcx
+    mov dword [rel evtmp], EPOLLIN | EPOLLRDHUP
+    mov [rel evtmp+4], r13
+    mov eax, SYS_epoll_ctl
+    mov edi, [rel g_epfd]
+    mov esi, EPOLL_CTL_ADD
+    mov edx, r13d
+    lea r10, [rel evtmp]
+    syscall
+    test rax, rax
+    js .reject_free
     mov rdi, r13
-    mov rsi, r12
-    call handle_connection
+    call conn_read            ; the first request may already be waiting
+    jmp .acc
+.reject_free:
+    mov rdi, [rbx+CONN_BUF]
+    call free
+    mov qword [rbx+CONN_BUF], 0
+.reject:
     mov eax, SYS_close
     mov edi, r13d
     syscall
-    jmp .loop
-.accept_err:
-    cmp rax, EINTR
-    je .loop
-    mov qword [rel g_timeout], 0
-    mov qword [rel g_timeout+8], 1000000
-    mov eax, 35
-    lea rdi, [rel g_timeout]
-    xor esi, esi
-    syscall
-    jmp .loop
-.exit_db:
-    mov rdi, r12
-    call db_close
-.exit:
-    xor eax, eax
-    add rsp, 24
+    jmp .acc
+.out:
+    add rsp, 40
     pop r15
     pop r14
     pop r13
@@ -407,9 +624,114 @@ worker_entry:
     ret
 
 ; -----------------------------------------------------------------------------
-; handle_connection(rdi=fd, rsi=wctx)
+; conn_read(rdi=fd) - drain readable bytes, then run every complete request
 ; -----------------------------------------------------------------------------
-handle_connection:
+conn_read:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 24
+    mov r12d, edi
+    mov eax, r12d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    cmp qword [rbx+CONN_BUF], 0
+    je .out                     ; stale event for an already closed connection
+.read:
+    mov rdx, [rbx+CONN_CAP]
+    sub rdx, [rbx+CONN_LEN]
+    jnz .have_space
+    ; buffer full: try to drain complete requests before growing
+    mov rdi, r12
+    call conn_process
+    test eax, eax
+    jnz .close
+    mov rax, [rbx+CONN_CAP]
+    cmp [rbx+CONN_LEN], rax
+    jb .read
+    mov rdi, r12
+    call conn_grow
+    test eax, eax
+    jnz .too_big
+    jmp .read
+.have_space:
+    mov eax, SYS_read
+    mov edi, r12d
+    mov rsi, [rbx+CONN_BUF]
+    add rsi, [rbx+CONN_LEN]
+    mov rdx, [rbx+CONN_CAP]
+    sub rdx, [rbx+CONN_LEN]
+    syscall
+    test rax, rax
+    jg .got
+    je .eof
+    cmp rax, EAGAIN
+    je .process
+    cmp rax, EINTR
+    je .read
+    jmp .close
+.got:
+    add [rbx+CONN_LEN], rax
+    mov rcx, [rel g_now_ms]
+    mov [rbx+CONN_LAST], rcx
+    ; Run whatever is complete right away. The listener is level-triggered, so
+    ; bytes still queued in the socket will report again: another recv() only
+    ; to observe EAGAIN would be one wasted syscall per request. If the buffer
+    ; did fill up, grow it now instead, because a request larger than the
+    ; buffer may have no further byte coming to wake us.
+    mov rdi, r12
+    call conn_process
+    test eax, eax
+    jnz .close
+    mov rax, [rbx+CONN_CAP]
+    cmp [rbx+CONN_LEN], rax
+    jb .out
+    mov rdi, r12
+    call conn_grow
+    test eax, eax
+    jnz .too_big
+    jmp .read
+.eof:
+    mov rdi, r12
+    call conn_process
+    jmp .close
+.process:
+    mov rdi, r12
+    call conn_process
+    test eax, eax
+    jnz .close
+.out:
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+.close:
+    mov rdi, r12
+    call conn_close
+    jmp .out
+.too_big:
+    mov rdi, r12
+    mov esi, ST_400
+    lea rdx, [rel e_badrequest]
+    mov ecx, e_badrequest_len
+    mov r8d, 1
+    call send_simple
+    jmp .close
+
+; -----------------------------------------------------------------------------
+; conn_process(rdi=fd) -> eax = 0 keep / 1 closed
+; Runs every fully buffered request, then compacts the leftovers.
+; -----------------------------------------------------------------------------
+conn_process:
     push rbp
     mov rbp, rsp
     push rbx
@@ -418,98 +740,96 @@ handle_connection:
     push r14
     push r15
     sub rsp, 200
-    mov r12, rdi
-    mov r13, rsi
-    mov r14, [r13+W_REQ]
-    xor r15d, r15d
-    mov rax, [r13+W_RESP]
-    mov [rbp-176], rax
-.read_headers:
-    mov rdi, r14
-    mov rsi, r15
+    mov r12d, edi
+    mov eax, r12d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    xor r13d, r13d              ; consumed offset
+    cmp qword [rbx+CONN_BUF], 0
+    je .keep
+.next_req:
+    cmp qword [rbx+CONN_OUTLEN], 0
+    jne .compact                ; response still draining: keep order
+    mov r14, [rbx+CONN_LEN]
+    sub r14, r13
+    jz .compact
+    mov rdi, [rbx+CONN_BUF]
+    add rdi, r13
+    mov rsi, r14
     call find_header_end
     cmp rax, -1
-    jne .have_headers
-    cmp r15, REQ_SIZE
-    jae .bad_request
-    mov rdx, REQ_SIZE
-    sub rdx, r15
-    mov eax, SYS_read
-    mov edi, r12d
-    lea rsi, [r14+r15]
-    syscall
-    test rax, rax
-    jle .read_error
-    add r15, rax
-    jmp .read_headers
-.read_error:
-    cmp rax, EINTR
-    je .read_headers
-    jmp .close
-.have_headers:
-    mov rdi, r14
-    mov rsi, r15
+    je .partial
+    mov rdi, [rbx+CONN_BUF]
+    add rdi, r13
+    mov rsi, r14
     lea rdx, [rbp-160]
+    mov rcx, rax                ; header end already found above
     call parse_request
     test rax, rax
-    js .bad_request
-    mov [rbp-168], rax
-.read_body:
-    mov rax, [rbp-168]
-    cmp r15, rax
-    jae .run
-    cmp r15, REQ_SIZE
-    jae .bad_request
-    mov rdx, REQ_SIZE
-    sub rdx, r15
-    mov eax, SYS_read
-    mov edi, r12d
-    lea rsi, [r14+r15]
-    syscall
-    test rax, rax
-    jle .read_body_err
-    add r15, rax
-    jmp .read_body
-.read_body_err:
-    cmp rax, EINTR
-    je .read_body
-    jmp .close
-.run:
-    mov rdi, r13
+    js .bad
+    mov r15, rax
+    mov rcx, r13
+    add rcx, r15
+    cmp rcx, [rbx+CONN_LEN]
+    ja .compact                 ; body still on the wire
+    lea rdi, [rel g_wctx]
     mov rsi, r12
-    mov rdx, r14
+    mov rdx, [rbx+CONN_BUF]
+    add rdx, r13
     lea rcx, [rbp-160]
     mov r8d, [rbp-160+P_CLOSE]
-    mov r9, [rbp-176]
+    mov r9, [rel g_wctx+W_RESP]
     call dispatch
     test rax, rax
     js .close
     cmp dword [rbp-160+P_CLOSE], 0
     jne .close
-    mov rax, r15
-    sub rax, [rbp-168]
-    mov [rbp-184], rax
-    test rax, rax
-    jle .left_zero
-    mov rdi, r14
-    mov rsi, r14
-    add rsi, [rbp-168]
-    mov rdx, rax
+    add r13, r15
+    jmp .next_req
+.partial:
+    mov rax, [rbx+CONN_LEN]
+    sub rax, r13
+    cmp rax, [rbx+CONN_CAP]
+    jb .compact                 ; wait for more bytes
+    ; The buffer is full and the request is still incomplete. Grow it so a
+    ; header larger than CONN_INIT_CAP still fits instead of being rejected.
+    mov rax, [rbx+CONN_CAP]
+    cmp rax, REQ_SIZE
+    jae .bad                    ; a request this large can never be valid
+    mov rdi, r12
+    call conn_grow
+    test eax, eax
+    jnz .bad
+    jmp .compact
+.compact:
+    mov rdx, [rbx+CONN_LEN]
+    sub rdx, r13
+    jz .clear
+    mov rdi, [rbx+CONN_BUF]
+    mov rsi, rdi
+    add rsi, r13
     call mem_copy
-    mov r15, [rbp-184]
-    jmp .read_headers
-.left_zero:
-    xor r15d, r15d
-    jmp .read_headers
-.bad_request:
+    mov [rbx+CONN_LEN], rdx
+    xor eax, eax
+    jmp .out
+.clear:
+    mov qword [rbx+CONN_LEN], 0
+.keep:
+    xor eax, eax
+    jmp .out
+.bad:
     mov rdi, r12
     mov esi, ST_400
     lea rdx, [rel e_badrequest]
     mov ecx, e_badrequest_len
     mov r8d, 1
-    mov r9, [rbp-176]
-    call send_response
+    call send_simple
 .close:
+    mov rdi, r12
+    call conn_close
+    mov eax, 1
+.out:
     add rsp, 200
     pop r15
     pop r14
@@ -520,7 +840,156 @@ handle_connection:
     ret
 
 ; -----------------------------------------------------------------------------
-; parse_request(rdi=req, rsi=len, rdx=out) -> rax = total bytes or negative
+; conn_grow(rdi=fd) -> eax = 0 ok / -1 at the request size limit or OOM
+; -----------------------------------------------------------------------------
+conn_grow:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    mov r12d, edi
+    mov eax, r12d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    mov rax, [rbx+CONN_CAP]
+    cmp rax, REQ_SIZE
+    jae .fail
+    shl rax, 1
+    cmp rax, REQ_SIZE
+    jbe .size_ok
+    mov eax, REQ_SIZE
+.size_ok:
+    mov r13, rax
+    mov rdi, [rbx+CONN_BUF]
+    mov rsi, rax
+    call realloc
+    test rax, rax
+    jz .fail
+    mov [rbx+CONN_BUF], rax
+    mov [rbx+CONN_CAP], r13
+    xor eax, eax
+    jmp .out
+.fail:
+    mov eax, -1
+.out:
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; -----------------------------------------------------------------------------
+; conn_close(rdi=fd) - idempotent: deregister, close, free
+; -----------------------------------------------------------------------------
+conn_close:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    mov r12d, edi
+    mov eax, r12d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    mov rdi, [rbx+CONN_BUF]
+    test rdi, rdi
+    jz .out
+    ; No epoll_ctl(DEL) here: close() removes the descriptor from every epoll
+    ; set that watches it, so the explicit deregistration was one wasted
+    ; syscall per closed connection.
+    mov eax, SYS_close
+    mov edi, r12d
+    syscall
+    mov rdi, [rbx+CONN_BUF]
+    call free
+    mov qword [rbx+CONN_BUF], 0
+    mov qword [rbx+CONN_LEN], 0
+    mov qword [rbx+CONN_CAP], 0
+    mov rdi, [rbx+CONN_OUTBUF]
+    test rdi, rdi
+    jz .no_out
+    call free
+    mov qword [rbx+CONN_OUTBUF], 0
+    mov qword [rbx+CONN_OUTCAP], 0
+.no_out:
+    mov qword [rbx+CONN_OUTOFF], 0
+    mov qword [rbx+CONN_OUTLEN], 0
+.out:
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; -----------------------------------------------------------------------------
+; sweep_idle() - close connections with no traffic for IDLE_TIMEOUT_MS
+; -----------------------------------------------------------------------------
+sweep_idle:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 8
+    xor r12d, r12d
+.loop:
+    cmp r12d, MAX_CONN
+    jae .out
+    mov eax, r12d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    mov rax, [rbx+CONN_BUF]
+    test rax, rax
+    jz .next
+    mov rax, [rel g_now_ms]
+    sub rax, [rbx+CONN_LAST]
+    cmp rax, IDLE_TIMEOUT_MS
+    jb .next
+    mov rdi, r12
+    call conn_close
+.next:
+    inc r12
+    jmp .loop
+.out:
+    add rsp, 8
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; -----------------------------------------------------------------------------
+; send_simple(rdi=fd, esi=status, rdx=body, rcx=len, r8d=close)
+; -----------------------------------------------------------------------------
+send_simple:
+    mov r9, [rel g_wctx+W_RESP]
+    jmp send_response
+
+
+; -----------------------------------------------------------------------------
+; parse_request(rdi=req, rsi=len, rdx=out, rcx=header end) -> rax = total bytes
+; The caller already located the CRLFCRLF to decide the request was complete,
+; so it is passed in instead of scanning the header a second time.
 ; -----------------------------------------------------------------------------
 parse_request:
     push rbp
@@ -534,17 +1003,13 @@ parse_request:
     mov r12, rdi
     mov r13, rsi
     mov r14, rdx
+    mov r15, rcx
     mov rdi, r14
     xor eax, eax
     mov ecx, 9
     rep stosq
-    mov rdi, r12
-    mov rsi, r13
-    call find_header_end
-    cmp rax, -1
-    je .bad
-    mov r15, rax
-    ; request-line end
+    test r15, r15
+    js .bad
     mov rdi, r12
     mov rsi, r13
     mov edx, 13
@@ -997,7 +1462,8 @@ send_parse_error:
     jmp send_response
 
 ; -----------------------------------------------------------------------------
-; write_iovecs(rdi=fd, rsi=h1, rdx=l1, rcx=h2, r8=l2) -> rax=0/-1
+; write_iovecs(rdi=fd, rsi=h1, rdx=l1, rcx=h2, r8=l2)
+;   -> rax = 0 fully sent / 1 queued for EPOLLOUT / -1 error
 ; -----------------------------------------------------------------------------
 write_iovecs:
     push rbp
@@ -1018,7 +1484,7 @@ write_iovecs:
     mov edx, 2
     syscall
     test rax, rax
-    js .err
+    js .werr
     jz .err
     mov r10, rax
     mov r11, [rsp+8]
@@ -1044,14 +1510,189 @@ write_iovecs:
     add [rsp+16], r10
     sub [rsp+24], r10
     jmp .loop
-.err:
+.werr:
+    cmp rax, EAGAIN
+    je .queue
     cmp rax, EINTR
     je .loop
-    mov eax, -1
+    jmp .err
+.queue:
+    ; send buffer is full: keep the remainder for EPOLLOUT
+    mov edi, r9d
+    mov rsi, [rsp]
+    mov rdx, [rsp+8]
+    mov rcx, [rsp+16]
+    mov r8, [rsp+24]
+    call conn_queue
     leave
     ret
 .ok:
     xor eax, eax
+    leave
+    ret
+.err:
+    mov eax, -1
+    leave
+    ret
+
+; -----------------------------------------------------------------------------
+; conn_queue(rdi=fd, rsi=b0, rdx=l0, rcx=b1, r8=l1) -> rax = 1 queued / -1 error
+; Only called when nothing is queued yet.
+; -----------------------------------------------------------------------------
+conn_queue:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 40
+    mov r12d, edi
+    mov [rsp], rsi
+    mov [rsp+8], rdx
+    mov [rsp+16], rcx
+    mov [rsp+24], r8
+    add rdx, r8
+    mov r13, rdx                ; total bytes
+    jz .ok
+    mov eax, r12d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    cmp [rbx+CONN_OUTCAP], r13
+    jae .have_buf
+    mov rdi, [rbx+CONN_OUTBUF]
+    mov rsi, r13
+    add rsi, rsi                ; grow to twice the need
+    call realloc
+    test rax, rax
+    jz .err
+    mov [rbx+CONN_OUTBUF], rax
+    mov rcx, r13
+    add rcx, rcx
+    mov [rbx+CONN_OUTCAP], rcx
+.have_buf:
+    mov rdi, [rbx+CONN_OUTBUF]
+    mov rsi, [rsp]
+    mov rdx, [rsp+8]
+    call mem_copy
+    mov rdi, [rbx+CONN_OUTBUF]
+    add rdi, [rsp+8]
+    mov rsi, [rsp+16]
+    mov rdx, [rsp+24]
+    call mem_copy
+    mov qword [rbx+CONN_OUTOFF], 0
+    mov [rbx+CONN_OUTLEN], r13
+    mov rdi, r12
+    mov esi, EPOLLOUT | EPOLLRDHUP
+    call set_events
+    test eax, eax
+    js .err
+    mov eax, 1
+    jmp .out
+.ok:
+    xor eax, eax
+    jmp .out
+.err:
+    mov eax, -1
+.out:
+    add rsp, 40
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; -----------------------------------------------------------------------------
+; conn_flush(rdi=fd) -> eax = 0 drained / 1 still pending / -1 error
+; -----------------------------------------------------------------------------
+conn_flush:
+    push rbp
+    mov rbp, rsp
+    push rbx
+    push r12
+    push r13
+    push r14
+    push r15
+    sub rsp, 24
+    mov r12d, edi
+    mov eax, r12d
+    imul rax, rax, CONN_SIZE
+    lea rbx, [rel conns]
+    add rbx, rax
+    cmp qword [rbx+CONN_BUF], 0
+    je .out
+.flush:
+    mov rdx, [rbx+CONN_OUTLEN]
+    test rdx, rdx
+    jz .drained
+    mov eax, SYS_write
+    mov edi, r12d
+    mov rsi, [rbx+CONN_OUTBUF]
+    add rsi, [rbx+CONN_OUTOFF]
+    syscall
+    test rax, rax
+    jg .wrote
+    je .err
+    cmp rax, EAGAIN
+    je .pending
+    cmp rax, EINTR
+    je .flush
+    jmp .err
+.wrote:
+    add [rbx+CONN_OUTOFF], rax
+    sub [rbx+CONN_OUTLEN], rax
+    mov rcx, [rel g_now_ms]
+    mov [rbx+CONN_LAST], rcx
+    jmp .flush
+.drained:
+    mov qword [rbx+CONN_OUTOFF], 0
+    mov rdi, r12
+    mov esi, EPOLLIN | EPOLLRDHUP
+    call set_events
+    test eax, eax
+    js .err
+    xor eax, eax
+    jmp .out
+.pending:
+    mov eax, 1
+    jmp .out
+.err:
+    mov eax, -1
+.out:
+    add rsp, 24
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop rbx
+    pop rbp
+    ret
+
+; -----------------------------------------------------------------------------
+; set_events(rdi=fd, esi=mask) -> eax = 0 / -1
+; -----------------------------------------------------------------------------
+set_events:
+    push rbp
+    mov rbp, rsp
+    mov [rel evtmp], esi
+    mov [rel evtmp+4], rdi
+    mov rdx, rdi
+    mov rsi, EPOLL_CTL_MOD
+    lea r10, [rel evtmp]
+    mov edi, [rel g_epfd]
+    mov eax, SYS_epoll_ctl
+    syscall
+    test rax, rax
+    js .err
+    xor eax, eax
+    leave
+    ret
+.err:
+    mov eax, -1
     leave
     ret
 

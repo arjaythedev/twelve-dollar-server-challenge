@@ -264,7 +264,7 @@ pub fn put_i64(out: &mut Vec<u8>, v: i64) {
     }
 }
 
-fn reason(code: u16) -> &'static str {
+pub fn reason(code: u16) -> &'static str {
     match code {
         200 => "OK",
         201 => "Created",

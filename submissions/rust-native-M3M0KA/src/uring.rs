@@ -421,10 +421,20 @@ impl Ring {
 
     /// Reaps completions, calling `f(user_data, res, flags)` for each.
     pub fn reap<F: FnMut(u64, i32, u32)>(&self, mut f: F) -> usize {
+        self.reap_bounded(usize::MAX, f)
+    }
+
+    /// Reaps at most `cap` completions; the rest stay queued in the ring (the
+    /// CQ is FIFO, so the next pass reaps the oldest first). Bounding the
+    /// batch bounds a pass's worst case at the memory wall: one giant drain
+    /// cannot hold every reply behind one slow commit.
+    pub fn reap_bounded<F: FnMut(u64, i32, u32)>(&self, cap: usize, mut f: F) -> usize {
         let head = unsafe { std::ptr::read_volatile(self.cq_head) };
         let tail = unsafe { std::ptr::read_volatile(self.cq_tail) };
         let mut i = head;
-        while i != tail {
+        let bound = tail.wrapping_sub(head) as usize;
+        let n = bound.min(cap);
+        for k in 0..n {
             let slot = (i & self.cq_mask) as usize;
             let p = unsafe { self.cqes.add(slot * CQE_SIZE) };
             let user = unsafe { std::ptr::read_volatile(p as *const u64) };
@@ -433,10 +443,10 @@ impl Ring {
             f(user, res, flags);
             i = i.wrapping_add(1);
         }
-        if head != tail {
-            unsafe { std::ptr::write_volatile(self.cq_head, tail) };
+        if n > 0 {
+            unsafe { std::ptr::write_volatile(self.cq_head, head.wrapping_add(n as u32)) };
         }
-        tail.wrapping_sub(head) as usize
+        n
     }
 
     pub fn pending(&self) -> u32 {

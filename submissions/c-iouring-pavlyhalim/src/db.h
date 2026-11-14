@@ -13,7 +13,9 @@
 #define WAL_WAKE_FRAMES 1000   /* wake the checkpoint thread */
 #define WAL_GATE_FRAMES 4000   /* hold writes until the log is fully copied, so the next write restarts it */
 #define WAL_INLINE_FRAMES 16384 /* last resort: checkpoint on the loop */
-#define WAL_GATE_MAX_NS 1000000000ULL
+#define WAL_GATE_MAX_NS 250000000ULL  /* a hold lasts at most this long; then WAL_STEP_FRAMES more before the next */
+#define WAL_STEP_FRAMES 2048
+#define WAL_INLINE_GAP_NS 100000000ULL /* the inline checkpoint at most every 100 ms */
 
 #define FEED_N 20
 #define FEED_SPAN 256 /* the 20 newest ids must sit within this many ids for the range plan */
@@ -56,6 +58,8 @@ struct db {
   _Atomic int wal_frames;
   int gate_held;
   uint64_t gate_since;
+  int gate_at; /* frames at which the gate holds writes next: WAL_GATE_FRAMES, higher after a hold ran out */
+  uint64_t inline_at;
   /* stats */
   uint64_t n_ckpt, n_gate, n_inline, n_fallback;
 };
@@ -66,7 +70,8 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
   atomic_store_explicit(&d->wal_frames, frames, memory_order_relaxed);
   atomic_fetch_add_explicit(&d->commit_seq, 1, memory_order_release);
   if (frames >= WAL_WAKE_FRAMES) {
-    if (frames >= WAL_GATE_FRAMES && !d->gate_held) {
+    if (frames < d->gate_at - WAL_STEP_FRAMES) d->gate_at = WAL_GATE_FRAMES; /* the log restarted */
+    if (frames >= d->gate_at && !d->gate_held) {
       d->gate_held = 1;
       d->gate_since = now_ns();
       d->n_gate++;
@@ -81,11 +86,14 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
 
 static void *db_ckpt_thread(void *ud) {
   struct db *d = ud;
-  /* nice 19: on one vCPU a pass at the default priority takes the loop's CPU for its whole length,
-   * 300-430 ms at the memory wall on the box, and c-iouring-public (#158) measured that stall as the
-   * difference at the edge (2 of 3 holds died at nice 0, 3 of 3 held at 19). The loop's batches
-   * are short, so the thread still runs between them. */
-  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+  /* nice 10. At nice 0 a pass competes with the loop as an equal. At nice 19 the scheduler gives the
+   * thread ~1.4% of a saturated CPU against the ~4.5% the checkpoint needs at 300k users: in load
+   * tests at 300-310k it then made almost no progress for the whole hold, the log grew to 970,000
+   * frames, the write gate shut 4,400 times and the inline checkpoint was tried 4,400 times. At
+   * nice 10 (~9.7%) the log stayed under 4,300 frames at 310k. (c-iouring-public #158, whose result
+   * this file cited for nice 19, has since retracted it: 1 of 3 holds on stock SQLite.) Set once:
+   * an unprivileged thread cannot lower its nice value again. */
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
   pthread_setname_np(pthread_self(), "ckpt");
   prefault_stack(128 << 10);
   for (;;) {
@@ -437,6 +445,7 @@ static int vfs_install(void) {
 
 static int db_open(struct db *d, const char *path, long long mmap_bytes, int cache_kib) {
   memset(d, 0, sizeof *d);
+  d->gate_at = WAL_GATE_FRAMES;
   if (!getenv("DEFAULT_PCACHE") && pcache_install() < 0) {
     fprintf(stderr, "sqlite: could not install the page cache\n");
     return -1;
@@ -537,11 +546,19 @@ static int db_commit(struct db *d) {
 static inline int db_writes_allowed(struct db *d) {
   if (d->gate_held) {
     uint64_t seq = atomic_load_explicit(&d->commit_seq, memory_order_acquire);
-    if (atomic_load_explicit(&d->backfilled_seq, memory_order_acquire) == seq || now_ns() - d->gate_since > WAL_GATE_MAX_NS)
+    if (atomic_load_explicit(&d->backfilled_seq, memory_order_acquire) == seq) {
+      d->gate_held = 0; /* copied: the next write restarts the log */
+    } else if (now_ns() - d->gate_since > WAL_GATE_MAX_NS) {
+      /* the checkpoint is behind: let writes go, and hold them again only WAL_STEP_FRAMES later, so
+       * writes see a short hold now and then instead of one every time the gate opens */
       d->gate_held = 0;
+      d->gate_at = atomic_load_explicit(&d->wal_frames, memory_order_relaxed) + WAL_STEP_FRAMES;
+    }
   }
-  if (atomic_load_explicit(&d->wal_frames, memory_order_relaxed) >= WAL_INLINE_FRAMES && !d->in_txn) {
+  if (atomic_load_explicit(&d->wal_frames, memory_order_relaxed) >= WAL_INLINE_FRAMES && !d->in_txn &&
+      now_ns() - d->inline_at > WAL_INLINE_GAP_NS) {
     int nlog = 0, nckpt = 0;
+    d->inline_at = now_ns();
     sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &nckpt);
     d->n_inline++;
     if (nlog == nckpt) {

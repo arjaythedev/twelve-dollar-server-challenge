@@ -95,6 +95,8 @@ impl Conn {
 struct Lane {
     ring: Ring,
     efd: c_int,
+    /// This ring's own listening socket (REUSEPORT group); -1 unassigned.
+    listen_fd: c_int,
     bufs: Vec<u8>,
     /// Buffers returned since the last flush, as a bitmap.
     pending: Box<[u64]>,
@@ -193,7 +195,12 @@ fn bit_set(pending: &[u64], i: u32) -> bool {
 pub struct UringServer {
     lanes: Vec<Lane>,
     ep: c_int,
+    /// Ring-owner listener (the first reuseport socket).
     listen_fd: c_int,
+    /// Every reuseport listener: ring `i` accepts from `listen_lfds[i]` when
+    /// present, falling back to `listen_fd` (which keeps a single-listener
+    /// run identical to the earlier verification).
+    listen_lfds: Vec<c_int>,
     accept_lane: usize,
     app: App,
     /// Free-slot level that moves accepting to the next ring.
@@ -218,11 +225,12 @@ impl UringServer {
     /// Tops up this lane's one-shot accepts, never more than its free slots.
     fn arm_accepts(&mut self, lane: usize) {
         let want = self.lanes[lane].free_slots.saturating_sub(1).min(ACCEPTS);
+        let lfd = self.listen_lfds.get(lane).copied().unwrap_or(self.listen_fd);
         while self.lanes[lane].accepting && self.lanes[lane].accept_inflight < want {
             let u = tag(K_ACCEPT, 0, lane as u32);
             let l = &mut self.lanes[lane];
             if let Some(p) = l.ring.sqe() {
-                Sqe(p).apply(Sqe::accept(self.listen_fd, u));
+                Sqe(p).apply(Sqe::accept(lfd, u));
                 l.accept_inflight += 1;
             } else {
                 break;
@@ -272,6 +280,7 @@ impl UringServer {
         let mut lane = Lane {
             ring,
             efd: -1,
+            listen_fd: self.listen_lfds.get(i).copied().unwrap_or(self.listen_fd),
             bufs,
             pending: vec![0u64; Lane::pending_words()].into_boxed_slice(),
             npending: 0,
@@ -824,6 +833,7 @@ pub fn self_test(secret: &str, db_path: &str) -> bool {
         accept_lane: 0,
         app: App::new(db_path, secret),
         hwm: HANDOVER_FREE,
+        listen_lfds: vec![lfd],
         table_override: None,
         mem: sys::MemGuard::new(),
         mem_holding: false,
@@ -936,6 +946,7 @@ fn self_test_boundary(secret: &str, db_path: &str, port: u16, lfd: c_int) -> boo
         accept_lane: 0,
         app: App::new(db_path, secret),
         hwm: 8,
+        listen_lfds: vec![lfd],
         table_override: Some(32),
         mem: sys::MemGuard::new(),
         mem_holding: false,
@@ -1029,13 +1040,14 @@ mod handover_tests {
 /// Serves forever on `listen_fd` using io_uring. Returns the app back only if
 /// no ring could be opened, so the caller can serve on the other transport
 /// instead of dying.
-pub fn serve(app: App, listen_fd: c_int) -> App {
+pub fn serve(app: App, listen_fds: &[c_int]) -> App {
     let ep = unsafe { sys::epoll_create1(0x80000) };
     assert!(ep >= 0, "epoll_create1 failed");
     let mut server = UringServer {
         lanes: Vec::new(),
         ep,
-        listen_fd,
+        listen_fd: listen_fds.first().copied().unwrap_or(-1),
+        listen_lfds: listen_fds.to_vec(),
         accept_lane: 0,
         app,
         hwm: env_u32("FEED_HANDOVER").unwrap_or(HANDOVER_FREE),
@@ -1050,10 +1062,20 @@ pub fn serve(app: App, listen_fd: c_int) -> App {
         unsafe { sys::close(ep) };
         return server.app;
     }
+    let additional = listen_fds.len().min(MAX_LANES) - 1;
+    // Each extra ring accepts from its own reuseport listener. Ring i's
+    // listen fd comes from the same group so every kernel accept queue has a
+    // drainer from the moment connections arrive.
+    for i in 1..=additional {
+        if !server.open_lane(i) {
+            break;
+        }
+        server.start_accepting(i);
+    }
     server.start_accepting(0);
     eprintln!(
-        "io_uring: {} direct descriptors in ring 0, {} buffers of {} bytes",
-        server.lanes[0].free_slots, BUF_COUNT, BUF_SIZE
+        "io_uring: {} rings, {} direct descriptors in ring 0, {} buffers of {} bytes",
+        server.lanes.len(), server.lanes[0].free_slots, BUF_COUNT, BUF_SIZE
     );
     server.run()
 }

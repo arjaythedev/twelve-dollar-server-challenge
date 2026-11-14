@@ -23,19 +23,18 @@ Every write is committed before its reply, and the server reads nothing box-wide
   - `build.rs` refuses any SQLite whose source id is not 3.54.1's, compiles `src/sqlite_unit.c` (the amalgamation, then `readers.c` and `checkpointer.c`) with GCC and every warning an error, and links it statically.
 - `start.sh`: replaces itself (`exec`) with `target/release/twelve-loop` in the foreground, with no arguments. The server is configured only by `SQLITE_PATH`, `JWT_SECRET`, `HOST` and `PORT`, as SPEC.md gives them.
 
-### The three builds
+### The two builds
 
 | Build | How | What it is |
 |---|---|---|
 | Fast (default) | `bash build.sh` | What the contest builds. Rust with `-C target-cpu=native -C target-feature=-avx512f`, opt-level 3, fat LTO, one codegen unit, `panic = "abort"`, overflow checks off; the C unit with `-O3 -march=native -mno-avx512f` and Ubuntu GCC's default hardening switched off (`-fno-stack-protector -U_FORTIFY_SOURCE -fno-stack-clash-protection -fcf-protection=none`). It ships the unsafe paths listed below. |
-| Fast with the C profile | `TWELVE_PGO=1 bash build.sh` | The fast build, with the C unit (SQLite and our C) compiled from a GCC profile. `build.sh` first builds an instrumented C unit and `bench/pgo_train.c`, runs the trainer on a synthetic database in a private folder, then compiles with `-fprofile-use` (and `-Werror=missing-profile`). Fast build only. |
 | Safe | `TWELVE_BUILD=safe bash build.sh` | Follows every rule the fast build's unsafe paths skip: overflow checks on, LTO off with 16 codegen units, frame pointers in Rust and C, and the C hardening flags `-fno-strict-overflow -fno-strict-aliasing -fno-delete-null-pointer-checks -ftrivial-auto-var-init=zero -D_FORTIFY_SOURCE=3 -fstack-protector-strong -fstack-clash-protection`. Each unsafe path takes its checked form. |
 
 Other switches `build.sh` reads: `RUSTFLAGS` (kept when set; both builds append `-C target-feature=-avx512f`, and the safe build its own flags), `TWELVE_C_TARGET` (the GCC `-march` value, default `native`) and `CC` (default `/usr/bin/gcc`).
 No build emits a 512-bit (AVX-512) instruction, whatever the CPU target: a Cascade Lake core lowers its clock while it runs them.
 `start.sh` passes no flags, so the server always runs its defaults; the optional flags exist for our own experiments, and the startup line on stderr prints every setting the process runs with.
 
-- `--batch-target N` or `--batch-target=N`: request target 1 through 1,024, default 64; ASCII decimal, leading zeros accepted, repeated last value wins.
+- `--batch-target N` or `--batch-target=N`: request target 1 through 1,024, default 96; ASCII decimal, leading zeros accepted, repeated last value wins.
 - `--ring-spread fill` or `--ring-spread=fill`: exactly `fill` (default) or `spread`, repeated last value wins.
 - A missing or invalid value exits 2 with `startup refused: invalid --batch-target` or `startup refused: invalid --ring-spread`, followed by LF.
 - The startup line appends `batch_target` and `ring_spread` after `backlog`; the stats line appends cumulative `rearm_buffer_wait` after `linger_errors`.
@@ -46,9 +45,9 @@ No build emits a 512-bit (AVX-512) instruction, whatever the CPU target: a Casca
   - With `fill`, when the accepting ring's free slots fall to h = max(slots / 10, min(1,024, slots / 8)), accept moves to the next ring with more than h free, or pauses until a ring has 2h free.
   - With `spread`, accept moves to the least occupied eligible ring once its owner has more live connections than the least occupied ring plus the turn cap. In-flight accepts during cancellation can exceed that skew; connections never move.
 - Receive: a multishot receive per connection into a ring of provided buffers (1,024 buffers of 2 KiB per ring).
-  - After a turn that reaped or advanced work, ring 0 waits for the ceiling of its live-connection share of twice `--batch-target` completions, approximately one receive and one send per request, for at most 1 ms.
-  - After a turn that did neither, ring 0 waits for one completion, bounded only by its deadlines: an idle loop, or one whose only work waits on a held sync, does not wake every 1 ms.
-  - The 1 ms cap also applies while rings 1 to 7 hold connections or operations, since their completions cannot wake ring 0's wait.
+  - After a turn that reaped or advanced work, ring 0 waits for the ceiling of its live-connection share of twice `--batch-target` completions, approximately one receive and one send per request, for at most the ceiling `--wake-wait-us=N` sets: 0 to 10,000 µs, default 4,000 µs (4 ms).
+  - After a turn that did neither, ring 0 waits for one completion, bounded only by its deadlines: an idle loop, or one whose only work waits on a held sync, does not wake every 4 ms.
+  - The 4 ms ceiling also applies while rings 1 to 7 hold connections or operations, since their completions cannot wake ring 0's wait.
   - A receive that ends while its connection has room in its input reservation is re-armed into that reservation, which takes no provided buffer.
   - Any other ended receive, buffer exhaustion included, joins its ring's FIFO. Each round limits buffer-select receive submissions to the free buffers observed after processing receives; a full SQ retains its operation for the next round.
   - `rearm_buffer_wait` counts deferred connection-rounds or retained receive attempts without buffer credit, not unique connections.
@@ -64,7 +63,7 @@ No build emits a 512-bit (AVX-512) instruction, whatever the CPU target: a Casca
 
 ### One thread, eight io_uring rings
 
-- On one vCPU a second worker thread only adds context switches and locks, so one loop batches its system calls: each round enters active nonzero rings once, then submits ring 0 and waits in one enter. Queued completions do not bypass batching. Ready backlog and eligible queued work use zero timeout; deadlines can shorten the 1 ms cap.
+- On one vCPU a second worker thread only adds context switches and locks, so one loop batches its system calls: each round enters active nonzero rings once, then submits ring 0 and waits in one enter. Queued completions do not bypass batching. Ready backlog and eligible queued work use zero timeout; deadlines can shorten the 4 ms ceiling.
 - Fixed (direct) descriptors skip the process file table on every operation; provided buffer rings let a receive land in a shared 2 KiB buffer instead of one buffer per idle connection.
 - Eight rings, because one ring's fixed-descriptor table can be no larger than the file limit: eight tables cover more connections than the box has memory for.
 
@@ -114,7 +113,7 @@ No build emits a 512-bit (AVX-512) instruction, whatever the CPU target: a Casca
 - A feed of contiguous ids writes each row straight into the output: before a row it checks room for the row's fixed bytes plus six times its text bytes, then stores without per-fragment checks. A feed of scattered ids reads its rows in id order, encodes their text once into reused scratch and copies the fragments in feed order.
 - Input reservations keep their actual allocation charged rather than shrinking it. Pools search newest-first for sufficient capacity, and cached usernames retain bounded slack rather than shrinking on each request.
 - SQLite is compiled with `SQLITE_THREADSAFE=0`, `SQLITE_DEFAULT_MEMSTATUS=0`, `SQLITE_DQS=0`, `HAVE_FDATASYNC=1`, `SQLITE_ENABLE_QPSG`, `SQLITE_OMIT_LOAD_EXTENSION`, `SQLITE_OMIT_DEPRECATED`, `SQLITE_OMIT_SHARED_CACHE`, `SQLITE_OMIT_PROGRESS_CALLBACK` and `SQLITE_LIKE_DOESNT_MATCH_BLOBS`.
-- Fat LTO, one codegen unit and the native CPU target without 512-bit instructions; the optional C profile trains SQLite's and our C's branches. These settings carry no benchmark of their own.
+- Fat LTO, one codegen unit and the native CPU target without 512-bit instructions carry no benchmark of their own.
 
 ## The rules, in the organizer's words
 

@@ -1168,10 +1168,11 @@ impl Server {
             .min(self.next_stats.saturating_duration_since(now));
         let others_active =
             (1_u8..8).any(|ring| self.conns.live(ring) != 0 || self.rings.active(ring));
-        // The cap bounds how long a partial batch waits on ring 0, and how long rings 1..7, whose
-        // completions cannot wake ring 0's wait, go unpolled.
+        // The ceiling, --wake-wait-us (default 4,000 us, 0 to 10,000 us), bounds how long a partial
+        // batch waits on ring 0, and how long rings 1..7, whose completions cannot wake ring 0's wait,
+        // go unpolled.
         if k0 > 1 || others_active {
-            timeout = timeout.min(self.timeout).min(Duration::from_millis(1));
+            timeout = timeout.min(self.timeout);
         }
         let held = self.wal.writes_held(now);
         // A capped hold ends at its deadline: the loop looks at the gate again then.

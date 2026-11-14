@@ -38,7 +38,10 @@ fn C.sqlite3_column_bytes(&C.sqlite3_stmt, i32) i32
 fn C.sqlite3_changes(&C.sqlite3) i32
 fn C.sqlite3_errmsg(&C.sqlite3) &char
 fn C.sqlite3_db_config(&C.sqlite3, i32, i32, voidptr) i32
-fn C.HMAC(voidptr, voidptr, i32, &u8, usize, &u8, &u32) &u8
+fn C.HMAC_CTX_new() voidptr
+fn C.HMAC_Init_ex(voidptr, voidptr, i32, voidptr, voidptr) i32
+fn C.HMAC_Update(voidptr, &u8, usize) i32
+fn C.HMAC_Final(voidptr, &u8, &u32) i32
 fn C.sqlite3_wal_hook(&C.sqlite3, voidptr, voidptr) voidptr
 fn C.eventfd(u32, i32) i32
 fn C.td_ckpt_start(&char, int, int)
@@ -69,24 +72,9 @@ fn C.td_net_resume(&C.td_net, int, int, int)
 fn C.td_net_abort(&C.td_net, int)
 fn C.td_json_scan(&u8, int) int
 
-struct C.td_feed_row {
-	id       i64
-	likes    i64
-	body     &u8
-	created  &u8
-	user     &u8
-	body_len int
-	user_len int
-}
-
-struct C.td_feed {
-	row [20]C.td_feed_row
-}
-
 fn C.td_feed_init(&C.sqlite3) int
-fn C.td_feed_read(int) int
-fn C.td_post_read(i64) int
-fn C.td_feed_out() &C.td_feed
+fn C.td_feed_read(int, &u8, &u8) &u8
+fn C.td_post_read(i64, &u8, &u8) &u8
 fn C.memchr(voidptr, int, usize) voidptr
 fn C.getrlimit(i32, &C.rlimit) i32
 fn C.setrlimit(i32, &C.rlimit) i32
@@ -100,7 +88,7 @@ const header_room = 128 // fits the longest response header (36 + 19 + 48 + 10 +
 const sql_post = 'SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id'
 
 const feed_span = 64 // feed_range handles the newest 20 ids when they span fewer ids than this
-const ckpt_frames = 1000 // WAL size that starts a checkpoint (SQLite's default auto-checkpoint)
+const ckpt_frames = 256 // start writeback earlier to reduce checkpoint bursts
 const ckpt_max_frames = 16000 // past this WAL size, phase B holds writes until the WAL is copied
 const max_pause_ms = u64(20) // longest hold on write requests while the WAL can restart
 const write_window_ns = u64(5_000_000) // after a commit that wrote, hold new writes this long to group them
@@ -141,6 +129,7 @@ mut:
 	in_txn    bool
 	btree_feed bool // td_feed_init found the schema it reads directly
 	secret    []u8
+	hmac      voidptr // HMAC_CTX keyed with secret once; each token reuses its hashed key blocks
 	started   i64
 	transport &C.td_net = unsafe { nil }
 	conns     []Conn
@@ -292,6 +281,10 @@ fn (mut s Server) run(lfd int) {
 				}
 				5 {
 					s.checkpoint_done()
+				}
+				6 {
+					C.td_net_abort(s.transport, fd)
+					s.conns[fd] = Conn{}
 				}
 				else {
 					panic('invalid transport event')
@@ -464,7 +457,9 @@ fn (mut s Server) finish_batch() {
 	}
 	if committed {
 		for seg in s.segs {
-			C.td_net_send(s.transport, seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start)
+			if s.conns[seg.fd].open {
+				C.td_net_send(s.transport, seg.fd, unsafe { &s.out[seg.start] }, seg.end - seg.start)
+			}
 		}
 	}
 	for fd in s.flush {
@@ -679,7 +674,14 @@ fn (mut s Server) auth(buf []u8, start int, end int) !(i64, string) {
 	}
 	mut mac := [32]u8{}
 	mut mac_len := u32(0)
-	C.HMAC(C.EVP_sha256(), s.secret.data, s.secret.len, token.str, dot2, &mac[0], &mac_len)
+	if s.hmac == unsafe { nil } {
+		s.hmac = C.HMAC_CTX_new()
+		C.HMAC_Init_ex(s.hmac, s.secret.data, s.secret.len, C.EVP_sha256(), unsafe { nil })
+	} else {
+		C.HMAC_Init_ex(s.hmac, unsafe { nil }, 0, unsafe { nil }, unsafe { nil })
+	}
+	C.HMAC_Update(s.hmac, token.str, usize(dot2))
+	C.HMAC_Final(s.hmac, &mac[0], &mac_len)
 	mut sig := [43]u8{}
 	b64url_encode_32(mac, mut sig)
 	mut diff := u8(0)
@@ -1133,9 +1135,14 @@ fn (mut s Server) like(user_id i64, post_id i64) {
 fn (mut s Server) feed() {
 	s.txn()
 	if s.btree_feed {
-		n := C.td_feed_read(feed_span)
-		if n > 0 {
-			s.feed_btree(n)
+		s.start_body()
+		put(mut s.out, '{"posts":[')
+		d, dend := s.out_room(65536)
+		end := C.td_feed_read(feed_span, d, dend)
+		if end != unsafe { nil } {
+			s.out_to(end)
+			put(mut s.out, ']}')
+			s.respond(200)
 			return
 		}
 	}
@@ -1160,35 +1167,18 @@ fn (mut s Server) feed() {
 	s.feed_full()
 }
 
-// feed_btree answers the feed from rows td_feed_read copied out of the B-trees.
-fn (mut s Server) feed_btree(n int) {
-	out := C.td_feed_out()
-	s.start_body()
-	put(mut s.out, '{"posts":[')
-	for k in 0 .. n {
-		if k > 0 {
-			put(mut s.out, ',')
-		}
-		s.put_feed_row(&out.row[k])
-	}
-	put(mut s.out, ']}')
-	s.respond(200)
+// out_room reserves room bytes past the end of s.out for C code that writes the body there.
+fn (mut s Server) out_room(room int) (&u8, &u8) {
+	s.out.ensure_cap(s.out.len + room)
+	d := unsafe { &u8(s.out.data) + s.out.len }
+	return d, unsafe { d + room }
 }
 
-fn (mut s Server) put_feed_row(r &C.td_feed_row) {
-	put(mut s.out, '{"id":')
-	put_int(mut s.out, r.id)
-	put(mut s.out, ',"body":')
-	put_json(mut s.out, r.body, r.body_len)
-	put(mut s.out, ',"created_at":')
-	append(mut s.out, c'"', 1)
-	append(mut s.out, r.created, 24)
-	append(mut s.out, c'"', 1)
-	put(mut s.out, ',"author":')
-	put_json(mut s.out, r.user, r.user_len)
-	put(mut s.out, ',"like_count":')
-	put_int(mut s.out, r.likes)
-	put(mut s.out, '}')
+// out_to keeps what C code wrote into s.out up to end.
+fn (mut s Server) out_to(end &u8) {
+	unsafe {
+		s.out.len = int(usize(end) - usize(s.out.data))
+	}
 }
 
 // feed_range scans the rows newest-id first, which is feed order when ids fall with created_at,
@@ -1262,14 +1252,17 @@ fn (mut s Server) feed_full() {
 
 fn (mut s Server) post(id i64) {
 	s.txn()
-	if s.btree_feed && C.td_post_read(id) == 1 {
+	if s.btree_feed {
 		s.start_body()
 		put(mut s.out, '{"post":')
-		out := C.td_feed_out()
-		s.put_feed_row(&out.row[0])
-		put_byte(mut s.out, `}`)
-		s.respond(200)
-		return
+		d, dend := s.out_room(16384)
+		end := C.td_post_read(id, d, dend)
+		if end != unsafe { nil } {
+			s.out_to(end)
+			put_byte(mut s.out, `}`)
+			s.respond(200)
+			return
+		}
 	}
 	st := s.st_post
 	C.sqlite3_bind_int64(st, 1, id)
@@ -1429,6 +1422,7 @@ fn put_byte(mut b []u8, c u8) {
 
 const digit_pairs = '00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899'
 
+@[inline]
 fn put_int(mut b []u8, v i64) {
 	if b.len + 21 > b.cap {
 		b.ensure_cap(b.len + 21)
@@ -1533,8 +1527,9 @@ fn b64url_decode(s string) ?string {
 const hex = '0123456789abcdef'
 
 // put_json writes p[0..n] as a JSON string, escaped the way JSON.stringify does.
+@[inline]
 fn put_json(mut b []u8, p &u8, n int) {
-	mut i := C.td_json_scan(p, n)
+	i := C.td_json_scan(p, n)
 	if i == n {
 		if b.len + n + 2 > b.cap {
 			b.ensure_cap(b.len + n + 2)
@@ -1548,6 +1543,11 @@ fn put_json(mut b []u8, p &u8, n int) {
 		}
 		return
 	}
+	put_json_escaped(mut b, p, n, i)
+}
+
+fn put_json_escaped(mut b []u8, p &u8, n int, at int) {
+	mut i := at
 	append(mut b, c'"', 1)
 	mut from := 0
 	for i < n {

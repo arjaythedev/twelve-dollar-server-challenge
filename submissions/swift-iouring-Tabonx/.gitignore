@@ -1,4 +1,3 @@
 bin/
 .build/
 .deps/
-Sources/CSQLite/include/sqlite3.h

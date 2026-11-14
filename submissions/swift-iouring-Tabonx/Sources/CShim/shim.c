@@ -7,7 +7,7 @@
 #include <netdb.h>
 #include <stdio.h>
 
-int sv_listen(const char *host, int port, int backlog) {
+int sv_listen(const char *host, int port, int backlog, int reuseport) {
     char service[16];
     snprintf(service, sizeof service, "%d", port);
     struct addrinfo hints = {0}, *res = 0;
@@ -19,6 +19,11 @@ int sv_listen(const char *host, int port, int backlog) {
     if (fd < 0) { freeaddrinfo(res); return -1; }
     int one = 1;
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (reuseport && setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) != 0) {
+        close(fd);
+        freeaddrinfo(res);
+        return -1;
+    }
     // Accepted sockets inherit TCP_NODELAY from the listener on Linux.
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     if (bind(fd, res->ai_addr, res->ai_addrlen) != 0 || listen(fd, backlog) != 0) {

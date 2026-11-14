@@ -42,7 +42,7 @@ static inline int64_t sv_monotonic_ns(void) {
 static inline const char *sv_getenv(const char *name) { return getenv(name); }
 
 #ifdef __linux__
-int sv_listen(const char *host, int port, int backlog);
+int sv_listen(const char *host, int port, int backlog, int reuseport);
 int sv_accept(int fd);
 int sv_epoll_create(void);
 int sv_epoll_add(int ep, int fd, int writable);

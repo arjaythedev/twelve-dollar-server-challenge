@@ -43,6 +43,8 @@ let private taskrunFlag = env "TASKRUN_FLAG" 1 = 1
 let private holdRem = env "HOLDREM" 0 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
 let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frames (1 GB of WAL), hold after any pass
 let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
+// A hold that starts while the pass a timed-out hold waited on is still running waits up to this long for it (0: off)
+let private holdRideMs = int64 (env "HOLDRIDE" 1500)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
@@ -309,6 +311,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let ckOn = not (isNull (box ck))
     let mutable ckBusy = false
     let mutable ckHold = false
+    let mutable ckRide = false // a hold timed out during the pass that is still running
     let mutable ckRewind = false
     let mutable ckFrom = 0
     let mutable ckBackfilled = 0
@@ -455,6 +458,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
 
     let ckDone (res: int) =
         ckBusy <- false
+        let rode = ckRide
+        ckRide <- false
         if res = 8 then
             if ck.Rc = 0 && ck.Backfilled >= 0 then ckBackfilled <- ck.Backfilled
             if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold
@@ -465,7 +470,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                     ckClock.Restart()
                 else ckRequest () // too much left for a short hold: one more pass with writes going on
             if ckHold then
-                if Db.walFrames <> ckFrom then ckRequest () // frames came in during the pass: one more
+                if Db.walFrames <> ckFrom then
+                    // frames came in during the pass: one more; after a long wait it gets a full holdMs of its own
+                    if rode then ckClock.Restart()
+                    ckRequest ()
                 else
                     ckHold <- false
                     ckRewind <- true
@@ -1176,8 +1184,11 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             lastReq <- nreq - reqHead
             if lastReq > maxBatch then maxBatch <- lastReq
             idlePasses <- if lastReq > 0 then 0 else idlePasses + 1
-            if ckHold && ckClock.ElapsedMilliseconds > holdMs then // the checkpoint pass is stuck: don't wait longer
+            if ckHold && ckClock.ElapsedMilliseconds > (if ckRide then holdRideMs else holdMs) then
+                // the checkpoint pass is slow: let writes in. The next hold starts at once on the same pass (the
+                // writes it holds can't rewind the WAL before that pass ends), so that one waits for the pass.
                 ckHold <- false
+                ckRide <- ckBusy && holdRideMs > holdMs
                 if ckLog then eprintfn "hold timeout frames %d" Db.walFrames
             if nreq > reqHead || wqLen > 0 then
                 let before = nreq - reqHead

@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <liburing.h>
+#include <link.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
@@ -40,8 +41,8 @@ typedef struct {
   char *in; uint32_t inlen, incap;  // partial request, or input held while a send is in flight
   sop_t *q;                         // responses queued behind the send in flight
   sop_t *out;                       // the send in flight
-  uint32_t gen;
-  uint8_t open, closing, sending, eof, sent100, queued, ready;
+  uint32_t gen, ready_ms;           // ready_ms: when it joined the ready list (now_ms)
+  uint8_t open, closing, sending, eof, sent100, queued, ready, pend;  // pend: a write's answer waits for its COMMIT
 } conn_t;
 // Accepted sockets live in each ring's registered file table, not in the process descriptor table.
 // A table can't be larger than RLIMIT_NOFILE, so more rings are added as tables fill up.
@@ -56,6 +57,8 @@ static uint32_t tsize;  // slots per ring
 static sqlite3 *db;
 static sqlite3_stmt *st_feed, *st_post, *st_ins, *st_like, *st_one, *st_begin, *st_commit, *st_rollback;
 static time_t started, now_s;
+static uint32_t now_ms;  // CLOCK_MONOTONIC in ms, set once per pass; wraps in 49 days, unsigned differences stay right
+static int64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
 
 // user_data: low 3 bits tag the operation. A send's user_data is its sop_t pointer (tag 0).
 enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ, T_WAL };
@@ -74,10 +77,12 @@ static void *huge_alloc(size_t n) {
 
 // ---------- output: one arena per batch, copied out to sends after COMMIT ----------
 static char *arena; static size_t alen;
-typedef struct { uint64_t who; uint32_t off, len; } seg_t;
+typedef struct { uint64_t who; uint32_t off, len, w; } seg_t;  // w: answers a write, so it waits for the COMMIT
 static seg_t segs[MAXSEG]; static int nsegs;
 static uint64_t *deferred, *held, *eofs, *limbo; static int ndef, nheld, neof, nlimbo, cap_def, cap_held, cap_eof, cap_limbo;
 static int arena_full, in_txn, txn_writes, batch_failed, hold_hit, hold_posts;
+static uint32_t txn_w0;  // now_ms at the batch's first write
+static uint64_t wal_outcome;  // the checkpoint worker's last report, until the loop has read it
 
 static inline void put(const void *p, size_t n) { memcpy(arena + alen, p, n); alen += n; }
 #define PUTS(s) put(s, sizeof(s) - 1)
@@ -428,7 +433,7 @@ static int txn(void) {  // opens the batch transaction on first use
 }
 static int wstep(sqlite3_stmt *s) {  // a write inside the batch transaction
   int rc = sqlite3_step(s);
-  if (rc == SQLITE_ROW || rc == SQLITE_DONE) txn_writes = 1;
+  if ((rc == SQLITE_ROW || rc == SQLITE_DONE) && !txn_writes++) txn_w0 = now_ms;
   return rc;
 }
 static void db_fail(void) {  // a failed statement may have rolled the whole batch back
@@ -829,11 +834,12 @@ static void send_bytes(uint64_t who, conn_t *c, const char *p, uint32_t n) {
 }
 
 static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
-  uint32_t start = alen; int closing = 0; arena_full = hold_hit = 0;
+  uint32_t start = alen; int closing = 0, w0 = txn_writes; arena_full = hold_hit = 0;
   sent100 = &c->sent100;
-  long used = serve(buf, n, &closing);
+  // An answer of this connection still waits for its COMMIT: its next request waits too, so answers stay in order.
+  long used = c->pend ? 0 : serve(buf, n, &closing);
   if (used < 0) { alen = start; conn_close(who); return; }
-  if (alen > start) segs[nsegs++] = (seg_t){who, start, alen - start};
+  if (alen > start) segs[nsegs++] = (seg_t){who, start, alen - start, txn_writes != w0};
   c->closing = closing;
   size_t left = closing ? 0 : n - used;
   if (left) {
@@ -843,13 +849,17 @@ static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
     if (arena_full) push(&deferred, &ndef, &cap_def, who);
     if (hold_hit) push(&held, &nheld, &cap_held, who);
   } else if (c->in) { free(c->in); c->in = NULL; c->inlen = c->incap = 0; }
-  if (alen == start && (closing || (c->eof && !c->sending && !arena_full && !hold_hit))) conn_close(who);
+  if (alen == start && !c->pend && (closing || (c->eof && !c->sending && !arena_full && !hold_hit))) conn_close(who);
 }
 // After a stall every connection has a request waiting. Letting them sit costs a socket buffer each (3 to 4 KB, toward
 // TCP's limit) and answering them all makes one very long pass, so a pass answers ANSWERS and reads READS: the rest
-// wait on their connection, in a copy the size of the request, on a first-in, first-out list.
-#define ANSWERS 1024
+// wait on their connection, in a copy the size of the request, on a list served newest first (below).
+#define ANSWERS 128       // #326 (objc-uring-delneg): 128 answers held p99 at 117-131 ms where 256 gave 134-290 and 512 850-910
 #define READS 4096
+// Parked this long, a request goes before the newest ones. 200 ms: five times the 40 ms delayed-ACK window, so the young
+// ones still get the newest-first benefit; about 60 passes at 26 us/req, so a backlog has had its chance to drain; and
+// a fifth of the 1 s p99 limit, leaving room for the scheduling and checkpoint stalls that add to a parked request's wait.
+#define READY_AGE_MS 200
 static int answers_left = ANSWERS;
 static inline uint64_t fifo_pop(fifo_t *f) {
   uint64_t v = f->a[f->head++];
@@ -865,12 +875,21 @@ static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
   if (c->incap - c->inlen < n) { c->incap = (c->inlen + n) * 2; c->in = realloc(c->in, c->incap); }
   memcpy(c->in + c->inlen, p, n); c->inlen += n;
   if (c->inlen > 4 * MAXREQ) { conn_close(who); return; }  // keeps sending but won't read its replies
-  if (later) { if (!c->ready) { c->ready = 1; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
+  if (later) { if (!c->ready) { c->ready = 1; c->ready_ms = now_ms; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
   else if (!c->sending) process(who, c, c->in, c->inlen);
 }
-static void run_ready(void) {  // with the answers this pass has left, what earlier passes read, oldest first
+// With the answers this pass has left, what earlier passes read: newest first, as #326 (objc-uring-delneg, 1baccb2) does.
+// A reply later than 40 ms after its request costs the kernel a delayed-ACK timer and a bare ACK, so oldest first in a
+// backlog makes every newcomer late too and the extra CPU keeps the backlog alive. The oldest wait for spare capacity
+// until they have been parked READY_AGE_MS; from then on they go first, oldest first, so a parked request waits for the
+// backlog ahead of it to drain, not for spare capacity. A connection's own requests keep their order.
+static void run_ready(void) {
   while (answers_left && readyq.n) {
-    uint64_t who = fifo_pop(&readyq); conn_t *c = conn_of(who);
+    uint64_t who;
+    conn_t *h = conn_of(readyq.a[readyq.head]);  // NULL: closed while waiting, drop it from the head
+    if (!h || now_ms - h->ready_ms >= READY_AGE_MS) who = fifo_pop(&readyq);
+    else { who = readyq.a[--readyq.n]; if (readyq.n == readyq.head) readyq.head = readyq.n = 0; }
+    conn_t *c = conn_of(who);
     if (!c) continue;
     c->ready = 0;
     if (c->inlen && !c->sending) { answers_left--; process(who, c, c->in, c->inlen); }
@@ -890,21 +909,36 @@ static void send_done(sop_t *o, int res) {
   else if (c->eof) conn_close(who);
 }
 
-// Commits the batch, then sends every response produced in it.
+// Commits the batch, then sends every response produced in it. Every COMMIT writes the pages all writes share (the
+// tables' last leaves, the header page) to the log again, so with COMMIT_MS a transaction that wrote stays open across
+// passes until its first write is that old: reads are answered at once, a write's answer waits for the COMMIT (#264
+// commits once per 256-completion pass for the same reason). The COMMIT comes early when the checkpoint worker has
+// reported, so its next pass sees every frame and the log can restart, and when the arena is half full.
+#ifndef COMMIT_MS
+#define COMMIT_MS 20  // 0: every pass commits
+#endif
 static void flush_batch(void) {
-  if (in_txn) {
+  int keep = COMMIT_MS && in_txn && txn_writes && !wal_outcome && now_ms - txn_w0 < COMMIT_MS && alen < BATCH_OUT / 2;
+  if (in_txn && !keep) {
     close_cursors();
     int rc = sqlite3_step(st_commit); sqlite3_reset(st_commit);
     if (rc != SQLITE_DONE) { sqlite3_step(st_rollback); sqlite3_reset(st_rollback); if (txn_writes) batch_failed = 1; }
     in_txn = 0; txn_writes = 0;
   }
+  int kept = 0; uint32_t pos = 0;
   for (int i = 0; i < nsegs; i++) {
     conn_t *c = conn_of(segs[i].who);
     if (!c) continue;
+    if (keep && segs[i].w) {  // stays, packed at the arena's start (pos never passes an unsent segment's offset)
+      memmove(arena + pos, arena + segs[i].off, segs[i].len);
+      segs[kept] = segs[i]; segs[kept++].off = pos; pos += segs[i].len; c->pend = 1;
+      continue;
+    }
+    c->pend = 0;
     if (batch_failed) { conn_close(segs[i].who); continue; }  // the batch wasn't committed: never claim it was
     send_bytes(segs[i].who, c, arena + segs[i].off, segs[i].len);
   }
-  nsegs = 0; alen = 0; batch_failed = 0;
+  nsegs = kept; alen = pos; batch_failed = 0;
 }
 
 // ---------- rings ----------
@@ -923,9 +957,16 @@ static struct io_uring_buf_ring *buf_ring(struct io_uring *u) {
 static int ring_init(int k) {
   ring_t *r = &R[k];
   // DEFER_TASKRUN on every ring: completion work runs when the loop asks, in one batch, never interrupting a pass.
-  struct io_uring_params p = {.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE |
-                              IORING_SETUP_DEFER_TASKRUN, .cq_entries = 16384};
-  if (io_uring_queue_init_params(4096, &r->r, &p) < 0) return -1;
+  // The completion queue holds one entry per connection the ring can have (1 MB): after a pause a ring of multishot
+  // receives completes more than 16k at once, and what doesn't fit goes to a kmalloc'd overflow list, at the moment
+  // memory is short (#245 sizes its queues over the connection count for this reason). Halved if the kernel refuses it.
+  int rc = -1;
+  for (unsigned cq = 65536; cq >= 16384 && rc < 0; cq /= 2) {
+    struct io_uring_params p = {.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE |
+                                IORING_SETUP_DEFER_TASKRUN, .cq_entries = cq};
+    rc = io_uring_queue_init_params(4096, &r->r, &p);
+  }
+  if (rc < 0) return -1;
   if (io_uring_register_files_sparse(&r->r, tsize) < 0 || !(r->br = buf_ring(&r->r))) {
     io_uring_queue_exit(&r->r); return -1;
   }
@@ -955,7 +996,7 @@ static void arm_accepts(void) {
     }
   }
 }
-static uint64_t wal_msg, wal_outcome;
+static uint64_t wal_msg;
 static int wal_replies = -1;
 static void arm_wal_msg(void) {  // the worker's reply arrives as a completion on ring 0
   struct io_uring_sqe *s = sqe(0); io_uring_prep_read(s, wal_replies, &wal_msg, 8, 0); s->user_data = T_WAL;
@@ -1040,7 +1081,7 @@ static void run(void) {
     // first. The target is capped by the open connections so a few clients without think time never sit out the timer.
     int rc; struct io_uring_cqe *cq;
     if (readq.n || readyq.n) rc = io_uring_submit_and_get_events(&R[0].r);  // work is waiting here: no sleeping
-    else if (seen >= 4 || nrings > 1 || nheld) {
+    else if (seen >= 4 || nrings > 1 || nheld || (COMMIT_MS && nsegs)) {  // held writes: wake to commit them
       unsigned want = seen >= 4 ? WAIT_N / nrings + 1 : 1;
       if (want > open / 3 + 1) want = open / 3 + 1;
       struct __kernel_timespec ts = {.tv_nsec = WAIT_NS};
@@ -1049,7 +1090,7 @@ static void run(void) {
     for (int i = 0; i < nlimbo; i++) sop_free((sop_t *)(uintptr_t)limbo[i]);  // those cancels are in now
     nlimbo = 0;
     if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -ETIME && rc != -EAGAIN) { fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc)); exit(1); }
-    now_s = time(NULL); seen = 0;
+    now_s = time(NULL); now_ms = mono_ns() / 1000000; seen = 0;
     answers_left = ANSWERS;
     // Requests that just arrived go first. After a stall the backlog has missed any latency target already; answered
     // first, it would make everything behind it miss too.
@@ -1060,7 +1101,7 @@ static void run(void) {
     if (neof) {  // clients that finished sending: close once what they sent has been answered
       for (int i = 0; i < neof; i++) {
         conn_t *c = conn_of(eofs[i]);
-        if (!c || c->sending) continue;  // the send's completion takes it from here
+        if (!c || c->sending || c->pend) continue;  // the send's completion takes it from here
         if (c->inlen) process(eofs[i], c, c->in, c->inlen); else conn_close(eofs[i]);
       }
       neof = 0; flush_batch();
@@ -1126,16 +1167,24 @@ static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anyth
 // The log is copied back by a worker thread at low priority, on its own connection, so the loop never waits for an
 // fsync. The loop alone decides: it asks for a pass by eventfd and the outcome comes back as a ring completion. A
 // log can only restart once all of it is copied, which steady writes prevent, so if frames arrived during a pass the
-// loop stops taking POSTs (reads go on) for one more pass. Past WAL_MAX frames it waits for that pass however long it
-// takes, because a saturated CPU starves the worker and the log would otherwise grow without bound.
+// loop stops taking POSTs (reads go on) for one more pass. Past WAL_MAX frames it waits for that pass however long
+// it takes, because a saturated CPU starves the worker and the log would otherwise grow without bound.
+#ifndef WAL_START
 #define WAL_START 8192
+#endif
 #define WAL_MAX (4 * WAL_START)
 #define POST_WAIT_NS 250000000LL
 enum { WAL_LEFT = 1, WAL_ALL };  // what a pass reports; a counter value, so never 0
 static sqlite3 *wal_db;
 static int wal_asks, wal_frames, wal_asked_at, wal_busy, wal_last_pass;
 static int64_t post_deadline;  // 0: no limit
-static int64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
+// Past WAL_MAX, POSTs wait for the pass at most MAX_HOLD_NS from when the log first passed it (0: no limit). No limit:
+// once a limit ran out, every later hold was let go at once and the log grew for the rest of the run.
+#ifndef MAX_HOLD_NS
+#define MAX_HOLD_NS 0
+#endif
+static int64_t full_since;
+static int64_t full_deadline(void) { if (!MAX_HOLD_NS) return 0; if (!full_since) full_since = mono_ns(); return full_since + MAX_HOLD_NS; }
 static int wal_hook(void *u, sqlite3 *d, const char *n, int frames) { wal_frames = frames; return SQLITE_OK; }
 static void *wal_worker(void *a) {
   uint64_t go, outcome;
@@ -1151,17 +1200,17 @@ static void wal_ask(void) { uint64_t one = 1; wal_busy = 1; wal_asked_at = wal_f
 static void wal_copied(uint64_t outcome) {
   wal_busy = 0;
   // All copied, and nothing committed since the pass was asked for: the next write restarts the log.
-  if (outcome == WAL_ALL && wal_frames == wal_asked_at) { wal_frames = 0; wal_last_pass = 0; hold_posts = 0; return; }
+  if (outcome == WAL_ALL && wal_frames == wal_asked_at) { wal_frames = 0; wal_last_pass = 0; hold_posts = 0; full_since = 0; return; }
   if (wal_last_pass) { wal_last_pass = 0; hold_posts = 0; return; }  // POSTs were let go early, or the pass failed: try again later
   wal_last_pass = 1; hold_posts = 1;
-  post_deadline = wal_frames >= WAL_MAX ? 0 : mono_ns() + POST_WAIT_NS;
+  post_deadline = wal_frames >= WAL_MAX ? full_deadline() : mono_ns() + POST_WAIT_NS;
   wal_ask();
 }
 // Between batches, with no transaction open: a write only restarts the log from a read transaction begun after the
 // last copy, so POSTs can't be let go in the middle of a batch.
 static void wal_after_commit(void) {
   if (wal_outcome) { uint64_t o = wal_outcome; wal_outcome = 0; wal_copied(o); }
-  if (wal_frames >= WAL_MAX && wal_busy) { hold_posts = 1; post_deadline = 0; }
+  if (wal_frames >= WAL_MAX && wal_busy) { hold_posts = 1; post_deadline = full_deadline(); }
   else if (!wal_busy && wal_frames >= WAL_START) wal_ask();
 }
 static int wal_hold_over(void) {
@@ -1175,8 +1224,11 @@ static void db_open(const char *path) {
   if (sqlite3_open_v2(path, &db, fl, "unix-excl") != SQLITE_OK) { fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1); }
   sqlite3_busy_timeout(db, 5000);
   char *e = NULL;
+  // journal_size_limit = 8,192 frames of 24 + 4,096 bytes: a restarted log is cut back to that size, not to nothing, so in the steady
+  // state frames overwrite blocks the file already has and the log's fdatasync has no new extents to record. Only the
+  // file's size changes: the frame counts and checkpoint outcomes the hold logic below reads are the same.
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0;"
-                   "SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
+                   "PRAGMA journal_size_limit=33751040; SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
   sqlite3_wal_hook(db, wal_hook, NULL);
   wal_asks = eventfd(0, EFD_CLOEXEC); wal_replies = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (wal_asks < 0 || wal_replies < 0 || sqlite3_open_v2(path, &wal_db, fl, "unix-excl") != SQLITE_OK ||
@@ -1193,6 +1245,19 @@ static void db_open(const char *path) {
                        : "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING");
   st_one = prep("SELECT 1");
   st_begin = prep("BEGIN"); st_commit = prep("COMMIT"); st_rollback = prep("ROLLBACK");
+}
+
+// Locks the code and read-only data of the binary and its libraries in RAM, within RLIMIT_MEMLOCK (8 MB by default).
+// With no swap, reclaim at the memory wall takes file-backed pages first, and the loop would then stall on major faults
+// reading its own code back from disk. Best effort, as in #245, #257 and #326.
+static int lock_segment(struct dl_phdr_info *i, size_t n, void *locked) {
+  for (int k = 0; k < i->dlpi_phnum; k++) {
+    const ElfW(Phdr) *p = &i->dlpi_phdr[k];
+    if (p->p_type != PT_LOAD || (p->p_flags & PF_W)) continue;
+    uintptr_t a = (i->dlpi_addr + p->p_vaddr) & ~(uintptr_t)4095, e = i->dlpi_addr + p->p_vaddr + p->p_memsz;
+    if (mlock((void *)a, e - a) == 0) *(size_t *)locked += e - a;
+  }
+  return 0;
 }
 
 #ifdef PGO_TRAIN
@@ -1229,6 +1294,8 @@ int main(int argc, char **argv) {
     if (bind(lfd[i], (struct sockaddr *)&a, sizeof a) || listen(lfd[i], 65535)) { perror("bind/listen"); return 1; }
   }
   arena = huge_alloc(BATCH_OUT);
+  size_t locked = 0; dl_iterate_phdr(lock_segment, &locked);
+  fprintf(stderr, "locked %zu KB of code and read-only data\n", locked >> 10);
   if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
   arm_wal_msg();
   run();

@@ -56,6 +56,23 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   ends with one `COMMIT`. Responses are written into an arena and only handed to `send` SQEs after that
   `COMMIT` returns, so a `201` always means the row is committed (rule 6). If a commit fails, nothing
   from a batch with writes is sent: those connections are closed instead.
+- **Fewer commits, fewer log bytes (`COMMIT_MS`).** Every `COMMIT` writes the pages all writes share (the
+  last leaves of `likes`, `posts` and their indexes, page 1 when the file grows) to the log again: on a
+  warmed seed copy a like or post costs 3.35 WAL frames when each commits alone, 1.95 at 22 per commit,
+  1.25 at 256. With `-DCOMMIT_MS=N` a transaction that wrote stays open across passes until its first
+  write is N ms old; reads are still answered every pass, a write's answer waits for the `COMMIT`, and a
+  connection with an answer waiting is not served again until it is sent, so answers stay in order. The
+  commit comes early when the checkpoint worker reports (the log restarts as before) or the arena is
+  half full. Durability is unchanged (rule 6). Idea from rust-iouring-kensac (#264), which commits once
+  per 256-completion pass. Default 20 ms (`-DCOMMIT_MS=0` commits every pass, as before). Local A/B
+  against the previous build, two rounds order-swapped, arm64 slow-core proxy, 290,000 users: disk
+  writes per write request 13.1 KB to 9.3 KB (-29 %), WAL restarts 105 to 69 per run, CPU and memory
+  the same; p95 6 to 13 ms and POST p99 33-39 to 47-51 ms (the commit wait), p99 23-31 vs 25-29 ms.
+  With the docker disk capped at 25 MB/s (which reproduces the rig's 290,000 line on the previous
+  build): p99 596 / 720 to 180 / 207 ms, POST p99 1,445 / 1,474 to 338 / 334 ms, max 1.7-2.3 s to
+  0.56-0.71 s, because the write demand falls under the cap and the log no longer sits at `WAL_MAX`
+  waiting for a copy the disk cannot finish. 280,000 for 300 s with the burner: p99 6 to 21 ms (POST
+  p99 13-15 to 24 ms), max and errors unchanged (0).
 - **Sends go through io_uring**, one in flight per connection so responses stay in order (later ones
   queue behind it). Each send owns a copy of its bytes, so the arena is reused immediately and a slow
   reader can never pin it. Short sends resubmit the rest. Closing a connection cancels its pending
@@ -80,7 +97,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   The loop asks for a `PASSIVE` pass over an eventfd after 8,192 WAL frames (32 MB) and the outcome comes back on a second
   eventfd as an ordinary ring completion, so the loop never waits for an fsync. A log only restarts once fully copied, which
   steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, for at most 250 ms (reads go
-  on). Past 32,768 frames (a CPU saturated long enough to starve the worker) they wait however long that pass takes. Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
+  on). Past 32,768 frames (a CPU saturated long enough to starve the worker) they wait for that pass with no time limit, so the log stays bounded. 1,024-frame passes were tried and scored lower on the benchmark box (270,000 and 260,000 against 280,000). Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
   waits for its `COMMIT`. If a commit fails, nothing from a batch with writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
@@ -93,6 +110,19 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **SQLite settings**: WAL, `synchronous=NORMAL`, no `mmap`, a 32 MB page cache (a cached page keeps its
   parsed header and needs no WAL lookup; `mmap` measured 4% more CPU per request), prepared statements built
   once with `SQLITE_PREPARE_PERSISTENT`, `SQLITE_THREADSAFE=2` with unused features left out.
+  `journal_size_limit=33751040` (8,192 frames): after the log restarts, the first commit cuts the WAL file back to
+  that size and no further, so in the steady state frames overwrite blocks the file already has and the log's
+  `fdatasync` has no new extents to record. (Before this it was 0, the idea from #326: truncate to nothing so frames
+  append to fresh pages.) Only the file's size changes; the frame counts and checkpoint outcomes the hold logic
+  reads are the same.
+- **Code and read-only data are locked in RAM** (as #245, #257 and #326 do). There is no swap, so reclaim at the memory
+  wall takes file-backed pages first, and the loop would stall on major faults reading its own code or libc back from
+  disk. `dl_iterate_phdr` walks every loaded object and `mlock`s its non-writable `PT_LOAD` segments: 2,978 KB, within
+  the default 8 MB `RLIMIT_MEMLOCK`. Best effort: a refused segment is skipped.
+- **65,536 completion queue entries per ring** (1 MB; #245 sizes its queues over the connection count for the same
+  reason). A ring holds up to 65,535 connections with a multishot receive each; after a pause one `io_uring_enter` can
+  complete more than the 16,384 the queue had, and the kernel then puts completions on a kmalloc'd overflow list, at the
+  moment memory is shortest. Halved down to 16,384 if the kernel refuses the size.
 - **No caching** (rule 5): every request runs its queries, and every token's HMAC is computed. The only
   thing computed once is the HMAC key schedule derived from `JWT_SECRET`.
 - **Strict input handling** (shared with our epoll entry): a full RFC 8259 JSON validator (duplicate
@@ -104,10 +134,24 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   leaves it in a socket buffer: a 2 s freeze at 300,000 users measured about 250 MB against TCP's 170 MB hard limit. A receive
   that runs out of buffers is not rearmed; its connection goes on a read queue, read by single-shot `MSG_DONTWAIT` receives,
   never more on a ring than it has buffers, and back to a multishot receive once drained. A pass does at most 4,096 of these
-  reads and answers 1,024 requests from reads and that list; requests released from other waits, such as held POSTs, aren't counted. What it reads beyond that waits on its connection in a copy the size of the request, on a list, and
+  reads and answers 128 requests from reads and that list; requests released from other waits, such as held POSTs, aren't counted. What it reads beyond that waits on its connection in a copy the size of the request, on a list, and
   while anything waits the loop doesn't sleep. Requests that have just arrived are answered before that list: the backlog has
   already missed any latency target, and answering it first made the requests behind it miss too (6.2% of all requests over 1 s
-  in a freeze test on an earlier build with 2,048 answers, against 5.2% this way). The constants come from a sweep; see below.
+  in a freeze test on an earlier build with 2,048 answers, against 5.2% this way).
+- **The list is served newest first, 128 answers a pass** (from objc-uring-delneg, #326 at `1baccb2`). A reply sent more
+  than 40 ms after its request costs the kernel a delayed-ACK timer and a bare ACK, about a fifth more CPU per request, so
+  in a backlog oldest-first makes every newcomer late too and the extra CPU keeps the backlog alive at a load the server
+  otherwise handles. The newest parked requests go first; the oldest wait for spare capacity until they have been parked
+  200 ms, then go first, oldest first, so a parked request waits for the backlog ahead of it to drain rather than for spare
+  capacity (it was half of each pass after 8 s; the `#362` run at 280,000 had p95 45 ms against p99 750 ms, the shape of a
+  few parked requests waiting long, and 290,000 missed the p99 limit by 40 ms). 200 ms is five times the 40 ms delayed-ACK
+  window, so the young ones keep the newest-first benefit, about 60 passes at 26 us a request, and a fifth of the 1 s p99
+  limit, leaving room for scheduling and checkpoint stalls. Measured locally (below): it shortens the longest waits after a
+  stall and does not change CPU, but whole-run p99 at 280,000 leaned a few tens of ms higher, so whether it helps the rig's
+  tail is open. A connection's own requests keep their order and nothing is dropped. The
+  benchmark agent ruled on #326 (comment on `197ad57`): "The newest-first answer order applies to any backlog, keeps
+  per-connection order and drops nothing, so it's general scheduling, not load-test detection. That's fine under rule 7."
+  128 answers rather than 1,024 because #326 measured p99 117 to 131 ms at 128 against 134 to 290 at 256 and 850 to 910 at 512.
 - **Hot memory sits on huge pages.** The page cache (one contiguous region instead of a malloc per page,
   through `SQLITE_CONFIG_PAGECACHE`), the receive buffers, the connection tables and the response arena are
   `MADV_HUGEPAGE` regions, which Ubuntu's default THP mode honours. A TLB miss on a VM walks two page tables.
@@ -163,9 +207,28 @@ Three freezes (SIGSTOP) at 300,000 users, 3 rounds for 2 s and 2 for 1 s and 4 s
 | 2 s | 4.82, 4.71, 4.69%; 4 to 5 s | 5.88, 5.55, 5.81%; 4 to 7 s | 231 to 251 MB |
 | 4 s | 10.16, 10.15%; 5 to 7 s | 10.61, 10.82%; 5 to 9 s | 500 to 514 MB |
 
-The answer and read bounds come from a sweep on an earlier build (`c25f357` plus these bounds) with the same 2 s freezes, 2 rounds each, share over 1 s: 1,024 answers and 4,096
+The read bound comes from a sweep on an earlier build (`c25f357` plus these bounds) with the same 2 s freezes, 2 rounds each, share over 1 s: 1,024 answers and 4,096
 reads 4.72, 4.73%; 1,024 and 8,192 4.61, 4.59%; 1,024 and 2,048 4.71, 5.18%; 2,048 and 4,096 5.80, 4.85%; 3,000 and 4,096 4.94,
-5.01%; 3,000 and 8,192 4.94, 4.83%. The differences among the 1,024 rows are within noise.
+5.01%; 3,000 and 8,192 4.94, 4.83%. The differences among the 1,024 rows are within noise. That sweep only looked at freezes;
+the answer bound was later lowered to 128 with the newest-first list (above), for the ramp-end tail the scoring runs showed.
+
+The four changes after the `#290` score (128 answers with the newest-first list, `journal_size_limit=0`, locked code, 65,536
+completion entries) were measured against that code in Docker on arm64 (1 CPU, 2 GB, no swap, a process burning 26% of the
+CPU in CPU time, `mload` at 300,000 users over loopback, 60 s ramp and 2 minute hold, two interleaved rounds). Both builds
+stall for about 25 s at the end of the ramp while accepts lag the connection rate (connect p99 14 to 16 s) and both fail the
+probe on p99 with 0 errors: whole-run p99 10.0 and 8.7 s before, 8.7 and 10.3 s after; p95 6.4 and 5.2 s before, 5.7 and 5.1 s
+after. No measurable effect on that tail there; the changes stay for the reasons above, each measured by its source entry.
+
+The 200 ms parked-age cap was measured against `177f00e` on the same box with a cleaner harness (32 target IPs, so the
+generator no longer saturates on ephemeral ports; a CFS quota of 1 ms per 2.6 ms as a slow-core proxy; 1 s ticks). Four
+interleaved rounds, order swapped, 0 errors and the same CPU and memory peak everywhere. 280,000 users, 3 minute hold,
+whole-run p99 `177f00e` / cap: 13 / 50, 47 / 75, 31 / 33, 29 / 55 ms (max 0.6 to 1.2 s both), so p99 leaned higher by 2 to
+37 ms, inside the 34 to 42 ms same-build spread but the same sign in all four rounds. 300,000 users, 2 minute probe: p99
+180 / 112, 142 / 103, 71 / 127, 53 / 136 ms; max 4.1 / 0.8, 1.6 / 0.5, 1.6 / 1.1, 1.5 / 1.9 s. In 1 s ticks the difference
+is the shape after a scheduling stall: `177f00e` keeps answering newcomers and its p99 climbs for two or three seconds to 1.6
+to 3.9 s as the oldest parked requests come out last; with the cap the peak is 0.6 to 0.7 s and the next second is clean.
+Frozen for 1 s at 280,000 (`docker pause`), both drain the backlog in 5 s at the same rate; max 5.9 and 5.0 s before, 3.6
+and 3.7 s with the cap. The rig's 290,000 tail is not reproduced here, so this is a bet on its shape, not a measured gain.
 
 Known limit: on Linux 6.8 a closed connection's socket, and the client's EOF, can wait until older connections' receives end. Replies carry `Content-Length`, so clients get every reply. Shutting the socket down first gave immediate EOF, but when every client reconnected at 300,000 users (one run each) that build was killed for memory and this one survived, so it isn't kept.
 
@@ -189,8 +252,11 @@ Code adapted from rust-iouring-kensac (`csrc/shim.c`, #248 and #264): `key_info`
 the setup of the index seek in `likes_from` follow it closely, including some names. Ideas from the same entry: B-tree cursor
 reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds, `SO_REUSEPORT` listeners,
 `DEFER_TASKRUN` on every ring, and bounded reads and answers after a burst (#264). Checkpoint coordination and the likes count
-were rewritten for this entry, and its bounds and answer order were chosen by the sweep above. The `resv[0]` retry is also from
-rust-iouring-kensac and from c-iouring-pavlyhalim (#245).
+were rewritten for this entry, and its read bound was chosen by the sweep above. The `resv[0]` retry is also from
+rust-iouring-kensac and from c-iouring-pavlyhalim (#245). From objc-uring-delneg (#326, `1baccb2`): the newest-first order
+of the parked list with its aging bound, and 128 answers per pass (ideas, no code copied; the list
+here is this entry's own queue). Locking code in RAM follows c-iouring-pavlyhalim (#245), mojo-iouring-oh-meh (#257) and
+#326; sizing the completion queue over the connection count follows #245.
 
 ## Earlier measurements (arm64, before the B-tree reads)
 

@@ -10,7 +10,8 @@
 // Every query runs in the route, on the worker: SQLite answers from its page
 // cache, so a query is CPU work, which a lane would only move to another
 // thread on the same core. Each write commits on its own, in WAL with
-// synchronous=NORMAL, before the route answers.
+// synchronous=NORMAL, before the route answers. Copying the WAL back into the
+// database waits on fsyncs, so that runs on the checkpoint lane.
 import std;
 import os;
 import json;
@@ -21,11 +22,27 @@ import sqlite;
 
 struct St {}
 
-// The worker state: its connection, and the key tokens are signed with.
+// The worker state: its connection, the key tokens are signed with, and the
+// checkpoint lane with the writes since it was last asked.
 struct App {
     db: sqlite::Conn&,
     keys: const plod::JwtKey[:],
     started_ns: i64,
+    checkpoints: http::Lane,
+    writes: i64 = 0,
+}
+
+// A write adds about 4 pages to the WAL: the lane is asked to copy it back
+// at about 4,096.
+let CHECKPOINT_WRITES = 1024;
+
+// Counts a write that changed the database, and asks the lane for a
+// checkpoint once enough have; while its box is full, the next write asks.
+fn wrote(cx) {
+    cx.app.writes++;
+    if cx.app.writes >= CHECKPOINT_WRITES && http::lane_send(cx.app.checkpoints, 0, "") == http::SENT {
+        cx.app.writes = 0;
+    }
 }
 
 // The post object's columns, in the order post writes them.
@@ -35,6 +52,18 @@ let FEED = """
       FROM posts p JOIN users u ON u.id = p.user_id
      ORDER BY p.created_at DESC, p.id DESC LIMIT 20
     """;
+// The feed in three range reads, where FEED takes twenty seeks into posts and
+// twenty into likes: the newest ids from the index alone, then, when they are
+// one run of consecutive ids, as posts created in id order are, the posts and
+// their like counts as two scans of that range.
+let FEED_IDS = "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20";
+let FEED_ROWS = """
+    SELECT p.id, p.body, p.created_at, u.username
+      FROM posts p JOIN users u ON u.id = p.user_id
+     WHERE p.id BETWEEN ? AND ?
+     ORDER BY p.id DESC
+    """;
+let FEED_LIKES = "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ? AND ? GROUP BY post_id";
 // The author by a subquery, not a join: with the join, SQLite's constant
 // propagation reads the bound id while planning, and re-prepares the
 // statement at every new id.
@@ -89,11 +118,41 @@ fn health(cx) {
 fn feed(cx) {
     var out: u8[>..] = [];
     out.append("{\"posts\":[");
+    var ids: i64[>..] = [];
+    var counts: i64[>..] = [];
+    var whole = false;
     db(cx) {
-        sqlite::query(cx.app.db, FEED) { r =>
-            if out.len > 10 { out.push(','); }
-            post(out, r);
-        };
+        sqlite::query(cx.app.db, FEED_IDS) { r => ids.push(sqlite::int(r, 0)); };
+        var run = ids.len > 0;
+        for i in 1..ids.len { run = run && ids[i] == ids[i - 1] - 1; }
+        if run {
+            let hi = ids[0];
+            let lo = ids[ids.len - 1];
+            counts.resize(ids.len, 0);
+            sqlite::query(cx.app.db, FEED_LIKES, lo, hi) { r =>
+                counts[hi - sqlite::int(r, 0)] = sqlite::int(r, 1);
+            };
+            // A post whose author has no row drops out of the join: then
+            // the rows don't match the ids, and the plain query answers.
+            var k = 0;
+            whole = true;
+            sqlite::query(cx.app.db, FEED_ROWS, lo, hi) { r =>
+                whole = whole && k < ids.len && sqlite::int(r, 0) == ids[k];
+                if whole {
+                    if k > 0 { out.push(','); }
+                    post_counted(out, r, counts[k]);
+                    k++;
+                }
+            };
+            whole = whole && k == ids.len;
+        }
+        if !whole {
+            out.resize(10);
+            sqlite::query(cx.app.db, FEED) { r =>
+                if out.len > 10 { out.push(','); }
+                post(out, r);
+            };
+        }
     };
     out.append("]}");
     plod::json_bytes(cx, 200, out);
@@ -126,6 +185,7 @@ fn create(cx, user: i64, name: const u8[:]) {
             out.append(",\"like_count\":0}}");
         };
     };
+    wrote(cx);
     plod::json_bytes(cx, 201, out);
 }
 
@@ -137,6 +197,7 @@ fn like(cx, user: i64, id: i64) {
         if added == 0 { exists = sqlite::query(cx.app.db, POST_EXISTS, id) { r => }; }
     };
     guard added > 0 || exists > 0 else { plod::fail(cx, 404, "post not found"); }
+    if added > 0 { wrote(cx); }
     var out: u8[>..] = [];
     out.append("{\"liked\":true,\"already_liked\":");
     out.append(if added > 0 { "false" } else { "true" });
@@ -146,8 +207,12 @@ fn like(cx, user: i64, id: i64) {
     plod::json_bytes(cx, if added > 0 { 201 } else { 200 }, out);
 }
 
-// A row of POST's columns as a post object.
-fn post(out: u8[>..]&, r) {
+// A row of FEED's or ONE_POST's columns as a post object.
+fn post(out: u8[>..]&, r) { post_counted(out, r, sqlite::int(r, 4)); }
+
+// A row's id, body, created_at, and author, with its like count, as a post
+// object.
+fn post_counted(out: u8[>..]&, r, likes: i64) {
     out.append("{\"id\":");
     format(out, sqlite::int(r, 0));
     out.append(",\"body\":");
@@ -157,7 +222,7 @@ fn post(out: u8[>..]&, r) {
     out.append(",\"author\":");
     http::json_string(out,sqlite::text(r, 3));
     out.append(",\"like_count\":");
-    format(out, sqlite::int(r, 4));
+    format(out, likes);
     out.push('}');
 }
 

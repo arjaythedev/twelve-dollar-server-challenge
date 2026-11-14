@@ -49,8 +49,8 @@ let private holdRideMs = int64 (env "HOLDRIDE" 1500)
 // waiting request is ADMITHI ms old or more (again below ADMITLO ms). New SYNs then wait in the kernel or are dropped
 // (the client retries), and the connections already open get the CPU through a burst of arrivals.
 let private admitQ = env "ADMITQ" 64
-let private admitHi = uint32 (env "ADMITHI" 50)
-let private admitLo = uint32 (env "ADMITLO" 10)
+let private admitHi = uint32 (env "ADMITHI" 25)
+let private admitLo = uint32 (env "ADMITLO" 5)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------

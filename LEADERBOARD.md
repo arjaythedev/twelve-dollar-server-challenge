@@ -693,7 +693,10 @@ at 96 % CPU), all with 0 errors. #415 stays open. A later follow-up, **#432** (`
 WAL write-shim fix; PGO build worked), held **257,000** (24,743 req/s, p95 39.0 / p99 177.1 ms, 0 err, 71 % CPU,
 26 µs/req, 766 MB, 2026-11-14), below the merged row, so not merged: 270,000 passed the 2-minute probe but failed the
 5-minute hold on p99 (6.56 s at 77 % CPU), 280,000 failed the 2-minute probe on p99 (2.90 s at 79 % CPU) and 320,000
-on p99 (6.06 s at 97 % CPU), all with 0 errors. #432 stays open.
+on p99 (6.06 s at 97 % CPU), all with 0 errors. #432 stays open. Its companion **#433** (`58b9ffc`: #432's shim fix
+plus `TCP_DEFER_ACCEPT` on the listeners; PGO build worked) held **270,000** (25,874 req/s, p95 39.4 / p99 140.9 ms,
+0 err, 74 % CPU, 26 µs/req, 1,138 MB, 2026-11-14), below the merged row, so not merged: 280,000 failed the 2-minute
+probe on p99 (3.17 s at 78 % CPU) and 320,000 on p99 (11.2 s at 96 % CPU), all with 0 errors. #433 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

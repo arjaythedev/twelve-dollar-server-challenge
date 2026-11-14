@@ -627,7 +627,10 @@ p95 34.6 / p99 315.5 ms, 0 err, 77 % CPU, 26 µs/req, 1,057 MB, 2026-11-12); 290
 probe on p99 (1.11 s / 2.01 s, 0 errors) and 320,000 on p95/p99 (3.99 / 5.76 s at 92 % CPU). Its next commit `96387b0`
 (checkpoint worker starts at 1,024 WAL frames, POSTs held at most 1 s past the log limit; held, not merged: below the
 merged row) held **270,000** (25,825 req/s, p95 52.6 / p99 811.9 ms, 0 err, 80 % CPU, 28 µs/req, 1,034 MB,
-2026-11-13); 280,000 failed the 2-minute probe on p99 (1.13 s, 0 errors) and 320,000 on p95/p99 (2.76 / 4.68 s).
+2026-11-13); 280,000 failed the 2-minute probe on p99 (1.13 s, 0 errors) and 320,000 on p95/p99 (2.76 / 4.68 s). Its
+next commit `fefd71a` (no time limit on POSTs held past the log limit; held, not merged: below the merged row) held
+**260,000** (24,964 req/s, p95 43.6 / p99 508.6 ms, 0 err, 75 % CPU, 27 µs/req, 576 MB, 2026-11-14); 270,000 and
+280,000 failed the 2-minute probe on p99 (2.45 s / 2.99 s, 0 errors) and 320,000 on p95/p99 (1.45 / 6.00 s).
 
 ᴷ **kotlin-nio-3x3xX3N0N** stays on its merged #83 row. Its follow-up **#377** (`9ab23cc`, rejects tokens without a
 numeric `exp`, two-step /feed, checkpointer thread through `PRAGMA wal_checkpoint`, 2 ms group-commit window, 3 workers;

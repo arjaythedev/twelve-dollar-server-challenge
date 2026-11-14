@@ -937,7 +937,9 @@ p95 57.5 / p99 534.5 ms, 0 errors, 1,158 MB; 310k failed the 2-minute probe on p
 ties #398's 300,000 and is not above it, so #427 is still not merged. Its follow-up **#437** (`0e2c166`, 2026-11-14:
 a checkpoint hold may ride up to 1.5 s, `HOLDRIDE`) held **300,000** at 81 % CPU (28,373 req/s, p95 59.9 / p99
 764.8 ms, 0 errors, 1,480 MB; 310k failed the 2-minute probe on p99 3.40 s, 320k on p99 2.40 s), which also ties
-#398's 300,000, so #437 is not merged.
+#398's 300,000, so #437 is not merged. Its newer head (`6a1c5fb`, 2026-11-14: `HOLDRIDE` plus no
+`TCP_DEFER_ACCEPT`) held **300,000** at 81 % CPU (28,376 req/s, p95 58.7 / p99 914.8 ms, 0 errors, 1,421 MB; 310k
+failed the 2-minute probe on p99 2.35 s, 320k on p99 4.36 s), again a tie, so #437 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

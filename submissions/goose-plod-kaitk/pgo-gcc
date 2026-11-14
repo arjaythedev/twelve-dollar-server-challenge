@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# The C compiler build.sh passes goose build, as copies named gcc, so that
+# goose takes them for gcc, in bin/pgo/generate and bin/pgo/use: goose keeps
+# the objects of each compiler path apart. The copy in generate instruments
+# SQLite's amalgamation; the one in use compiles it with the profile that the
+# training run wrote. Everything else compiles as goose asks.
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+profile=$here/../profile
+args=("$@")
+obj=
+for ((i = 0; i < ${#args[@]}; i++)); do [[ ${args[i]} == -o ]] && obj=${args[i + 1]}; done
+case " $* " in
+*/sqlite3.c\ *)
+    case $here in
+    */generate) args+=(-fprofile-generate="$profile" -fprofile-update=single) ;;
+    # gcc reads a profile beside the object it writes.
+    */use) cp "$profile/sqlite3.gcda" "${obj%.o}.gcda"
+           args+=(-fprofile-use -fprofile-partial-training -Wno-missing-profile) ;;
+    esac ;;
+*" -c "*) ;;
+*) [[ $here == */generate ]] && args+=(-lgcov) ;;
+esac
+exec /usr/bin/gcc "${args[@]}"

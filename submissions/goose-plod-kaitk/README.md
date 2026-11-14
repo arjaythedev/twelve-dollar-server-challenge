@@ -11,7 +11,7 @@ no C: `app.goose` is the whole application, about 500 lines with its comments.
 | Framework | [Plod](https://github.com/kaitk/plod) `v0.5.13`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.20` (io_uring) |
 | SQLite | [goose-sqlite](https://github.com/kaitk/goose-sqlite) `v0.0.4`, which builds SQLite 3.54.1's amalgamation, unmodified, into the program |
 | JWT | Plod's HS256 verifier, over [goose-hash](https://github.com/kaitk/goose-hash) `v0.0.4` |
-| C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`) |
+| C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`); SQLite's amalgamation from a profile (PGO) |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ for goose-http's io_uring loop |
 
@@ -83,6 +83,14 @@ no C: `app.goose` is the whole application, about 500 lines with its comments.
 - **Pragmas**: `cache_size` 16 MB on the worker, which leaves page reads at 0.03 a
   request. No `mmap`: with it, every page read looks the page up in the WAL index,
   which was a third of the instructions in a profile.
+- **SQLite built from a profile.** `build.sh` first builds `train.goose` with only
+  `sqlite3.c` instrumented. The trainer makes its own database in the challenge's
+  schema (5,000 users, 50,000 posts, 400,000 likes), since the seed isn't promised at
+  build time, and serves `app.goose`'s routes in-process through `plod::serve_one`,
+  40,000 user loops in `bench/load.js`'s mix, writes and checkpoint holds included.
+  The server is then built with gcc's `-fprofile-use` on `sqlite3.c`. `pgo-gcc` is
+  the compiler `build.sh` passes `goose build`: it adds the flags for `sqlite3.c`
+  only, from two folders, as Goose keeps each compiler path's objects apart.
 - **JSON strings** go through `http::json_string`, which finds what to escape with
   std's `find_any`, not a byte-at-a-time loop.
 
@@ -113,6 +121,22 @@ The hold takes p99 to kensac's range at both CPU limits, in every round. Group c
 alone is within the spread: at this rate a 1 ms pass holds about one write. The CPU a
 request is about the same as before, so the gain on the board is the tail, not the
 throughput.
+
+SQLite from a profile, against the same build without it, the same setup, three
+alternating rounds each:
+
+| Build | CPU | p95 | p99 | max | µs a request |
+|---|---|---:|---:|---:|---:|
+| the hold | 1 | 4.9 to 5.1 ms | 8.2 to 11.4 ms | 128 to 268 ms | 30.5 to 30.6 |
+| and PGO (`start.sh`) | 1 | 5.0 ms | 9.3 to 9.9 ms | 100 to 240 ms | 30.5 to 30.6 |
+| the hold | 0.65 | 5.3 to 6.1 ms | 12.1 to 52.7 ms | 74 to 170 ms | 30.4 to 30.7 |
+| and PGO (`start.sh`) | 0.65 | 5.1 to 6.0 ms | 8.9 to 48.4 ms | 78 to 165 ms | 30.3 to 30.7 |
+
+Under callgrind with its cache and branch simulation (300 users, 40 s, two runs
+each), PGO gives about 1% fewer instruction-cache misses and 4% fewer mispredicted
+conditional branches a request; instructions a request vary 3% from run to run, and
+the two builds overlap. The 5800X3D's 96 MB L3 hides most of those misses, so the
+rounds here are level; the box, with a smaller cache, may gain more.
 
 The first version, without `ring_buffers` or the lane, held 115,000 users on the
 board; it ran at half the CPU during the hold, and at 120,000 failed at 97% with

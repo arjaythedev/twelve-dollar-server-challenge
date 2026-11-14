@@ -13,9 +13,12 @@ if [ ! -f $SQ/sqlite3.c ]; then
   echo "$SQ_SHA  sqlite.zip" | sha256sum -c - >/dev/null
   unzip -qo sqlite.zip && rm sqlite.zip
 fi
-# compile-time options only (the source is untouched): one thread uses the connection, so no mutexes
-[ -x sqlite3 ] || gcc -O2 -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 \
-  -o sqlite3 $SQ/shell.c $SQ/sqlite3.c -lm
+# compile-time options only (the source is untouched): one thread uses the connection, so no mutexes, and a
+# larger lookaside (the connection's allocator for small objects: 1,000 slots of 1,200 bytes instead of 40)
+SQF="-O2 -DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_LOOKASIDE=1200,1000"
+if [ ! -x sqlite3 ] || [ "$(cat sqlite3.flags 2>/dev/null)" != "$SQF" ]; then
+  gcc $SQF -o sqlite3 $SQ/shell.c $SQ/sqlite3.c -lm && echo "$SQF" > sqlite3.flags
+fi
 as -o serve.o ../src/serve.s
 ld -shared -o serve.so serve.o -L$WE/lib -lwasmedge -rpath $WE/lib
 $T/wabt/bin/wat2wasm ../src/app.wat -o app.wasm

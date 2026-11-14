@@ -36,8 +36,11 @@
   in constant time.
 - **Group commit.** Each loop pass is one SQLite transaction (WAL, `synchronous=NORMAL`), and no response of the pass
   is handed to the kernel before its `COMMIT` returns (rule 6). If a commit fails, the pass's connections close
-  without an answer, so no response claims a write that didn't land. Writes commit at most once per 10 ms (reads
-  aren't held), so a commit carries more writes and fewer WAL frames per write.
+  without an answer, so no response claims a write that didn't land. Writes commit at most once per 20 ms (reads
+  aren't held), so a commit carries more writes and fewer WAL frames per write. A pass that only reads doesn't
+  commit: the next pass goes on in its read transaction, with its cursors where they are, so most passes skip
+  `BEGIN`/`COMMIT` and the cursors' descents from the root. It ends once the WAL is all copied, so the next write
+  can rewind it.
 - **Held writes.** A write that must wait (the write window, or a checkpoint hold) moves once to a queue of its own,
   with every later request on its connection and a copy of a new post's text, and passes don't walk it again. The
   first pass after the hold answers up to 4,096 of them, oldest first, in its one commit. Releasing at most a pass's
@@ -51,13 +54,33 @@
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 250 ms. After each pass the thread drops the database file's pages from the kernel's cache (the server reads
-  through SQLite's own page cache).
+  most 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
+  reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
+  of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes
+  started writeback of every page each of them wrote, a hot index page once per pass; left dirty until that sync, each
+  page is written once, and the disk got about 60 % fewer write requests per request on the test box.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 256 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. Inserts bind `created_at` in the column default's format
   and take the id from `sqlite3_last_insert_rowid` (no `RETURNING`); a like is one `INSERT … SELECT … WHERE EXISTS
   … ON CONFLICT DO NOTHING`, and `sqlite3_changes` tells a new like from a repeat or a missing post.
+- **One write per commit.** A VFS of its own over `unix-excl` (SQLite's public VFS interface, the pattern of its own
+  vfstrace and multiplex shims) changes only the WAL file's writes. SQLite writes a transaction's frames one after
+  another, each as two writes (its 24-byte header, then the page): thousands of `pwrite` calls a second under load.
+  While the loop runs `COMMIT`, writes that continue where the last one ended go into a buffer, which goes to the file
+  when the commit frame's page arrives (its header's database-size field is non-zero), inside SQLite's own call. So the
+  commit is in the kernel before SQLite publishes it in the WAL index and before `COMMIT` returns, and the buffer is
+  empty whenever SQLite isn't inside that call. Any other write, and every sync, truncate and close, writes the buffer
+  first. The unix VFS hands at most 131,071 bytes to one `pwrite` (and reports a longer write as a full disk), so a
+  large commit goes out in pieces that size. Reads, locks and the database file are `unix-excl`'s.
+- **Page cache.** SQLite's own page cache (pcache1) through `SQLITE_CONFIG_PCACHE2`, with one method of its own,
+  `xRekey`. A B-tree split that puts its new pages in order swaps two of them through a temporary page number, the
+  lock-byte page's (262,145 for 4 KB pages), and pcache1 keeps the largest page number it has held until a truncate
+  walks the cache. So after each such swap, the next commit's truncate (drop the pages past the end of the file)
+  scanned the whole hash table, tens of thousands of slots, to find nothing: 2.5 % of the server's CPU under a stream
+  of likes. Here the page waits out the swap under page number 0, which SQLite never gives a page, and that walk is
+  gone. Fetches, truncates and everything else are pcache1's; `xRekey` runs only inside an `INSERT`'s split.
 
 ## Reads walk SQLite's B-trees
 
@@ -75,7 +98,8 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
   still decodes the rows from SQLite's pages. Like counts take one range walk of `likes_post_id_idx` when the 20 ids
   lie within 512 of each other, a seek per post otherwise.
 - **Live reads:** every request reads its rows while it is served (rule 5). Only prepared statements, cursors, key
-  descriptions and the four root pages are kept, and the schema cookie is checked on every read.
+  descriptions and the four root pages are kept, and the schema cookie is checked on every read. A read transaction
+  that read-only passes share always sees the latest commit: only the loop writes, and a pass that writes commits.
 - **Fallbacks to SQL:** a row the decoder doesn't cover (a record spilling onto overflow pages, an unexpected type, a
   post without its user) is read with the reference SQL query. At startup the server checks the column order of each
   table and index it decodes, then compares the B-tree answers with SQL's, byte for byte, on the feed and on the
@@ -89,6 +113,8 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 | `src/Server.fs` | the loop: rings, accept, receive, send, close, HTTP, the batch and its transaction, held writes, checkpoint holds |
 | `src/Db.fs` | statements, writes, record decoding, the feed and post reads, the self-test, the checkpoint thread |
 | `src/Sqlite.fs` | P/Invoke declarations for SQLite's API and its B-tree functions |
+| `src/Vfs.fs` | the VFS that writes each commit's WAL frames with one `pwrite` |
+| `src/Pcache.fs` | pcache1 with an `xRekey` of its own |
 | `src/Json.fs`, `src/Jwt.fs` | response JSON, HS256 |
 | `src/Native.fs`, `src/Program.fs` | libc calls, startup |
 
@@ -106,8 +132,9 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 10), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
-(`unix-excl`), `STATS` (1: a line a second on stderr).
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
+(`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
+line a second on stderr).
 
 ## Credits
 
@@ -115,6 +142,8 @@ The loop's policies (accept high-water marks, bounded re-arms, answers per pass,
 window, checkpoint holds) come from the author's [objc-uring-delneg](../objc-uring-delneg), and `Ring.fs` and `Jwt.fs`
 from the author's F# entries. Ideas from other entries: the `unix-excl` VFS and eight `SO_REUSEPORT` listeners from
 [rust-iouring-kensac](../rust-iouring-kensac), and calling SQLite's `sqlite3Btree*` functions on the unmodified
-amalgamation built with `SQLITE_PRIVATE` defined empty from [swift-iouring-akbashev](../swift-iouring-akbashev).
+amalgamation built with `SQLITE_PRIVATE` defined empty from [swift-iouring-akbashev](../swift-iouring-akbashev),
+and writing each commit's WAL frames with one `pwrite` at the commit frame, and the page cache's truncate walk, from
+[c-iouring-pavlyhalim](../c-iouring-pavlyhalim).
 
 MIT license (the repository's).

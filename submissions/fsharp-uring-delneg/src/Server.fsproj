@@ -19,6 +19,8 @@
     <Compile Include="Native.fs" />
     <Compile Include="Ring.fs" />
     <Compile Include="Sqlite.fs" />
+    <Compile Include="Vfs.fs" />
+    <Compile Include="Pcache.fs" />
     <Compile Include="Json.fs" />
     <Compile Include="Jwt.fs" />
     <Compile Include="Db.fs" />

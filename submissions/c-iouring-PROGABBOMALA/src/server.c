@@ -876,6 +876,7 @@ static void run_batch(void) {
     }
   }
   if (writes) {
+    bt_feed_close(&g_db.bt);
     for (int i = 0; i < g_nbatch; i++) {
       struct task *t = &g_batch[i];
       if (t->state != ST_WRITE) continue;
@@ -989,19 +990,18 @@ int main(void) {
   for (;;) {
     /* wait */
 
+    /* ring 0 sleeps first, the others are collected after it */
     int busy = g_ready.n > 0 || g_rq.n > 0;
     int spread = 0; /* connections or accepts on a ring that cannot wake ring 0 */
-    for (int i = 1; i < g_nrings; i++) {
-      struct ring_ctx *r = &g_rings[i];
-      if (ring_unsubmitted(r) || ring_has_work(r) || r->got >= 16) ring_flush(r);
-      spread |= r->open || r->acc_inflight;
-    }
+    for (int i = 1; i < g_nrings; i++) spread |= g_rings[i].open || g_rings[i].acc_inflight;
     struct ring_ctx *r0 = &g_rings[0];
-    if (busy) {
-      if (ring_unsubmitted(r0) || ring_has_work(r0) || r0->got >= 16) ring_flush(r0);
-    } else {
+    if (!busy) {
       int timed = spread || last > 0 || g_db.writes_held || db_ckpt_active(&g_db);
       ring_wait(r0, last > 0 ? WAIT_BATCH : 1, timed ? WAIT_NS : IDLE_NS);
+    }
+    for (int i = 0; i < g_nrings; i++) {
+      struct ring_ctx *r = &g_rings[i];
+      if (ring_unsubmitted(r) || ring_has_work(r) || r->got >= 16) ring_poll(r);
     }
 
     /* collect */
@@ -1034,6 +1034,8 @@ int main(void) {
 
     if (db_tick(&g_db, g_now_ms)) release_held();
     accept_policy();
+    /* the other rings' sends go out now */
+    for (int i = 1; i < g_nrings; i++) ring_submit(&g_rings[i]);
   }
   return 0;
 }

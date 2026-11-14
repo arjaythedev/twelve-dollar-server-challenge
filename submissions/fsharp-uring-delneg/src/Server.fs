@@ -22,7 +22,7 @@ let BufSize = 1024
 let MaxReq = 16384
 let private nBufs = env "BUFS" 1024 // receive buffers per ring, a power of two
 let private answers = env "ANSWERS" 64 // requests answered per pass (0: all)
-let private wwin = uint32 (env "WWIN" 10) // ms: writes commit at most once per window (group commit)
+let private wwin = uint32 (env "WWIN" 20) // ms: writes commit at most once per window (group commit)
 let private lifoOn = env "LIFO" 1 = 1
 let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
@@ -40,6 +40,10 @@ let private poolMax = env "POOLMAX" 4096
 let private cqSize = env "CQ" 65536
 let private statsOn = env "STATS" 0 = 1
 let private taskrunFlag = env "TASKRUN_FLAG" 1 = 1
+let private holdRem = env "HOLDREM" 0 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
+let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frames (1 GB of WAL), hold after any pass
+let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
+let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
 
@@ -320,6 +324,9 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable stPasses = 0L
     let mutable stAns = 0L
     let mutable stWalk = 0L
+    let mutable stCommitUs = 0L
+    let mutable stCommitMax = 0L
+    let mutable stCommits = 0L
     let mutable lastStats = 0L
     let mutable lastUtc = 0L
 
@@ -420,8 +427,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     // ---------- checkpoints ----------
     // The checkpoint thread runs PASSIVE checkpoints on its own connection so the loop never waits on their fsyncs.
     // The loop asks for one every ckPass new WAL frames. Under constant writes a pass never ends with the WAL fully
-    // copied, so it can't rewind: past ckHoldAt frames writes wait (reads are still answered) for one pass, after
-    // which the next write rewinds the WAL.
+    // copied, so it can't rewind. Past ckHoldAt frames, passes go on with writes flowing until one leaves at most
+    // holdRem frames uncopied; then writes wait (reads are still answered) for one short pass, after which the next
+    // write rewinds the WAL. A pass's time is mostly its random page writes and fsyncs, so a hold that starts only
+    // when little is left stays short, and a long pass copies a page written many times once.
 
     let ckArmRead () = R.[0].Ring.Read(ck.Fd, ckSink, 8, ud UdCkpt 0 0u)
 
@@ -434,7 +443,11 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         if ckOn then
             let f = Db.walFrames
             if f < ckBackfilled then ckBackfilled <- 0 // the WAL rewound
-            if not ckHold && f >= ckHoldAt then
+            if holdRem > 0 then
+                // passes run without holding writes until one leaves at most holdRem frames uncopied; ckDone then holds
+                // writes for one short pass that copies the rest, and the WAL rewinds
+                if not ckHold && not ckBusy && (f - ckBackfilled >= ckPass || f >= ckHoldAt) then ckRequest ()
+            elif not ckHold && f >= ckHoldAt then
                 ckHold <- true
                 ckClock.Restart()
                 if not ckBusy then ckRequest ()
@@ -444,6 +457,13 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         ckBusy <- false
         if res = 8 then
             if ck.Rc = 0 && ck.Backfilled >= 0 then ckBackfilled <- ck.Backfilled
+            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold
+            if holdRem > 0 && not ckHold && ck.Rc = 0 && Db.walFrames >= ckHoldAt then
+                // past holdMax, hold anyway: passes aren't catching up with the writes
+                if Db.walFrames - ckBackfilled <= holdRem || Db.walFrames >= holdMax then
+                    ckHold <- true
+                    ckClock.Restart()
+                else ckRequest () // too much left for a short hold: one more pass with writes going on
             if ckHold then
                 if Db.walFrames <> ckFrom then ckRequest () // frames came in during the pass: one more
                 else
@@ -818,11 +838,15 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         wq.[wqHead + wqLen] <- r
         wqLen <- wqLen + 1
 
-    /// Runs one pass in one transaction. While a WAL hold or the write window is on, writes wait in the held queue
+    /// Runs one pass in a transaction: a pass that writes commits it, one that only reads leaves it open, with its
+    /// cursors where they are, for the next pass. While a WAL hold or the write window is on, writes wait in the held queue
     /// (with every later request on their connections) while reads are answered. When the hold ends, the held queue is
     /// answered first, oldest first, up to wqMax requests in the pass's one commit.
     let flush () =
         uptime <- now - started
+        // A write rewinds the WAL only in a transaction begun after the WAL was all copied: once it is, a transaction
+        // a read-only pass left open ends, so the next write can rewind.
+        if Db.carrying () && Db.walFrames > 0 && ckBackfilled >= Db.walFrames && not (Db.commit ()) then Db.rollback ()
         let isWin = wwin > 0u && passMs - lastWriteMs < wwin
         let mutable hold = ckHold || isWin
         let mutable oneWrite = ckRewind && oneWriteOn && not hold
@@ -937,10 +961,18 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             if wrote then lastWriteMs <- passMs
             nHeldNow <- wqLen
             let mutable ok = true
-            if txn && not (Db.commit ()) then
+            let c0 = if statsOn then Diagnostics.Stopwatch.GetTimestamp() else 0L
+            let keep = txn && not wrote && carryOn
+            if keep then Db.keep ()
+            elif txn && not (Db.commit ()) then
                 ok <- false
                 Db.rollback ()
-            elif not txn then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
+            if statsOn && txn && not keep then
+                let us = int64 (Diagnostics.Stopwatch.GetElapsedTime(c0).TotalMicroseconds)
+                stCommitUs <- stCommitUs + us
+                stCommits <- stCommits + 1L
+                if us > stCommitMax then stCommitMax <- us
+            elif not txn && not (Db.carrying ()) then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
             if not ok && wrote then
                 // never acknowledge an uncommitted write: every connection of this pass closes without an answer
                 for d in 0 .. dirty.Count - 1 do
@@ -1081,9 +1113,13 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         for k in 0 .. nrings - 1 do
             live <- live + R.[k].Live
             ovf <- ovf + R.[k].Ring.CqOverflow
-        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d"
+        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d"
             (now - started) live accErr lastAccErr ovf nobufs nrearm maxBatch pool.Count (Db.cacheKB ()) stPasses stAns
             Db.walFrames (GC.CollectionCount 0) (GC.CollectionCount 2) (GC.GetTotalMemory false >>> 20) stWalk wqLen
+            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked
+        stCommits <- 0L
+        stCommitUs <- 0L
+        stCommitMax <- 0L
         stWalk <- 0L
         maxBatch <- 0
         stPasses <- 0L
@@ -1140,7 +1176,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             lastReq <- nreq - reqHead
             if lastReq > maxBatch then maxBatch <- lastReq
             idlePasses <- if lastReq > 0 then 0 else idlePasses + 1
-            if ckHold && ckClock.ElapsedMilliseconds > 250L then // the checkpoint pass is stuck: don't wait longer
+            if ckHold && ckClock.ElapsedMilliseconds > holdMs then // the checkpoint pass is stuck: don't wait longer
                 ckHold <- false
                 if ckLog then eprintfn "hold timeout frames %d" Db.walFrames
             if nreq > reqHead || wqLen > 0 then

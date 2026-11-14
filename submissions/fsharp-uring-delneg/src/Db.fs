@@ -25,10 +25,13 @@ let private sqlPost =
 
 /// SQLite's unix-excl VFS: the process holds the file's lock for its life, and the WAL index lives in its own memory,
 /// shared by its two connections (no -shm file, no file locks per transaction). VFS=unix for the default one.
-let private vfs =
+let private vfsName =
     match Environment.GetEnvironmentVariable "VFS" with
-    | null | "" -> z "unix-excl"
-    | v -> z v
+    | null | "" -> "unix-excl"
+    | v -> v
+/// WALBUF=0: the loop's WAL writes go straight to unix-excl, one pwrite per frame header and one per page (Vfs.fs)
+let walBuf = vfsName = "unix-excl" && Environment.GetEnvironmentVariable "WALBUF" <> "0"
+let mutable private vfs = z vfsName
 
 let private chunkMB = match Int32.TryParse(Environment.GetEnvironmentVariable "CHUNK_MB") with | true, v when v > 0 -> v | _ -> 0
 
@@ -49,6 +52,13 @@ let mutable walFrames = 0
 [<UnmanagedFunctionPointer(CallingConvention.Cdecl)>]
 type private WalHook = delegate of nativeint * nativeint * nativeint * int -> int
 let private walHook = WalHook(fun _ _ _ frames -> walFrames <- frames; 0)
+
+/// failed writes, commits and BEGINs since start (each logged with SQLite's extended code: the first 20, then every 1000th)
+let mutable dbErrors = 0L
+let private logErr (what: string) (rc: int) =
+    dbErrors <- dbErrors + 1L
+    if dbErrors <= 20L || dbErrors % 1000L = 0L then
+        eprintfn "sqlite %s failed: rc %d extended %d %s (%d so far)" what rc (sqlite3_extended_errcode db) (errmsg db) dbErrors
 
 let private exec (sql: string) =
     let rc = sqlite3_exec (db, z sql, 0n, 0n, 0n)
@@ -179,7 +189,7 @@ let private CAuthor = 24
 [<Literal>]
 let private CCount = 44
 
-/// Cursors stay open for the rest of the pass's transaction (closed before COMMIT/ROLLBACK); a write in between makes
+/// Cursors stay open for the rest of the transaction (closed before COMMIT/ROLLBACK), which read-only passes share; a write in between makes
 /// SQLite save and reseek them, as for any open statement cursor. The feed reads its n-th post and that post's author
 /// through cursors of their own: requests in one pass mostly ask for the same rows, and sqlite3BtreeTableMoveto returns
 /// at once from a cursor already on the key. The row is still decoded from SQLite's page for each request.
@@ -608,6 +618,7 @@ let create (uid: int64) (body: nativeint) (bodyLen: int) (created: byref<byte[]>
     sqlite3_bind_text (sCreate, 2, body, bodyLen, 0n) |> ignore // SQLITE_STATIC: the arena is pinned and kept until the reset
     sqlite3_bind_text (sCreate, 3, Marshal.UnsafeAddrOfPinnedArrayElement(t, 0), 24, 0n) |> ignore
     let rc = sqlite3_step_commit sCreate
+    if rc <> DONE then logErr "insert post" rc
     sqlite3_reset sCreate |> ignore
     if rc = DONE then sqlite3_last_insert_rowid db else -1L
 
@@ -618,6 +629,7 @@ let like (uid: int64) (pid: int64) =
     sqlite3_bind_int64 (sLike, 2, pid) |> ignore
     sqlite3_bind_text (sLike, 3, Marshal.UnsafeAddrOfPinnedArrayElement(t, 0), 24, 0n) |> ignore
     let rc = sqlite3_step_commit sLike
+    if rc <> DONE then logErr "insert like" rc
     sqlite3_reset sLike |> ignore
     if rc <> DONE then -1
     elif sqlite3_changes db = 1 then 1
@@ -634,19 +646,38 @@ let health () =
 
 let lastError () = errmsg db
 
+/// A pass that wrote nothing leaves its transaction open, cursors and all, for the next pass (keep). Only this
+/// connection writes, and a pass that writes commits, so that transaction's snapshot is always the latest one.
+let mutable private carried = false
+
+let carrying () = carried
+
 let begin' () =
-    let rc = sqlite3_step sBegin
-    sqlite3_reset sBegin |> ignore
-    rc = DONE
+    if carried && sqlite3_get_autocommit db = 0 then true
+    else
+        carried <- false
+        let rc = sqlite3_step sBegin
+        sqlite3_reset sBegin |> ignore
+        if rc <> DONE then logErr "BEGIN" rc
+        rc = DONE
+
+/// Ends a pass that wrote nothing without ending its transaction (the next pass's begin' goes on with it)
+let keep () = carried <- true
 
 /// true when committed
 let commit () =
+    carried <- false
     endCursors ()
+    if walBuf then Vfs.enter ()
     let rc = sqlite3_step_commit sCommit
+    let f = if walBuf then Vfs.leave () else OK
+    if rc <> DONE then logErr "COMMIT" rc
+    elif f <> OK then logErr "WAL write" f
     sqlite3_reset sCommit |> ignore
-    rc = DONE
+    rc = DONE && f = OK
 
 let rollback () =
+    carried <- false
     endCursors ()
     if sqlite3_get_autocommit db = 0 then
         sqlite3_step_commit sRollback |> ignore
@@ -714,7 +745,12 @@ let private selfTest () =
 /// Opens the database (SQLITE_PATH). cacheKB: SQLite's page cache limit.
 let openDb (path: string) (cacheKB: int) (warm: bool) =
     let mutable h = 0n
+    // PCACHE=0: pcache1 as it is
+    let pc = Environment.GetEnvironmentVariable "PCACHE" <> "0" && Pcache.install ()
     if sqlite3_initialize () <> OK then failwith "sqlite3_initialize"
+    if walBuf then
+        if Vfs.register "fsu-excl" "unix-excl" then vfs <- z "fsu-excl"
+        else eprintfn "WAL write gathering off: no unix-excl VFS"
     if sqlite3_open_v2 (z path, &h, OPEN_READWRITE ||| OPEN_NOMUTEX, vfs) <> OK then failwithf "open %s: %s" path (errmsg h)
     db <- h
     exec "PRAGMA journal_mode=WAL"
@@ -732,6 +768,7 @@ let openDb (path: string) (cacheKB: int) (warm: bool) =
         let mutable bytes = chunkMB <<< 20
         sqlite3_file_control (db, z "main", 6, &bytes) |> ignore
     exec "SELECT count(*) FROM sqlite_schema"
+    if pc then Pcache.enable (int (scalar "PRAGMA page_size"))
     sHealth <- prep "SELECT 1"
     sFeed <- prep sqlFeed
     sPost <- prep sqlPost
@@ -757,6 +794,9 @@ let openDb (path: string) (cacheKB: int) (warm: bool) =
     else eprintfn "B-tree reads off: SQL for every read"
     useBt
 
+/// bytes per WAL frame: a 24-byte header and a page
+let walFrameBytes () = 24 + int (scalar "PRAGMA page_size")
+
 // ---------- the checkpoint thread ----------
 
 /// A thread with its own connection runs PASSIVE checkpoints when the loop asks, so the copy and its two fsyncs never
@@ -768,10 +808,14 @@ type Checkpointer(path: string, nice: int) =
     let wake = new AutoResetEvent(false)
     let mutable rc = 0
     let mutable backfilled = -1
+    let mutable wallUs = 0L
+    let mutable cpuUs = 0L
+    let frameBytes = walFrameBytes ()
     let run () =
         if nice <> 0 then Native.setpriority (0, Native.gettid (), nice) |> ignore
         let mutable cdb = 0n
         let mutable dropFd = -1
+        let mutable walFd = -1
         let main = z "main"
         while true do
             wake.WaitOne() |> ignore
@@ -789,10 +833,24 @@ type Checkpointer(path: string, nice: int) =
                     dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
             let mutable log = -1
             let mutable done' = -1
+            let t0 = Diagnostics.Stopwatch.GetTimestamp()
+            let c0 = Native.threadCpuUs ()
             let r = if cdb <> 0n then sqlite3_wal_checkpoint_v2 (cdb, main, CHECKPOINT_PASSIVE, &log, &done') else 14
-            // the pass synced what it wrote and the server reads from its own page cache: the kernel's copy would only
-            // make it reclaim, on the one CPU, when memory gets short
-            if dropFd >= 0 then Native.posix_fadvise (dropFd, 0L, 0L, 4) |> ignore // POSIX_FADV_DONTNEED
+            // SQLite syncs the database only at the end of a pass that copied every frame in the WAL, i.e. when no
+            // commit added frames while it ran (writes held): then the WAL still ends where the pass stopped. Then every
+            // page is clean and the server reads from its own page cache: the kernel's copy goes, so it never has to
+            // reclaim it on the one CPU when memory gets short. After a pass that didn't catch up, the pages it wrote
+            // stay dirty until that sync, which writes each page once however many passes wrote it (a drop here would
+            // start writing them all back after every pass, and fail to drop the ones still being written).
+            if dropFd >= 0 && r = 0 && done' > 0 && done' = log && walFrames = done' then
+                Native.posix_fadvise (dropFd, 0L, 0L, 4) |> ignore // POSIX_FADV_DONTNEED
+            // the WAL frames the pass copied are synced and never read again (readers start past them): out of the cache
+            // too, so a WAL that grows while the disk is slow doesn't fill memory
+            if walFd < 0 && cdb <> 0n then walFd <- Native.``open`` (z (path + "-wal"), 0x80000) // kept open, as above
+            if walFd >= 0 && r = 0 && done' > 0 then
+                Native.posix_fadvise (walFd, 0L, 32L + int64 done' * int64 frameBytes, 4) |> ignore
+            Volatile.Write(&cpuUs, Native.threadCpuUs () - c0)
+            Volatile.Write(&wallUs, int64 (Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMicroseconds))
             Volatile.Write(&backfilled, done')
             Volatile.Write(&rc, r)
             Native.write (efd, one, 8un) |> ignore
@@ -805,3 +863,6 @@ type Checkpointer(path: string, nice: int) =
     /// the last pass: SQLite's rc and the frames it backfilled (-1 unknown)
     member _.Rc = Volatile.Read &rc
     member _.Backfilled = Volatile.Read &backfilled
+    /// the last pass's wall time and its thread's CPU time, in microseconds
+    member _.WallUs = Volatile.Read &wallUs
+    member _.CpuUs = Volatile.Read &cpuUs

@@ -86,12 +86,19 @@ static void db_ckpt_kick(struct db_engine *d, int state) {
   pthread_mutex_unlock(&d->ckpt_mu);
 }
 
+/* the file grows in 64 MiB steps, not page by page */
+static void db_chunk(sqlite3 *db) {
+  int chunk = 64 << 20;
+  sqlite3_file_control(db, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
+}
+
 static int db_open_ckpt(const char *path, sqlite3 **out) {
   if (sqlite3_open_v2(path, out, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl") != SQLITE_OK) {
     fprintf(stderr, "db: open checkpoint connection: %s\n", sqlite3_errmsg(*out));
     return 0;
   }
   sqlite3_busy_timeout(*out, 2000);
+  db_chunk(*out);
   return db_exec_fwd(*out, "PRAGMA synchronous=NORMAL") && db_exec_fwd(*out, "PRAGMA wal_autocheckpoint=0") &&
          db_exec_fwd(*out, "PRAGMA cache_size=-2048") && db_exec_fwd(*out, "SELECT 1 FROM sqlite_schema LIMIT 1");
 }
@@ -193,6 +200,7 @@ static int db_init(struct db_engine *d, const char *path) {
     return 0;
   }
   sqlite3_busy_timeout(d->db, 2000);
+  db_chunk(d->db);
   int wal = 0;
   sqlite3_exec(d->db, "PRAGMA journal_mode=WAL", db_wal_mode, &wal, NULL);
   if (!wal) {
@@ -201,7 +209,7 @@ static int db_init(struct db_engine *d, const char *path) {
   }
   if (!db_exec(d->db, "PRAGMA synchronous=NORMAL") || !db_exec(d->db, "PRAGMA temp_store=MEMORY") ||
       !db_exec(d->db, "PRAGMA cache_size=-65536") || !db_exec(d->db, "PRAGMA mmap_size=0") ||
-      !db_exec(d->db, "PRAGMA wal_autocheckpoint=0") || !db_exec(d->db, "PRAGMA journal_size_limit=1048576"))
+      !db_exec(d->db, "PRAGMA wal_autocheckpoint=0"))
     return 0;
 
   if (!db_prep(d, "BEGIN", &d->st_begin) || !db_prep(d, "COMMIT", &d->st_commit) ||

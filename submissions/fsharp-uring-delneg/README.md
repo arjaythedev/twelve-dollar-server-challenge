@@ -18,9 +18,16 @@
   Accepted sockets are fixed (direct) descriptors from multishot accepts. A table may hold up to `RLIMIT_NOFILE`
   (65,535) entries, so the server raises its soft limit to the hard one and runs up to 8 rings: accept leaves a ring
   at a high-water mark (a quarter of its slots, at most 4,096, below full) while another ring has room, since an
-  accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues,
-  so a ramp's new connections wait there instead of being refused. A connection is accepted when its handshake
-  completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives).
+  accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues
+  (see admission below). A connection is accepted when its handshake completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`,
+  which keeps it out of the queue until its first request arrives).
+- **Admission at the door.** Each listener's accept queue holds 64 connections (`ADMITQ`). While the oldest request
+  waiting for an answer is 50 ms old or more, the loop cancels its accepts, and it accepts again once that age is
+  under 10 ms, so the connections already open get the CPU through a burst of arrivals. Meanwhile new connections
+  wait in the accept queues; once those are full the kernel drops their SYNs and the client sends them again (after
+  1 s, then 3 s). Part of the gain comes from where that wait is counted: a load generator that times a request from
+  the moment its connection is up (mload leaves the dial out) doesn't count a resent SYN as request time. The idea,
+  and this note, come from [c-iouring-jowinjestine](../c-iouring-jowinjestine) (#435).
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -137,9 +144,9 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
-(`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
-line a second on stderr).
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `ADMITQ` (64; 0: no admission control),
+`BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS` (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one),
+`PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a line a second on stderr).
 
 ## Credits
 

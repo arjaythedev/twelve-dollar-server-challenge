@@ -42,6 +42,9 @@ export HPHP_RING0_WAIT="${HPHP_RING0_WAIT:-1}"
 # Do not wait for the full ring-0 CQ batch while accepted work or completions
 # are already queued. Set HPHP_RING0_BUSY=0 to compare the prior wait policy.
 export HPHP_RING0_BUSY="${HPHP_RING0_BUSY:-1}"
+# Reuse SQLite table-cursor positions for repeated B-tree rowid batches within
+# one poll transaction. No payload/result survives the batch or a write.
+export HPHP_BT_MULTI_CURSORS="${HPHP_BT_MULTI_CURSORS:-1}"
 # Return to receive processing between bounded application batches. The 2048
 # budget reduced tails versus 8192 on the one-vCPU Ubuntu 6.8 VM and passed
 # a five-minute hold. Set 8192 to compare the previous budget.

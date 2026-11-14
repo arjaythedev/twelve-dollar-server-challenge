@@ -127,6 +127,13 @@ static void ck_set(int s) {
   pthread_mutex_unlock(&ck_mu);
 }
 
+static int tail_restart(sqlite3 *c) {
+  static int uv = 0;
+  char sql[32];
+  snprintf(sql, sizeof sql, "PRAGMA user_version=%d", uv ^= 1);
+  return sqlite3_exec(c, sql, NULL, NULL, NULL) == SQLITE_OK;
+}
+
 static void *ck_main(void *arg) {
   (void)arg;
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), CKPT_NICE);
@@ -141,6 +148,7 @@ static void *ck_main(void *arg) {
 
     pthread_mutex_lock(&ck_mu);
     ck_full = (rc == SQLITE_OK && nlog == ndone && nlog > 0);
+    if (ck_full && st == CK_TAIL) tail_restart(ckdb);
     __atomic_store_n(&ck_state, st + 1, __ATOMIC_RELEASE);
     pthread_mutex_unlock(&ck_mu);
   }
@@ -342,7 +350,10 @@ static const uint32_t K[64] = {
 
 static void sha_block(uint32_t *h, const unsigned char *p) {
   uint32_t w[64], a, b, c, d, e, f, g, k, t1, t2;
-  for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4*i] << 24 | p[4*i+1] << 16 | p[4*i+2] << 8 | p[4*i+3];
+  for (int i = 0; i < 16; i++) {
+    uint32_t val; memcpy(&val, p + 4 * i, 4);
+    w[i] = __builtin_bswap32(val);
+  }
   for (int i = 16; i < 64; i++) {
     uint32_t s0 = ROR(w[i-15], 7) ^ ROR(w[i-15], 18) ^ (w[i-15] >> 3), s1 = ROR(w[i-2], 17) ^ ROR(w[i-2], 19) ^ (w[i-2] >> 10);
     w[i] = w[i-16] + s0 + w[i-7] + s1;
@@ -865,21 +876,49 @@ static inline int hit_username(struct bt_hit *h, col_t *out) {
   return 1;
 }
 
+static inline int feed_leaf_fast(MemPage *pg, int64_t *ids, unsigned char ca[FEED_N][32], uint32_t *cal) {
+  if (!pg->leaf || pg->nCell < FEED_N) return 0;
+  for (int i = 0; i < FEED_N; i++) {
+    const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
+    if (__builtin_expect(cell[0] == 0x22 && cell[1] == 0x04 && cell[2] == 0x3d && cell[3] == 0x03, 1)) {
+      memcpy(ca[i], cell + 5, 24);
+      cal[i] = 24;
+      ids[i] = ((int32_t)cell[29] << 16) | ((int32_t)cell[30] << 8) | cell[31];
+    } else if (cell[0] == 0x24 && cell[1] == 0x04 && cell[2] == 0x3d && cell[3] == 0x04) {
+      memcpy(ca[i], cell + 5, 24);
+      cal[i] = 24;
+      ids[i] = (int32_t)__builtin_bswap32(*(const uint32_t *)(cell + 29));
+    } else {
+      return 0;
+    }
+  }
+  return 1;
+}
+
 static int feed_btree(int close) {
   if (!bt_ok) return 0;
   int64_t ids[FEED_N]; unsigned char ca[FEED_N][32]; uint32_t cal[FEED_N], likes[FEED_N]; int n = 0, empty = 1;
   int64_t min_id = 0, max_id = 0;
   if (sqlite3BtreeFirst(cur_feed, &empty) != SQLITE_OK) return -1;
-  if (!empty) for (;;) {
-    col_t c[3];
-    if (!rec_cols(cur_feed, c, 3) || !col_text(&c[0]) || c[0].len > sizeof ca[0] || !col_int(&c[1], &ids[n])) return 0;
-    memcpy(ca[n], c[0].d, c[0].len); cal[n] = c[0].len;
-    if (n == 0 || ids[n] < min_id) min_id = ids[n];
-    if (n == 0 || ids[n] > max_id) max_id = ids[n];
-    if (++n == FEED_N) break;
-    int rc = sqlite3BtreeNext(cur_feed, 0);
-    if (rc == SQLITE_DONE) break;
-    if (rc != SQLITE_OK) return -1;
+  if (!empty) {
+    if (feed_leaf_fast(cur_feed->pPage, ids, ca, cal)) {
+      n = FEED_N;
+      min_id = ids[0]; max_id = ids[0];
+      for (int i = 0; i < FEED_N; i++) {
+        if (ids[i] < min_id) min_id = ids[i];
+        if (ids[i] > max_id) max_id = ids[i];
+      }
+    } else for (;;) {
+      col_t c[3];
+      if (!rec_cols(cur_feed, c, 3) || !col_text(&c[0]) || c[0].len > sizeof ca[0] || !col_int(&c[1], &ids[n])) return 0;
+      memcpy(ca[n], c[0].d, c[0].len); cal[n] = c[0].len;
+      if (n == 0 || ids[n] < min_id) min_id = ids[n];
+      if (n == 0 || ids[n] > max_id) max_id = ids[n];
+      if (++n == FEED_N) break;
+      int rc = sqlite3BtreeNext(cur_feed, 0);
+      if (rc == SQLITE_DONE) break;
+      if (rc != SQLITE_OK) return -1;
+    }
   }
   if (n == 0) {
     begin_resp(200, close); PUTS("{\"posts\":[]}"); finish(); return 1;
@@ -904,16 +943,24 @@ static int feed_btree(int close) {
 
   col_t bodies[FEED_N];
   int64_t uids[FEED_N];
-  static unsigned char body_buf[FEED_N][2048];
+  MemPage *pinned[FEED_N]; int npinned = 0;
   for (int k = 0; k < n; k++) {
     int idx = order[k];
     int rc = seek_row(cur_posts, ids[idx]);
-    if (rc <= 0) return rc;
+    if (rc <= 0) {
+      for (int p = 0; p < npinned; p++) releasePageNotNull(pinned[p]);
+      return rc;
+    }
     col_t c[3];
-    if (!rec_cols(cur_posts, c, 3) || !col_text(&c[2]) || !col_int(&c[1], &uids[idx])) return 0;
-    if (c[2].len > sizeof(body_buf[idx])) return 0;
-    memcpy(body_buf[idx], c[2].d, c[2].len);
-    bodies[idx] = (col_t){c[2].type, c[2].len, body_buf[idx]};
+    if (!rec_cols(cur_posts, c, 3) || !col_text(&c[2]) || !col_int(&c[1], &uids[idx])) {
+      for (int p = 0; p < npinned; p++) releasePageNotNull(pinned[p]);
+      return 0;
+    }
+    bodies[idx] = c[2];
+    if (!npinned || pinned[npinned - 1] != cur_posts->pPage) {
+      sqlite3PagerRef(cur_posts->pPage->pDbPage);
+      pinned[npinned++] = cur_posts->pPage;
+    }
   }
 
   // 2. Author lookups: batched simultaneous descent
@@ -925,6 +972,7 @@ static int feed_btree(int close) {
       int rc = row_author(uids[i], &names[i]);
       if (rc <= 0) {
         if (rc_many == 0) bt_release_hits(hits, n);
+        for (int p = 0; p < npinned; p++) releasePageNotNull(pinned[p]);
         return rc;
       }
     }
@@ -938,6 +986,7 @@ static int feed_btree(int close) {
   }
   PUTS("]}"); finish();
   if (rc_many == 0) bt_release_hits(hits, n);
+  for (int p = 0; p < npinned; p++) releasePageNotNull(pinned[p]);
   return 1;
 }
 
@@ -1551,9 +1600,162 @@ static void btree_setup(void) {
   bt_ok = 1;
 }
 
+// ---------- WAL Write Coalescing VFS Shim ----------
+#define WAL_BUF_CAP 0x1ffff
+struct wfile {
+  sqlite3_file base;
+  sqlite3_file *real;
+  int is_wal, commit, len;
+  sqlite3_int64 off, last_end;
+  unsigned char *buf;
+};
+
+static sqlite3_vfs *vfs_real;
+
+static int wf_close(sqlite3_file *p) {
+  struct wfile *f = (struct wfile *)p;
+  if (f->buf) sqlite3_free(f->buf);
+  return f->real->pMethods->xClose(f->real);
+}
+
+static int wf_read(sqlite3_file *p, void *b, int n, sqlite3_int64 off) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xRead(f->real, b, n, off);
+}
+
+static int wf_flush(struct wfile *f) {
+  if (!f->len) return SQLITE_OK;
+  int n = f->len; f->len = 0;
+  return f->real->pMethods->xWrite(f->real, f->buf, n, f->off);
+}
+
+static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
+  struct wfile *f = (struct wfile *)p;
+  if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
+  if (off != f->last_end || f->len + n > WAL_BUF_CAP) {
+    int rc = wf_flush(f); if (rc != SQLITE_OK) return rc;
+    f->commit = 0;
+  }
+  f->last_end = off + n;
+  if (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))
+    return f->real->pMethods->xWrite(f->real, b, n, off);
+  if (!f->len) f->off = off;
+  memcpy(f->buf + f->len, b, n);
+  f->len += n;
+  if (n == 24) {
+    const unsigned char *h = b;
+    f->commit = (h[4] | h[5] | h[6] | h[7]) != 0;
+    return SQLITE_OK;
+  }
+  if (f->commit) {
+    f->commit = 0;
+    return wf_flush(f);
+  }
+  return SQLITE_OK;
+}
+
+static int wf_sync(sqlite3_file *p, int flags) {
+  struct wfile *f = (struct wfile *)p;
+  wf_flush(f);
+  return f->real->pMethods->xSync(f->real, flags);
+}
+
+static int wf_truncate(sqlite3_file *p, sqlite3_int64 size) {
+  struct wfile *f = (struct wfile *)p;
+  wf_flush(f);
+  return f->real->pMethods->xTruncate(f->real, size);
+}
+
+static int wf_file_control(sqlite3_file *p, int op, void *pArg) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xFileControl(f->real, op, pArg);
+}
+
+static int wf_file_size(sqlite3_file *p, sqlite3_int64 *pSize) {
+  struct wfile *f = (struct wfile *)p;
+  wf_flush(f);
+  return f->real->pMethods->xFileSize(f->real, pSize);
+}
+
+static int wf_lock(sqlite3_file *p, int lock) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xLock(f->real, lock);
+}
+
+static int wf_unlock(sqlite3_file *p, int lock) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xUnlock(f->real, lock);
+}
+
+static int wf_check_reserved_lock(sqlite3_file *p, int *pResOut) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xCheckReservedLock(f->real, pResOut);
+}
+
+static int wf_sector_size(sqlite3_file *p) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xSectorSize(f->real);
+}
+
+static int wf_device_characteristics(sqlite3_file *p) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xDeviceCharacteristics(f->real);
+}
+
+static int wf_shm_map(sqlite3_file *p, int iPg, int pgsz, int isWrite, void volatile **pp) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xShmMap(f->real, iPg, pgsz, isWrite, pp);
+}
+
+static int wf_shm_lock(sqlite3_file *p, int offset, int n, int flags) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xShmLock(f->real, offset, n, flags);
+}
+
+static void wf_shm_barrier(sqlite3_file *p) {
+  struct wfile *f = (struct wfile *)p;
+  f->real->pMethods->xShmBarrier(f->real);
+}
+
+static int wf_shm_unmap(sqlite3_file *p, int deleteFlag) {
+  struct wfile *f = (struct wfile *)p;
+  return f->real->pMethods->xShmUnmap(f->real, deleteFlag);
+}
+
+static const sqlite3_io_methods wfile_methods = {
+  2,
+  wf_close, wf_read, wf_write, wf_truncate, wf_sync, wf_file_size,
+  wf_lock, wf_unlock, wf_check_reserved_lock, wf_file_control,
+  wf_sector_size, wf_device_characteristics,
+  wf_shm_map, wf_shm_lock, wf_shm_barrier, wf_shm_unmap
+};
+
+static int wvfs_open(sqlite3_vfs *v, const char *zName, sqlite3_file *p, int flags, int *pOutFlags) {
+  (void)v;
+  struct wfile *f = (struct wfile *)p;
+  f->real = (sqlite3_file *)((char *)p + sizeof(struct wfile));
+  int rc = vfs_real->xOpen(vfs_real, zName, f->real, flags, pOutFlags);
+  if (rc != SQLITE_OK) return rc;
+  p->pMethods = &wfile_methods;
+  f->is_wal = (flags & SQLITE_OPEN_WAL) != 0;
+  f->len = 0; f->buf = NULL; f->commit = 0; f->last_end = -1;
+  return SQLITE_OK;
+}
+
+static int vfs_shim_install(void) {
+  vfs_real = sqlite3_vfs_find("unix-excl");
+  if (!vfs_real) return -1;
+  static sqlite3_vfs wvfs;
+  memcpy(&wvfs, vfs_real, sizeof wvfs);
+  wvfs.zName = "unix-wal-shim";
+  wvfs.szOsFile = sizeof(struct wfile) + vfs_real->szOsFile;
+  wvfs.xOpen = wvfs_open;
+  return sqlite3_vfs_register(&wvfs, 0);
+}
+
 static void db_open(const char *path) {
   int fl = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
-  if (sqlite3_open_v2(path, &db, fl, "unix-excl") != SQLITE_OK) {
+  if (sqlite3_open_v2(path, &db, fl, "unix-wal-shim") != SQLITE_OK) {
     fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1);
   }
   sqlite3_busy_timeout(db, 5000);
@@ -1563,7 +1765,7 @@ static void db_open(const char *path) {
   }
   sqlite3_wal_hook(db, wal_hook, NULL);
 
-  if (sqlite3_open_v2(path, &ckdb, fl, "unix-excl") != SQLITE_OK ||
+  if (sqlite3_open_v2(path, &ckdb, fl, "unix-wal-shim") != SQLITE_OK ||
       sqlite3_exec(ckdb, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) {
     fprintf(stderr, "checkpoint connection failed: %s\n", ckdb ? sqlite3_errmsg(ckdb) : "cannot open"); exit(1);
   }
@@ -1596,6 +1798,7 @@ int main(int argc, char **argv) {
 
   pcache_install();
   sqlite3_initialize();
+  vfs_shim_install();
 
   struct rlimit rl; getrlimit(RLIMIT_NOFILE, &rl);
   if (rl.rlim_cur < rl.rlim_max) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }

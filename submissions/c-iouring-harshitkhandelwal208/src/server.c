@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <immintrin.h>
 #include <liburing.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -26,12 +27,82 @@
 #define NBUF 2048                // provided receive buffers per ring
 #define BSZ 1024                 // buffer size per receive buffer
 #ifndef CACHE_KB
-#define CACHE_KB 65536           // 64 MB SQLite page cache
+#define CACHE_KB 32768           // 32 MB SQLite page cache (matches kensac)
 #endif
 #define STR2(x) #x
 #define STR(x) STR2(x)
-#define MAXRINGS 10              // Up to 10 rings * 65,472 direct descriptors = 654,720 capacity
+#define MAXRINGS 16              // Up to 16 rings (matches kensac)
 #define NLISTEN 8                // SO_REUSEPORT listeners sharing the port
+#define ACCEPTS 512              // In-flight accepts (matches kensac ACCEPT_DEPTH 512)
+
+// ---------- PCACHE2 Wrapper (Skip commit truncate when no page past EOF is cached) ----------
+#define LOCK_BYTE_OFFSET 0x40000000u
+
+typedef struct {
+  sqlite3_pcache *base;
+  unsigned max_key;
+  unsigned lock_page;
+  unsigned n_parked;
+} wcache_t;
+
+static sqlite3_pcache_methods2 pc_base;
+
+static int wc_init(void *a) { (void)a; return pc_base.xInit(pc_base.pArg); }
+static void wc_shutdown(void *a) { (void)a; pc_base.xShutdown(pc_base.pArg); }
+static sqlite3_pcache *wc_create(int sz, int extra, int purgeable) {
+  wcache_t *w = sqlite3_malloc(sizeof *w);
+  if (!w) return NULL;
+  w->base = pc_base.xCreate(sz, extra, purgeable);
+  if (!w->base) { sqlite3_free(w); return NULL; }
+  w->max_key = 0;
+  w->lock_page = LOCK_BYTE_OFFSET / (unsigned)sz + 1;
+  w->n_parked = 0;
+  return (sqlite3_pcache *)w;
+}
+static void wc_cachesize(sqlite3_pcache *p, int n) { pc_base.xCachesize(((wcache_t *)p)->base, n); }
+static int wc_pagecount(sqlite3_pcache *p) { return pc_base.xPagecount(((wcache_t *)p)->base); }
+static sqlite3_pcache_page *wc_fetch(sqlite3_pcache *p, unsigned key, int create) {
+  wcache_t *w = (wcache_t *)p;
+  sqlite3_pcache_page *pg = pc_base.xFetch(w->base, key, create);
+  if (pg && create) {
+    if (key == w->lock_page) w->n_parked++;
+    else if (key > w->max_key) w->max_key = key;
+  }
+  return pg;
+}
+static void wc_unpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) { pc_base.xUnpin(((wcache_t *)p)->base, pg, discard); }
+static void wc_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned from, unsigned to) {
+  wcache_t *w = (wcache_t *)p;
+  pc_base.xRekey(w->base, pg, from, to);
+  if (from == w->lock_page && w->n_parked) w->n_parked--;
+  if (to == w->lock_page) w->n_parked++;
+  else if (to > w->max_key) w->max_key = to;
+}
+static void wc_truncate(sqlite3_pcache *p, unsigned limit) {
+  wcache_t *w = (wcache_t *)p;
+  if (!w->n_parked && w->max_key < limit) return; // Shortcut: skip full hash-table walk!
+  pc_base.xTruncate(w->base, limit);
+  if (limit > 0 && w->max_key >= limit) w->max_key = limit - 1;
+  if (w->lock_page >= limit) w->n_parked = 0;
+}
+static void wc_destroy(sqlite3_pcache *p) {
+  wcache_t *w = (wcache_t *)p;
+  pc_base.xDestroy(w->base);
+  sqlite3_free(w);
+}
+static void wc_shrink(sqlite3_pcache *p) { pc_base.xShrink(((wcache_t *)p)->base); }
+
+static int pcache_install(void) {
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pc_base) != SQLITE_OK) return -1;
+  static sqlite3_pcache_methods2 m;
+  m = pc_base;
+  m.pArg = NULL;
+  m.xInit = wc_init; m.xShutdown = wc_shutdown; m.xCreate = wc_create;
+  m.xCachesize = wc_cachesize; m.xPagecount = wc_pagecount; m.xFetch = wc_fetch;
+  m.xUnpin = wc_unpin; m.xRekey = wc_rekey; m.xTruncate = wc_truncate;
+  m.xDestroy = wc_destroy; m.xShrink = wc_shrink;
+  return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) == SQLITE_OK ? 0 : -1;
+}
 
 // ---------- Background Checkpoint Coordination ----------
 #define CKPT_FRAMES 4096         // WAL threshold to trigger background bulk checkpoint
@@ -145,15 +216,6 @@ static time_t started, now_s;
 enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ };
 #define RECV_UD(k, slot, gen) (T_RECV | (uint64_t)(k) << 3 | (uint64_t)(slot) << 8 | (uint64_t)(gen) << 32)
 
-static void *huge_alloc(size_t n) {
-  size_t hp = 2u << 20; n = (n + hp - 1) & ~(hp - 1);
-  char *p = mmap(NULL, n + hp, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-  if (p == MAP_FAILED) { perror("mmap"); exit(1); }
-  char *a = (char *)(((uintptr_t)p + hp - 1) & ~(hp - 1));
-  madvise(a, n, MADV_HUGEPAGE);
-  return a;
-}
-
 static inline void clamp_socket(int fd) {
   int clamp = 2048;
   setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &clamp, sizeof(clamp));
@@ -174,34 +236,71 @@ static int arena_full, in_txn, txn_writes, batch_failed;
 
 static inline void put(const void *p, size_t n) { memcpy(arena + alen, p, n); alen += n; }
 #define PUTS(s) put(s, sizeof(s) - 1)
+
+static const char digits[200] =
+  "0001020304050607080910111213141516171819"
+  "2021222324252627282930313233343536373839"
+  "4041424344454647484950515253545556575859"
+  "6061626364656667686970717273747576777879"
+  "8081828384858687888990919293949596979899";
+
 static inline void putu(uint64_t v) {
   char b[24]; int i = 24;
-  do { b[--i] = '0' + v % 10; v /= 10; } while (v);
+  while (v >= 100) {
+    uint32_t r = (uint32_t)(v % 100);
+    v /= 100;
+    i -= 2;
+    b[i] = digits[2 * r];
+    b[i + 1] = digits[2 * r + 1];
+  }
+  if (v >= 10) {
+    i -= 2;
+    b[i] = digits[2 * v];
+    b[i + 1] = digits[2 * v + 1];
+  } else {
+    b[--i] = '0' + (char)v;
+  }
   put(b + i, 24 - i);
 }
 
 static const char hexd[] = "0123456789abcdef";
 static void putjs(const unsigned char *s, size_t n) {
-  size_t i = 0, run = 0;
-  #define LO8 0x0101010101010101ULL
-  #define HI8 0x8080808080808080ULL
+  size_t i = 0;
+#if defined(__AVX2__)
+  const __m256i q = _mm256_set1_epi8('"'), b = _mm256_set1_epi8('\\'), c = _mm256_set1_epi8(0x1f);
+  for (; i + 32 <= n; i += 32) {
+    __m256i v = _mm256_loadu_si256((const __m256i *)(s + i));
+    __m256i m = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(v, q), _mm256_cmpeq_epi8(v, b)),
+                                _mm256_cmpeq_epi8(_mm256_max_epu8(v, c), c));
+    if (_mm256_movemask_epi8(m)) break;
+  }
+#endif
   for (; i + 8 <= n; i += 8) {
     uint64_t v; memcpy(&v, s + i, 8);
-    uint64_t q = v ^ (LO8 * '"'), b = v ^ (LO8 * '\\');
-    if (((v - LO8 * 0x20) | (q - LO8) | (b - LO8)) & ~v & HI8) break;
+    #define LO8 0x0101010101010101ULL
+    #define HI8 0x8080808080808080ULL
+    uint64_t qq = v ^ (LO8 * '"'), bb = v ^ (LO8 * '\\');
+    if (((v - LO8 * 0x20) | (qq - LO8) | (bb - LO8)) & ~v & HI8) break;
   }
   for (; i < n; i++) {
-    unsigned char c = s[i];
-    if (c >= 0x20 && c != '"' && c != '\\') continue;
+    unsigned char ch = s[i];
+    if (ch < 0x20 || ch == '"' || ch == '\\') break;
+  }
+  put(s, i);
+  if (i == n) return;
+  size_t run = i;
+  for (; i < n; i++) {
+    unsigned char ch = s[i];
+    if (ch >= 0x20 && ch != '"' && ch != '\\') continue;
     put(s + run, i - run); run = i + 1;
     char e[6] = {'\\', 0};
-    switch (c) {
+    switch (ch) {
       case '"': e[1] = '"'; put(e, 2); break;
       case '\\': e[1] = '\\'; put(e, 2); break;
       case '\n': e[1] = 'n'; put(e, 2); break;
       case '\r': e[1] = 'r'; put(e, 2); break;
       case '\t': e[1] = 't'; put(e, 2); break;
-      default: e[1] = 'u'; e[2] = '0'; e[3] = '0'; e[4] = hexd[c >> 4]; e[5] = hexd[c & 15]; put(e, 6);
+      default: e[1] = 'u'; e[2] = '0'; e[3] = '0'; e[4] = hexd[ch >> 4]; e[5] = hexd[ch & 15]; put(e, 6);
     }
   }
   put(s + run, n - run);
@@ -459,18 +558,29 @@ static const char *auth(const char *h, size_t hl, int64_t *uid, char *uname, siz
   if (!d1) return bad;
   d2 = memchr(d1 + 1, '.', te - d1 - 1);
   if (!d2 || memchr(d2 + 1, '.', te - d2 - 1)) return bad;
-  unsigned char sig[48], mac[32], hdr[512], pl[2048];
+  unsigned char sig[48], mac[32];
   if (te - d2 - 1 != 43 || b64dec(d2 + 1, 43, sig) != 32) return bad;
   hmac((const unsigned char *)t, d2 - t, mac);
   unsigned diff = 0; for (int i = 0; i < 32; i++) diff |= sig[i] ^ mac[i];
   if (diff) return bad;
-  if (d1 - t > 680 || d2 - d1 - 1 > 2700) return bad;
-  int hn = b64dec(t, d1 - t, hdr), pn = b64dec(d1 + 1, d2 - d1 - 1, pl);
-  if (hn < 0 || pn < 0) return bad;
-  want_t hw[1] = {{"alg"}};
-  if (!jdoc((char *)hdr, hn, hw, 1) || !hw[0].v || *hw[0].v != '"') return bad;
-  char alg[8]; js_t aj = {hw[0].v, hw[0].ve}; long al = jstr(&aj, alg, sizeof alg);
-  if (al != 5 || memcmp(alg, "HS256", 5)) return bad;
+
+  // Header fast path: standard HS256 base64 header
+  static const char std_hdr[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+  if (d1 - t != 36 || memcmp(t, std_hdr, 36) != 0) {
+    if (d1 - t > 680) return bad;
+    unsigned char hdr[512];
+    int hn = b64dec(t, d1 - t, hdr);
+    if (hn < 0) return bad;
+    want_t hw[1] = {{"alg"}};
+    if (!jdoc((char *)hdr, hn, hw, 1) || !hw[0].v || *hw[0].v != '"') return bad;
+    char alg[8]; js_t aj = {hw[0].v, hw[0].ve}; long al = jstr(&aj, alg, sizeof alg);
+    if (al != 5 || memcmp(alg, "HS256", 5)) return bad;
+  }
+
+  if (d2 - d1 - 1 > 2700) return bad;
+  unsigned char pl[2048];
+  int pn = b64dec(d1 + 1, d2 - d1 - 1, pl);
+  if (pn < 0) return bad;
   want_t pw[4] = {{"exp"}, {"nbf"}, {"sub"}, {"username"}};
   if (!jdoc((char *)pl, pn, pw, 4) || !pw[0].v) return bad;
   for (int i = 0; i < 2; i++) if (pw[i].v) {
@@ -637,8 +747,106 @@ static inline int row_author(int64_t uid, col_t *name) {
   *name = c[1]; return 1;
 }
 
+// ---------- Batched Author Descent with Interpolated Search ----------
 #define FEED_N 20
 #define FEED_SPAN 512
+
+struct bt_hit {
+  MemPage *pg;
+  int ix;
+};
+
+static inline int64_t bt_cell_key(MemPage *pg, int i) {
+  u8 *c = findCellPastPtr(pg, i);
+  if (pg->intKeyLeaf)
+    while (0x80 <= *(c++))
+      if (c >= pg->aDataEnd) return INT64_MAX;
+  return sqlite3VarintValue(c);
+}
+
+static int bt_lower_bound(MemPage *pg, int64_t k) {
+  int n = pg->nCell;
+  int64_t k0 = bt_cell_key(pg, 0), kn = bt_cell_key(pg, n - 1);
+  if (k <= k0) return 0;
+  if (k > kn) return n;
+  int lo = 1, hi = n - 1;
+  int g = lo + (int)((double)(k - k0) / (double)(kn - k0) * (double)(n - 1) - 0.5);
+  if (g < lo) g = lo;
+  if (g > hi) g = hi;
+  for (int probe = 0; lo < hi; probe++) {
+    if (bt_cell_key(pg, g) >= k) hi = g;
+    else lo = g + 1;
+    if (probe < 2 && lo < hi) g = (hi == g) ? g - 1 : g + 1;
+    else g = lo + ((hi - lo) >> 1);
+    if (g < lo) g = lo;
+    if (g > hi) g = hi;
+  }
+  return lo;
+}
+
+static void bt_release_hits(struct bt_hit *h, int n) {
+  for (int i = 0; i < n; i++)
+    if (h[i].pg) releasePageNotNull(h[i].pg);
+}
+
+static int bt_seek_many(Pgno root, const int64_t *key, int n, struct bt_hit *hit) {
+  BtShared *bs = bt->pBt;
+  MemPage *pg[FEED_N];
+  Pgno next[FEED_N];
+  if (n < 1 || n > FEED_N) return -1;
+  for (int i = 0; i < n; i++) next[i] = root;
+  for (int depth = 0;; depth++) {
+    for (int i = 0; i < n; i++) {
+      int j = i - 1;
+      while (j >= 0 && next[j] != next[i]) j--;
+      if (j >= 0) {
+        pg[i] = pg[j];
+        sqlite3PagerRef(pg[i]->pDbPage);
+      } else if (getAndInitPage(bs, next[i], &pg[i], PAGER_GET_READONLY) != SQLITE_OK) {
+        pg[i] = NULL;
+      } else {
+        __builtin_prefetch(pg[i]->aCellIdx);
+        __builtin_prefetch(pg[i]->aCellIdx + 2 * (pg[i]->nCell - 1));
+      }
+      if (!pg[i] || !pg[i]->intKey || pg[i]->nCell == 0 || pg[i]->nOverflow || depth >= BTCURSOR_MAX_DEPTH ||
+          (i > 0 && pg[i]->leaf != pg[0]->leaf)) {
+        for (int k = 0; k <= i; k++)
+          if (pg[k]) releasePageNotNull(pg[k]);
+        return -1;
+      }
+    }
+    if (pg[0]->leaf) break;
+    for (int i = 0; i < n; i++) {
+      int lw = bt_lower_bound(pg[i], key[i]);
+      next[i] = lw >= pg[i]->nCell ? get4byte(&pg[i]->aData[pg[i]->hdrOffset + 8]) : get4byte(findCell(pg[i], lw));
+    }
+    for (int i = 0; i < n; i++) releasePageNotNull(pg[i]);
+  }
+  for (int i = 0; i < n; i++) {
+    int ix = bt_lower_bound(pg[i], key[i]);
+    if (ix < pg[i]->nCell && bt_cell_key(pg[i], ix) == key[i]) {
+      hit[i].pg = pg[i];
+      hit[i].ix = ix;
+    } else {
+      releasePageNotNull(pg[i]);
+      hit[i].pg = NULL;
+    }
+  }
+  return 0;
+}
+
+static inline int hit_username(struct bt_hit *h, col_t *out) {
+  if (!h->pg) return 0;
+  CellInfo info;
+  h->pg->xParseCell(h->pg, findCell(h->pg, h->ix), &info);
+  if (info.nLocal != info.nPayload) return 0;
+  col_t cols[2];
+  if (!rec_parse(info.pPayload, info.pPayload + info.nPayload, cols, 2)) return 0;
+  if (!col_text(&cols[1])) return 0;
+  *out = cols[1];
+  return 1;
+}
+
 static int feed_btree(int close) {
   if (!bt_ok) return 0;
   int64_t ids[FEED_N]; unsigned char ca[FEED_N][32]; uint32_t cal[FEED_N], likes[FEED_N]; int n = 0, empty = 1;
@@ -655,26 +863,64 @@ static int feed_btree(int close) {
     if (rc == SQLITE_DONE) break;
     if (rc != SQLITE_OK) return -1;
   }
-  memset(likes, 0, sizeof likes);
-  if (n) {
-    if (max_id - min_id < FEED_SPAN) {
-      uint32_t span[FEED_SPAN]; memset(span, 0, (max_id - min_id + 1) * sizeof span[0]);
-      int rc = count_likes(min_id, max_id, span); if (rc <= 0) return rc;
-      for (int i = 0; i < n; i++) likes[i] = span[ids[i] - min_id];
-    } else for (int i = 0; i < n; i++) { int rc = count_likes(ids[i], ids[i], &likes[i]); if (rc <= 0) return rc; }
+  if (n == 0) {
+    begin_resp(200, close); PUTS("{\"posts\":[]}"); finish(); return 1;
   }
-  size_t mark = alen;
+  memset(likes, 0, sizeof likes);
+  if (max_id - min_id < FEED_SPAN) {
+    uint32_t span[FEED_SPAN]; memset(span, 0, (max_id - min_id + 1) * sizeof span[0]);
+    int rc = count_likes(min_id, max_id, span); if (rc <= 0) return rc;
+    for (int i = 0; i < n; i++) likes[i] = span[ids[i] - min_id];
+  } else {
+    for (int i = 0; i < n; i++) { int rc = count_likes(ids[i], ids[i], &likes[i]); if (rc <= 0) return rc; }
+  }
+
+  // 1. Post lookups in ascending id order
+  int order[FEED_N];
+  for (int i = 0; i < n; i++) order[i] = i;
+  for (int i = 1; i < n; i++) {
+    int k = order[i]; int j = i - 1;
+    while (j >= 0 && ids[order[j]] > ids[k]) { order[j + 1] = order[j]; j--; }
+    order[j + 1] = k;
+  }
+
+  col_t bodies[FEED_N];
+  int64_t uids[FEED_N];
+  static unsigned char body_buf[FEED_N][2048];
+  for (int k = 0; k < n; k++) {
+    int idx = order[k];
+    int rc = seek_row(cur_posts, ids[idx]);
+    if (rc <= 0) return rc;
+    col_t c[3];
+    if (!rec_cols(cur_posts, c, 3) || !col_text(&c[2]) || !col_int(&c[1], &uids[idx])) return 0;
+    if (c[2].len > sizeof(body_buf[idx])) return 0;
+    memcpy(body_buf[idx], c[2].d, c[2].len);
+    bodies[idx] = (col_t){c[2].type, c[2].len, body_buf[idx]};
+  }
+
+  // 2. Author lookups: batched simultaneous descent
+  struct bt_hit hits[FEED_N];
+  col_t names[FEED_N];
+  int rc_many = bt_seek_many(root_users, uids, n, hits);
+  for (int i = 0; i < n; i++) {
+    if (rc_many != 0 || !hit_username(&hits[i], &names[i])) {
+      int rc = row_author(uids[i], &names[i]);
+      if (rc <= 0) {
+        if (rc_many == 0) bt_release_hits(hits, n);
+        return rc;
+      }
+    }
+  }
+
+  // 3. Emit JSON directly in original feed order
   begin_resp(200, close); PUTS("{\"posts\":[");
   for (int i = 0; i < n; i++) {
-    int rc = seek_row(cur_posts, ids[i]); col_t c[3], name; int64_t uid;
-    if (rc < 0) { alen = mark; return -1; }
-    if (!rc || !rec_cols(cur_posts, c, 3) || !col_text(&c[2]) || !col_int(&c[1], &uid)) { alen = mark; return 0; }
-    rc = row_author(uid, &name);
-    if (rc <= 0) { alen = mark; return rc; }
     if (i) PUTS(",");
-    put_row(ids[i], &c[2], ca[i], cal[i], &name, likes[i]);
+    put_row(ids[i], &bodies[i], ca[i], cal[i], &names[i], likes[i]);
   }
-  PUTS("]}"); finish(); return 1;
+  PUTS("]}"); finish();
+  if (rc_many == 0) bt_release_hits(hits, n);
+  return 1;
 }
 
 static int post_btree(int64_t id, int close) {
@@ -1052,7 +1298,11 @@ static int ring_init(int k) {
     io_uring_queue_exit(&r->r); return -1;
   }
   io_uring_register_ring_fd(&r->r);
-  r->c = huge_alloc(tsize * sizeof *r->c); r->bufs = huge_alloc((size_t)NBUF * BSZ);
+  // Zero-demand anonymous memory (faulted in page-by-page as connections arrive: 0 RSS initially)
+  r->c = mmap(NULL, tsize * sizeof *r->c, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if (r->c == MAP_FAILED) { io_uring_queue_exit(&r->r); return -1; }
+  r->bufs = mmap(NULL, (size_t)NBUF * BSZ, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if (r->bufs == MAP_FAILED) { munmap(r->c, tsize * sizeof *r->c); io_uring_queue_exit(&r->r); return -1; }
   for (int i = 0; i < NBUF; i++) io_uring_buf_ring_add(r->br, r->bufs + (size_t)i * BSZ, BSZ, i, NBUF - 1, i);
   io_uring_buf_ring_advance(r->br, NBUF);
   if (k) fprintf(stderr, "%u connections: added ring %d\n", k * (tsize - 1024), k);
@@ -1060,7 +1310,6 @@ static int ring_init(int k) {
   return 0;
 }
 
-#define ACCEPTS 64
 static int armed[NLISTEN];
 static void arm_accepts(void) {
   for (int l = 0, k = 0; l < NLISTEN; l++) {
@@ -1260,7 +1509,7 @@ static void db_open(const char *path) {
 
   if (sqlite3_open_v2(path, &ckdb, fl, "unix-excl") != SQLITE_OK ||
       sqlite3_exec(ckdb, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) {
-    fprintf(stderr, "checkpoint connection failed\n"); exit(1);
+    fprintf(stderr, "checkpoint connection failed: %s\n", ckdb ? sqlite3_errmsg(ckdb) : "cannot open"); exit(1);
   }
   pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 256 << 10);
   if (pthread_create(&t, &a, ck_main, NULL)) { fprintf(stderr, "checkpoint thread failed\n"); exit(1); }
@@ -1289,11 +1538,7 @@ int main(int argc, char **argv) {
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET"), *host = getenv("HOST"), *ports = getenv("PORT");
   if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
 
-  {
-    int hdr = 0; sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &hdr);
-    int sz = (4096 + hdr + 7) & ~7, npg = CACHE_KB / 4;
-    sqlite3_config(SQLITE_CONFIG_PAGECACHE, huge_alloc((size_t)sz * npg), sz, npg);
-  }
+  pcache_install();
   sqlite3_initialize();
 
   struct rlimit rl; getrlimit(RLIMIT_NOFILE, &rl);
@@ -1318,7 +1563,8 @@ int main(int argc, char **argv) {
     clamp_socket(lfd[i]);
     if (bind(lfd[i], (struct sockaddr *)&a, sizeof a) || listen(lfd[i], 65535)) { perror("bind/listen"); return 1; }
   }
-  arena = huge_alloc(BATCH_OUT);
+  arena = mmap(NULL, BATCH_OUT, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  if (arena == MAP_FAILED) { perror("mmap arena"); return 1; }
   if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
   run();
   return 0;

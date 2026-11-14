@@ -1,0 +1,14 @@
+[versions]
+dotenv = "6.5.1"
+slf4j = "2.0.19"
+kotlin = "2.4.0"
+sqlite = "3.53.4.0"
+
+[libraries]
+dotenv = { module = "io.github.cdimascio:dotenv-kotlin", version.ref = "dotenv"}
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+sqlite = { module = "org.xerial:sqlite-jdbc", version.ref = "sqlite" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlin" }

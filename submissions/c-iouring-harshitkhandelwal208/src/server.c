@@ -216,7 +216,7 @@ typedef struct {
 } ring_t;
 
 static ring_t R[MAXRINGS];
-static int nrings = 0, lfd[NLISTEN];
+static int nrings = 0, active_rings = 1, lfd[NLISTEN];
 static uint32_t tsize;
 static sqlite3_stmt *st_feed, *st_post, *st_ins, *st_like, *st_one, *st_begin, *st_commit, *st_rollback;
 static time_t started, now_s;
@@ -227,6 +227,8 @@ enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ };
 static inline void clamp_socket(int fd) {
   int snd = 16384;
   setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
+  int rcv = 2048;
+  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof(rcv));
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
   setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &one, sizeof(one));
@@ -718,6 +720,17 @@ static inline int col_int(const col_t *c, int64_t *v) {
 static int tally_cells(MemPage *pg, int first, int last, int64_t lo, int64_t hi, uint32_t *n) {
   for (int i = first; i <= last; i++) {
     const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
+    if (__builtin_expect(cell[0] == 0x09 && cell[1] == 0x03 && cell[2] == 0x03, 1)) {
+      int64_t post = ((int32_t)cell[4] << 16) | ((int32_t)cell[5] << 8) | cell[6];
+      if (post > hi) return 0;
+      if (post >= lo) n[post - lo]++;
+      continue;
+    } else if (cell[0] == 0x0a && cell[1] == 0x03 && cell[2] == 0x04) {
+      int64_t post = (int32_t)__builtin_bswap32(*(const uint32_t *)(cell + 4));
+      if (post > hi) return 0;
+      if (post >= lo) n[post - lo]++;
+      continue;
+    }
     uint32_t size, skip = getVarint32(cell, size);
     col_t key; int64_t post;
     if (size > pg->maxLocal || cell + skip + size > pg->aDataEnd) return -1;
@@ -1165,6 +1178,48 @@ static long serve(char *buf, size_t n, int *closing, conn_t *c, uint64_t who) {
     }
     char *he = find_crlfcrlf(p, e - p);
     if (!he) { if ((size_t)(e - p) > MAXREQ) return -1; break; }
+
+    if (__builtin_expect((size_t)(e - p) >= 19 &&
+        *(const uint64_t *)p == 0x6565662f20544547ULL &&
+        *(const uint64_t *)(p + 8) == 0x312f505454482064ULL &&
+        (p[16] == '1' || p[16] == '0') && p[17] == '\r' && p[18] == '\n', 1)) {
+      int close = (p[16] == '0');
+      for (char *h = p + 19; h < he + 2;) {
+        char *hl = memchr(h, '\r', he + 2 - h);
+        if (!hl) return -1;
+        if ((h[0] | 0x20) == 'c') {
+          char *c2 = memchr(h, ':', hl - h);
+          if (c2) {
+            size_t kn = c2 - h;
+            char *v = c2 + 1; while (v < hl && (*v == ' ' || *v == '\t')) v++;
+            char *ve = hl; while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
+            if (hdr_is(h, kn, "connection", 10)) {
+              if (ve - v == 5 && !strncasecmp(v, "close", 5)) close = 1;
+              else if (ve - v == 10 && !strncasecmp(v, "keep-alive", 10)) close = 0;
+            }
+          }
+        }
+        h = hl + 2;
+      }
+      if (!txn()) { err(500, "internal server error", close); if (close) *closing = 1; used = (he + 4) - buf; continue; }
+      int rc = feed_btree(close);
+      if (rc <= 0) {
+        if (rc < 0) { db_fail(); err(500, "internal server error", close); }
+        else {
+          size_t mark = alen;
+          begin_resp(200, close); PUTS("{\"posts\":[");
+          int i = 0;
+          while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW) { if (i++) PUTS(","); put_post_row(st_feed); }
+          sqlite3_reset(st_feed);
+          if (rc != SQLITE_DONE) { db_fail(); alen = mark; err(500, "internal server error", close); if (close) *closing = 1; used = (he + 4) - buf; continue; }
+          PUTS("]}"); finish();
+        }
+      }
+      if (close) *closing = 1;
+      used = (he + 4) - buf;
+      continue;
+    }
+
     char *le = memchr(p, '\r', he + 2 - p);
     char *m = p, *sp1 = memchr(m, ' ', le - m); if (!sp1) return -1;
     char *path = sp1 + 1, *sp2 = memchr(path, ' ', le - path); if (!sp2) return -1;
@@ -1412,6 +1467,7 @@ static void arm_accepts(void) {
     while (armed[l] < ACCEPTS && k < MAXRINGS) {
       if (k == nrings && ring_init(k) < 0) return;
       if (R[k].n + R[k].pend + 1024 >= tsize) { k++; continue; }
+      if (k >= active_rings) active_rings = k + 1;
       struct io_uring_sqe *s = sqe(k);
       io_uring_prep_accept_direct(s, lfd[l], NULL, NULL, 0, IORING_FILE_INDEX_ALLOC);
       s->user_data = T_ACCEPT | (uint64_t)l << 3;
@@ -1490,7 +1546,7 @@ static unsigned read_rounds(void) {
     }
     if (!issued) break;
     budget -= issued;
-    for (int k = 0; k < nrings; k++) { io_uring_submit_and_get_events(&R[k].r); seen += drain(k); }
+    for (int k = 0; k < active_rings; k++) { io_uring_submit_and_get_events(&R[k].r); seen += drain(k); }
   }
   return seen;
 }
@@ -1516,7 +1572,7 @@ static void run(void) {
   for (;;) {
     arm_accepts();
     int busy = (readq.n > 0 || readyq.n > 0);
-    for (int k = nrings - 1; k >= 0; k--) {
+    for (int k = active_rings - 1; k >= 0; k--) {
       if (k == 0 && !busy) {
         struct __kernel_timespec ts = {.tv_sec = 0, .tv_nsec = 1000000}; // 1 ms wait
         struct io_uring_cqe *cq = NULL;
@@ -1529,7 +1585,7 @@ static void run(void) {
     nlimbo = 0;
     if ((loop_tick++ & 63) == 0) now_s = time(NULL);
     answers_left = ANSWERS;
-    for (int k = 0; k < nrings; k++) drain(k);
+    for (int k = 0; k < active_rings; k++) drain(k);
     run_ready();
     read_rounds();
     flush_batch();
@@ -1824,7 +1880,18 @@ int main(int argc, char **argv) {
   }
   arena = mmap(NULL, BATCH_OUT, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   if (arena == MAP_FAILED) { perror("mmap arena"); return 1; }
-  if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
+
+  struct rlimit ml = {.rlim_cur = RLIM_INFINITY, .rlim_max = RLIM_INFINITY};
+  setrlimit(RLIMIT_MEMLOCK, &ml);
+  mlockall(MCL_CURRENT);
+
+#define TARGET_RINGS 7
+  for (int k = 0; k < TARGET_RINGS; k++) {
+    if (ring_init(k) < 0) {
+      if (k == 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
+      break;
+    }
+  }
   run();
   return 0;
 }

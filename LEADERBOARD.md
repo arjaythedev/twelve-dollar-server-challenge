@@ -60,7 +60,9 @@ merged row) scored 250,000 (24,097 req/s, p95 102.5 / p99 493.6 ms, 0 err, 79 % 
 260,000 failed the 2-minute probe on p99 1.12 s). c-iouring-PROGABBOMALA is scored at its follow-up PR #430 (`24a47f4`, merged); its merged #406 code (`740ab89`)
 held 250,000 and its merged #399 code (`bab1010`) 220,000. Its later follow-up #439 (`7d8b606`, checkpoint policy rework;
 held, not merged: it didn't beat the merged row) scored 230,000 (22,383 req/s, p95 10.5 / p99 34.0 ms, 0 err, 63 % CPU,
-26 µs/req, 674 MB, 2026-11-14; 240,000 failed the 2-minute probe on p99 1.39 s). asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
+26 µs/req, 674 MB, 2026-11-14; 240,000 failed the 2-minute probe on p99 1.39 s); its next commit `3be2728` (log restarts
+spaced by hold length) scored 280,000 (26,693 req/s, p95 197.6 / p99 539.9 ms, 0 err, 76 % CPU, 26 µs/req, 860 MB,
+2026-11-14; 290,000 failed the 2-minute probe on p99 2.03 s), the same as the merged row, so it isn't merged either. asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
 #414 code (`7c9e722`, thread per connection behind Nginx) held 24,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for

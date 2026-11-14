@@ -640,48 +640,40 @@ static inline int row_author(int64_t uid, col_t *name) {
 #define FEED_N 20
 #define FEED_SPAN 512
 static int feed_btree(int close) {
-  static char tmp[64 * 1024]; // 64 KB is generous for 20 posts and stays in L1/L2 cache
   if (!bt_ok) return 0;
-  int64_t ids[FEED_N]; unsigned char ca[FEED_N][32]; uint32_t cal[FEED_N], likes[FEED_N]; int n = 0, empty = 1, ord[FEED_N];
+  int64_t ids[FEED_N]; unsigned char ca[FEED_N][32]; uint32_t cal[FEED_N], likes[FEED_N]; int n = 0, empty = 1;
+  int64_t min_id = 0, max_id = 0;
   if (sqlite3BtreeFirst(cur_feed, &empty) != SQLITE_OK) return -1;
   if (!empty) for (;;) {
     col_t c[3];
     if (!rec_cols(cur_feed, c, 3) || !col_text(&c[0]) || c[0].len > sizeof ca[0] || !col_int(&c[1], &ids[n])) return 0;
     memcpy(ca[n], c[0].d, c[0].len); cal[n] = c[0].len;
+    if (n == 0 || ids[n] < min_id) min_id = ids[n];
+    if (n == 0 || ids[n] > max_id) max_id = ids[n];
     if (++n == FEED_N) break;
     int rc = sqlite3BtreeNext(cur_feed, 0);
     if (rc == SQLITE_DONE) break;
     if (rc != SQLITE_OK) return -1;
   }
-  for (int i = 0; i < n; i++) {
-    int j = i, v = n - 1 - i;
-    while (j > 0 && ids[ord[j - 1]] > ids[v]) { ord[j] = ord[j - 1]; j--; }
-    ord[j] = v;
-  }
   memset(likes, 0, sizeof likes);
   if (n) {
-    int64_t lo = ids[ord[0]], hi = ids[ord[n - 1]];
-    if (hi - lo < FEED_SPAN) {
-      uint32_t span[FEED_SPAN]; memset(span, 0, (hi - lo + 1) * sizeof span[0]);
-      int rc = count_likes(lo, hi, span); if (rc <= 0) return rc;
-      for (int i = 0; i < n; i++) likes[i] = span[ids[i] - lo];
+    if (max_id - min_id < FEED_SPAN) {
+      uint32_t span[FEED_SPAN]; memset(span, 0, (max_id - min_id + 1) * sizeof span[0]);
+      int rc = count_likes(min_id, max_id, span); if (rc <= 0) return rc;
+      for (int i = 0; i < n; i++) likes[i] = span[ids[i] - min_id];
     } else for (int i = 0; i < n; i++) { int rc = count_likes(ids[i], ids[i], &likes[i]); if (rc <= 0) return rc; }
   }
-  size_t mark = alen; uint32_t at[FEED_N], len[FEED_N];
+  size_t mark = alen;
   begin_resp(200, close); PUTS("{\"posts\":[");
-  size_t rows = alen;
-  for (int k = 0; k < n; k++) {
-    int i = ord[k], rc = seek_row(cur_posts, ids[i]); col_t c[3], name; int64_t uid;
+  for (int i = 0; i < n; i++) {
+    int rc = seek_row(cur_posts, ids[i]); col_t c[3], name; int64_t uid;
     if (rc < 0) { alen = mark; return -1; }
     if (!rc || !rec_cols(cur_posts, c, 3) || !col_text(&c[2]) || !col_int(&c[1], &uid)) { alen = mark; return 0; }
     rc = row_author(uid, &name);
     if (rc <= 0) { alen = mark; return rc; }
-    at[i] = alen - rows; put_row(ids[i], &c[2], ca[i], cal[i], &name, likes[i]); len[i] = alen - rows - at[i];
+    if (i) PUTS(",");
+    put_row(ids[i], &c[2], ca[i], cal[i], &name, likes[i]);
   }
-  size_t total = alen - rows;
-  if (total > sizeof tmp) { alen = mark; return 0; }
-  memcpy(tmp, arena + rows, total); alen = rows;
-  for (int i = 0; i < n; i++) { if (i) PUTS(","); put(tmp + at[i], len[i]); }
   PUTS("]}"); finish(); return 1;
 }
 

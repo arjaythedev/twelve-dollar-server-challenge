@@ -18,8 +18,9 @@
   Accepted sockets are fixed (direct) descriptors from multishot accepts. A table may hold up to `RLIMIT_NOFILE`
   (65,535) entries, so the server raises its soft limit to the hard one and runs up to 8 rings: accept leaves a ring
   at a high-water mark (a quarter of its slots, at most 4,096, below full) while another ring has room, since an
-  accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues
-  (`TCP_DEFER_ACCEPT` on), so a ramp's new connections wait there instead of being refused.
+  accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues,
+  so a ramp's new connections wait there instead of being refused. A connection is accepted when its handshake
+  completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives).
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -54,7 +55,14 @@
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  most 250 ms, with one exception. Late in a long run a pass can take a second or more on the disk. A hold that times out
+  lets writes in, but the next hold starts at once on the same pass, and the writes it lets in keep the WAL from
+  rewinding when that pass ends. Without the exception, no hold would complete and the WAL would grow. So the hold that
+  starts on a pass an earlier hold already timed out on waits up to 1.5 s for it (`HOLDRIDE`), and the pass after it
+  gets the usual 250 ms. The checkpoint thread runs at nice 19, so when the loop has requests queued every pass it
+  gets about 1.5 % of the CPU, and a pass that needs 15-30 ms of CPU takes seconds. That happens at the end of a ramp,
+  when new connections add their setup cost to a full load. So once a hold has waited 20 ms for a running pass, the
+  loop sleeps 200 µs per pass until it ends (`HOLDYIELD`), which leaves the checkpoint thread a share of the CPU. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
   them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
   reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
   of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes
@@ -132,7 +140,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
 line a second on stderr).
 

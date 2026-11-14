@@ -20,14 +20,17 @@
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
-static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
-static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
-static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
+static int ckpt_frames = 4096;   /* WAL frames (16 MB) after which the bulk thread copies the log back */
+static int ckpt_tail = 1 << 30;  /* the tail takes whatever one bulk pass left (CKPT_TAIL: converge to this few first) */
+static uint64_t hold_max_ns = 250000000ULL; /* a hold's limit, whatever the log's length */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
 static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
-#define CKPT_NICE 19
+static int ckpt_nice = 19; /* CKPT_NICE: the bulk checkpoint thread's nice value */
+static size_t dbwarm_bytes = 0; /* DBWARM_MB: the database file's first bytes kept in the page cache (off by default) */
+static uint64_t dbwarm_s = 5;
+#define DBWARM_MIN_AVAIL_KB (512L << 10) /* no warming while MemAvailable is below this: it must never fight reclaim */
 
 enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 
@@ -203,14 +206,21 @@ static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
   if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
   /* A write that does not continue the buffered run (the first after open, the first after
    * another connection restarted the log, a header rewrite) starts a new run: the old one goes
-   * out first. It must not bypass the buffer, or a frame header would lose its commit flag and
-   * the page behind it would wait in user space after COMMIT returned. */
-  if (off != f->last_end || f->len + n > WAL_BUF_CAP) {
+   * out first and no commit is pending. A write that continues the run but does not fit flushes
+   * the run too, but keeps the commit flag: the flag belongs to the frame header that just went
+   * out, and the page that follows it must still go out before COMMIT returns (a commit of 32
+   * frames or more overflows the buffer; before this, such a commit left its last page in user
+   * space, and a checkpoint reading that frame copied garbage into the database). It must not
+   * bypass the buffer either, for the same reason. */
+  if (off != f->last_end) {
     WF_FLUSH(p);
     f->commit = 0;
+  } else if (f->len + n > WAL_BUF_CAP) {
+    WF_FLUSH(p);
   }
   f->last_end = off + n;
   if (n > WAL_BUF_CAP || (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))) {
+    WF_FLUSH(p); /* nothing of this transaction may stay behind a write that goes out directly */
     f->commit = 0;
     return f->real->pMethods->xWrite(f->real, b, n, off);
   }
@@ -327,6 +337,8 @@ struct ck_thread {
   int state; /* the state this thread acts on: CK_BULK or CK_TAIL */
   int nice;
   int wal_fd;        /* the bulk thread's own descriptor on the log, for writeback kicks */
+  int db_fd;         /* the bulk thread's descriptor on the database file, for warming */
+  uint64_t warm_at;  /* when the database file is next read ahead */
   int64_t wb_kicked; /* log offset up to which writeback has been started */
   int uv;            /* the tail thread's user_version toggle: its restart transactions */
   int last_frames;   /* log size after the tail thread's last commit (1 = it restarted the log) */
@@ -376,6 +388,27 @@ static void wal_readahead(struct ck_thread *t) {
   if (end > (int64_t)256 << 20) end = (int64_t)256 << 20; /* a log that long is a disk that cannot keep up: the pass reads the rest itself */
   if (wal_fd_open(t) >= 0) (void)readahead(t->wal_fd, 0, (size_t)end);
 }
+/* Keeps the database file's pages in the page cache, from the idle bulk thread: a page SQLite's
+ * own cache misses is then a copy, not a disk read on the loop. readahead() of pages already
+ * cached costs a lookup; it reads from disk only what memory pressure evicted, and only while
+ * MemAvailable shows room, so it never competes with reclaim. */
+static long mem_avail_kb(void) {
+  char b[256];
+  long kb = -1;
+  FILE *f = fopen("/proc/meminfo", "r");
+  if (!f) return -1;
+  while (fgets(b, sizeof b, f)) if (!strncmp(b, "MemAvailable:", 13)) { kb = atol(b + 13); break; }
+  fclose(f);
+  return kb;
+}
+static void db_warm(struct ck_thread *t) {
+  uint64_t nw = now_ns();
+  if (nw < t->warm_at) return;
+  t->warm_at = nw + dbwarm_s * 1000000000ULL;
+  long kb = mem_avail_kb();
+  if (kb >= 0 && kb < DBWARM_MIN_AVAIL_KB) return;
+  (void)readahead(t->db_fd, 0, dbwarm_bytes);
+}
 static void wb_kick(struct ck_thread *t) {
   struct db *d = t->d;
   if (wal_fd_open(t) < 0) return;
@@ -399,6 +432,7 @@ static void *ck_main(void *arg) {
       if (pthread_cond_timedwait(&d->cv, &d->mu, &ts) == ETIMEDOUT) {
         pthread_mutex_unlock(&d->mu);
         wb_kick(t);
+        if (t->db_fd >= 0) db_warm(t);
         pthread_mutex_lock(&d->mu);
       }
     }
@@ -424,6 +458,8 @@ static int ck_start(struct db *d, const char *path, int state, int nice) {
   t->state = state;
   t->nice = nice;
   t->wal_fd = -1;
+  t->db_fd = -1;
+  if (state == CK_BULK && dbwarm_bytes) t->db_fd = open(path, O_RDONLY | O_CLOEXEC);
   if (db_open_conn(&t->c, path, 64) < 0) return -1;
   if (state == CK_TAIL) sqlite3_wal_hook(t->c, tail_wal_hook, t);
   pthread_t th;
@@ -502,10 +538,7 @@ static void db_tick(struct db *d) {
     break;
   }
   default: { /* a thread is working */
-    /* The limit grows with the log: a log that has missed restarts (the disk made the last tails
-     * slow) must restart before it reaches the inline last resort, whatever the sync costs. */
-    uint64_t limit = hold_max_ns * (uint64_t)(1 + d->wal_frames / (2 * ckpt_frames));
-    if (limit > 2 * hold_max_ns) limit = 2 * hold_max_ns; /* never a hold a POST would count as a failure */
+    uint64_t limit = hold_max_ns; /* flat, as the leader's: a missed restart costs one short cycle */
     if (d->writes_held && now_ns() - d->hold_t0 > limit) { /* a slow sync: writes resume, the log restarts next cycle */
       d->writes_held = 0;
       d->n_hold_timeout++;
@@ -593,7 +626,7 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
   sqlite3_wal_hook(d->c, db_wal_hook, d);
   pthread_mutex_init(&d->mu, NULL);
   pthread_cond_init(&d->cv, NULL);
-  if (ck_start(d, path, CK_BULK, CKPT_NICE) || ck_start(d, path, CK_TAIL, 0)) {
+  if (ck_start(d, path, CK_BULK, ckpt_nice) || ck_start(d, path, CK_TAIL, 0)) {
     fprintf(stderr, "checkpoint threads: %s\n", strerror(errno));
     return -1;
   }

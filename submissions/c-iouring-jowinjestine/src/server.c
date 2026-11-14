@@ -24,7 +24,8 @@
 #define READS_PER_PASS 16384
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
-static unsigned answers_per_pass = 2048, wait_min = 256;
+static unsigned answers_per_pass = 2048, wait_min = 64;
+static int sweep2 = 1;
 static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
@@ -87,6 +88,7 @@ static unsigned NR, NR_MAX, acc_ring;
 static unsigned ring_slots, accept_next, accept_stop, recv_bufs;
 static int ring_grow_failed;
 static int LFD[NLISTEN];
+static uint64_t acc_ok[NLISTEN], acc_nofile, acc_cancel, acc_err; /* accepts per listener; the error kinds */
 static struct app A;
 static int writes_ok = 1;
 
@@ -102,7 +104,7 @@ static unsigned nready, ready_cap, nheld, held_cap, nrq, rq_head, rq_cap;
 static unsigned answers_left;
 
 static struct {
-  uint64_t batches, cqes, reqs, accepts, closes, enobufs, reads, deferred, rq_max, ready_max, max_batch, cq_overflow, cancels;
+  uint64_t batches, commits, cqes, reqs, accepts, closes, enobufs, reads, deferred, rq_max, ready_max, max_batch, cq_overflow, cancels;
   uint64_t max_turn_ns, max_commit_ns, max_gap_ns; /* longest batch, longest commit, longest time outside a batch while busy */
 } S;
 static uint64_t reads_done; /* single-shot reads that returned data or EAGAIN */
@@ -380,8 +382,9 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   struct rs *rs = &R[ri];
   if (!(cqe->flags & IORING_CQE_F_MORE)) rs->accept_armed &= (uint8_t)~(1u << UD_SLOT(cqe->user_data));
   if (cqe->res < 0) {
-    if (cqe->res != -ECANCELED && cqe->res != -ENFILE && cqe->res != -EMFILE)
-      fprintf(stderr, "accept ring %u: %s\n", ri, strerror(-cqe->res));
+    if (cqe->res == -ECANCELED) acc_cancel++;
+    else if (cqe->res == -ENFILE || cqe->res == -EMFILE) acc_nofile++;
+    else { acc_err++; fprintf(stderr, "accept ring %u: %s\n", ri, strerror(-cqe->res)); }
     return;
   }
   uint32_t slot = (uint32_t)cqe->res;
@@ -393,6 +396,7 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   c->send_arena = NULL;
   rs->open++;
   S.accepts++;
+  acc_ok[UD_SLOT(cqe->user_data)]++;
   arm_multishot(ri, slot, c);
 }
 
@@ -588,6 +592,51 @@ static void flush_replies(int commit_failed) {
 
 /* ---------- housekeeping ---------- */
 
+/* kernel-side counters the box's log should carry: accept-queue overflows and drops, TCP memory aborts and
+   pressure events (deltas per interval), TCP memory in pages and MemAvailable (snapshots) */
+static long kst_prev[4];
+static void kstats(void) {
+  static const char *names[4] = {"ListenOverflows", "ListenDrops", "TCPAbortOnMemory", "TCPMemoryPressures"};
+  long cur[4] = {0, 0, 0, 0};
+  char head[4096], vals[4096];
+  FILE *f = fopen("/proc/net/netstat", "r");
+  if (f) {
+    while (fgets(head, sizeof head, f) && fgets(vals, sizeof vals, f))
+      if (!strncmp(head, "TcpExt:", 7)) {
+        char *h = head + 7, *v = vals + 7, *hs, *vs, *ht, *vt;
+        while ((ht = strtok_r(h, " \n", &hs)) && (vt = strtok_r(v, " \n", &vs))) {
+          h = v = NULL;
+          for (int i = 0; i < 4; i++) if (!strcmp(ht, names[i])) cur[i] = atol(vt);
+        }
+        break;
+      }
+    fclose(f);
+  }
+  long tcp_mem = -1, avail = -1, inuse = -1, tw = -1, orphan = -1;
+  if ((f = fopen("/proc/net/sockstat", "r"))) {
+    while (fgets(head, sizeof head, f))
+      if (!strncmp(head, "TCP:", 4)) {
+        char *m;
+        if ((m = strstr(head, " mem "))) tcp_mem = atol(m + 5);
+        if ((m = strstr(head, " inuse "))) inuse = atol(m + 7);
+        if ((m = strstr(head, " tw "))) tw = atol(m + 4);
+        if ((m = strstr(head, " orphan "))) orphan = atol(m + 8);
+      }
+    fclose(f);
+  }
+  if ((f = fopen("/proc/meminfo", "r"))) {
+    while (fgets(head, sizeof head, f)) if (!strncmp(head, "MemAvailable:", 13)) avail = atol(head + 13) / 1024;
+    fclose(f);
+  }
+  fprintf(stderr, " listen_overflows=%ld listen_drops=%ld abort_on_mem=%ld mem_pressure=%ld tcp_mem_pages=%ld tcp_inuse=%ld tcp_tw=%ld "
+          "tcp_orphan=%ld mem_avail=%ldMB accepts_per_listener=",
+          cur[0] - kst_prev[0], cur[1] - kst_prev[1], cur[2] - kst_prev[2], cur[3] - kst_prev[3], tcp_mem, inuse, tw, orphan, avail);
+  for (unsigned l = 0; l < NLISTEN; l++) fprintf(stderr, "%s%llu", l ? "," : "", (unsigned long long)acc_ok[l]);
+  fprintf(stderr, " accept_nofile=%llu accept_cancelled=%llu accept_errors=%llu\n", (unsigned long long)acc_nofile,
+          (unsigned long long)acc_cancel, (unsigned long long)acc_err);
+  memcpy(kst_prev, cur, sizeof cur);
+}
+
 static uint64_t T_reqs, T_accepts, T_closes;
 static long majflt_prev;
 static void stats(uint64_t dt_ns) {
@@ -603,12 +652,12 @@ static void stats(uint64_t dt_ns) {
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_HIT, &c_hit, &hw, 1);
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_MISS, &c_miss, &hw, 1);
   fprintf(stderr,
-          " total_reqs=%llu req/s=%.0f batches/s=%.0f avg_batch=%.1f max_batch=%llu accepts=%llu closes=%llu enobufs=%llu reads=%llu "
+          " total_reqs=%llu req/s=%.0f batches/s=%.0f commits/s=%.0f avg_batch=%.1f max_batch=%llu accepts=%llu closes=%llu enobufs=%llu reads=%llu "
           "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
           "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
           "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu "
-          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu\n",
-          (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
+          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu",
+          (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, (double)S.commits / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
           (unsigned long long)S.cq_overflow, (unsigned long long)S.cancels, A.db.wal_frames, (unsigned long long)A.db.n_ckpt,
@@ -618,6 +667,7 @@ static void stats(uint64_t dt_ns) {
           (double)A.db.hold_total_ns / 1e6, (unsigned long long)A.db.n_hold_timeout, (unsigned long long)A.db.tail_frames_max,
           (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max, (double)S.max_gap_ns / 1e6, ru.ru_majflt - majflt_prev,
           (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy);
+  kstats();
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -839,17 +889,21 @@ int main(int argc, char **argv) {
   /* 1 ms batches. Longer ones (4 ms) would cut the WAL ~40 % (one set of hot-page frames per
    * commit), but measured under a CPU quota they add 25-50 ms to p95 at high load: bigger
    * service bursts, more queueing variance. The tail is what the score is made of. */
-  wait_min = (unsigned)env_long("WAIT_MIN", 256);
-  wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
-  ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
-  ckpt_tail = (int)env_long("CKPT_TAIL", 64);
-  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
+  wait_min = (unsigned)env_long("WAIT_MIN", 64);
+  sweep2 = (int)env_long("SWEEP2", 1);  /* the rings are entered a second time after the batch's database work */
+  wait_ns = (uint64_t)env_long("WAIT_US", 2000) * 1000ULL;
+  ckpt_frames = (int)env_long("CKPT_FRAMES", 4096);
+  ckpt_tail = (int)env_long("CKPT_TAIL", 1 << 30);
+  hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 250) * 1000000ULL;
+  ckpt_nice = (int)env_long("CKPT_NICE", 19);
   wb_kick_ms = env_long("WB_KICK_MS", 250);
   ckpt_log = (int)env_long("CKPT_LOG", 0);
   long want = env_long("MAX_CONNS", 600000);
   NR_MAX = (unsigned)((want + nslots - 1) / nslots);
   if (NR_MAX < 1) NR_MAX = 1;
   if (NR_MAX > MAX_RINGS) NR_MAX = MAX_RINGS;
+  dbwarm_bytes = (size_t)env_long("DBWARM_MB", 0) << 20;
+  dbwarm_s = (uint64_t)env_long("DBWARM_S", 5);
   int cache_kib = (int)env_long("CACHE_KIB", 65536); /* 64 MB: the likes index (24 MB), the post tails and their indexes stay resident */
 
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
@@ -873,6 +927,9 @@ int main(int argc, char **argv) {
 
   uint64_t last_stats = now_ns(), te_prev = 0;
   unsigned last_cqes = 0;
+  uint64_t tx_write_ns = 0; /* when the open transaction first wrote; 0 when it has not */
+  uint64_t cg_ns = (uint64_t)env_long("CG_US", 3000) * 1000ULL;
+  unsigned cg_min = (unsigned)env_long("CG_MIN", 32); /* a batch smaller than this commits at once: grouping pays only under load */
   for (;;) {
     /* 1. the other rings: submit what the last batch queued and collect their completions */
     for (unsigned i = 1; i < NR; i++) ring_enter(&R[i].r, 0, 0);
@@ -880,7 +937,14 @@ int main(int argc, char **argv) {
     int busy = nready || (nrq > rq_head) || (nheld && !A.db.writes_held);
     long rc;
     if (busy) rc = ring_enter(&R[0].r, 0, 0);
-    else rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, last_cqes ? wait_ns : IDLE_NS);
+    else {
+      uint64_t to = last_cqes ? wait_ns : IDLE_NS;
+      if (tx_write_ns) { /* a group is open: wake for its commit, whatever else arrives */
+        uint64_t n0 = now_ns(), left = tx_write_ns + cg_ns > n0 ? tx_write_ns + cg_ns - n0 : 1;
+        if (left < to) to = left;
+      }
+      rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, to);
+    }
     if (rc < 0 && rc != -ETIME && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN) {
       fprintf(stderr, "io_uring_enter: %s\n", strerror((int)-rc));
       return 1;
@@ -895,14 +959,39 @@ int main(int argc, char **argv) {
     unsigned ncq = reap_all();
     run_ready(); /* oldest first: what earlier batches read */
     ncq += read_rounds();
+    /* The second sweep. With deferred task work a ring's completions are posted only inside an
+     * enter on that ring, and one non-blocking enter per batch on the rings the loop does not
+     * wait on (step 1) does not always post them: on a 300,000-connection run whose batches
+     * were 3 ms long, one of those rings at a time kept thousands of requests unanswered for a
+     * second or more (the waited ring never did), and that is the rig's failure at 290-300k: p99
+     * of seconds with 0 errors at 78-84 % CPU. Entering every ring again after the batch's
+     * database work, before the commit, posts them; what it collects is answered in this batch. */
+    if (sweep2) {
+      for (unsigned i = 0; i < NR; i++) ring_enter(&R[i].r, 0, 0);
+      ncq += reap_all();
+      run_ready();
+      ncq += read_rounds();
+    }
     if (writes_ok && nheld) release_held();
-    uint64_t tc = now_ns();
-    int failed = db_commit(&A.db) < 0;
-    uint64_t tc2 = now_ns();
-    if (tc2 - tc > S.max_commit_ns) S.max_commit_ns = tc2 - tc;
-    flush_replies(failed);
-    A.db.wrote = 0;
-    db_tick(&A.db); /* no transaction is open: the only point where a hold starts or ends */
+    if (A.db.wrote && !tx_write_ns) tx_write_ns = t;
+    /* Group commit across batches: a transaction that wrote stays open for up to CG_US (3 ms),
+     * so the hot pages every commit rewrites into the log (page 1, the tails of posts, likes
+     * and their indexes) go out once per group instead of once per batch. The replies of the
+     * batches in a group wait for its commit, as before: no reply ever reports a row that
+     * rolled back. A transaction that has not written commits at once (nothing to group, and
+     * it may be a deferred one that must not write). */
+    int commit_now = !A.db.wrote || !cg_ns || t - tx_write_ns >= cg_ns || ncq < cg_min || nrep >= 16384 || n_batch_arenas >= 448 || stop_requested;
+    if (commit_now) {
+      uint64_t tc = now_ns();
+      int failed = db_commit(&A.db) < 0;
+      uint64_t tc2 = now_ns();
+      if (tc2 - tc > S.max_commit_ns) S.max_commit_ns = tc2 - tc;
+      flush_replies(failed);
+      A.db.wrote = 0;
+      tx_write_ns = 0;
+      S.commits++;
+      db_tick(&A.db); /* no transaction is open: the only point where a hold starts or ends */
+    }
     for (unsigned i = 0; i < NR; i++) ring_buf_publish(&R[i].r);
     accept_policy();
     last_cqes = ncq;

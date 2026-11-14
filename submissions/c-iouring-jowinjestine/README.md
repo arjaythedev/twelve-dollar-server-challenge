@@ -42,10 +42,29 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
-  ring 0 waits for 256 completions or 1 ms, whichever comes first, so bigger batches share one
-  commit and a pass never spins. (4 ms batches were tried: they cut the WAL ~40 %, one set of
-  hot-page frames per commit, but under a CPU quota they add 25-50 ms to p95 at high load, so
-  the batches stay short.)
+  ring 0 waits for 64 completions or 2 ms (`WAIT_MIN`, `WAIT_US`), whichever comes first, so
+  bigger batches share one commit and a pass never spins; while a commit group is open the wait
+  ends at the group's deadline, and a batch of fewer than 32 completions (`CG_MIN`) commits at
+  once, so a lone request is answered within its batch (the heads before `2703df3` let it wait
+  for the idle timeout, which starved the PGO training client on the box).
+- **Every ring is entered twice per batch** (`SWEEP2`). With deferred task work
+  (`IORING_SETUP_DEFER_TASKRUN`) a ring's completions are posted only inside an enter on that
+  ring, and the one non-blocking enter per batch on the rings the loop does not wait on does not
+  always post them. Found with a load generator holding 300,000 connections (one per user) and
+  batches stretched to 3 ms, which is what the box's busier core does at 1 ms: ~6,000 server
+  sockets with an unread request, nothing queued in user space, p99 1.4 s with 0 errors, and,
+  with each response tagged by the ring that served it, every stuck request was on one of the
+  rings the loop did not wait on, one ring at a time for a second or more, never on ring 0. That
+  is the box's failure at 290,000-300,000 (`1e7fb4d`, `f4ec9c5`: p99 1.3-3.8 s, 0 errors, 78-84 %
+  CPU). Entering every ring again after the batch's database work, before the commit, posts
+  what the first enter left behind: the same run passes with p99 12 ms and no ring ever holds a
+  stuck request. A ring that rotates the wait instead also passes (p99 37 ms) but less well. The
+  second sweep costs 5 % of loop CPU at a 1 ms window; the 2 ms window it makes safe again is
+  10 % cheaper, so together they are 5 % under the 1 ms head (41.9 s against 44.2 s of loop CPU
+  for 3.0 M requests). Commit groups of 20 ms saved another 2 % of the cgroup's CPU but doubled
+  the softirq time on the server's core (the replies of a group leave as one burst), which on
+  the box is the same core, so groups stay at 3 ms. Cooperative task work instead of deferred
+  has no stuck rings either but costs 13-20 % more CPU.
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per
@@ -70,7 +89,13 @@ mostly idle sockets under `LimitNOFILE=65535`.
    them (`BEGIN`, then the read transaction and four B-tree cursors). Reads see the batch's earlier
    writes.
 3. `COMMIT`, then every response is handed to the kernel. **No response from a batch is handed to
-   the kernel until its COMMIT returns.** If the commit fails, every response that touched the
+   the kernel until its COMMIT returns.** A transaction that wrote stays open for up to 3 ms
+   (`CG_US`), so the batches of those milliseconds share one commit: every commit rewrites the
+   same hot pages into the log (page 1, the tails of posts, likes and their indexes), and sharing
+   a commit across three or four batches cuts that traffic, and the checkpoint and writeback work
+   behind it, by the same factor. The responses of the batches in a group wait for the group's
+   commit, so a POST or a read in a group answers up to 3 ms later than it would alone; a
+   transaction that has not written commits at once (nothing to group). If the commit fails, every response that touched the
    database becomes a 500 and the connection is closed, so no 201 ever claims a write that did not
    land and no read ever reports a row that rolled back. If SQLite ends the transaction by itself
    mid-batch (`SQLITE_FULL`, an I/O error), the rest of the batch does not write and its commit
@@ -120,7 +145,14 @@ mostly idle sockets under `LimitNOFILE=65535`.
   the tail thread restarted the log) flushes the run and starts a new one; it never bypasses the
   buffer (the earlier heads let it, and a frame header written that way lost its commit flag, so
   the page behind it waited in user space after `COMMIT` had returned; a checkpoint reading that
-  frame in that moment copied garbage, seen once the tail thread began restarting the log). Every other call on
+  frame in that moment copied garbage, seen once the tail thread began restarting the log). A
+  write that continues the run but does not fit the 128 KB buffer (a commit of 32 frames or more:
+  any write batch released after a hold of more than ~13 ms) flushes the run but keeps the commit
+  flag, since the flag belongs to the header that just went out and the page behind it must still
+  go out before `COMMIT` returns (`1e7fb4d` cleared it there, and under CPU contention a
+  checkpoint copied such a page before the loop had written it: "database disk image is
+  malformed" from then on, found with a load generator holding 300,000 connections while a
+  busy process shared the core). Every other call on
   the file flushes first and goes straight through, so the bytes and their order are SQLite's.
   Readers find frames only through the wal-index, so none can see a buffered one. (After
   c-iouring-pavlyhalim #245 and c-iouring-shivanshthapliyal #250.)
@@ -134,11 +166,16 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
-  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
-  nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
-  writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
-  fully copied; so that thread runs pass after pass, each copying what the previous one missed,
-  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). Then
+  rust-iouring-kensac #264, changed for one vCPU). The policy is the leader's, as a whole: past
+  4,096 WAL frames (16 MB) a thread at nice 19 runs one PASSIVE checkpoint on its own connection,
+  in the loop's idle time; whatever that pass could not copy (the frames written meanwhile) the
+  tail takes under a hold of at most 250 ms; a missed restart costs one short cycle. This entry
+  tried its own policy first and the box never favoured it: 64 MB cycles with passes repeated
+  until fewer than 64 frames remained, holds of 400 ms growing to 800 ms, scored 270,000-290,000
+  across eleven heads, and changing one parameter at a time toward the leader's (a flat 250 ms
+  hold, `5d2fa6b`, 270,000; the bulk thread at nice 12, `ca5743b`, 270,000) changed nothing the
+  box could resolve. `CKPT_FRAMES`, `CKPT_TAIL` (converge to this few frames first),
+  `HOLD_MAX_MS` and `CKPT_NICE` keep the old policy one environment variable away. Then
   writes are held (reads go on; the next POST on each connection waits in its buffer) while a
   second thread at the normal priority copies that remainder: a few milliseconds of copying plus
   the syncs of the log and of the database, on a thread. That thread then restarts the log itself
@@ -148,16 +185,16 @@ mostly idle sockets under `LimitNOFILE=65535`.
   a restart does not disturb; a read that began earlier holds another mark and makes the attempt
   `BUSY`, so it is retried, and if the hold ends first the loop's next write restarts the log as
   before. A hold
-  starts and ends only between batches and lasts at most 400 ms (writes only, once per cycle:
-  under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the next
-  cycle waits for half a log more, so a slow disk never gives back-to-back holds, and the limit
-  grows for a log that has missed restarts, up to 800 ms and no further: a POST that waited a
-  second would count against the score, so past that the log is simply allowed to grow (a
-  longer log costs the loop nothing while its page cache holds the hot pages: the wal-index is
+  starts and ends only between batches and lasts at most 250 ms (writes only, once per cycle):
+  if the disk makes the tail's sync slow, writes resume and the next cycle waits for half a log
+  more, so a slow disk never gives back-to-back holds, and the log is allowed to grow (a longer
+  log costs the loop nothing while its page cache holds the hot pages: the wal-index is
   consulted only on a cache miss) until the disk gives a restart. Before each pass the bulk
   thread reads the log sequentially ahead (`readahead`): a pass reads frames in page order,
   random in the file, and once the box's memory pressure has evicted them (they are clean once
-  written back) that would be a disk seek per frame.
+  written back) that would be a disk seek per frame. The same thread can keep the database
+  file's first pages warm between passes (`DBWARM_MB`, `readahead` every 5 s, only while
+  MemAvailable is over 512 MB); it is off by default, as the leader has no such thing.
   (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms limit: on the
   box the tail's sync of a few hundred random pages outlasted the limit, the log never restarted,
   and the last resort copied half a gigabyte on the loop once per probe, the one stall that
@@ -213,7 +250,7 @@ cursors through SQLite's pager; writes use SQL.
 5. No caching across requests: no response, query-result or token caches. Every request reads SQLite
 pages while it is served. Kept between batches: prepared statements, cursors, root page numbers and
 column layout (schema metadata, read at open), and the HMAC key schedule.
-6. WAL + `synchronous=NORMAL`; group commit; each response waits for its batch's commit.
+6. WAL + `synchronous=NORMAL`; group commit (one commit per up to 3 ms of batches); each response waits for its commit.
 7. Nothing detects the load test: every route works for any request, and the server never sheds
 load, never closes a healthy connection and never looks at who is asking.
 8–9. Direct on `0.0.0.0:80`. Direct descriptors need no file descriptors beyond the listeners.

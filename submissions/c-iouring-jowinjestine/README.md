@@ -32,7 +32,7 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Eight listening sockets share the port (`SO_REUSEPORT`), each with its own accept queue of
   `somaxconn`, so together they hold ~32k pending connections through a ramp or a stall. Their
   multishot accepts are armed on the ring being filled and cancelled by user data when it moves on.
-- Each connection has one **multishot receive** into the ring's provided-buffer ring (1,024 × 2 KB),
+- Each connection has one **multishot receive** into the ring's provided-buffer ring (8,192 × 1 KB),
   so an idle connection holds no receive buffer and no heap, only a 32-byte record, and a request
   costs one completion. Requests are parsed in place in the kernel's buffer and the buffer goes
   back at once.
@@ -52,9 +52,9 @@ mostly idle sockets under `LimitNOFILE=65535`.
   queued connection, never more on a ring than it has buffers, in rounds that complete inside the
   submit. A read that fills its buffer is queued again; a shorter one, or `EAGAIN`, means the
   socket is drained and the multishot receive is armed again.
-- **Drain first.** A pass reads up to 16,384 times but answers at most 2,048 requests; the rest
-  wait in the connection's own buffer (a copy the size of the request) on a ready list that later
-  passes answer first, oldest first. A request left in its socket costs a 3–4 KB kernel buffer,
+- **Drain first.** A pass reads up to 16,384 times and answers up to 16,384 requests; the rest
+  wait in the connection's own buffer (a copy the size of the request) on a ready list that the
+  next pass answers before it reaps anything new, oldest first. A request left in its socket costs a 3–4 KB kernel buffer,
   and a backlog of those is what runs a 2 GB box out of memory.
 - Closing is a `SHUTDOWN` hard-linked to a direct-descriptor `CLOSE`; a generation number in every
   `user_data` drops completions for a reused slot. Idle connections are never closed by the server.
@@ -64,8 +64,8 @@ mostly idle sockets under `LimitNOFILE=65535`.
 
 ## A batch
 
-1. Every completion is handled. Requests are answered straight into the arena, up to 2,048 a
-   batch; a connection gets at most one request per batch (pipelined bytes wait for the send).
+1. Every completion is handled. Requests are answered straight into the arena, up to 16,384 a
+   batch, after the requests earlier batches left waiting; a connection gets at most one request per batch (pipelined bytes wait for the send).
 2. All of the batch's reads and writes run in one SQLite transaction, begun lazily by the first of
    them (`BEGIN`, then the read transaction and four B-tree cursors). Reads see the batch's earlier
    writes.

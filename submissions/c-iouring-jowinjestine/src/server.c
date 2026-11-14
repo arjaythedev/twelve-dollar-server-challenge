@@ -18,13 +18,13 @@
 #define NLISTEN 8
 #define ACCEPT_NEXT_MAX 8192 /* make the next ring this many connections before the current one is full */
 #define ACCEPT_STOP_MAX 6144 /* stop accepting on a ring this many slots before its table is full */
-#define RECV_BUF_SIZE 2048
+#define RECV_BUF_SIZE 1024 /* a request is ~150-400 bytes; a longer one spans buffers */
 #define ARENA_CAP (1u << 20)
 #define ARENA_POOL 64
 #define READS_PER_PASS 16384
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
-static unsigned answers_per_pass = 2048, wait_min = 256;
+static unsigned answers_per_pass = 16384, wait_min = 256;
 static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
@@ -834,8 +834,8 @@ int main(int argc, char **argv) {
   accept_next = nslots / 8 < ACCEPT_NEXT_MAX ? nslots / 8 : ACCEPT_NEXT_MAX;
   if (accept_stop < 16) accept_stop = 16;
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
-  recv_bufs = (unsigned)env_long("RECV_BUFS", 1024);
-  answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
+  recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
+  answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 16384);
   /* 1 ms batches. Longer ones (4 ms) would cut the WAL ~40 % (one set of hot-page frames per
    * commit), but measured under a CPU quota they add 25-50 ms to p95 at high load: bigger
    * service bursts, more queueing variance. The tail is what the score is made of. */
@@ -892,8 +892,8 @@ int main(int argc, char **argv) {
     writes_ok = !A.db.writes_held;
     if (writes_ok && db_begin_write(&A.db) < 0) writes_ok = 0; /* the tail thread is restarting the log: this batch reads only */
     answers_left = answers_per_pass;
+    run_ready(); /* oldest first: what earlier batches read, before this batch's arrivals can take the answer slots */
     unsigned ncq = reap_all();
-    run_ready(); /* oldest first: what earlier batches read */
     ncq += read_rounds();
     if (writes_ok && nheld) release_held();
     uint64_t tc = now_ns();

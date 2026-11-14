@@ -56,8 +56,11 @@
   (data (i32.const 0x1007c0) "true")
   (data (i32.const 0x1007e0) "false")
   ;; SQL. SQLite writes each post object; the order of its keys is the order of json_object's arguments.
+  ;; The feed: the subquery runs as a co-routine that scans posts_created_at_id_idx in feed order, and
+  ;; group_concat joins its rows in the order the co-routine yields them (EXPLAIN QUERY PLAN shows no other
+  ;; step; an ORDER BY inside group_concat would sort the 20 rows again in a temporary b-tree).
   (data (i32.const 0x100800) "SELECT json_object('post',json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username,'like_count',(SELECT count(*) FROM likes l WHERE l.post_id=p.id))) FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?1\00")
-  (data (i32.const 0x100a00) "SELECT '{\"posts\":['||coalesce(group_concat(j,',' ORDER BY c DESC,i DESC),'')||']}' FROM (SELECT p.id i,p.created_at c,json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username,'like_count',(SELECT count(*) FROM likes l WHERE l.post_id=p.id)) j FROM posts p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC,p.id DESC LIMIT 20)\00")
+  (data (i32.const 0x100a00) "SELECT '{\"posts\":['||coalesce(group_concat(j,','),'')||']}' FROM (SELECT json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username,'like_count',(SELECT count(*) FROM likes l WHERE l.post_id=p.id)) j FROM posts p JOIN users u ON u.id=p.user_id ORDER BY p.created_at DESC,p.id DESC LIMIT 20)\00")
   (data (i32.const 0x100c00) "INSERT INTO posts(user_id,body) VALUES(?1,?2) RETURNING json_object('post',json_object('id',id,'body',body,'created_at',created_at,'author',?3,'like_count',0))\00")
   (data (i32.const 0x100d00) "SELECT 1 FROM posts WHERE id=?1\00")
   (data (i32.const 0x100d40) "INSERT INTO likes(user_id,post_id) VALUES(?1,?2) ON CONFLICT(user_id,post_id) DO NOTHING\00")

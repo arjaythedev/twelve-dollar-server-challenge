@@ -6,17 +6,16 @@ field; zeroing plus opcode constants supplies the remaining ABI fields. The Linu
 C emission are trusted boundaries, not claims of a machine-checked kernel proof. -/
 namespace Feed.Sqe
 open Wire
-inductive Op where | accept | recv | send | shutdown | close | cancel
+inductive Op where | accept | recv | send | shutdown | close
   deriving DecidableEq
 
 def Op.name : Op → String
   | .accept => "accept" | .recv => "recv" | .send => "send"
-  | .shutdown => "shutdown" | .close => "close" | .cancel => "cancel"
+  | .shutdown => "shutdown" | .close => "close"
 def Op.ctx : Op → List Binding
   | .accept | .recv | .shutdown => [⟨"fd", .fd⟩, ⟨"tag", .u64⟩]
   | .send => [⟨"fd", .fd⟩, ⟨"addr", .u64⟩, ⟨"len", .u32⟩, ⟨"tag", .u64⟩]
   | .close => [⟨"index", .u32⟩, ⟨"tag", .u64⟩]
-  | .cancel => [⟨"target", .u64⟩, ⟨"tag", .u64⟩]
 inductive Field : Wire.Ty → Type where
   | fd : Field .fd
   | addr : Field .u64
@@ -35,7 +34,6 @@ def Op.required : Op → List String
   | .accept | .recv | .shutdown => ["fd", "user_data"]
   | .send => ["fd", "addr", "len", "user_data"]
   | .close => ["file_index", "user_data"]
-  | .cancel => ["addr", "user_data"]
 structure ReadyPlan (op : Op) where
   assignments : List (Assignment op.ctx)
   complete : assignments.map (fun a => a.field.name) = op.required
@@ -47,7 +45,6 @@ def plan : (op : Op) → ReadyPlan op
   | .send => ⟨[assign .fd .here, assign .addr (.there .here),
       assign .len (.there (.there .here)), assign .tag (.there (.there (.there .here)))], rfl⟩
   | .close => ⟨[assign .fileIndex .here, assign .tag (.there .here)], rfl⟩
-  | .cancel => ⟨[assign .addr .here, assign .tag (.there .here)], rfl⟩
 
 def Op.constants : Op → String
   | .accept => "s->opcode = IORING_OP_ACCEPT; s->file_index = IORING_FILE_INDEX_ALLOC;"
@@ -55,7 +52,6 @@ def Op.constants : Op → String
   | .send => "s->opcode = IORING_OP_SEND; s->flags = IOSQE_FIXED_FILE; s->msg_flags = MSG_NOSIGNAL | MSG_WAITALL;"
   | .shutdown => "s->opcode = IORING_OP_SHUTDOWN; s->flags = IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS; s->len = SHUT_RDWR;"
   | .close => "s->opcode = IORING_OP_CLOSE;"
-  | .cancel => "s->opcode = IORING_OP_ASYNC_CANCEL; s->flags = IOSQE_CQE_SKIP_SUCCESS;"
 
 def argDecl (b : Binding) : String :=
   (match b.ty with | .fd => "int " | .u32 => "u32 " | .u64 => "u64 " | _ => "UNSUPPORTED ") ++ b.name
@@ -67,5 +63,5 @@ def emit (p : ReadyPlan op) : String :=
   "\n  sqe_commit(r, (sqe_ready){s});\n}\n"
 def header : String :=
   "/* GENERATED opcode-specific constructors; zero, initialize, then commit privately. */\n" ++
-  "\n".intercalate ([Op.accept, .recv, .send, .shutdown, .close, .cancel].map fun op => emit (plan op))
+  "\n".intercalate ([Op.accept, .recv, .send, .shutdown, .close].map fun op => emit (plan op))
 end Feed.Sqe

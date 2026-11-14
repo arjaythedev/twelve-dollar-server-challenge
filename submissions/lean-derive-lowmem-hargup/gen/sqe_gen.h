@@ -45,12 +45,3 @@ static void sqe_close(ring *r, u32 index, u64 tag) {
   s->user_data = tag;
   sqe_commit(r, (sqe_ready){s});
 }
-
-static void sqe_cancel(ring *r, u64 target, u64 tag) {
-  sqe_reserved slot = sqe_reserve(r);
-  struct io_uring_sqe *s = slot.p;
-  s->opcode = IORING_OP_ASYNC_CANCEL; s->flags = IOSQE_CQE_SKIP_SUCCESS;
-  s->addr = target;
-  s->user_data = tag;
-  sqe_commit(r, (sqe_ready){s});
-}

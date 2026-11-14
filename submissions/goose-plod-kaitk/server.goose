@@ -3,9 +3,9 @@
 // that checkpoints the WAL beside it.
 import std;
 import os;
-import http from "github.com/kaitk/goose-http@v0.5.19";
+import http from "github.com/kaitk/goose-http@v0.5.20";
 import hash from "github.com/kaitk/goose-hash@v0.0.4";
-import plod from "github.com/kaitk/plod@v0.5.12";
+import plod from "github.com/kaitk/plod@v0.5.13";
 import sqlite from "github.com/kaitk/goose-sqlite@v0.0.4";
 import app;
 
@@ -54,6 +54,9 @@ thread_fn checkpointer(box: http::Box) {
             sqlite::exec(db, "PRAGMA wal_checkpoint(PASSIVE)");
         };
         for e in ran { write_stderr(str("SQLite checkpoint: ", e.message, "\n")); }
+        // A hold's checkpoint: wake the write that asked, which ends it.
+        var to = http::MailAddress { .. };
+        if tag == HOLD && http::mail_value(bytes, to) { http::mail_send(to, 0, ""); }
     };
     sqlite::close(db);
 }
@@ -69,14 +72,15 @@ thread_fn worker(cfg: http::Config, checkpoints: http::Lane) {
         // is checked in its INSERT, so enforcement would only add seeks.
         db.db = sqlite::open(database(), sqlite::READ_WRITE | sqlite::NO_MUTEX | OPEN_URI, false);
         // WAL, as the seed is; NORMAL syncs at checkpoints, not at each
-        // commit, which SPEC.md's rule 6 allows. The lane copies most of the
-        // WAL back; at 16,000 pages this connection checkpoints the rest
-        // itself, which lets the next write start the WAL from its beginning.
+        // commit, which SPEC.md's rule 6 allows. The lane copies the WAL
+        // back, and a hold's checkpoint completes it (app.goose's held), so
+        // that the next COMMIT starts the WAL over. This connection
+        // checkpoints itself only at 65,536 pages, when holds can't keep up.
         sqlite::exec(db.db, """
             PRAGMA journal_mode = WAL;
             PRAGMA synchronous = NORMAL;
             PRAGMA cache_size = -16000;
-            PRAGMA wal_autocheckpoint = 16000;
+            PRAGMA wal_autocheckpoint = 65536;
             """);
         sqlite::busy_timeout(db.db, 5000);
     };
@@ -98,17 +102,22 @@ fn main() {
     // connection with data in a pass takes a receive buffer: past the ring's
     // buffers, the rest end their receives and are queued again, pass after
     // pass, so there are 1,024 buffers rather than goose-http's 64.
+    // A write waits for its pass's COMMIT as goose-http's waits do, which
+    // needs a box: a worker's wakes of its own exchanges take no slot, and
+    // each waiting write takes one of max_waiting's timers.
     var cfg = http::Config { workers: 1, max_conns: 1000000, idle_ms: 120000, server: "",
-                             ring_direct: true, ring_batch_us: 1000, ring_buffers: 1024, .. };
+                             ring_direct: true, ring_batch_us: 1000, ring_buffers: 1024,
+                             mail_slots: 64, max_waiting: 65536, .. };
     if env("HOST", host) && host != "0.0.0.0" { format(cfg.address, host); }
     if env("PORT", port) {
         let p, ok = parse_int(trim(port));
         guard ok else { abort("PORT: not a port"); }
         cfg.port = p as i32;
     }
-    // Two slots: one checkpoint running and one asked for; an ask past them
-    // is dropped, as the one queued will copy its frames.
-    let checkpoints = http::lane_open(http::LaneConfig { slots: 2, .. }, checkpointer);
+    // A checkpoint running, one asked for, and room for a hold's; a
+    // periodic ask past them is dropped, as the one queued will copy its
+    // frames.
+    let checkpoints = http::lane_open(http::LaneConfig { slots: 4, .. }, checkpointer);
     http::run(cfg, checkpoints, worker);
     http::lane_stop(checkpoints);
 }

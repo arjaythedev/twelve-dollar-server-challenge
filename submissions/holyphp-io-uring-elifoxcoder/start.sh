@@ -12,6 +12,16 @@ export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
 # WAL tail is copied and SQLite can restart the log from frame 0. Without it
 # the WAL grew past 200 MB under sustained load. HPHP_CKPT_RESTART=0 disables.
 export HPHP_CKPT_RESTART="${HPHP_CKPT_RESTART:-1}"
+# Optional: open SQLite through another VFS, e.g. HPHP_SQLITE_VFS=unix-excl
+# (the process holds the database lock, so transactions take no fcntl()
+# locks). Off by default: the box run with unix-excl + WAL coalescing at
+# f1f8d45 held 230k with a worse tail than the default VFS at 250k, so this
+# head isolates the runtime changes.
+export HPHP_SQLITE_VFS="${HPHP_SQLITE_VFS-}"
+# Write each commit's WAL frames with one pwrite through a thin wrapper over
+# the selected VFS (reads, syncs and locks flush first). Set 0 to compare the
+# old path; the default VFS itself remains unchanged.
+export HPHP_SQLITE_WAL_COALESCE="${HPHP_SQLITE_WAL_COALESCE:-1}"
 # Keep SQLite's request cache at the 64 MiB measured baseline. Larger caches
 # and the index warm-up remain opt-in via HPHP_SQLITE_CACHE_KIB / HPHP_SQLITE_WARM.
 export HPHP_SQLITE_CACHE_KIB="${HPHP_SQLITE_CACHE_KIB:-65536}"
@@ -32,6 +42,10 @@ export HPHP_RING0_WAIT="${HPHP_RING0_WAIT:-1}"
 # Do not wait for the full ring-0 CQ batch while accepted work or completions
 # are already queued. Set HPHP_RING0_BUSY=0 to compare the prior wait policy.
 export HPHP_RING0_BUSY="${HPHP_RING0_BUSY:-1}"
+# Return to receive processing between bounded application batches. The 2048
+# budget reduced tails versus 8192 on the one-vCPU Ubuntu 6.8 VM and passed
+# a five-minute hold. Set 8192 to compare the previous budget.
+export HPHP_ANSWER_BUDGET="${HPHP_ANSWER_BUDGET:-2048}"
 # Match Rust's SQ-full path: publish queued entries without waiting for CQEs.
 # Set 1 to compare the previous GETEVENTS flush policy on the same binary.
 export HPHP_SQ_FLUSH_GETEVENTS="${HPHP_SQ_FLUSH_GETEVENTS:-0}"
@@ -40,6 +54,9 @@ export HPHP_ACCEPT_DEPTH="${HPHP_ACCEPT_DEPTH:-512}"
 # table reaches the reserved-slot watermark (leader-style bounded accepts).
 # Set HPHP_ACCEPT_HANDOVER=0 to retain the prior multi-ring accept scheduler.
 export HPHP_ACCEPT_HANDOVER="${HPHP_ACCEPT_HANDOVER:-1}"
+# Optional same-binary experiment: rotate which ring's CQ is drained first.
+# Mixed-load A/Bs were not consistent enough to enable this by default.
+# Set HPHP_DRAIN_RR=1 to test it without changing the server source.
 # Cap accepted TCP receive/send buffers through the listener; on Linux these
 # options are inherited by accepted sockets, including direct fds. A same-binary
 # A/B/B/A at 120k connections showed no CPU difference; set 0 for the kernel defaults.
@@ -53,6 +70,9 @@ export HPHP_FEED_USER_RAW="${HPHP_FEED_USER_RAW:-1}"
 # Resolve the feed's 20 author rows with one generic sorted B-tree batch seek
 # instead of one cursor seek per author. Set 0 to compare the legacy path.
 export HPHP_FEED_BATCH_USERS="${HPHP_FEED_BATCH_USERS:-1}"
+# These typed fast-array accesses are used only with in-range feed-loop indices.
+# Set 0 to restore runtime bounds checks while diagnosing array logic.
+export HPHP_IARR_FAST="${HPHP_IARR_FAST:-1}"
 # Keep the 64-CQE default: the 256-CQE leader-style wait was not repeatable at
 # 280k-shaped WSL load and worsened p95 on the reverse-order run. Both knobs are overridable.
 case "$HPHP_RINGS" in

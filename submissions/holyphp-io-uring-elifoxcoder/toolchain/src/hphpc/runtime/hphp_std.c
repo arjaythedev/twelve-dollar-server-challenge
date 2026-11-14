@@ -407,6 +407,68 @@ int64_t hp_str_to_int_t(hstr *x) {
     return v <= 0 ? -1 : v;
 }
 
+/* Strict decimal parse over a byte range, without allocating a substring.
+ * Mirrors str_to_int() validation for route IDs. */
+int64_t hp_str_to_int_range_t(hstr *x, int64_t start, int64_t end) {
+    if (start < 0 || end < start || (uint64_t)end > (uint64_t)x->len)
+        return -1;
+    size_t n = (size_t)(end - start);
+    if (n < 1 || n > 18) return -1;
+    int64_t v = 0;
+    for (size_t i = (size_t)start; i < (size_t)end; i++) {
+        unsigned char c = (unsigned char)x->data[i];
+        if (c < '0' || c > '9') return -1;
+        v = v * 10 + (int64_t)(c - '0');
+    }
+    return v <= 0 ? -1 : v;
+}
+hval hpbi_str_to_int_range(hval s, hval start, hval end) {
+    return hp_of_int(hp_str_to_int_range_t(hp_val_to_str(s),
+        hp_val_to_int(start), hp_val_to_int(end)));
+}
+
+/* Find the first HTTP header terminator and the request-line separators in one
+ * bounded pass. Three 21-bit offsets fit in a positive tagged integer. */
+int64_t hp_http_request_bounds_t(hstr *x) {
+    if (!x) return 0;
+    size_t n = x->len;
+    size_t he = SIZE_MAX, sp1 = SIZE_MAX, sp2 = SIZE_MAX;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)x->data[i];
+        if (he == SIZE_MAX) {
+            if (sp1 == SIZE_MAX && c == ' ') sp1 = i;
+            else if (sp1 != SIZE_MAX && sp2 == SIZE_MAX && c == ' ') sp2 = i;
+            if (i >= 3 && x->data[i-3] == '\r' && x->data[i-2] == '\n' &&
+                x->data[i-1] == '\r' && c == '\n') {
+                he = i - 3;
+                break;
+            }
+        }
+    }
+    if (he == SIZE_MAX) return -1;
+    if (sp1 == SIZE_MAX || sp2 == SIZE_MAX || sp1 > he || sp2 > he) return -2;
+    if (he >= (1U << 21) || sp1 >= (1U << 21) || sp2 >= (1U << 21)) return -3;
+    return ((int64_t)he << 42) | ((int64_t)sp2 << 21) | (int64_t)sp1;
+}
+hval hpbi_http_request_bounds(hval s) {
+    return hp_of_int(hp_http_request_bounds_t(hp_val_to_str(s)));
+}
+
+int64_t hp_str_find_range_t(hstr *s, hstr *needle, int64_t start) {
+    if (!s || !needle || start < 0) return -1;
+    size_t n = s->len, m = needle->len, off = (size_t)start;
+    if (off > n || m > n - off) return -1;
+    if (m == 0) return (int64_t)off;
+    const unsigned char *p = (const unsigned char *)s->data;
+    const unsigned char *q = (const unsigned char *)needle->data;
+    for (size_t i = off; i <= n - m; i++)
+        if (p[i] == q[0] && memcmp(p + i, q, m) == 0) return (int64_t)i;
+    return -1;
+}
+hval hpbi_str_find_range(hval s, hval needle, hval start) {
+    return hp_of_int(hp_str_find_range_t(hp_val_to_str(s), hp_val_to_str(needle), hp_val_to_int(start)));
+}
+
 hval hpbi_str_contains(hval h, hval n) {
     RETB(hp_str_index(hp_val_to_str(h), hp_val_to_str(n)) >= 0);
 }
@@ -2583,6 +2645,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_OP_POLL     6
 #define HP_UR_OP_ACCEPT   13
 #define HP_UR_OP_CLOSE    19
+#define HP_UR_OP_SHUTDOWN 34
 #define HP_UR_OP_SEND     26
 #define HP_UR_OP_RECV     27
 #define HP_UR_OFF_CQ      0x8000000ULL
@@ -2593,7 +2656,8 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_ENTER_SQ_WAKEUP 2
 /* IORING_ENTER_EXT_ARG is bit 3 (verified against io_uring.h + the probe) */
 #define HP_UR_ENTER_EXT   8
-/* io_uring SQ flags: deferred task work is pending (uapi value 1 << 2) */
+/* io_uring SQ flags: buffered CQ overflow and pending task work. */
+#define HP_UR_SQ_CQ_OVERFLOW (1U << 1)
 #define HP_UR_SQ_TASKRUN  (1U << 2)
 /* IORING_SETUP_CQSIZE = bit 3, IORING_SETUP_CLAMP = bit 4 (uapi io_uring.h) */
 #define HP_UR_SETUP_CQSIZE (1U << 3)
@@ -2615,9 +2679,11 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_KIND_CLOSE  5
 #define HP_UR_KIND_READ   6
 #define HP_UR_KIND_WAKE   7
+#define HP_UR_KIND_CANCEL 8
 #define HP_UR_WAKE_UD(r)  (((uint64_t)(r) << 8) | HP_UR_KIND_WAKE)
 #define HP_UR_OP_POLL_ADD 6
 #define HP_UR_POLL_ADD_MULTI 1
+#define HP_UR_POLLRDHUP 0x2000U
 /* Bound app dispatch per poll round by default. High-concurrency experiments
  * may raise the budget so a backlog can drain without repeated loop turns. */
 #ifndef HP_UR_READ_ANSWER_MAX
@@ -2643,14 +2709,16 @@ static _Thread_local int g_epfd = -1;
  * working set. Larger requests arrive in chunks and the app concatenates
  * partial buffers, so nothing is lost. */
 #define HP_UR_RLEN_DEF    1024
-/* Match the current leader's busy-loop wait: one pass waits for 64 CQEs or 2 ms.
+/* Bound the multi-ring completion wait to one millisecond by default.
  * Keep both values tunable so A/B runs can compare policies on one binary. */
 #define HP_UR_BATCH       64
-#define HP_UR_BATCH_US    2000
+#define HP_UR_BATCH_US    1000
 
 /* io_uring ABI bits used by the direct-descriptor path. */
 #define HP_UR_IOSQE_FIXED_FILE    (1U << 0)
+#define HP_UR_IOSQE_IO_HARDLINK  (1U << 4)
 #define HP_UR_IOSQE_BUFFER_SELECT (1U << 5)
+#define HP_UR_IOSQE_CQE_SKIP_SUCCESS (1U << 6)
 #define HP_UR_ACCEPT_MULTISHOT    (1U << 0)
 #define HP_UR_ACCEPT_DEPTH        512U
 #define HP_UR_ACCEPT_DEPTH_MAX    (HP_UR_SQ_ENTRIES / 2U)
@@ -2796,38 +2864,46 @@ static uint64_t *hp_ur_chunk_diag_ns(struct hp_urchunk *c) {
 #define HP_RESP_BUF_POOL_CAP_MAX (16u * 1024u)
 #define HP_RESP_BUF_POOL_BYTES_MAX (4u * 1024u * 1024u)
 typedef struct { char *data; size_t cap; } hp_resp_buf_entry;
-static _Thread_local hp_resp_buf_entry hp_resp_buf_pool[HP_RESP_BUF_POOL_MAX];
-static _Thread_local unsigned hp_resp_buf_pool_n;
+/* Two size classes: small buffers (most responses) and large ones (feed-sized
+ * builders). One mixed stack let a run of small buffers hide every large
+ * one, so large builders fell back to malloc. */
+#define HP_RESP_BUF_SMALL_MAX 4096u
+typedef struct {
+    hp_resp_buf_entry e[HP_RESP_BUF_POOL_MAX / 2];
+    unsigned n;
+} hp_resp_buf_stack;
+static _Thread_local hp_resp_buf_stack hp_resp_buf_pool[2];
 static _Thread_local size_t hp_resp_buf_pool_bytes;
 
+static char *hp_resp_buf_take(hp_resp_buf_stack *st, unsigned i, size_t *cap) {
+    hp_resp_buf_entry e = st->e[i];
+    st->e[i] = st->e[st->n - 1];
+    st->n--;
+    if (hp_resp_buf_pool_bytes >= e.cap) hp_resp_buf_pool_bytes -= e.cap;
+    else hp_resp_buf_pool_bytes = 0;
+    *cap = e.cap;
+    return e.data;
+}
+
 static char *hp_resp_buf_acquire(size_t *cap) {
-    if (hp_resp_buf_pool_n) {
-        hp_resp_buf_entry e = hp_resp_buf_pool[--hp_resp_buf_pool_n];
-        if (hp_resp_buf_pool_bytes >= e.cap) hp_resp_buf_pool_bytes -= e.cap;
-        else hp_resp_buf_pool_bytes = 0;
-        *cap = e.cap;
-        return e.data;
+    for (int c = 0; c < 2; c++) {
+        hp_resp_buf_stack *st = &hp_resp_buf_pool[c];
+        if (st->n) return hp_resp_buf_take(st, st->n - 1, cap);
     }
     *cap = 0;
     return NULL;
 }
 
-/* Take a pooled buffer of at least `want` bytes. The pool mixes small and
- * large capacities (e.g. 2 KiB and 16 KiB builders), so look a few entries
- * deep instead of only at the top; the hit is swapped out from the top. */
+/* Take a pooled buffer of at least `want` bytes from the matching class (a
+ * small request may also use a large buffer). The hit is swapped out. */
 static char *hp_resp_buf_acquire_min(size_t want, size_t *cap) {
-    unsigned n = hp_resp_buf_pool_n;
-    unsigned look = n < 8 ? n : 8;
-    for (unsigned k = 0; k < look; k++) {
-        unsigned i = n - 1 - k;
-        if (hp_resp_buf_pool[i].cap >= want) {
-            hp_resp_buf_entry e = hp_resp_buf_pool[i];
-            hp_resp_buf_pool[i] = hp_resp_buf_pool[n - 1];
-            hp_resp_buf_pool_n = n - 1;
-            if (hp_resp_buf_pool_bytes >= e.cap) hp_resp_buf_pool_bytes -= e.cap;
-            else hp_resp_buf_pool_bytes = 0;
-            *cap = e.cap;
-            return e.data;
+    for (int c = want > HP_RESP_BUF_SMALL_MAX ? 1 : 0; c < 2; c++) {
+        hp_resp_buf_stack *st = &hp_resp_buf_pool[c];
+        unsigned n = st->n;
+        unsigned look = n < 8 ? n : 8;
+        for (unsigned k = 0; k < look; k++) {
+            unsigned i = n - 1 - k;
+            if (st->e[i].cap >= want) return hp_resp_buf_take(st, i, cap);
         }
     }
     *cap = 0;
@@ -2836,10 +2912,11 @@ static char *hp_resp_buf_acquire_min(size_t want, size_t *cap) {
 
 static void hp_resp_buf_release(char *data, size_t cap) {
     if (!data) return;
+    hp_resp_buf_stack *st = &hp_resp_buf_pool[cap > HP_RESP_BUF_SMALL_MAX ? 1 : 0];
     if (cap && cap <= HP_RESP_BUF_POOL_CAP_MAX &&
-        hp_resp_buf_pool_n < HP_RESP_BUF_POOL_MAX &&
+        st->n < HP_RESP_BUF_POOL_MAX / 2 &&
         cap <= HP_RESP_BUF_POOL_BYTES_MAX - hp_resp_buf_pool_bytes) {
-        hp_resp_buf_pool[hp_resp_buf_pool_n++] = (hp_resp_buf_entry){ data, cap };
+        st->e[st->n++] = (hp_resp_buf_entry){ data, cap };
         hp_resp_buf_pool_bytes += cap;
     } else {
         free(data);
@@ -2909,6 +2986,7 @@ struct hp_urfds {
     unsigned int rborrowed:1;             /* rh is an in-place view of a provided buffer */
     unsigned int rdispatch:1;              /* already added to this poll's app-ready list */
     unsigned int rdispatch_valid:1;        /* distinguishes a fresh connection from pass bit 0 */
+    unsigned int rpoll:1;                  /* direct socket uses poll + one-shot receive */
 };
 _Static_assert(sizeof(struct hp_urfds) <= 64,
                "per-connection runtime state must stay compact");
@@ -2923,6 +3001,9 @@ static _Thread_local int hp_ur_ep_conns = 0;
 static _Thread_local int hp_ur_ring_conns = 0;
 static _Thread_local int hp_ur_ring_max = -1;
 static _Thread_local int hp_ur_busy = 0;   /* the last wakeup had completions */
+/* Optional fair CQ drain start for same-binary scheduler A/B checks. */
+static _Thread_local int hp_ur_drain_rr;
+static _Thread_local unsigned int hp_ur_drain_start;
 /* Batching is tunable at runtime so the box can decide its own trade. The
  * 2,048 answer ceiling matches the leader's bounded per-turn response batch:
  * it lets a busy loop retire a useful burst without unbounded monopolization.
@@ -2938,6 +3019,9 @@ static _Thread_local unsigned int hp_ur_ready_bit;
  * better completed throughput and tail latency together. */
 static _Thread_local int hp_ur_ready_dedupe = 0;
 static _Thread_local int hp_ur_defer_all = 0;
+static _Thread_local int hp_ur_force_enter = 0;
+static _Thread_local int hp_ur_epoll_batch_us = 0;
+static _Thread_local uint32_t hp_ur_cq_budget = 0;
 static _Thread_local int hp_ur_ring0_wait = 1;
 /* Mirror the leader's event-loop policy: ring 0 only performs its bounded
  * wait while both ready/recovery work and CQ completions are absent. */
@@ -2960,6 +3044,7 @@ static _Thread_local int hp_ur_taskrun = 1;
 /* Optional kernel-side SQ polling experiment. Keep disabled by default: its
  * kernel thread can cost more CPU than it saves on a one-vCPU host. */
 static _Thread_local int hp_ur_sqpoll = 0;
+static _Thread_local int hp_ur_recv_poll = -1;
 
 static _Thread_local int hp_ur_st = 0;    /* 0 untried, 1 active, -1 unusable */
 static _Thread_local struct hp_urfds *hp_ur_fds;
@@ -3261,13 +3346,16 @@ static void hp_ur_slot_close_done(hp_sock fd) {
 /* An enter is only needed when the ring has SQEs to submit, deferred task
  * work to flush, or completions waiting. Idle rings cost no syscall. */
 static int hp_ur_ring_needs_enter(struct hp_uring_ring *rg) {
+    if (hp_ur_force_enter && (rg->live || rg->accept_armed)) return 1;
+    uint32_t flags = rg->sq_flags ?
+        __atomic_load_n(rg->sq_flags, __ATOMIC_ACQUIRE) : 0;
+    /* Both flags require GETEVENTS even without new SQEs, including the
+     * COOP_TASKRUN fallback and an already-awake SQPOLL ring. */
+    if (flags & (HP_UR_SQ_CQ_OVERFLOW | HP_UR_SQ_TASKRUN)) return 1;
     if (rg->sqpoll && rg->sq_flags &&
-        !(__atomic_load_n(rg->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_NEED_WAKEUP))
+        !(flags & HP_UR_SQ_NEED_WAKEUP))
         return 0;
     if (rg->sqtail != __atomic_load_n(rg->sq_head, __ATOMIC_ACQUIRE)) return 1;
-    if (rg->defer_taskrun && rg->sq_flags &&
-        (__atomic_load_n(rg->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_TASKRUN))
-        return 1;
     return 0;
 }
 
@@ -3595,6 +3683,58 @@ static int hp_ur_close_slot(uint32_t idx, uint64_t ud) {
     return -1;
 }
 
+/* The poll-read mode mirrors the low-kernel-memory idle strategy used by the
+ * leading io_uring servers: one multishot poll per idle socket, then a single
+ * buffer-selected recv only after readiness. It is opt-in for A/B testing. */
+static int hp_ur_poll_read_on(void) {
+    if (hp_ur_recv_poll < 0) {
+        const char *v = getenv("HPHP_RECV_POLL");
+        hp_ur_recv_poll = v && v[0] == '1';
+    }
+    return hp_ur_recv_poll;
+}
+
+static int hp_ur_sq_reserve(int need) {
+    for (int tries = 0; tries < 8; tries++) {
+        uint32_t head = __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE);
+        uint32_t pending = hp_ur_sqtail - head;
+        if (pending + (uint32_t)need <= hp_ur_sqmask + 1) return 1;
+        if (pending == 0 || hp_ur_enter((long)pending, 0, 0) < 0) return 0;
+    }
+    return 0;
+}
+
+/* A multishot poll keeps a fixed-file reference until cancelled. Order its
+ * cancellation, socket shutdown, and direct-slot close as one hard-linked
+ * chain so closing idle peers cannot leave kernel poll requests behind. */
+static int hp_ur_close_poll_slot(hp_sock fd, struct hp_urfds *st) {
+    if (!st || !st->direct || !st->rpoll) return -2;
+    if (!hp_ur_sq_reserve(3)) return -1;
+    struct hp_uring_sqe s;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_ASYNC_CANCEL;
+    s.fd = -1;
+    s.addr = hp_ur_ud(st, fd, HP_UR_KIND_POLL);
+    s.flags = HP_UR_IOSQE_IO_HARDLINK | HP_UR_IOSQE_CQE_SKIP_SUCCESS;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_CANCEL);
+    if (!hp_ur_sq_push(&s)) return -1;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_SHUTDOWN;
+    s.fd = st->diridx;
+    s.len = SHUT_RDWR;
+    s.flags = HP_UR_IOSQE_FIXED_FILE | HP_UR_IOSQE_IO_HARDLINK |
+              HP_UR_IOSQE_CQE_SKIP_SUCCESS;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_CANCEL);
+    if (!hp_ur_sq_push(&s)) return -1;
+    memset(&s, 0, sizeof s);
+    s.opcode = HP_UR_OP_CLOSE;
+    s.fd = 0;
+    s.file_index = (uint32_t)st->diridx + 1;
+    s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_CLOSE);
+    if (!hp_ur_sq_push(&s)) return -1;
+    return 1;
+}
+
 /* The app asked to close an fd while a SEND is still queued in the ring.
  * The bytes have not reached the kernel yet, so closing now would cancel the
  * response (exactly what the shed path does: write_response closes the fd
@@ -3611,7 +3751,12 @@ static void hp_ur_finish_close(hp_sock fd) {
     st->sarmed = 0;                /* nothing may defer the close again */
     if (st->direct) {
         if (!st->listener) {
-            int cr = hp_ur_close_slot((uint32_t)st->diridx,
+            int cr = hp_ur_close_poll_slot(fd, st);
+            if (cr == -2)
+                cr = hp_ur_close_slot((uint32_t)st->diridx,
+                                      hp_ur_ud(st, fd, HP_UR_KIND_CLOSE));
+            else if (cr < 0)
+                cr = hp_ur_close_slot((uint32_t)st->diridx,
                                       hp_ur_ud(st, fd, HP_UR_KIND_CLOSE));
             if (cr == 0) hp_ur_slot_freed(fd);
             else if (cr < 0 && hp_ur_dbg)
@@ -3773,10 +3918,14 @@ static long hp_ur_submit_only(long to_submit) {
     bool diag = hp_diag_enabled();
     uint64_t t0 = diag ? hp_diag_now_ns() : 0;
     long rc = 0;
+    uint32_t sq_flags = hp_ur_cur && hp_ur_cur->sq_flags ?
+        __atomic_load_n(hp_ur_cur->sq_flags, __ATOMIC_ACQUIRE) : 0;
+    bool task_work = (sq_flags & (HP_UR_SQ_CQ_OVERFLOW | HP_UR_SQ_TASKRUN)) != 0;
     if (!hp_ur_cur || !hp_ur_cur->sqpoll || !hp_ur_cur->sq_flags ||
-        (__atomic_load_n(hp_ur_cur->sq_flags, __ATOMIC_ACQUIRE) & HP_UR_SQ_NEED_WAKEUP)) {
+        (sq_flags & HP_UR_SQ_NEED_WAKEUP) || task_work) {
         unsigned flags = hp_ur_cur && hp_ur_cur->sqpoll
             ? HP_UR_ENTER_SQ_WAKEUP : 0;
+        if (hp_ur_force_enter || task_work) flags |= HP_UR_ENTER_GET;
         rc = syscall(SYS_io_uring_enter, (long)hp_ur_fd, to_submit, 0,
                      flags, 0L, 0L);
     }
@@ -3922,6 +4071,8 @@ static bool hp_uring_setup(void) {
         hp_ur_ring0_wait = 0;
     if ((env = getenv("HPHP_RING0_BUSY")) && env[0] == '0')
         hp_ur_ring0_busy_aware = 0;
+    if ((env = getenv("HPHP_DRAIN_RR")) && env[0] == '1')
+        hp_ur_drain_rr = 1;
     if ((env = getenv("HPHP_ACCEPT_DEPTH")) && *env) {
         long depth = atol(env);
         /* Keep at least half of the SQ available for recv/send/close work;
@@ -3959,6 +4110,16 @@ static bool hp_uring_setup(void) {
     if ((env = getenv("HPHP_DEFER_ALL")) &&
         (env[0] == '1' || env[0] == 'y' || env[0] == 'Y'))
         hp_ur_defer_all = 1;
+    if ((env = getenv("HPHP_FORCE_ENTER")) && env[0] == '1')
+        hp_ur_force_enter = 1;
+    if ((env = getenv("HPHP_EPOLL_BATCH_US")) && *env) {
+        long v = atol(env);
+        if (v >= 0 && v <= 10000) hp_ur_epoll_batch_us = (int)v;
+    }
+    if ((env = getenv("HPHP_CQ_BUDGET")) && *env) {
+        long v = atol(env);
+        if (v >= 0 && v <= 65536) hp_ur_cq_budget = (uint32_t)v;
+    }
     /* Multiple rings multiply the direct-descriptor space: the kernel caps
      * each registration at RLIMIT_NOFILE (65535 on the box), not the sum.
      * HPHP_RINGS is bounded by HP_UR_RINGS_MAX so handle encoding stays
@@ -4050,8 +4211,21 @@ static bool hp_uring_pbuf_setup(void) {
     reg.ring_addr = (uint64_t)(uintptr_t)ring;
     reg.ring_entries = n;
     reg.bgid = 0;
-    if (syscall(SYS_io_uring_register, (long)hp_ur_fd,
-                HP_UR_REGISTER_PBUF_RING, (long)&reg, 1L) < 0) {
+    long registered = syscall(SYS_io_uring_register, (long)hp_ur_fd,
+                              HP_UR_REGISTER_PBUF_RING, (long)&reg, 1L);
+    /* Some Ubuntu 6.8 backports invert the reserved-word validation. Try
+     * the standard zeroed ABI first; only EINVAL permits this single retry.
+     * Correct kernels never reach the compatibility path on valid input. */
+    const char *compat = getenv("HPHP_PBUF_COMPAT");
+    if (registered < 0 && errno == EINVAL && !(compat && compat[0] == '0')) {
+        reg.resv[0] = 1;
+        registered = syscall(SYS_io_uring_register, (long)hp_ur_fd,
+                             HP_UR_REGISTER_PBUF_RING, (long)&reg, 1L);
+        if (registered == 0)
+            fprintf(stderr, "[ur] provided-buffer compatibility retry succeeded\n");
+    }
+    if (registered < 0) {
+        fprintf(stderr, "[ur] provided-buffer registration failed: errno=%d\n", errno);
         munmap(ring, ring_sz);
         free(mem);
         return false;
@@ -4337,6 +4511,26 @@ static bool hp_uring_arm_recv(hp_sock fd, size_t want) {
     /* overflow connections are watched by epoll, not by an armed SQE */
     if (st->epolled) return true;
     if (st->direct) {
+        if (hp_ur_poll_read_on() && hp_ur_pbuf) {
+            struct hp_uring_sqe s;
+            memset(&s, 0, sizeof s);
+            s.opcode = HP_UR_OP_POLL_ADD;
+            s.flags = HP_UR_IOSQE_FIXED_FILE;
+            s.fd = st->diridx;
+            s.len = HP_UR_POLL_ADD_MULTI;
+            s.poll32_events = POLLIN | HP_UR_POLLRDHUP;
+            s.user_data = hp_ur_ud(st, fd, HP_UR_KIND_POLL);
+            hp_st[HP_ST_ARM_POLL]++;
+            if (!hp_ur_sq_push(&s)) {
+                hp_st[HP_ST_ARM_FAIL]++;
+                hp_ur_retfd(fd);
+                return false;
+            }
+            st->rpoll = 1;
+            st->rmshot = 1;
+            st->rarmed = 1;
+            return true;
+        }
         /* Preferred: multishot recv + provided buffers. One SQE stays in
          * flight for the life of the connection, so holding a very large
          * number of connections never needs that many re-arms. Data is
@@ -4431,7 +4625,7 @@ static bool hp_uring_arm_read(hp_sock fd) {
     hp_ur_use_ring(fd);
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || !st->direct || !st->rmshot || !hp_ur_pbuf || st->reof ||
-        st->closeafter || st->rarmed || st->rreading) return false;
+        st->closeafter || (st->rarmed && !st->rpoll) || st->rreading) return false;
     struct hp_uring_sqe s;
     memset(&s, 0, sizeof s);
     s.opcode = HP_UR_OP_RECV;
@@ -4733,7 +4927,7 @@ static bool hp_uring_add_conn(hp_sock fd) {
 /* Queue a response whose buffer the runtime already owns (stream_send_sb):
  * like hp_uring_send2, but there is nothing to copy -- the malloc'd builder
  * buffer becomes the chunk. -2 on a fatal path, buffer freed. */
-static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len, size_t cap) {
+static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t off, size_t len, size_t cap) {
     struct hp_urfds *st = hp_ur_st_of(fd);
     if (!st || st->reof) { hp_resp_buf_release(buf, cap); return -2; }
     if (st->squeued >= 64) {                       /* a stalled peer */
@@ -4743,14 +4937,14 @@ static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len, size_t cap
     }
     struct hp_urchunk *c = hp_ur_chunk_alloc();
     if (!c) { hp_resp_buf_release(buf, cap); st->reof = 1; hp_ur_drop_send_chain(st); return -2; }
-    c->data = buf; c->off = 0; c->len = len; c->cap = cap; c->next = NULL;
+    c->data = buf; c->off = off; c->len = len; c->cap = cap; c->next = NULL;
     uint64_t *queued_ns = hp_ur_chunk_diag_ns(c);
     if (queued_ns) *queued_ns = hp_diag_now_ns();
     if (st->stail) st->stail->next = c; else st->shead = c;
     st->stail = c;
     st->squeued++;
     if (!st->sarmed) hp_ur_arm_send_head(fd);
-    return (int64_t)len;
+    return (int64_t)(len - off);
 }
 
 /* Queue a response for the ring: the bytes are copied into the chunk so the
@@ -4771,8 +4965,9 @@ static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b) {
     }
     size_t n = a->len + b->len;
     size_t cap = 0;
-    char *buf = hp_resp_buf_acquire(&cap);
     size_t need = n ? n : 1;
+    char *buf = hp_resp_buf_acquire_min(need, &cap);
+    if (!buf) buf = hp_resp_buf_acquire(&cap);
     if (cap < need) {
         size_t next_cap = cap ? cap : 256;
         while (next_cap < need && next_cap <= HP_RESP_BUF_POOL_CAP_MAX / 2)
@@ -5071,6 +5266,10 @@ static int hp_ur_drain_ring(HpFdList *in) {
      * thousands of accept CQEs would bloat the app's ready array. */
     int accept_woken = 0;
     for (;;) {
+        /* Leave the remainder published in CQ for the next pass. Refreshing
+         * the producer tail without a quantum can monopolize the issuer
+         * while other rings and application-ready sockets wait. */
+        if (hp_ur_cq_budget && head - start_head >= hp_ur_cq_budget) break;
         hp_ur_cur = self;
         uint32_t tail = __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE);
         if (head == tail) break;
@@ -5244,13 +5443,15 @@ static int hp_ur_drain_ring(HpFdList *in) {
                 hp_ur_recovery_ready(fd, st, in);
                 if ((uint32_t)c->res == hp_ur_pbuf_blen) {
                     if (!hp_ur_readq_push(fd, st, 1)) hp_ur_retfd(fd);
-                } else if (!hp_uring_arm_recv(fd, hp_ur_rlen())) {
+                } else if (!(st->rpoll && st->rarmed) &&
+                           !hp_uring_arm_recv(fd, hp_ur_rlen())) {
                     hp_ur_retfd(fd);
                 }
             } else if (c->res == -ENOBUFS) {
                 if (!hp_ur_readq_push(fd, st, 2)) hp_ur_retfd(fd);
             } else if (c->res == -EAGAIN || c->res == -EINTR) {
-                if (!hp_uring_arm_recv(fd, hp_ur_rlen())) hp_ur_retfd(fd);
+                if (!(st->rpoll && st->rarmed) &&
+                    !hp_uring_arm_recv(fd, hp_ur_rlen())) hp_ur_retfd(fd);
             } else {
                 st->reof = 1;
                 hp_sockrec *sr = sockrec((intptr_t)fd, false);
@@ -5322,6 +5523,25 @@ static int hp_ur_drain_ring(HpFdList *in) {
         } else if (kind == HP_UR_KIND_POLL) {
             if (diag) self->diag_poll_cqes++;
             hp_st[HP_ST_CQE_POLL]++;
+            if (st->rpoll) {
+                int more = (c->flags & HP_UR_CQE_F_MORE) ? 1 : 0;
+                if (!more) st->rarmed = 0;
+                if (st->closeafter) continue;
+                if (c->res > 0 && (c->res & POLLIN)) {
+                    if (!st->rready && !st->rreadq && !st->rreading &&
+                        !hp_uring_arm_read(fd)) hp_ur_retfd(fd);
+                } else if (c->res > 0 &&
+                           (c->res & (HP_UR_POLLRDHUP | POLLHUP | POLLERR))) {
+                    st->reof = 1;
+                    hp_sockrec *sr = sockrec((intptr_t)fd, false);
+                    if (sr) sr->eof = true;
+                    hp_fdlist_push(in, fd);
+                } else if (c->res < 0 && c->res != -ECANCELED && c->res != -EBADF) {
+                    if (!more && !st->rreading && !st->rready && !st->rreadq &&
+                        !hp_uring_arm_recv(fd, hp_ur_rlen())) hp_ur_retfd(fd);
+                }
+                continue;
+            }
             st->pollarmed = 0;
             if (st->closeafter) continue;   /* app already closed: ignore */
             if (c->res < 0 && (c->res == -ECANCELED || c->res == -EBADF))
@@ -5484,7 +5704,11 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
 
     int drained = 0;
     uint32_t have = 0;
-    for (int r = 0; r < hp_ur_nrings; r++) {
+    unsigned int nrings = (unsigned int)hp_ur_nrings;
+    unsigned int drain_start = (hp_ur_drain_rr && nrings)
+        ? hp_ur_drain_start % nrings : 0;
+    for (unsigned int i = 0; i < nrings; i++) {
+        int r = (int)((drain_start + i) % nrings);
         hp_ur_cur = &hp_ur_rings[r];
         if (hp_ur_rings[r].wake_ready) {
             hp_ur_rings[r].wake_ready = 0;
@@ -5587,6 +5811,35 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
             }
             if (!ring_event) hp_fdlist_push(in, (hp_sock)efd);
         }
+        /* A readiness wake often represents only one completion. Collect a
+         * bounded burst before returning to the application, unless queued
+         * application/recovery work already needs service. Deferred rings
+         * must then publish task work that arrived during the collection. */
+        if (hp_ur_epoll_batch_us && (n > 0 || have > 0) &&
+            !recovery_dispatched &&
+            hp_ur_readq_head == hp_ur_readq_tail &&
+            hp_ur_answerq_head == hp_ur_answerq_tail) {
+            for (int pass = 0; pass < 2; pass++) {
+                for (int r = 0; r < hp_ur_nrings; r++) {
+                    struct hp_uring_ring *rg = &hp_ur_rings[r];
+                    if (!hp_ur_ring_needs_enter(rg)) continue;
+                    hp_ur_cur = rg;
+                    long pending = (long)(rg->sqtail -
+                        __atomic_load_n(rg->sq_head, __ATOMIC_ACQUIRE));
+                    hp_ur_enter(pending > 0 ? pending : 0, 0, -1);
+                }
+                if (pass == 0) {
+                    uint32_t ready = 0;
+                    for (int r = 0; r < hp_ur_nrings; r++)
+                        ready += __atomic_load_n(hp_ur_rings[r].cq_tail,
+                                   __ATOMIC_ACQUIRE) - hp_ur_rings[r].cqhead;
+                    if (ready >= (uint32_t)(hp_ur_batch > 1 ? hp_ur_batch : 64))
+                        break;
+                    struct timespec pause = {0, (long)hp_ur_epoll_batch_us * 1000L};
+                    nanosleep(&pause, NULL);
+                }
+            }
+        }
     } else {
         /* One ring, no epoll: one enter submits and waits, as before. */
         hp_ur_cur = &hp_ur_rings[0];
@@ -5600,7 +5853,8 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
     }
     }
 
-    for (int r = 0; r < hp_ur_nrings; r++) {
+    for (unsigned int i = 0; i < nrings; i++) {
+        int r = (int)((drain_start + i) % nrings);
         hp_ur_cur = &hp_ur_rings[r];
         if (!cq_ready[r] &&
             __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE) != hp_ur_cqhead)
@@ -5611,11 +5865,14 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
          * and one non-semaphore read returns and clears the whole counter.
          * Draining every ring until EAGAIN cost up to two syscalls per ring
          * per pass (mostly EAGAIN) without changing any wakeup. */
-        if (ring0_wait && cq_ready[r] && hp_ur_rings[r].efd >= 0) {
+        if ((ring0_wait || (hp_ur_ring_wake && r > 0)) &&
+            cq_ready[r] && hp_ur_rings[r].efd >= 0) {
             uint64_t v;
             if (read(hp_ur_rings[r].efd, &v, sizeof v) < 0) { /* EAGAIN: already clear */ }
         }
     }
+    if (hp_ur_drain_rr && nrings > 1)
+        hp_ur_drain_start = (drain_start + 1) % nrings;
     hp_ur_arm_all_accepts();
     hp_ur_cur = &hp_ur_rings[0];
     hp_ur_busy = drained;
@@ -5721,7 +5978,7 @@ static int hp_uring_active(void);
 static void hp_ur_free_fd(hp_sock fd);
 static hstr *hp_uring_take_recv(hp_sock fd, size_t want);
 static int64_t hp_uring_send2(hp_sock fd, hstr *a, hstr *b);
-static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t len, size_t cap);
+static int64_t hp_uring_send_owned(hp_sock fd, char *buf, size_t off, size_t len, size_t cap);
 #endif
 
 hval hpbi_epoll_add(hval s) {
@@ -5885,7 +6142,7 @@ hval hpbi_stream_send_nb(hval s, hval data) {
         char *buf = (char *)malloc(d->len);
         if (!buf) return hp_of_int(-2);
         memcpy(buf, d->data, d->len);
-        return hp_of_int(hp_uring_send_owned(fd, buf, d->len, d->len));
+        return hp_of_int(hp_uring_send_owned(fd, buf, 0, d->len, d->len));
     }
 #endif
     int r = (int)send(fd, d->data, (int)d->len, 0);
@@ -7485,7 +7742,63 @@ static const uint32_t K256[64] = {
 static uint32_t rotr32(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 static void hp_sha256_digest(const unsigned char *msg, size_t len, unsigned char out[32]);
 
+static void hp_sha256_compress_soft(uint32_t h[8], const unsigned char block[64]);
+
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+/* One block with the x86 SHA extensions (SHA-NI); same result as the scalar
+ * code, chosen at run time when the CPU reports the extension. */
+__attribute__((target("sha,sse4.1,ssse3")))
+static void hp_sha256_compress_ni(uint32_t h[8], const unsigned char block[64]) {
+    const __m128i mask = _mm_set_epi64x(0x0c0d0e0f08090a0bULL, 0x0405060700010203ULL);
+    __m128i tmp = _mm_loadu_si128((const __m128i *)(const void *)&h[0]);
+    __m128i st1 = _mm_loadu_si128((const __m128i *)(const void *)&h[4]);
+    tmp = _mm_shuffle_epi32(tmp, 0xB1);              /* CDAB */
+    st1 = _mm_shuffle_epi32(st1, 0x1B);              /* EFGH */
+    __m128i st0 = _mm_alignr_epi8(tmp, st1, 8);      /* ABEF */
+    st1 = _mm_blend_epi16(st1, tmp, 0xF0);           /* CDGH */
+    const __m128i abef = st0, cdgh = st1;
+    __m128i m[4];
+    for (int i = 0; i < 16; i++) {
+        __m128i w;
+        if (i < 4) {
+            w = _mm_shuffle_epi8(_mm_loadu_si128((const __m128i *)(const void *)(block + 16 * i)), mask);
+        } else {
+            __m128i a = _mm_sha256msg1_epu32(m[i & 3], m[(i + 1) & 3]);
+            a = _mm_add_epi32(a, _mm_alignr_epi8(m[(i + 3) & 3], m[(i + 2) & 3], 4));
+            w = _mm_sha256msg2_epu32(a, m[(i + 3) & 3]);
+        }
+        m[i & 3] = w;
+        __m128i k = _mm_add_epi32(w, _mm_loadu_si128((const __m128i *)(const void *)&K256[4 * i]));
+        st1 = _mm_sha256rnds2_epu32(st1, st0, k);
+        k = _mm_shuffle_epi32(k, 0x0E);
+        st0 = _mm_sha256rnds2_epu32(st0, st1, k);
+    }
+    st0 = _mm_add_epi32(st0, abef);
+    st1 = _mm_add_epi32(st1, cdgh);
+    tmp = _mm_shuffle_epi32(st0, 0x1B);              /* FEBA */
+    st1 = _mm_shuffle_epi32(st1, 0xB1);              /* DCHG */
+    st0 = _mm_blend_epi16(tmp, st1, 0xF0);           /* DCBA */
+    st1 = _mm_alignr_epi8(st1, tmp, 8);              /* HGFE */
+    _mm_storeu_si128((__m128i *)(void *)&h[0], st0);
+    _mm_storeu_si128((__m128i *)(void *)&h[4], st1);
+}
+#endif
+
 static void hp_sha256_compress(uint32_t h[8], const unsigned char block[64]) {
+#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+    static int have_ni = -1;
+    if (have_ni < 0) {
+        __builtin_cpu_init();
+        have_ni = __builtin_cpu_supports("sha") ? 1 : 0;
+        const char *e = getenv("HPHP_SHA_NI");
+        if (e && e[0] == '0') have_ni = 0;
+    }
+    if (have_ni) { hp_sha256_compress_ni(h, block); return; }
+#endif
+    hp_sha256_compress_soft(h, block);
+}
+
+static void hp_sha256_compress_soft(uint32_t h[8], const unsigned char block[64]) {
     uint32_t w[64];
     for (int i = 0; i < 16; i++)
         w[i] = ((uint32_t)block[i*4] << 24) | ((uint32_t)block[i*4+1] << 16) |
@@ -7652,12 +7965,37 @@ hval hpbi_hash_hmac(hval algo, hval data, hval key, hval raw_output) {
  * The PHP-level version built the same check out of substr/concat/base64
  * calls and allocated ~20 strings per authenticated request. */
 
+/* b64_val() as a table: 0..63, or -1 for a byte the decoders skip. */
+static const signed char hp_b64_tab[256] = {
+#define X16 -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    X16, X16,
+    -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,62,-1,63,
+    52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+    -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,
+    15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,63,
+    -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,
+    41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+    X16, X16, X16, X16, X16, X16, X16, X16
+#undef X16
+};
 static int hp_b64url_decode_into(const char *in, size_t n, char *out, size_t cap) {
     uint32_t acc = 0;
     int bits = 0;
     size_t o = 0;
-    for (size_t i = 0; i < n; i++) {
-        int v = b64_val(in[i]);
+    size_t i = 0;
+    /* Four valid characters -> three bytes; anything unusual (a skipped
+     * byte, the tail) goes through the general loop below. */
+    while (i + 4 <= n && o + 3 <= cap) {
+        int a = hp_b64_tab[(unsigned char)in[i]], b = hp_b64_tab[(unsigned char)in[i + 1]];
+        int c = hp_b64_tab[(unsigned char)in[i + 2]], d = hp_b64_tab[(unsigned char)in[i + 3]];
+        if ((a | b | c | d) < 0) break;
+        uint32_t v = ((uint32_t)a << 18) | ((uint32_t)b << 12) | ((uint32_t)c << 6) | (uint32_t)d;
+        out[o] = (char)(v >> 16); out[o + 1] = (char)(v >> 8); out[o + 2] = (char)v;
+        o += 3;
+        i += 4;
+    }
+    for (; i < n; i++) {
+        int v = hp_b64_tab[(unsigned char)in[i]];
         if (v < 0) continue;
         acc = (acc << 6) | (uint32_t)v;
         bits += 6;
@@ -8749,7 +9087,9 @@ HP_BT_WEAK void hp_bt_page_release_impl(void *v);
 HP_BT_WEAK int hp_bt_count_key_impl(void *v, int64_t key);
 HP_BT_WEAK int hp_bt_count_range_impl(void *v, int64_t lo, int64_t hi, int64_t *out, int64_t cap);
 HP_BT_WEAK void *hp_bt_multi_seek_impl(void *v, const int64_t *keys, int n);
+HP_BT_WEAK void *hp_bt_tail_impl(void *v, int n);
 HP_BT_WEAK int hp_bt_multi_payloads_impl(void *v, int64_t *out, int64_t cap);
+HP_BT_WEAK int hp_bt_multi_keys_impl(void *v, int64_t *out, int64_t cap);
 HP_BT_WEAK void hp_bt_multi_release_impl(void *v);
 
 static void *bt_h(hval v) { return (void *)(intptr_t)hp_val_to_int(v); }
@@ -8993,13 +9333,18 @@ hval hpbi_bt_count_key(hval h, hval key) {
 }
 
 /* ---- generic string builder ---- */
-typedef struct { Buf b; } HpSb;
+/* head: bytes of free space in front of the contents. The contents are
+ * b.data[head .. b.len). A reserved builder starts with HP_SB_HEADROOM bytes
+ * there, so sb_prepend() of a short prefix (a response header) writes into
+ * that space instead of moving the whole body. */
+#define HP_SB_HEADROOM 192
 static HpSb *sb_h(hval v) { return (HpSb *)(intptr_t)hp_val_to_int(v); }
 
 
 hval hpbi_sb_new(void) {
     HpSb *s = (HpSb *)hp_alloc(sizeof *s);
     hbuf_init(&s->b);
+    s->head = 0;
     return hp_of_int((int64_t)(intptr_t)s);
 }
 hval hpbi_sb_put(hval h, hval str) {
@@ -9017,7 +9362,7 @@ hval hpbi_sb_bytes(hval h, hval ptr, hval len) {
 }
 hval hpbi_sb_data_ptr(hval h) {
     HpSb *s = sb_h(h);
-    return hp_of_int((int64_t)(intptr_t)s->b.data);
+    return hp_of_int(s->b.data ? (int64_t)(intptr_t)(s->b.data + s->head) : 0);
 }
 hval hpbi_sb_discard(hval h) {
     HpSb *s = sb_h(h);
@@ -9030,13 +9375,9 @@ hval hpbi_sb_discard(hval h) {
 }
 hval hpbi_sb_int(hval h, hval n) {
     HpSb *s = sb_h(h);
-    long long v = (long long)hp_val_to_int(n);
     char tmp[24];
-    int i = 24;
-    unsigned long long u = v < 0 ? -(unsigned long long)v : (unsigned long long)v;
-    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
-    if (v < 0) tmp[--i] = '-';
-    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    char *p = hp_fmt_i64(tmp + sizeof tmp, hp_val_to_int(n));
+    hbuf_write(&s->b, p, (size_t)(tmp + sizeof tmp - p));
     return hp_of_bool(true);
 }
 /* int_digits(n): decimal digit count of an integer, so a caller can compute a
@@ -9168,12 +9509,37 @@ hval hpbi_sb_json_str(hval h, hval str) {
  * response. Only capacity is reused, never bytes. */
 static void hp_sb_reserve_pooled(HpSb *s, int64_t want) {
     if (want <= 0) return;
-    if (!s->b.data && (size_t)want < HP_RESP_BUF_POOL_CAP_MAX) {
-        size_t cap = 0;
-        char *p = hp_resp_buf_acquire_min((size_t)want + 1, &cap);
-        if (p) { s->b.data = p; s->b.cap = cap; s->b.len = 0; }
+    size_t extra = 0;
+    if (s->b.len == 0 && s->head == 0) {
+        extra = HP_SB_HEADROOM;
+        if (!s->b.data && (size_t)want + extra < HP_RESP_BUF_POOL_CAP_MAX) {
+            size_t cap = 0;
+            char *p = hp_resp_buf_acquire_min((size_t)want + extra + 1, &cap);
+            if (p) { s->b.data = p; s->b.cap = cap; s->b.len = 0; }
+        }
     }
-    hbuf_reserve(&s->b, (size_t)want);
+    hbuf_reserve(&s->b, s->b.len + (size_t)want + extra);
+    if (extra && s->b.data) {
+        s->b.len = s->head = extra;
+        s->b.data[s->b.len] = 0;
+    }
+}
+/* Put x in front of the contents: into the headroom when it fits, else by
+ * moving the contents once (and dropping the headroom). */
+static void hp_sb_prepend_bytes(HpSb *s, const char *x, size_t n) {
+    if (n == 0) return;
+    if (n <= s->head) {
+        s->head -= n;
+        memcpy(s->b.data + s->head, x, n);
+        return;
+    }
+    size_t body = s->b.len - s->head;
+    hbuf_reserve(&s->b, body + n);
+    if (body) memmove(s->b.data + n, s->b.data + s->head, body);
+    memcpy(s->b.data, x, n);
+    s->b.len = body + n;
+    s->b.data[s->b.len] = 0;
+    s->head = 0;
 }
 hval hpbi_sb_reserve(hval h, hval n) {
     HpSb *s = sb_h(h);
@@ -9181,18 +9547,14 @@ hval hpbi_sb_reserve(hval h, hval n) {
     return hp_of_bool(true);
 }
 /* sb_len(sb): bytes currently in the builder. */
-hval hpbi_sb_len(hval h) { return hp_of_int((int64_t)sb_h(h)->b.len); }
+hval hpbi_sb_len(hval h) { HpSb *s = sb_h(h); return hp_of_int((int64_t)(s->b.len - s->head)); }
 /* sb_prepend(sb, str): put str in front of the current contents. Used to add
  * a response header to a body that is already built, without a second buffer
  * or a header string concatenation. */
 hval hpbi_sb_prepend(hval h, hval str) {
     HpSb *s = sb_h(h);
     hstr *x = hp_val_to_str(str);
-    if (x->len == 0) return hp_of_bool(true);
-    hbuf_reserve(&s->b, s->b.len + x->len);
-    if (s->b.len) memmove(s->b.data + x->len, s->b.data, s->b.len);
-    memcpy(s->b.data, x->data, x->len);
-    s->b.len += x->len;
+    hp_sb_prepend_bytes(s, x->data, x->len);
     return hp_of_bool(true);
 }
 hval hpbi_str_from_bytes(hval ptr, hval len) {
@@ -9209,7 +9571,7 @@ hval hpbi_str_from_bytes(hval ptr, hval len) {
 static _Thread_local hp_iarr_t *hp_iarr_pool;
 static _Thread_local int hp_iarr_pool_count;
 
-static hp_iarr_t *hp_iarr_acquire(int64_t n) {
+static hp_iarr_t *hp_iarr_acquire(int64_t n, bool clear) {
     hp_iarr_t **link = &hp_iarr_pool;
     hp_iarr_t *a = NULL;
     if (n < 1) n = 1;
@@ -9230,7 +9592,7 @@ static hp_iarr_t *hp_iarr_acquire(int64_t n) {
     a->pool_next = NULL;
     a->leased = true;
     a->len = 0;
-    memset(a->v, 0, sizeof(int64_t) * (size_t)a->cap);
+    if (clear) memset(a->v, 0, sizeof(int64_t) * (size_t)a->cap);
     return a;
 }
 
@@ -9248,10 +9610,37 @@ static void hp_iarr_release_ptr(hp_iarr_t *a) {
 }
 
 static hp_iarr_t *iarr_of(hval h) { return (hp_iarr_t *)(intptr_t)hp_val_to_int(h); }
+static int hp_iarr_fast_unchecked_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *v = getenv("HPHP_IARR_FAST");
+        /* The explicitly named *_fast builtins assume valid in-range indices.
+         * Set HPHP_IARR_FAST=0 to retain bounds checks while diagnosing code. */
+        enabled = !(v && v[0] == '0');
+    }
+    return enabled;
+}
+static int64_t hp_iarr_get_fast_impl(int64_t h, int64_t k) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)h;
+    if (!a || !a->leased) return 0;
+    if (!hp_iarr_fast_unchecked_enabled() && (k < 0 || k >= a->cap)) return 0;
+    return a->v[k];
+}
+static bool hp_iarr_set_fast_impl(int64_t h, int64_t k, int64_t v) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)h;
+    if (!a || !a->leased) return true;
+    if (!hp_iarr_fast_unchecked_enabled() && (k < 0 || k >= a->cap)) return true;
+    a->v[k] = v;
+    return true;
+}
 
 hval hpbi_iarr_new(hval size) {
     int64_t n = hp_val_to_int(size);
-    return hp_of_int((int64_t)(intptr_t)hp_iarr_acquire(n));
+    return hp_of_int((int64_t)(intptr_t)hp_iarr_acquire(n, true));
+}
+hval hpbi_iarr_new_uninit(hval size) {
+    int64_t n = hp_val_to_int(size);
+    return hp_of_int((int64_t)(intptr_t)hp_iarr_acquire(n, false));
 }
 hval hpbi_iarr_release(hval h) {
     hp_iarr_release_ptr((hp_iarr_t *)(intptr_t)hp_val_to_int(h));
@@ -9273,6 +9662,13 @@ hval hpbi_iarr_set(hval h, hval i, hval v) {
     if (a && a->leased && k >= 0 && k < a->cap) a->v[k] = hp_val_to_int(v);
     return hp_of_bool(true);
 }
+hval hpbi_iarr_get_fast(hval h, hval i) {
+    return hp_of_int(hp_iarr_get_fast_impl(hp_val_to_int(h), hp_val_to_int(i)));
+}
+hval hpbi_iarr_set_fast(hval h, hval i, hval v) {
+    return hp_of_bool(hp_iarr_set_fast_impl(hp_val_to_int(h), hp_val_to_int(i),
+                                            hp_val_to_int(v)));
+}
 hval hpbi_iarr_len(hval h) {
     hp_iarr_t *a = iarr_of(h);
     return hp_of_int(a && a->leased ? a->len : 0);
@@ -9290,11 +9686,22 @@ hval hpbi_bt_multi_seek(hval h, hval keys, hval count) {
         return hp_of_int(0);
     return hp_of_int((int64_t)(intptr_t)hp_bt_multi_seek_impl(bt_h(h), a->v, (int)n));
 }
+hval hpbi_bt_tail(hval h, hval count) {
+    int64_t n = hp_val_to_int(count);
+    if (!hp_bt_tail_impl || n < 1 || n > 64) return hp_of_int(0);
+    return hp_of_int((int64_t)(intptr_t)hp_bt_tail_impl(bt_h(h), (int)n));
+}
 hval hpbi_bt_multi_payloads(hval result, hval out) {
     hp_iarr_t *a = iarr_of(out);
     if (!hp_bt_multi_payloads_impl || !a || !a->leased) return hp_of_bool(false);
     return hp_of_bool(hp_bt_multi_payloads_impl(
         (void *)(intptr_t)hp_val_to_int(result), a->v, a->cap) != 0);
+}
+hval hpbi_bt_multi_keys(hval result, hval out) {
+    hp_iarr_t *a = iarr_of(out);
+    if (!hp_bt_multi_keys_impl || !a || !a->leased) return hp_of_int(-1);
+    return hp_of_int(hp_bt_multi_keys_impl(
+        (void *)(intptr_t)hp_val_to_int(result), a->v, a->cap));
 }
 hval hpbi_bt_multi_release(hval result) {
     if (hp_bt_multi_release_impl)
@@ -9308,7 +9715,10 @@ hval hpbi_bt_read(hval h, hval out, hval cols) {
     return hp_of_int(hp_bt_read_raw(hp_val_to_int(h), a->v, c));
 }
 int64_t hp_iarr_new_t(int64_t n) {
-    return (int64_t)(intptr_t)hp_iarr_acquire(n);
+    return (int64_t)(intptr_t)hp_iarr_acquire(n, true);
+}
+int64_t hp_iarr_new_uninit_t(int64_t n) {
+    return (int64_t)(intptr_t)hp_iarr_acquire(n, false);
 }
 bool hp_iarr_release_t(int64_t h) {
     hp_iarr_release_ptr((hp_iarr_t *)(intptr_t)h);
@@ -9324,6 +9734,12 @@ bool hp_iarr_set_t(int64_t h, int64_t k, int64_t v) {
     if (a && a->leased && k >= 0 && k < a->cap) a->v[k] = v;
     return true;
 }
+int64_t hp_iarr_get_fast_t(int64_t h, int64_t k) {
+    return hp_iarr_get_fast_impl(h, k);
+}
+bool hp_iarr_set_fast_t(int64_t h, int64_t k, int64_t v) {
+    return hp_iarr_set_fast_impl(h, k, v);
+}
 int64_t hp_bt_read_t(int64_t h, int64_t out, int64_t cols) {
     hp_iarr_t *a = (hp_iarr_t *)(intptr_t)out;
     if (!a || cols < 0 || cols > a->cap / 4) return -1;
@@ -9332,9 +9748,10 @@ int64_t hp_bt_read_t(int64_t h, int64_t out, int64_t cols) {
 
 hval hpbi_sb_take(hval h) {
     HpSb *s = sb_h(h);
-    size_t n = s->b.len;
+    size_t head = s->head;
+    size_t n = s->b.len - head;
     char *p = hbuf_take(&s->b);
-    hstr *r = hp_str_new(p, n);
+    hstr *r = hp_str_new(p + head, n);
     free(p);
     hp_free(s);
     return hp_of_str(r);
@@ -9514,7 +9931,12 @@ static bool hp_sqlite_ckpt_tick(sqlite3 *db) {
         return false;
 
     pthread_mutex_lock(&w->mu);
-    if (w->state != 0 ||
+    /* The WAL hook queues a bulk checkpoint immediately at commit, before
+     * this between-batches tick can run. Requiring IDLE alone therefore
+     * makes the force limit unreachable under sustained writes. Queued
+     * bulk, tail-pending, and restart-pending states have no worker inside
+     * SQLite and can safely be claimed under the same mutex. */
+    if ((w->state != 0 && w->state != 1 && w->state != 5 && w->state != 8) ||
         __atomic_load_n(&w->wal_frames, __ATOMIC_ACQUIRE) < w->force_frames) {
         pthread_mutex_unlock(&w->mu);
         return false;
@@ -9522,6 +9944,7 @@ static bool hp_sqlite_ckpt_tick(sqlite3 *db) {
     /* State 7 reserves the main connection for this checkpoint. The worker
      * sleeps in every state except its bulk/tail requests and stop. */
     w->state = 7;
+    w->hold_since_ms = 0;
     uint64_t generation = w->wal_generation;
     pthread_mutex_unlock(&w->mu);
 
@@ -9538,7 +9961,15 @@ static bool hp_sqlite_ckpt_tick(sqlite3 *db) {
     pthread_mutex_lock(&w->mu);
     if (full && w->wal_generation == generation)
         __atomic_store_n(&w->wal_frames, 0, __ATOMIC_RELEASE);
-    if (w->state == 7) w->state = 0;
+    if (w->state == 7) {
+        if (full && w->restart_wait && nlog > 0) {
+            w->state = 8;
+            w->restart_frames = (uint32_t)nlog;
+        } else {
+            w->state = 0;
+            __atomic_store_n(&w->active_flag, 0, __ATOMIC_RELEASE);
+        }
+    }
     pthread_mutex_unlock(&w->mu);
     if (getenv("HPHP_STATS") && strcmp(getenv("HPHP_STATS"), "1") == 0)
         fprintf(stderr, "[sqlite-ckpt] mode=forced rc=%d log=%d done=%d full=%d us=%lld\n",
@@ -9547,14 +9978,216 @@ static bool hp_sqlite_ckpt_tick(sqlite3 *db) {
 }
 #endif
 
+/* Optional generic SQLite VFS wrapper. SQLite emits separate xWrite calls
+ * for WAL frame headers and pages; sequential frames are buffered until a
+ * commit frame, then written as one contiguous range. All reads, syncs,
+ * truncates, locks, and file controls flush first, so SQLite observes the
+ * same bytes and durability boundary as the underlying VFS. */
+#if !defined(_WIN32)
+typedef struct {
+    sqlite3_file base;
+    sqlite3_file *real;
+    unsigned char *buf;
+    size_t n, cap;
+    sqlite3_int64 off, next;
+    int wal, commit_hdr;
+} HpWalFile;
+static sqlite3_vfs *hp_wal_base_vfs;
+static sqlite3_vfs hp_wal_vfs;
+static char hp_wal_vfs_name[96];
+
+static int hp_wal_flush(HpWalFile *f) {
+    if (!f->n) return SQLITE_OK;
+    int rc = SQLITE_OK;
+    for (size_t at = 0; at < f->n && rc == SQLITE_OK; at += 0x1f000) {
+        size_t n = f->n - at;
+        if (n > 0x1f000) n = 0x1f000;
+        rc = f->real->pMethods->xWrite(f->real, f->buf + at, (int)n,
+                                       f->off + (sqlite3_int64)at);
+    }
+    f->n = 0;
+    return rc;
+}
+#define HP_WAL_FLUSH(f) do { int hp_rc_ = hp_wal_flush((HpWalFile *)(f)); if (hp_rc_ != SQLITE_OK) return hp_rc_; } while (0)
+static int hp_wal_close(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    int rc = hp_wal_flush(f);
+    free(f->buf);
+    f->buf = NULL;
+    int rc2 = f->real->pMethods->xClose(f->real);
+    return rc != SQLITE_OK ? rc : rc2;
+}
+static int hp_wal_read(sqlite3_file *file, void *buf, int n, sqlite3_int64 off) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xRead(f->real, buf, n, off);
+}
+static int hp_wal_write(sqlite3_file *file, const void *buf, int n, sqlite3_int64 off) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (!f->wal) return f->real->pMethods->xWrite(f->real, buf, n, off);
+    /* SQLite can rewrite a previously emitted frame header after a cache
+     * spill. Write that header through immediately; otherwise a commit could
+     * return before its final checksum reaches the underlying VFS. */
+    if (n == 24 && off != f->next) {
+        HP_WAL_FLUSH(file);
+        f->next = off + n;
+        const unsigned char *h = (const unsigned char *)buf;
+        f->commit_hdr = (h[4] | h[5] | h[6] | h[7]) != 0;
+        return f->real->pMethods->xWrite(f->real, buf, n, off);
+    }
+    f->next = off + n;
+    if (f->n && off != f->off + (sqlite3_int64)f->n) HP_WAL_FLUSH(file);
+    if (f->n + (size_t)n > f->cap) {
+        if (f->n + (size_t)n > (8u << 20)) {
+            HP_WAL_FLUSH(file);
+            if ((size_t)n > f->cap) return f->real->pMethods->xWrite(f->real, buf, n, off);
+        } else {
+            size_t cap = f->cap ? f->cap : 65536;
+            while (cap < f->n + (size_t)n) cap *= 2;
+            unsigned char *next = (unsigned char *)realloc(f->buf, cap);
+            if (!next) {
+                HP_WAL_FLUSH(file);
+                return f->real->pMethods->xWrite(f->real, buf, n, off);
+            }
+            f->buf = next;
+            f->cap = cap;
+        }
+    }
+    if (!f->n) f->off = off;
+    memcpy(f->buf + f->n, buf, (size_t)n);
+    f->n += (size_t)n;
+    if (n == 24) {
+        const unsigned char *h = (const unsigned char *)buf;
+        f->commit_hdr = (h[4] | h[5] | h[6] | h[7]) != 0;
+        return SQLITE_OK;
+    }
+    if (f->commit_hdr) {
+        f->commit_hdr = 0;
+        return hp_wal_flush(f);
+    }
+    return SQLITE_OK;
+}
+static int hp_wal_truncate(sqlite3_file *file, sqlite3_int64 size) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xTruncate(f->real, size);
+}
+static int hp_wal_sync(sqlite3_file *file, int flags) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xSync(f->real, flags);
+}
+static int hp_wal_size(sqlite3_file *file, sqlite3_int64 *size) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xFileSize(f->real, size);
+}
+static int hp_wal_lock(sqlite3_file *file, int level) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xLock(f->real, level);
+}
+static int hp_wal_unlock(sqlite3_file *file, int level) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xUnlock(f->real, level);
+}
+static int hp_wal_reserved(sqlite3_file *file, int *result) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xCheckReservedLock(f->real, result);
+}
+static int hp_wal_control(sqlite3_file *file, int op, void *arg) {
+    HP_WAL_FLUSH(file);
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xFileControl(f->real, op, arg);
+}
+static int hp_wal_sector(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xSectorSize(f->real);
+}
+static int hp_wal_device(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xDeviceCharacteristics(f->real);
+}
+static int hp_wal_shm_map(sqlite3_file *file, int page, int size, int extend,
+                          void volatile **out) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmMap(f->real, page, size, extend, out);
+}
+static int hp_wal_shm_lock(sqlite3_file *file, int off, int n, int flags) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmLock(f->real, off, n, flags);
+}
+static void hp_wal_shm_barrier(sqlite3_file *file) {
+    HpWalFile *f = (HpWalFile *)file;
+    f->real->pMethods->xShmBarrier(f->real);
+}
+static int hp_wal_shm_unmap(sqlite3_file *file, int del) {
+    HpWalFile *f = (HpWalFile *)file;
+    return f->real->pMethods->xShmUnmap(f->real, del);
+}
+static int hp_wal_fetch(sqlite3_file *file, sqlite3_int64 off, int n, void **out) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (f->real->pMethods->iVersion < 3 || !f->real->pMethods->xFetch) { *out = NULL; return SQLITE_OK; }
+    return f->real->pMethods->xFetch(f->real, off, n, out);
+}
+static int hp_wal_unfetch(sqlite3_file *file, sqlite3_int64 off, void *ptr) {
+    HpWalFile *f = (HpWalFile *)file;
+    if (f->real->pMethods->iVersion < 3 || !f->real->pMethods->xUnfetch) return SQLITE_OK;
+    return f->real->pMethods->xUnfetch(f->real, off, ptr);
+}
+static const sqlite3_io_methods hp_wal_io = {
+    3, hp_wal_close, hp_wal_read, hp_wal_write, hp_wal_truncate, hp_wal_sync,
+    hp_wal_size, hp_wal_lock, hp_wal_unlock, hp_wal_reserved, hp_wal_control,
+    hp_wal_sector, hp_wal_device, hp_wal_shm_map, hp_wal_shm_lock,
+    hp_wal_shm_barrier, hp_wal_shm_unmap, hp_wal_fetch, hp_wal_unfetch
+};
+static int hp_wal_open(sqlite3_vfs *vfs, const char *name, sqlite3_file *file,
+                       int flags, int *out_flags) {
+    (void)vfs;
+    HpWalFile *f = (HpWalFile *)file;
+    memset(f, 0, sizeof(*f));
+    f->real = (sqlite3_file *)(f + 1);
+    int rc = hp_wal_base_vfs->xOpen(hp_wal_base_vfs, name, f->real, flags, out_flags);
+    f->wal = (flags & SQLITE_OPEN_WAL) != 0;
+    f->base.pMethods = rc == SQLITE_OK && f->real->pMethods ? &hp_wal_io : NULL;
+    return rc;
+}
+/* Register the wrapper over `base` (NULL: SQLite's default VFS) and return
+ * its name. One wrapper per process: both SQLite connections use it. */
+static const char *hp_wal_vfs_register(const char *base) {
+    if (hp_wal_base_vfs) return hp_wal_vfs_name;
+    sqlite3_vfs *b = sqlite3_vfs_find(base);
+    if (!b) return NULL;
+    hp_wal_base_vfs = b;
+    snprintf(hp_wal_vfs_name, sizeof hp_wal_vfs_name, "hphp-wal-coalesce-%s", b->zName);
+    hp_wal_vfs = *b;
+    hp_wal_vfs.zName = hp_wal_vfs_name;
+    hp_wal_vfs.szOsFile = (int)sizeof(HpWalFile) + b->szOsFile;
+    hp_wal_vfs.xOpen = hp_wal_open;
+    hp_wal_vfs.pNext = NULL;
+    if (sqlite3_vfs_register(&hp_wal_vfs, 0) != SQLITE_OK) { hp_wal_base_vfs = NULL; return NULL; }
+    return hp_wal_vfs_name;
+}
+#else
+static const char *hp_wal_vfs_register(const char *base) { (void)base; return NULL; }
+#endif
+
 static hval hpbi_sqlite_open_impl(hval path, hval vfs) {
     hstr *p = hp_val_to_str(path);
     hstr *v = vfs.tag == HV_STR ? hp_val_to_str(vfs) : NULL;
     sqlite3 *db = NULL;
     if (sqlite3_initialize() != SQLITE_OK) return hp_of_int(0);
+    const char *vfs_name = v && v->len ? v->data : NULL;
+    /* HPHP_SQLITE_WAL_COALESCE=1: write each commit's WAL frames with one
+     * write call, through a thin wrapper over the selected VFS. */
+    const char *co = getenv("HPHP_SQLITE_WAL_COALESCE");
+    if (co && strcmp(co, "1") == 0) {
+        vfs_name = hp_wal_vfs_register(vfs_name);
+        if (!vfs_name) return hp_of_int(0);
+    }
     int rc = sqlite3_open_v2(p->data, &db,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                             v && v->len ? v->data : NULL);
+                             vfs_name);
     if (rc != SQLITE_OK) {
         if (db) sqlite3_close(db);
         return hp_of_int(0);
@@ -9580,12 +10213,16 @@ hval hpbi_sqlite_bg_checkpoint_start(hval dbv, hval pathv, hval framesv, hval ho
     int hold_ms = (int)hp_val_to_int(holdv);
     if (!db || !path || frames < 1 || hold_ms < 1 || sqlite3_threadsafe() == 0 || w->started)
         return hp_of_bool(false);
-    /* Use the same VFS as the request connection. unix-excl keeps its WAL
-     * index in connection-local heap memory; a second connection using that
-     * VFS cannot safely checkpoint a database opened by the default unix VFS. */
+    /* Use the same VFS as the request connection. With unix-excl the WAL
+     * index lives in process heap memory shared by this process's
+     * connections, so both connections must use it; mixing it with the
+     * default unix VFS would give them different WAL indexes. */
+    sqlite3_vfs *vfs = NULL;
+    if (sqlite3_file_control(db, "main", SQLITE_FCNTL_VFS_POINTER, &vfs) != SQLITE_OK)
+        vfs = NULL;
     int rc = sqlite3_open_v2(path->data, &ckdb,
                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX,
-                             NULL);
+                             vfs ? vfs->zName : NULL);
     if (rc != SQLITE_OK) {
         if (ckdb) sqlite3_close(ckdb);
         return hp_of_bool(false);
@@ -9850,29 +10487,12 @@ hval hpbi_sqlite_busy_timeout(hval dbv, hval ms) {
 int64_t hp_sb_new_t(void) {
     HpSb *s = (HpSb *)hp_alloc(sizeof *s);
     hbuf_init(&s->b);
+    s->head = 0;
     return (int64_t)(intptr_t)s;
 }
 bool hp_sb_reserve_t(int64_t h, int64_t n) {
     hp_sb_reserve_pooled((HpSb *)(intptr_t)h, n);
     return true;
-}
-bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    const char *p = (const char *)(intptr_t)ptr;
-    if (p && len > 0) hbuf_write(&s->b, p, (size_t)len);
-    return true;
-}
-bool hp_sb_put_t(int64_t h, hstr *x) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    hbuf_write(&s->b, x->data, x->len);
-    return true;
-}
-int64_t hp_sb_len_t(int64_t h) {
-    return (int64_t)((HpSb *)(intptr_t)h)->b.len;
-}
-int64_t hp_sb_data_ptr_t(int64_t h) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    return (int64_t)(intptr_t)s->b.data;
 }
 bool hp_sb_discard_t(int64_t h) {
     HpSb *s = (HpSb *)(intptr_t)h;
@@ -9884,22 +10504,7 @@ bool hp_sb_discard_t(int64_t h) {
     return true;
 }
 bool hp_sb_prepend_t(int64_t h, hstr *x) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    if (x->len == 0) return true;
-    hbuf_reserve(&s->b, s->b.len + x->len);
-    if (s->b.len) memmove(s->b.data + x->len, s->b.data, s->b.len);
-    memcpy(s->b.data, x->data, x->len);
-    s->b.len += x->len;
-    return true;
-}
-bool hp_sb_int_t(int64_t h, int64_t n) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    char tmp[24];
-    int i = 24;
-    unsigned long long u = n < 0 ? -(unsigned long long)n : (unsigned long long)n;
-    do { tmp[--i] = (char)('0' + (u % 10)); u /= 10; } while (u);
-    if (n < 0) tmp[--i] = '-';
-    hbuf_write(&s->b, tmp + i, (size_t)(24 - i));
+    hp_sb_prepend_bytes((HpSb *)(intptr_t)h, x->data, x->len);
     return true;
 }
 bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len) {
@@ -9916,9 +10521,10 @@ bool hp_sb_json_str_t(int64_t h, hstr *x) {
 }
 hstr *hp_sb_take_t(int64_t h) {
     HpSb *s = (HpSb *)(intptr_t)h;
-    size_t n = s->b.len;
+    size_t head = s->head;
+    size_t n = s->b.len - head;
     char *p = hbuf_take(&s->b);
-    hstr *r = hp_str_new(p, n);
+    hstr *r = hp_str_new(p + head, n);
     free(p);
     hp_free(s);
     return r;
@@ -9936,8 +10542,10 @@ static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
     char *buf = sb->b.data;
     size_t len = sb->b.len;
     size_t cap = sb->b.cap;
+    size_t head = buf ? sb->head : 0;
     sb->b.data = NULL;
     sb->b.len = sb->b.cap = 0;
+    sb->head = 0;
     hp_free(sb);         /* the builder handle is consumed: only the buffer
                             travels on (it was leaked before: ~55 B/request) */
     if (!buf) {                                   /* empty builder: send "" */
@@ -9946,9 +10554,9 @@ static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
         cap = 0;
     }
 #ifdef HP_UR_CAN
-    if (hp_uring_active()) return hp_uring_send_owned(fd, buf, len, cap);
+    if (hp_uring_active()) return hp_uring_send_owned(fd, buf, head, len, cap);
 #endif
-    size_t off = 0;
+    size_t off = head;
     int waited_ms = 0;
     while (off < len) {
         ssize_t r = send(fd, buf + off, (int)(len - off), 0);
@@ -9963,7 +10571,7 @@ static int64_t hp_send_sb_impl(hp_sock fd, HpSb *sb) {
         return -2;
     }
     hp_resp_buf_release(buf, cap);
-    return (int64_t)len;
+    return (int64_t)(len - head);
 }
 hval hpbi_stream_send_sb(hval s, hval h) {
     hp_net_init();
@@ -10005,10 +10613,19 @@ int64_t hp_bt_multi_seek_t(int64_t h, int64_t keys, int64_t count) {
     return (int64_t)(intptr_t)hp_bt_multi_seek_impl(
         (void *)(intptr_t)h, a->v, (int)count);
 }
+int64_t hp_bt_tail_t(int64_t h, int64_t count) {
+    if (!hp_bt_tail_impl || count < 1 || count > 64) return 0;
+    return (int64_t)(intptr_t)hp_bt_tail_impl((void *)(intptr_t)h, (int)count);
+}
 bool hp_bt_multi_payloads_t(int64_t result, int64_t out) {
     hp_iarr_t *a = (hp_iarr_t *)(intptr_t)out;
     if (!hp_bt_multi_payloads_impl || !a || !a->leased) return false;
     return hp_bt_multi_payloads_impl((void *)(intptr_t)result, a->v, a->cap) != 0;
+}
+int64_t hp_bt_multi_keys_t(int64_t result, int64_t out) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)out;
+    if (!hp_bt_multi_keys_impl || !a || !a->leased) return -1;
+    return hp_bt_multi_keys_impl((void *)(intptr_t)result, a->v, a->cap);
 }
 bool hp_bt_multi_release_t(int64_t result) {
     if (hp_bt_multi_release_impl) hp_bt_multi_release_impl((void *)(intptr_t)result);
@@ -10262,6 +10879,46 @@ hstr *hp_runtime_stats_t(void) {
             hbuf_write(&b, tmp, strlen(tmp));
         }
         hbuf_write(&b, "]", 1);
+        if (hp_diag_enabled()) {
+            uint64_t now = hp_diag_now_ns();
+            hbuf_write(&b, ",\"outstanding\":[", 16);
+            for (int r = 0; r < hp_ur_nrings; r++) {
+                struct hp_uring_ring *rg = &hp_ur_rings[r];
+                uint32_t sends = 0, unarmed_sends = 0, reads = 0, missing_recv = 0;
+                uint64_t send_age = 0, read_age = 0;
+                for (uint32_t i = 0; rg->dirs && i < rg->dircap; i++) {
+                    struct hp_urfds *st = &rg->dirs[i];
+                    if (!st->direct || !st->slot_live) continue;
+                    if (st->shead) {
+                        sends++;
+                        if (!st->sarmed) unarmed_sends++;
+                        uint64_t *stamp = hp_ur_chunk_diag_ns(st->shead);
+                        if (stamp && *stamp && now >= *stamp && now - *stamp > send_age)
+                            send_age = now - *stamp;
+                    }
+                    if (st->rready) {
+                        reads++;
+                        uint64_t stamp = rg->diag_recv_ready_ns ? rg->diag_recv_ready_ns[i] : 0;
+                        if (stamp && now >= stamp && now - stamp > read_age)
+                            read_age = now - stamp;
+                    }
+                    if (!st->reof && !st->closeafter && !st->rarmed &&
+                        !st->rreading && !st->rreadq && !st->rtagged && !st->rready)
+                        missing_recv++;
+                }
+                snprintf(tmp, sizeof tmp,
+                         "%s{\"id\":%d,\"sends\":%u,\"unarmed_sends\":%u,\"send_max_age_ns\":%llu,\"buffered_reads\":%u,\"read_max_age_ns\":%llu,\"missing_recv\":%u,\"sq_flags\":%u,\"sq_pending\":%u,\"cq_pending\":%u,\"defer_taskrun\":%d}",
+                         r ? "," : "", r, sends, unarmed_sends,
+                         (unsigned long long)send_age, reads,
+                         (unsigned long long)read_age, missing_recv,
+                         rg->sq_flags ? __atomic_load_n(rg->sq_flags, __ATOMIC_ACQUIRE) : 0,
+                         rg->sqtail - __atomic_load_n(rg->sq_head, __ATOMIC_ACQUIRE),
+                         __atomic_load_n(rg->cq_tail, __ATOMIC_ACQUIRE) - rg->cqhead,
+                         rg->defer_taskrun);
+                hbuf_write(&b, tmp, strlen(tmp));
+            }
+            hbuf_write(&b, "]", 1);
+        }
     }
 #endif
     hbuf_write(&b, "}", 1);

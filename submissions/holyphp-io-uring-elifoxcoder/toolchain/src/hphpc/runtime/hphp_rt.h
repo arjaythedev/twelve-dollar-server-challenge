@@ -42,6 +42,25 @@ static inline void hbuf_write(Buf *b, const char *s, size_t n) {
     b->len += n;
     b->data[b->len] = 0;
 }
+/* Decimal digits of v, written so they end at `end`; returns the first
+ * character. `end` needs 20 bytes of room before it. Two digits per step. */
+static inline char *hp_fmt_i64(char *end, int64_t v) {
+    static const char d2[201] =
+        "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+        "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+        "8081828384858687888990919293949596979899";
+    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
+    char *p = end;
+    while (u >= 100) {
+        unsigned r = (unsigned)(u % 100);
+        u /= 100;
+        p -= 2; memcpy(p, d2 + 2 * r, 2);
+    }
+    if (u >= 10) { p -= 2; memcpy(p, d2 + 2 * u, 2); }
+    else *--p = (char)('0' + u);
+    if (v < 0) *--p = '-';
+    return p;
+}
 void hbuf_puts(Buf *b, const char *s);
 void hbuf_printf(Buf *b, const char *fmt, ...);
 char *hbuf_take(Buf *b); /* NUL-terminated, transfers ownership */
@@ -419,6 +438,9 @@ hval hpbi_str_int_range(hval s, hval a, hval b);
 hval hpbi_str_trim_range(hval s, hval a, hval b);
 hval hpbi_str_at_eq(hval s, hval start, hval len, hval lit);
 hval hpbi_str_to_int(hval s);
+hval hpbi_str_to_int_range(hval s, hval start, hval end);
+hval hpbi_http_request_bounds(hval s);
+hval hpbi_str_find_range(hval s, hval needle, hval start);
 hval hpbi_str_contains(hval h, hval n);
 hval hpbi_str_starts_with(hval h, hval n);
 hval hpbi_str_ends_with(hval h, hval n);
@@ -1093,8 +1115,11 @@ hval hpbi_bt_page_release(hval pin);
 hval hpbi_bt_count_key(hval h, hval key);
 hval hpbi_bt_count_range(hval h, hval lo, hval hi, hval out);
 hval hpbi_bt_multi_seek(hval h, hval keys, hval count);
+hval hpbi_bt_tail(hval h, hval count);
 hval hpbi_bt_multi_payloads(hval result, hval out);
+hval hpbi_bt_multi_keys(hval result, hval out);
 hval hpbi_bt_multi_release(hval result);
+hval hpbi_iarr_new_uninit(hval size);
 hval hpbi_bt_read(hval h, hval out, hval cols);
 hval hpbi_sb_new(void);
 hval hpbi_sb_put(hval h, hval str);
@@ -1138,24 +1163,52 @@ hval hpbi_sqlite_is_lock_error(hval db);
 hval hpbi_sqlite_busy_timeout(hval db, hval ms);
 
 /* ---- typed builtin fast paths (see hphp_std.c) ---- */
+/* String builder handle. head: free bytes in front of the contents, which
+ * are b.data[head .. b.len) (see hp_sb_reserve_pooled in hphp_std.c). The
+ * small appends are inline: generated code makes many of them per response. */
+typedef struct { Buf b; size_t head; } HpSb;
 int64_t hp_sb_new_t(void);
 bool hp_sb_reserve_t(int64_t h, int64_t n);
-bool hp_sb_put_t(int64_t h, hstr *s);
-bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len);
-int64_t hp_sb_data_ptr_t(int64_t h);
+static inline bool hp_sb_put_t(int64_t h, hstr *x) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    hbuf_write(&s->b, x->data, x->len);
+    return true;
+}
+static inline bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    const char *p = (const char *)(intptr_t)ptr;
+    if (p && len > 0) hbuf_write(&s->b, p, (size_t)len);
+    return true;
+}
+static inline int64_t hp_sb_data_ptr_t(int64_t h) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    return s->b.data ? (int64_t)(intptr_t)(s->b.data + s->head) : 0;
+}
 bool hp_sb_discard_t(int64_t h);
-int64_t hp_sb_len_t(int64_t h);
+static inline int64_t hp_sb_len_t(int64_t h) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    return (int64_t)(s->b.len - s->head);
+}
 bool hp_sb_prepend_t(int64_t h, hstr *s);
-bool hp_sb_int_t(int64_t h, int64_t n);
+static inline bool hp_sb_int_t(int64_t h, int64_t n) {
+    HpSb *s = (HpSb *)(intptr_t)h;
+    char tmp[24];
+    char *p = hp_fmt_i64(tmp + sizeof tmp, n);
+    hbuf_write(&s->b, p, (size_t)(tmp + sizeof tmp - p));
+    return true;
+}
 bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len);
 bool hp_sb_json_str_t(int64_t h, hstr *s);
 hstr *hp_sb_take_t(int64_t h);
 int64_t hp_stream_send_sb_t(int64_t fd, int64_t sb);
 int64_t hp_int_digits_t(int64_t n);
 int64_t hp_iarr_new_t(int64_t n);
+int64_t hp_iarr_new_uninit_t(int64_t n);
 bool hp_iarr_release_t(int64_t h);
 int64_t hp_iarr_get_t(int64_t h, int64_t k);
 bool hp_iarr_set_t(int64_t h, int64_t k, int64_t v);
+int64_t hp_iarr_get_fast_t(int64_t h, int64_t k);
+bool hp_iarr_set_fast_t(int64_t h, int64_t k, int64_t v);
 int64_t hp_iarr_len_t(int64_t h);
 bool hp_epoll_wait_iarr2_t(int64_t in, int64_t out, int64_t timeout_ms);
 int64_t hp_bt_last_t(int64_t h);
@@ -1175,7 +1228,9 @@ int64_t hp_bt_payload_size_t(int64_t h);
 int64_t hp_bt_payload_pin_t(int64_t h);
 bool hp_bt_page_release_t(int64_t pin);
 int64_t hp_bt_multi_seek_t(int64_t h, int64_t keys, int64_t count);
+int64_t hp_bt_tail_t(int64_t h, int64_t count);
 bool hp_bt_multi_payloads_t(int64_t result, int64_t out);
+int64_t hp_bt_multi_keys_t(int64_t result, int64_t out);
 bool hp_bt_multi_release_t(int64_t result);
 int64_t hp_stream_send_nb_t(int64_t fd, hstr *s);
 int64_t hp_stream_send2_nb_t(int64_t fd, hstr *a, hstr *b);
@@ -1186,6 +1241,9 @@ bool hp_uring_direct_t(void);
 int64_t hp_uring_direct_slots_t(void);
 int64_t hp_strlen_t(hstr *s);
 int64_t hp_str_to_int_t(hstr *s);
+int64_t hp_str_to_int_range_t(hstr *s, int64_t start, int64_t end);
+int64_t hp_http_request_bounds_t(hstr *s);
+int64_t hp_str_find_range_t(hstr *s, hstr *needle, int64_t start);
 bool hp_str_at_eq_t(hstr *s, int64_t start, int64_t len, hstr *lit);
 hstr *hp_strtolower_t(hstr *s);
 hstr *hp_trim_t(hstr *s);

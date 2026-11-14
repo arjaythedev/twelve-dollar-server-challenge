@@ -19,6 +19,7 @@ typedef struct HpBtMulti {
     MemPage *page[HP_BT_MULTI_MAX];
     int ix[HP_BT_MULTI_MAX];
     unsigned char found[HP_BT_MULTI_MAX];
+    sqlite3_int64 key[HP_BT_MULTI_MAX];
 } HpBtMulti;
 
 
@@ -156,11 +157,11 @@ void *hp_bt_multi_seek_impl(void *v, const sqlite3_int64 *keys_in, int n) {
     for (int i = 0; i < n; i++) {
         MemPage *pg = cur[i];
         int lb = hp_bt_multi_lower_bound(pg, keys[i]);
-        int found = 0;
-        if (lb < pg->nCell) found = hp_bt_multi_cell_key(pg, lb) == keys[i];
+        int found = lb < pg->nCell && hp_bt_multi_cell_key(pg, lb) == keys[i];
         out->page[ord[i]] = pg;
         out->ix[ord[i]] = lb;
         out->found[ord[i]] = (unsigned char)found;
+        out->key[ord[i]] = keys_in[ord[i]];
         cur[i] = 0;
     }
     return out;
@@ -168,6 +169,48 @@ fail:
     for (int i = 0; i < n; i++) if (cur[i]) releasePage(cur[i]);
     sqlite3_free(out);
     return 0;
+}
+
+/* Collect the last n rows from a generic integer-key table cursor in one
+ * runtime crossing. The result owns references to each leaf page until
+ * hp_bt_multi_release_impl(), so payload pointers remain valid while callers
+ * perform independent lookups and render the response. */
+void hp_bt_multi_release_impl(void *v);
+void *hp_bt_tail_impl(void *v, int n) {
+    HpBt *h = (HpBt *)v;
+    HpBtMulti *out;
+    int res = 1, rc;
+    if (!h || !h->isOpen || h->isIndex || n < 1 || n > HP_BT_MULTI_MAX) return 0;
+    out = (HpBtMulti *)sqlite3_malloc(sizeof *out);
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if ((rc = sqlite3BtreeLast(&h->cur, &res)) != SQLITE_OK) goto fail;
+    if (res) return out;
+    for (int i = 0; i < n; i++) {
+        MemPage *pg = h->cur.pPage;
+        if (!pg || h->cur.eState != CURSOR_VALID) break;
+        sqlite3PagerRef(pg->pDbPage);
+        out->page[i] = pg;
+        out->ix[i] = h->cur.ix;
+        out->found[i] = 1;
+        out->key[i] = sqlite3BtreeIntegerKey(&h->cur);
+        out->n = i + 1;
+        if (i + 1 == n) break;
+        rc = sqlite3BtreePrevious(&h->cur, 0);
+        if (rc == SQLITE_DONE) break;
+        if (rc != SQLITE_OK) goto fail;
+    }
+    return out;
+fail:
+    hp_bt_multi_release_impl(out);
+    return 0;
+}
+
+int hp_bt_multi_keys_impl(void *v, sqlite3_int64 *dst, sqlite3_int64 cap) {
+    HpBtMulti *r = (HpBtMulti *)v;
+    if (!r || !dst || cap < r->n) return -1;
+    for (int i = 0; i < r->n; i++) dst[i] = r->key[i];
+    return r->n;
 }
 
 int hp_bt_multi_payloads_impl(void *v, sqlite3_int64 *dst, sqlite3_int64 cap) {

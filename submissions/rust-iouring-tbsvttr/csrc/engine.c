@@ -26,6 +26,13 @@
 #define TVCC_HOLD_MAX_MS 250
 #define TVCC_CKPT_NICE   19
 
+static pthread_once_t tvcc_sqlite_once = PTHREAD_ONCE_INIT;
+static int tvcc_sqlite_init_rc = -1;
+
+static void tvcc_sqlite_global_init(void) {
+    tvcc_sqlite_init_rc = sqlite3_initialize();
+}
+
 typedef struct TvccPostRow {
     int64_t id;
     uint32_t body_off;
@@ -170,23 +177,14 @@ static inline const uint8_t *tvcc_fetch_record(TvccDbEngine *eng, BtCursor *cur,
     return eng->scratch;
 }
 
-static KeyInfo *tvcc_alloc_keyinfo(sqlite3 *db, int n_key_fields, const uint8_t *sort_orders) {
-    size_t bytes = sizeof(KeyInfo) + (size_t)n_key_fields * sizeof(CollSeq *);
-    KeyInfo *ki = (KeyInfo *)sqlite3DbMallocZero(db, (u64)bytes);
+static KeyInfo *tvcc_alloc_keyinfo(sqlite3 *db, int nkey, int nextra, int desc) {
+    KeyInfo *ki = sqlite3KeyInfoAlloc(db, nkey, nextra);
     if (!ki) return NULL;
-    ki->db = db;
-    ki->enc = ENC(db);
-    ki->nKeyField = (u16)n_key_fields;
-    ki->nAllField = (u16)(n_key_fields + 1);
-    ki->nRef = 1;
-    ki->aSortFlags = (u8 *)sqlite3DbMallocZero(db, (u64)(n_key_fields + 1));
-    if (!ki->aSortFlags) {
-        sqlite3DbFree(db, ki);
-        return NULL;
-    }
-    for (int i = 0; i < n_key_fields; i++) {
-        ki->aSortFlags[i] = sort_orders[i];
+    for (int i = 0; i < nkey + nextra; i++) {
         ki->aColl[i] = db->pDfltColl;
+        if (desc && i < nkey) {
+            ki->aSortFlags[i] = KEYINFO_ORDER_DESC;
+        }
     }
     return ki;
 }
@@ -340,41 +338,6 @@ static int tvcc_lookup_single_user(TvccDbEngine *eng, int64_t uid, uint8_t *dst,
     return 1;
 }
 
-typedef struct TvccUserBatchItem {
-    int64_t uid;
-    Pgno pgno;
-    uint32_t text_off;
-    uint32_t text_len;
-    int resolved;
-} TvccUserBatchItem;
-
-static int tvcc_batch_lookup_users(TvccDbEngine *eng, TvccUserBatchItem *items, int n_items,
-                                   uint8_t *text_pool, uint32_t *text_used, uint32_t text_cap) {
-    /* Sort unique user_ids ascending so cur_users walks B-tree leaves monotonically
-     * while keeping root_users pinned in cur_users->apPage[0]. */
-    for (int i = 1; i < n_items; i++) {
-        TvccUserBatchItem key = items[i];
-        int j = i - 1;
-        while (j >= 0 && items[j].uid > key.uid) {
-            items[j + 1] = items[j];
-            j--;
-        }
-        items[j + 1] = key;
-    }
-    for (int i = 0; i < n_items; i++) {
-        uint32_t ulen = 0;
-        uint32_t rem = text_cap - *text_used;
-        if (!tvcc_lookup_single_user(eng, items[i].uid, text_pool + *text_used, rem, &ulen)) {
-            return 0;
-        }
-        items[i].text_off = *text_used;
-        items[i].text_len = ulen;
-        *text_used += ulen;
-        items[i].resolved = 1;
-    }
-    return 1;
-}
-
 static int tvcc_count_likes_range(TvccDbEngine *eng, int64_t lo, int64_t hi, uint32_t *counts);
 
 static int tvcc_count_likes(TvccDbEngine *eng, int64_t post_id, int64_t *out_count) {
@@ -479,6 +442,34 @@ static int tvcc_count_likes_range(TvccDbEngine *eng, int64_t lo, int64_t hi, uin
     }
 }
 
+static int tvcc_parse_post_uid_body(const uint8_t *rec, uint32_t rec_sz, int64_t *out_uid,
+                                    const uint8_t **out_body, uint32_t *out_body_len) {
+    if (!rec || rec_sz < 3) return 0;
+    u32 hdr_sz = 0;
+    int pos = getVarint32(rec, hdr_sz);
+    if (hdr_sz > rec_sz) return 0;
+
+    u32 st_id = 0, st_uid = 0, st_body = 0;
+    pos += getVarint32(rec + pos, st_id);
+    pos += getVarint32(rec + pos, st_uid);
+    pos += getVarint32(rec + pos, st_body);
+
+    if (st_body < 13 || (st_body & 1) == 0) {
+        return 0;
+    }
+    uint32_t id_len = tvcc_serial_byte_len(st_id);
+    uint32_t uid_len = tvcc_serial_byte_len(st_uid);
+    uint32_t body_len = (st_body - 13) >> 1;
+    if (hdr_sz + id_len + uid_len + body_len > rec_sz) {
+        return 0;
+    }
+
+    *out_uid = tvcc_decode_be_int(rec + hdr_sz + id_len, st_uid);
+    *out_body = rec + hdr_sz + id_len + uid_len;
+    *out_body_len = body_len;
+    return 1;
+}
+
 static int tvcc_parse_post_record(const uint8_t *rec, uint32_t rec_sz, int64_t *out_uid,
                                   const uint8_t **out_body, uint32_t *out_body_len,
                                   const uint8_t **out_created, uint32_t *out_created_len) {
@@ -540,7 +531,8 @@ static long tvcc_ms_since(const struct timespec *t0) {
 static void *tvcc_checkpoint_worker(void *arg) {
     TvccDbEngine *eng = (TvccDbEngine *)arg;
 #ifdef __linux__
-    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), TVCC_CKPT_NICE);
+    id_t tid = (id_t)syscall(SYS_gettid);
+    setpriority(PRIO_PROCESS, tid, TVCC_CKPT_NICE);
 #else
     int nice_rc = nice(TVCC_CKPT_NICE);
     (void)nice_rc;
@@ -556,11 +548,19 @@ static void *tvcc_checkpoint_worker(void *arg) {
         if (st == CK_STOP) {
             break;
         }
+#ifdef __linux__
+        setpriority(PRIO_PROCESS, tid, st == CK_TAIL ? 0 : TVCC_CKPT_NICE);
+#endif
 
         int nlog = -1, ndone = -2;
         int rc = sqlite3_wal_checkpoint_v2(
             eng->ck_db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone
         );
+#ifdef __linux__
+        if (st == CK_TAIL) {
+            setpriority(PRIO_PROCESS, tid, TVCC_CKPT_NICE);
+        }
+#endif
         pthread_mutex_lock(&eng->ck_mu);
         eng->ck_full = (rc == SQLITE_OK && nlog == ndone);
         if (eng->ck_state != CK_STOP) {
@@ -569,6 +569,10 @@ static void *tvcc_checkpoint_worker(void *arg) {
         pthread_mutex_unlock(&eng->ck_mu);
     }
     return NULL;
+}
+
+int tvcc_db_writes_held(TvccDbEngine *eng) {
+    return eng ? eng->writes_held : 0;
 }
 
 int tvcc_db_poll_checkpoint(TvccDbEngine *eng, int has_inflight_reads) {
@@ -631,7 +635,8 @@ int tvcc_db_open(const char *path, TvccDbEngine **out_eng) {
     if (!path || !out_eng) return -1;
     *out_eng = NULL;
 
-    if (sqlite3_initialize() != SQLITE_OK) {
+    pthread_once(&tvcc_sqlite_once, tvcc_sqlite_global_init);
+    if (tvcc_sqlite_init_rc != SQLITE_OK) {
         return -1;
     }
 
@@ -681,10 +686,8 @@ int tvcc_db_open(const char *path, TvccDbEngine **out_eng) {
         return -1;
     }
 
-    static const uint8_t kFeedSort[2] = {KEYINFO_ORDER_DESC, KEYINFO_ORDER_DESC};
-    static const uint8_t kLikesSort[2] = {0, 0};
-    eng->ki_feed = tvcc_alloc_keyinfo(eng->db, 2, kFeedSort);
-    eng->ki_likes = tvcc_alloc_keyinfo(eng->db, 2, kLikesSort);
+    eng->ki_feed = tvcc_alloc_keyinfo(eng->db, 2, 1, 1);
+    eng->ki_likes = tvcc_alloc_keyinfo(eng->db, 1, 1, 0);
     eng->probe_feed = (UnpackedRecord *)sqlite3DbMallocZero(eng->db, sizeof(UnpackedRecord));
     eng->probe_likes = (UnpackedRecord *)sqlite3DbMallocZero(eng->db, sizeof(UnpackedRecord));
     if (!eng->ki_feed || !eng->ki_likes || !eng->probe_feed || !eng->probe_likes) {
@@ -804,14 +807,8 @@ void tvcc_db_close(TvccDbEngine *eng) {
     if (eng->db) {
         if (eng->probe_feed) sqlite3DbFree(eng->db, eng->probe_feed);
         if (eng->probe_likes) sqlite3DbFree(eng->db, eng->probe_likes);
-        if (eng->ki_feed) {
-            sqlite3DbFree(eng->db, eng->ki_feed->aSortFlags);
-            sqlite3DbFree(eng->db, eng->ki_feed);
-        }
-        if (eng->ki_likes) {
-            sqlite3DbFree(eng->db, eng->ki_likes->aSortFlags);
-            sqlite3DbFree(eng->db, eng->ki_likes);
-        }
+        if (eng->ki_feed) sqlite3KeyInfoUnref(eng->ki_feed);
+        if (eng->ki_likes) sqlite3KeyInfoUnref(eng->ki_likes);
         sqlite3_close(eng->db);
     }
     if (eng->ck_db) {
@@ -919,13 +916,22 @@ int tvcc_db_feed(TvccDbEngine *eng, TvccFeedResult *out) {
         u32 st_created = 0, st_id = 0;
         pos += getVarint32(rec + pos, st_created);
         pos += getVarint32(rec + pos, st_id);
-        uint32_t clen = tvcc_serial_byte_len(st_created);
-        uint32_t ilen = tvcc_serial_byte_len(st_id);
-        if (hdr_sz + clen + ilen > rec_sz) {
+        if (st_created < 13 || (st_created & 1) == 0) {
             return tvcc_feed_sql_fallback(eng, out);
         }
+        uint32_t clen = (st_created - 13) >> 1;
+        uint32_t ilen = tvcc_serial_byte_len(st_id);
+        if (hdr_sz + clen + ilen > rec_sz || out->text_used + clen > TVCC_TEXT_POOL_CAP) {
+            return tvcc_feed_sql_fallback(eng, out);
+        }
+        TvccPostRow *row = &out->rows[n_rows];
+        row->created_off = out->text_used;
+        row->created_len = clen;
+        memcpy(out->text + out->text_used, rec + hdr_sz, clen);
+        out->text_used += clen;
+
         post_ids[n_rows] = tvcc_decode_be_int(rec + hdr_sz + clen, st_id);
-        out->rows[n_rows].id = post_ids[n_rows];
+        row->id = post_ids[n_rows];
         n_rows++;
 
         if (n_rows == TVCC_FEED_MAX_ROWS) break;
@@ -964,9 +970,9 @@ int tvcc_db_feed(TvccDbEngine *eng, TvccFeedResult *out) {
         }
     }
 
-    int64_t slot_uids[TVCC_FEED_MAX_ROWS];
-    TvccUserBatchItem uniq_users[TVCC_FEED_MAX_ROWS];
-    int n_uniq_users = 0;
+    int64_t prev_uid = -1;
+    uint32_t prev_author_off = 0;
+    uint32_t prev_author_len = 0;
 
     for (uint32_t i = 0; i < n_rows; i++) {
         int64_t pid = order[i].post_id;
@@ -988,12 +994,12 @@ int tvcc_db_feed(TvccDbEngine *eng, TvccFeedResult *out) {
         uint32_t rec_sz = 0;
         const uint8_t *rec = tvcc_fetch_record(eng, eng->cur_posts, &rec_sz);
         int64_t uid = 0;
-        const uint8_t *bptr = NULL, *cptr = NULL;
-        uint32_t blen = 0, clen = 0;
-        if (!tvcc_parse_post_record(rec, rec_sz, &uid, &bptr, &blen, &cptr, &clen)) {
+        const uint8_t *bptr = NULL;
+        uint32_t blen = 0;
+        if (!tvcc_parse_post_uid_body(rec, rec_sz, &uid, &bptr, &blen)) {
             return tvcc_feed_sql_fallback(eng, out);
         }
-        if (out->text_used + blen + clen > TVCC_TEXT_POOL_CAP) {
+        if (out->text_used + blen > TVCC_TEXT_POOL_CAP) {
             return tvcc_feed_sql_fallback(eng, out);
         }
         TvccPostRow *row = &out->rows[slot];
@@ -1002,37 +1008,21 @@ int tvcc_db_feed(TvccDbEngine *eng, TvccFeedResult *out) {
         memcpy(out->text + out->text_used, bptr, blen);
         out->text_used += blen;
 
-        row->created_off = out->text_used;
-        row->created_len = clen;
-        memcpy(out->text + out->text_used, cptr, clen);
-        out->text_used += clen;
-
-        slot_uids[slot] = uid;
-        int found = 0;
-        for (int u = 0; u < n_uniq_users; u++) {
-            if (uniq_users[u].uid == uid) {
-                found = 1;
-                break;
+        if (uid == prev_uid) {
+            row->author_off = prev_author_off;
+            row->author_len = prev_author_len;
+        } else {
+            uint32_t ulen = 0;
+            uint32_t rem = TVCC_TEXT_POOL_CAP - out->text_used;
+            if (!tvcc_lookup_single_user(eng, uid, out->text + out->text_used, rem, &ulen)) {
+                return tvcc_feed_sql_fallback(eng, out);
             }
-        }
-        if (!found) {
-            uniq_users[n_uniq_users].uid = uid;
-            n_uniq_users++;
-        }
-    }
-
-    if (!tvcc_batch_lookup_users(eng, uniq_users, n_uniq_users, out->text, &out->text_used, TVCC_TEXT_POOL_CAP)) {
-        return tvcc_feed_sql_fallback(eng, out);
-    }
-
-    for (uint32_t slot = 0; slot < n_rows; slot++) {
-        int64_t uid = slot_uids[slot];
-        for (int u = 0; u < n_uniq_users; u++) {
-            if (uniq_users[u].uid == uid) {
-                out->rows[slot].author_off = uniq_users[u].text_off;
-                out->rows[slot].author_len = uniq_users[u].text_len;
-                break;
-            }
+            row->author_off = out->text_used;
+            row->author_len = ulen;
+            prev_uid = uid;
+            prev_author_off = out->text_used;
+            prev_author_len = ulen;
+            out->text_used += ulen;
         }
     }
 

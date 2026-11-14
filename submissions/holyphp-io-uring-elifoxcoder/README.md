@@ -124,6 +124,23 @@ allocation-stable for a long-running server. All of this is generic:
   `arm_fail=0`/`parked=0`, and 42/42 on the classic real-fd path.
   `HPHP_DIRECT=0` forces that path; a failed registration falls back
   automatically.
+  On the tested Ubuntu 6.8.0-147 kernel, the standard provided-buffer
+  registration returns `EINVAL`. The runtime first tries the standard ABI,
+  then retries that specific failure with the reserved-word compatibility
+  value used by the Rust reference. `HPHP_PBUF_COMPAT=0` disables this retry
+  for comparison. Startup logs show whether buffers or the one-shot fallback
+  are active; a successful `/health` response alone does not identify the path.
+  `HPHP_CQ_BUDGET` limits completions consumed from each ring per pass so
+  other rings and application-ready sockets receive service. Zero retains
+  the previous unbounded drain. Unconsumed entries remain in the kernel CQ
+  for the next pass; the limit does not discard completions.
+  Queued POST/LIKE replies carry a connection generation alongside the socket
+  handle. A disconnected client's write still commits, while its response is
+  suppressed if that handle has since been assigned to another connection.
+  The forced SQLite checkpoint can claim an idle worker even when a bulk
+  checkpoint is queued or a tail/restart is pending. A running worker remains
+  exclusive. This keeps the configured force limit reachable under sustained
+  writes instead of requiring an idle state that the WAL hook immediately exits.
 
 There is no challenge-specific C code: the backend is generic runtime code the
 same way epoll and the SQLite binding are.
@@ -666,12 +683,13 @@ is required.
 
 #### SQLite file locking and WAL write calls (WSL, 2026-11-13)
 
-Both switches below are **off by default** now. The box run at `f1f8d45`, with
-both on, held 230,000 users (30 µs/req, 653 MB peak). 240,000 failed on
-p95/p99 at 77 % CPU. That is below the default VFS's 250,000, so `start.sh`
-leaves SQLite's default VFS in place and the next run measures the runtime
-changes alone. Set `HPHP_SQLITE_VFS=unix-excl` and
-`HPHP_SQLITE_WAL_COALESCE=1` to use them.
+The `unix-excl` VFS remains **off by default**. The box run at `f1f8d45`, with
+both `unix-excl` and WAL coalescing enabled, held 230,000 users (30 µs/req,
+653 MB peak); 240,000 failed on p95/p99 at 77 % CPU. `start.sh` therefore
+keeps SQLite's default VFS and measures WAL coalescing independently. The
+coalescing wrapper is now on by default; set `HPHP_SQLITE_WAL_COALESCE=0` to
+compare the original write path. Set `HPHP_SQLITE_VFS=unix-excl` separately
+to opt into the alternate VFS.
 
 With `HPHP_SQLITE_VFS=unix-excl`, SQLite opens through the `unix-excl` VFS. The process holds the
 database lock, so transactions take no `fcntl()` locks, and the WAL index
@@ -715,3 +733,93 @@ Checks:
 - No sampled acknowledged post was missing.
 
 These are WSL diagnostics, not Box results.
+
+#### WAL coalescing with SQLite's default VFS (WSL, 2026-11-14)
+
+An alternating A/B/B/A run at 1,000 VUs (20 s per run) measured 18.90 µs of
+server CPU per request with coalescing off and 17.95 µs with it on, about 5%
+less. A second A/B/B/A run at 4,096 VUs measured 20.22 vs. 19.33 µs, about
+4.4% less. Both settings had zero HTTP failures. At 4,096 VUs, p95 was
+176/175 ms off and 170/175 ms on; p99 was 287/310 ms off and 229/254 ms on.
+The wrapper's flushes remain inside SQLite's commit path before the commit
+returns. Three SIGKILL-under-write rounds preserved all 716 acknowledged
+posts, and each pre/post-restart `PRAGMA integrity_check` returned `ok`.
+The challenge suite passed 42/42 with coalescing on. These WSL results justify
+the default as a CPU improvement, but do not predict a Box user count.
+
+#### Multi-ring completion-drain order experiment (WSL, 2026-11-14)
+
+Added generic `HPHP_DRAIN_RR=1` to rotate the first ring drained each event-loop
+pass. This can change the arrival order in the shared ready FIFO when multiple
+rings complete together; it is off by default. On the same binary in A/B/B/A
+order, with Direct-6 and the hot no-think-time feed mix, the 800-VU pair means
+were 19.76 vs. 19.45 us CPU/request (about 1.6% lower with rotation), 35.5k vs.
+36.5k requests/s, p95 42.26 vs. 42.16 ms, and p99 62.46 vs. 59.88 ms. At
+1,600 VUs, CPU/request was 20.47 vs. 20.29 us, request rate was effectively
+flat (34.7k vs. 34.7k/s), p95 was 88.70 vs. 88.03 ms, and p99 regressed from
+108.22 to 113.45 ms. All runs had zero HTTP errors. The higher-load pair does
+not reproduce a tail-latency gain, so rotation remains opt-in and is not a
+280k capacity result.
+
+At 280,000 configured users, four C epoll client shards (70k each, 45 s ramp
+and 45 s hold) all connected successfully with zero HTTP errors. Same-build
+Direct-6 A/B runs with and without rotation both peaked at 280,002 server
+connections. Rotation completed 826,876 requests versus 829,988 without it
+(-0.4%); mean shard p95 was 3.47 s versus 3.33 s, and the answer FIFO peaked
+at 53,963 versus 50,859 entries. The per-shard p99 values were about 46 s in
+both runs. This rejects the ring-order hypothesis for the current queue; it
+does not meet the challenge latency gate.
+
+The same four-shard 280k diagnostic compared `HPHP_BATCH_N=256` with the
+64-CQE baseline. The single candidate run completed 834,480 requests versus
+829,988 in the baseline (+0.5%); per-shard p95 averaged 3.25 s versus 3.33 s
+and p99 averaged 44.16 s versus 45.99 s. This is a small, unreplicated WSL
+signal and does not justify changing the 64-CQE launcher default. Raising the
+answer budget from 2,048 to 4,096 was worse in a separate run: 788,945 requests,
+p95 about 4.64 s, and an 80k answer-queue peak. Keep the answer budget at
+2,048. All these client percentiles are per shard, not a combined global
+percentile, and none is a Box score or a 280k pass.
+
+#### Ubuntu 6.8 receive path and bounded dispatch (local validation, 2026-11-14)
+
+The runtime now retries the specific provided-buffer registration `EINVAL`
+seen on the tested Ubuntu 6.8 kernel. `HPHP_PBUF_COMPAT=0` restores the old
+one-shot fallback for comparison. Standard registration is still tried first.
+The launcher dispatches at most 2,048 application-ready sockets per pass;
+`HPHP_ANSWER_BUDGET=8192` selects the previous experimental budget.
+
+Two correctness fixes accompany this work: pending POST/LIKE replies carry
+connection generations, and forced checkpoints may reserve a worker that is
+queued or waiting rather than requiring the transient idle state. The SQL
+commit still precedes every successful write reply. PHP syntax and existing
+builtins are unchanged; additional range/array/B-tree helpers are generic.
+
+A private Ubuntu 6.8.0-147 VM (one vCPU, 2 GiB, no swap, `LimitNOFILE=65535`)
+ran a native-client diagnostic across a virtual NIC: 60 s ramp and 300 s hold,
+150,000 configured clients, 5,312,271 requests. All clients had successful
+requests; the 45 failures include unfinished requests at strict cutoff.
+Per-shard p95 was 22.3-22.5 ms and p99 196.3-198.3 ms. The same server PID
+survived with no OOM. All 47,784 acknowledged posts and 359,609 acknowledged
+new likes were present afterward; four additional unacknowledged likes had
+committed. `PRAGMA quick_check` returned `ok`; foreign-key violations: zero.
+These are local diagnostics, not a Box score or a 280k capacity claim.
+
+The unchanged Rust reference also fails the larger 176k diagnostic on this
+nested VM, so its absolute client counts do not translate directly to the Box.
+CQ limiting, all-ring deferred task work, unconditional ring enters and
+rotating drain order remain experimental; none is enabled by this launcher.
+
+Two optional regressions require Python 3 and a private test database:
+
+- `checks/stale_write_response.py --database PATH --tokens TOKENS --pid PID
+  --port PORT --kind post` (repeat with `--kind like`): start the server with
+  `HPHP_DIRECT=0 HPHP_STATS=1`. The test holds a write lock, disconnects its
+  client, verifies actual server-FD reuse and checks that the abandoned write
+  commits without replying on the replacement connection. Run as the server
+  user, or with permission to inspect its `/proc/PID/fd` entries.
+- `checks/checkpoint_reader.py --database PATH --tokens TOKENS --port PORT`:
+  start with `HPHP_STATS=1 HPHP_CKPT_FRAMES=32
+  HPHP_CKPT_FORCE_FRAMES=128`. A reader delays the checkpoint while 136 POSTs
+  commit. Inspect the server log for `mode=forced`; after releasing the reader,
+  all 136 acknowledged posts must be present. The old runtime recorded zero
+  forced checkpoints in this probe; the corrected runtime reaches that path.

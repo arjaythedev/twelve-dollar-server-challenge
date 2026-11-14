@@ -66,6 +66,9 @@ void builtins_init(void) {
     add("str_contains",  B_STR2,    ty_bool,   false, false);
     add("str_at_eq",      B_MISC,    ty_bool,   false, false);
     add("str_to_int",      B_MISC,    ty_int,    false, false);
+    add("str_to_int_range", B_MISC,   ty_int,    false, false);
+    add("http_request_bounds", B_MISC, ty_int, false, false);
+    add("str_find_range", B_MISC, ty_int, false, false);
     add("str_starts_with", B_STR2,  ty_bool,   false, false);
     add("str_ends_with", B_STR2,    ty_bool,   false, false);
     add("strcmp",        B_CMP,     ty_int,    false, false);
@@ -911,12 +914,17 @@ void builtins_init(void) {
     add("bt_count_key",        B_MISC, ty_int,    false, false);
     add("bt_count_range",      B_MISC, ty_int,    false, false);
     add("bt_multi_seek",       B_MISC, ty_int,    false, false);
+    add("bt_tail",             B_MISC, ty_int,    false, false);
     add("bt_multi_payloads",   B_MISC, ty_bool,   false, false);
+    add("bt_multi_keys",       B_MISC, ty_int,    false, false);
     add("bt_multi_release",    B_MISC, ty_bool,   false, false);
     add("iarr_new",            B_MISC, ty_int,    false, false);
+    add("iarr_new_uninit",     B_MISC, ty_int,    false, false);
     add("iarr_release",        B_MISC, ty_bool,   false, false);
     add("iarr_get",            B_MISC, ty_int,    false, false);
     add("iarr_set",            B_MISC, ty_bool,   false, false);
+    add("iarr_get_fast",       B_MISC, ty_int,    false, false);
+    add("iarr_set_fast",       B_MISC, ty_bool,   false, false);
     add("iarr_len",            B_MISC, ty_int,    false, false);
     add("sb_new",               B_MISC, ty_int,    false, false);
     add("sb_put",               B_MISC, ty_bool,   false, false);

@@ -18,8 +18,9 @@
   Accepted sockets are fixed (direct) descriptors from multishot accepts. A table may hold up to `RLIMIT_NOFILE`
   (65,535) entries, so the server raises its soft limit to the hard one and runs up to 8 rings: accept leaves a ring
   at a high-water mark (a quarter of its slots, at most 4,096, below full) while another ring has room, since an
-  accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues
-  (`TCP_DEFER_ACCEPT` on), so a ramp's new connections wait there instead of being refused.
+  accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues,
+  so a ramp's new connections wait there instead of being refused. A connection is accepted when its handshake
+  completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives).
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -54,9 +55,7 @@
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 700 ms: late in a long run a pass can take most of a second on the disk, and a shorter hold ends before its
-  pass does, lets writes in, and starts the next hold at once, riding the same pass, so no hold completes and the WAL
-  never rewinds. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  most 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
   them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
   reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
   of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes

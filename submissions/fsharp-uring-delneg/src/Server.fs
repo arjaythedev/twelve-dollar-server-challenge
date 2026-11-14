@@ -42,7 +42,7 @@ let private statsOn = env "STATS" 0 = 1
 let private taskrunFlag = env "TASKRUN_FLAG" 1 = 1
 let private holdRem = env "HOLDREM" 0 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
 let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frames (1 GB of WAL), hold after any pass
-let private holdMs = int64 (env "HOLDMS" 700) // a hold longer than this ends without its checkpoint pass
+let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------

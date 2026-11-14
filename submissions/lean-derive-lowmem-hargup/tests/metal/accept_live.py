@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Real Linux accept-table exhaustion/reuse. Run in a private network namespace."""
-import asyncio, os, pathlib, shutil, subprocess, sys, tempfile
+import asyncio, os, pathlib, resource, shutil, subprocess, sys, tempfile
+
+def client_descriptors(need=8192):
+    # The client holds 4,097 sockets; the server's own limit is set separately with prlimit.
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = need if hard == resource.RLIM_INFINITY else min(hard, need)
+    if want < need: raise RuntimeError(f'client needs {need} descriptors; hard limit is {hard}')
+    if soft < want: resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
 
 async def response(reader):
     head = await asyncio.wait_for(reader.readuntil(b'\r\n\r\n'), 10)
@@ -9,6 +16,7 @@ async def response(reader):
     await reader.readexactly(size)
 
 async def main(binary, seed):
+    client_descriptors()
     subprocess.run(['ip','link','set','lo','up'],check=True)
     with tempfile.TemporaryDirectory(prefix='accept-live-') as folder:
         db=pathlib.Path(folder)/'feed.db';shutil.copyfile(seed,db)

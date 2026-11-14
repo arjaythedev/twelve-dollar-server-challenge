@@ -1,5 +1,5 @@
-// Feed API: high-performance io_uring event loop, SQLite in-process, group commit per completion batch.
-// Implements Pcache1 lock-byte neutralizer, Coalescing WAL VFS, and aggressive socket clamping.
+// Feed API: high-performance io_uring event loop, SQLite in-process, group commit per batch.
+// Pure C11, single translation unit with SQLite amalgamation, zero-allocation request pipeline.
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
@@ -7,7 +7,6 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <pthread.h>
-#include <sys/eventfd.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -16,183 +15,134 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
-#include "sqlite3.c"  // one translation unit: reads use its B-tree layer directly
+#include "sqlite3.c"  // Direct inclusion: enables compiler cross-inlining into B-tree routines
 
-#define MAXREQ (64 * 1024)    // header + body cap per request
-#define BATCH_OUT (4 << 20)   // response bytes held per batch until its commit
-#define MAXSEG 65536          // responses per batch
-#define NBUF 2048             // provided receive buffers per ring: every one gets touched, so they cost RAM
-#define BSZ 1024
+#define MAXREQ (64 * 1024)       // header + body cap per request
+#define BATCH_OUT (4 << 20)      // response bytes held per batch until commit
+#define MAXSEG 65536             // responses per batch
+#define NBUF 2048                // provided receive buffers per ring
+#define BSZ 1024                 // buffer size per receive buffer
 #ifndef CACHE_KB
-#define CACHE_KB 32768        // SQLite page cache
+#define CACHE_KB 65536           // 64 MB SQLite page cache
 #endif
 #define STR2(x) #x
 #define STR(x) STR2(x)
-#define MAXRINGS 8            // 8 rings * 65,472 = 523,776 max concurrent connections
-#define NLISTEN 8             // SO_REUSEPORT listeners: each has its own accept queue of somaxconn
+#define MAXRINGS 10              // Up to 10 rings * 65,472 direct descriptors = 654,720 capacity
+#define NLISTEN 8                // SO_REUSEPORT listeners sharing the port
 
-// ---------- Pcache1 xRekey Lock-Byte Neutralizer ----------
-// A B-tree split that puts new pages in order swaps two of them through temporary page number 262,145
-// (the lock-byte page for 4096-byte pages). pcache1 tracks the largest page number held and scans all slots up to
-// that number during truncate. Neutralizing it to page 0 prevents scanning tens of thousands of slots!
-static sqlite3_pcache_methods2 orig_pcache;
-static void my_pcache_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned oldKey, unsigned newKey) {
-  uint32_t t = 0x40000000u / 4096u + 1u; // 262145
-  if (newKey == t || oldKey == t) {
-    orig_pcache.xRekey(p, pg, (oldKey == t ? 0 : oldKey), (newKey == t ? 0 : newKey));
-  } else {
-    orig_pcache.xRekey(p, pg, oldKey, newKey);
-  }
-}
-static void install_pcache_rekey(void) {
-  sqlite3_pcache_methods2 methods;
-  memset(&methods, 0, sizeof(methods));
-  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &methods) == SQLITE_OK && methods.xRekey) {
-    orig_pcache = methods;
-    methods.xRekey = my_pcache_rekey;
-    sqlite3_config(SQLITE_CONFIG_PCACHE2, &methods);
-  }
-}
+// ---------- Background Checkpoint Coordination ----------
+#define CKPT_FRAMES 4096         // WAL threshold to trigger background bulk checkpoint
+#define CKPT_FORCE 65536         // Last-resort inline checkpoint threshold
+#define HOLD_MAX_MS 250          // Maximum duration to hold POST writes during tail checkpoint
+#define CKPT_NICE 19
 
-// ---------- Coalescing WAL VFS ----------
-// Buffers sequential WAL frame writes during COMMIT into a 4 MB contiguous buffer,
-// flushing to disk in chunks of 131,071 bytes upon reaching the commit frame page.
-static const sqlite3_vfs *orig_vfs;
-static sqlite3_vfs my_vfs;
-static sqlite3_io_methods orig_methods;
-static sqlite3_io_methods my_methods;
-static int my_methods_init = 0;
+static sqlite3 *db, *ckdb;
+enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
+static int ck_state;             // Guarded by ck_mu; polled atomically by event loop
+static int ck_full;              // 1 if last checkpoint pass fully caught up
+static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
+static volatile int writes_held = 0;
+static struct timespec hold_t0;
+static int wal_frames = 0;
 
-static char wal_buf[4 << 20];
-static sqlite3_file *wal_buf_file = NULL;
-static sqlite3_int64 wal_buf_off = 0;
-static int wal_buf_len = 0;
-static int wal_commit_pending = 0;
-static int in_commit_call = 0;
-
-static int flush_wal_buf(void) {
-  if (wal_buf_len == 0) return SQLITE_OK;
-  int rc = SQLITE_OK;
-  int done = 0;
-  while (rc == SQLITE_OK && done < wal_buf_len) {
-    int n = wal_buf_len - done;
-    if (n > 131071) n = 131071; // unix VFS maximum write size
-    rc = orig_methods.xWrite(wal_buf_file, wal_buf + done, n, wal_buf_off + done);
-    done += n;
-  }
-  wal_buf_len = 0;
-  wal_commit_pending = 0;
-  return rc;
+static void ck_set(int s) {
+  pthread_mutex_lock(&ck_mu);
+  __atomic_store_n(&ck_state, s, __ATOMIC_RELEASE);
+  pthread_cond_signal(&ck_cv);
+  pthread_mutex_unlock(&ck_mu);
 }
 
-static int my_wal_xWrite(sqlite3_file *pFile, const void *pBuf, int iAmt, sqlite3_int64 iOfst) {
-  if (in_commit_call && iAmt <= (int)sizeof(wal_buf)) {
-    int rc = SQLITE_OK;
-    if (wal_buf_len > 0 && (pFile != wal_buf_file || iOfst != wal_buf_off + wal_buf_len || wal_buf_len + iAmt > (int)sizeof(wal_buf))) {
-      if (pFile == wal_buf_file) rc = flush_wal_buf();
-    }
-    if (rc != SQLITE_OK) return rc;
-    if (wal_buf_len == 0 || pFile == wal_buf_file) {
-      if (wal_buf_len == 0) {
-        wal_buf_file = pFile;
-        wal_buf_off = iOfst;
+static void *ck_main(void *arg) {
+  (void)arg;
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), CKPT_NICE);
+  for (;;) {
+    pthread_mutex_lock(&ck_mu);
+    while (ck_state != CK_BULK && ck_state != CK_TAIL) pthread_cond_wait(&ck_cv, &ck_mu);
+    int st = ck_state;
+    pthread_mutex_unlock(&ck_mu);
+
+    int nlog = -1, ndone = -2;
+    int rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+
+    pthread_mutex_lock(&ck_mu);
+    ck_full = (rc == SQLITE_OK && nlog == ndone && nlog > 0);
+    __atomic_store_n(&ck_state, st + 1, __ATOMIC_RELEASE);
+    pthread_mutex_unlock(&ck_mu);
+  }
+  return NULL;
+}
+
+static inline long ms_since(const struct timespec *t0) {
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (t.tv_sec - t0->tv_sec) * 1000 + (t.tv_nsec - t0->tv_nsec) / 1000000;
+}
+
+static void td_tick(void) {
+  switch (__atomic_load_n(&ck_state, __ATOMIC_ACQUIRE)) {
+    case CK_IDLE:
+      if (wal_frames >= CKPT_FORCE) {
+        int nlog = 0, ndone = 0;
+        if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK && nlog == ndone)
+          wal_frames = 0;
+      } else if (wal_frames >= CKPT_FRAMES) {
+        ck_set(CK_BULK);
       }
-      memcpy(wal_buf + wal_buf_len, pBuf, iAmt);
-      wal_buf_len += iAmt;
-      if (wal_commit_pending) {
-        return flush_wal_buf();
-      } else {
-        if (iAmt == 24) {
-          const unsigned char *q = (const unsigned char *)pBuf;
-          if (q[4] | q[5] | q[6] | q[7]) {
-            wal_commit_pending = 1;
-          }
-        }
-        return SQLITE_OK;
+      break;
+    case CK_BULK_DONE:
+      writes_held = 1;
+      clock_gettime(CLOCK_MONOTONIC, &hold_t0);
+      ck_set(CK_TAIL);
+      break;
+    case CK_TAIL_DONE:
+      if (ck_full) wal_frames = 0;
+      writes_held = 0;
+      ck_set(CK_IDLE);
+      break;
+    default:
+      if (writes_held && ms_since(&hold_t0) > HOLD_MAX_MS) {
+        writes_held = 0;
       }
-    } else {
-      return orig_methods.xWrite(pFile, pBuf, iAmt, iOfst);
-    }
-  } else {
-    int rc = SQLITE_OK;
-    if (wal_buf_len > 0 && pFile == wal_buf_file) rc = flush_wal_buf();
-    if (rc != SQLITE_OK) return rc;
-    return orig_methods.xWrite(pFile, pBuf, iAmt, iOfst);
+      break;
   }
 }
 
-static int my_wal_xSync(sqlite3_file *pFile, int flags) {
-  if (wal_buf_len > 0 && pFile == wal_buf_file) flush_wal_buf();
-  return orig_methods.xSync(pFile, flags);
+static int wal_hook(void *arg, sqlite3 *d, const char *name, int n) {
+  (void)arg; (void)d; (void)name;
+  wal_frames = n;
+  return SQLITE_OK;
 }
 
-static int my_wal_xTruncate(sqlite3_file *pFile, sqlite3_int64 size) {
-  if (wal_buf_len > 0 && pFile == wal_buf_file) flush_wal_buf();
-  return orig_methods.xTruncate(pFile, size);
-}
-
-static int my_wal_xClose(sqlite3_file *pFile) {
-  if (wal_buf_len > 0 && pFile == wal_buf_file) {
-    flush_wal_buf();
-    wal_buf_file = NULL;
-  }
-  return orig_methods.xClose(pFile);
-}
-
-static int my_vfs_xOpen(sqlite3_vfs *vfs, const char *zName, sqlite3_file *pFile, int flags, int *pOutFlags) {
-  (void)vfs;
-  int rc = orig_vfs->xOpen((sqlite3_vfs *)orig_vfs, zName, pFile, flags, pOutFlags);
-  if (rc == SQLITE_OK && (flags & SQLITE_OPEN_WAL) && pFile->pMethods) {
-    if (!my_methods_init) {
-      orig_methods = *pFile->pMethods;
-      my_methods = orig_methods;
-      my_methods.xWrite = my_wal_xWrite;
-      my_methods.xSync = my_wal_xSync;
-      my_methods.xTruncate = my_wal_xTruncate;
-      my_methods.xClose = my_wal_xClose;
-      my_methods_init = 1;
-    }
-    pFile->pMethods = &my_methods;
-  }
-  return rc;
-}
-
-static void install_wal_vfs(void) {
-  orig_vfs = sqlite3_vfs_find("unix-excl");
-  if (!orig_vfs) orig_vfs = sqlite3_vfs_find(NULL);
-  memcpy(&my_vfs, orig_vfs, sizeof(my_vfs));
-  my_vfs.zName = "coalesce-wal";
-  my_vfs.xOpen = my_vfs_xOpen;
-  sqlite3_vfs_register(&my_vfs, 0);
-}
-
-// A response in flight. who is the connection's receive tag, so a late completion can tell
-// whether the connection it belongs to is still the same one.
+// ---------- Response in Flight ----------
 typedef struct { uint64_t who; uint32_t len, off, cap; char d[]; } sop_t;
+
 typedef struct {
-  char *in; uint32_t inlen, incap;  // partial request, or input held while a send is in flight
-  sop_t *q;                         // responses queued behind the send in flight
-  sop_t *out;                       // the send in flight
+  char *in; uint32_t inlen, incap;
+  sop_t *q;
+  sop_t *out;
   uint32_t gen;
-  uint8_t open, closing, sending, eof, sent100, queued, ready;
+  uint8_t open, closing, sending, eof, sent100, queued, ready, held;
 } conn_t;
 
 typedef struct {
   struct io_uring r;
-  conn_t *c; uint32_t n, pend, reads;  // open connections, accepts in flight, single-shot reads in flight
-  struct io_uring_buf_ring *br; char *bufs;
+  conn_t *c;
+  uint32_t n, pend, reads;
+  struct io_uring_buf_ring *br;
+  char *bufs;
 } ring_t;
+
 static ring_t R[MAXRINGS];
-static int nrings, lfd[NLISTEN];
-static uint32_t tsize;  // slots per ring
-static sqlite3 *db;
+static int nrings = 0, lfd[NLISTEN];
+static uint32_t tsize;
 static sqlite3_stmt *st_feed, *st_post, *st_ins, *st_like, *st_one, *st_begin, *st_commit, *st_rollback;
 static time_t started, now_s;
 
-// user_data: low 3 bits tag the operation. A send's user_data is its sop_t pointer (tag 0).
-enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ, T_WAL };
+enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ };
 #define RECV_UD(k, slot, gen) (T_RECV | (uint64_t)(k) << 3 | (uint64_t)(slot) << 8 | (uint64_t)(gen) << 32)
 
 static void *huge_alloc(size_t n) {
@@ -204,24 +154,23 @@ static void *huge_alloc(size_t n) {
   return a;
 }
 
-// ---------- Socket Buffer Clamping ----------
 static inline void clamp_socket(int fd) {
-  int clamp = 1024;
+  int clamp = 2048;
   setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &clamp, sizeof(clamp));
   setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &clamp, sizeof(clamp));
   setsockopt(fd, IPPROTO_TCP, TCP_WINDOW_CLAMP, &clamp, sizeof(clamp));
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-  int zero = 0;
-  setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &zero, sizeof(zero));
+  setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &one, sizeof(one));
 }
 
-// ---------- Output: One Arena Per Batch ----------
+// ---------- Batch Output Arena ----------
 static char *arena; static size_t alen;
 typedef struct { uint64_t who; uint32_t off, len; } seg_t;
 static seg_t segs[MAXSEG]; static int nsegs;
-static uint64_t *deferred, *held, *eofs, *limbo; static int ndef, nheld, neof, nlimbo, cap_def, cap_held, cap_eof, cap_limbo;
-static int arena_full, in_txn, txn_writes, batch_failed, hold_hit, hold_posts;
+static uint64_t *deferred, *held, *eofs, *limbo;
+static int ndef, nheld, neof, nlimbo, cap_def, cap_held, cap_eof, cap_limbo;
+static int arena_full, in_txn, txn_writes, batch_failed;
 
 static inline void put(const void *p, size_t n) { memcpy(arena + alen, p, n); alen += n; }
 #define PUTS(s) put(s, sizeof(s) - 1)
@@ -230,6 +179,7 @@ static inline void putu(uint64_t v) {
   do { b[--i] = '0' + v % 10; v /= 10; } while (v);
   put(b + i, 24 - i);
 }
+
 static const char hexd[] = "0123456789abcdef";
 static void putjs(const unsigned char *s, size_t n) {
   size_t i = 0, run = 0;
@@ -272,10 +222,12 @@ static void begin_resp(int status, int close) {
   PUTS("Content-Type: application/json\r\nContent-Length:       \r\n\r\n");
   cl_pos = alen - 10; body_start = alen;
 }
+
 static void finish(void) {
   size_t n = alen - body_start; char *p = arena + cl_pos + 6;
   do { *--p = '0' + n % 10; n /= 10; } while (n);
 }
+
 static void err(int status, const char *msg, int close) {
   begin_resp(status, close); PUTS("{\"error\":\""); put(msg, strlen(msg)); PUTS("\"}"); finish();
 }
@@ -290,6 +242,7 @@ static const uint32_t K[64] = {
   0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,
   0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
 #define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
+
 static void sha_block(uint32_t *h, const unsigned char *p) {
   uint32_t w[64], a, b, c, d, e, f, g, k, t1, t2;
   for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4*i] << 24 | p[4*i+1] << 16 | p[4*i+2] << 8 | p[4*i+3];
@@ -305,16 +258,19 @@ static void sha_block(uint32_t *h, const unsigned char *p) {
   }
   h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += k;
 }
+
 static void sha_init(sha_t *s) {
   static const uint32_t iv[8] = {0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
   memcpy(s->h, iv, 32); s->n = 0; s->bl = 0;
 }
+
 static void sha_upd(sha_t *s, const unsigned char *p, size_t n) {
   s->n += n;
   if (s->bl) { size_t t = 64 - s->bl; if (t > n) t = n; memcpy(s->b + s->bl, p, t); s->bl += t; p += t; n -= t; if (s->bl == 64) { sha_block(s->h, s->b); s->bl = 0; } }
   for (; n >= 64; p += 64, n -= 64) sha_block(s->h, p);
   if (n) { memcpy(s->b, p, n); s->bl = n; }
 }
+
 static void sha_fin(sha_t *s, unsigned char *out) {
   uint64_t bits = s->n * 8; unsigned char pad = 0x80, z[64] = {0}, len[8];
   sha_upd(s, &pad, 1);
@@ -323,6 +279,7 @@ static void sha_fin(sha_t *s, unsigned char *out) {
   sha_upd(s, len, 8);
   for (int i = 0; i < 8; i++) { out[4*i] = s->h[i] >> 24; out[4*i+1] = s->h[i] >> 16; out[4*i+2] = s->h[i] >> 8; out[4*i+3] = s->h[i]; }
 }
+
 static sha_t hm_in, hm_out;
 static void hmac_key(const char *key) {
   unsigned char k[64] = {0}, pad[64]; size_t kl = strlen(key);
@@ -332,6 +289,7 @@ static void hmac_key(const char *key) {
   for (int i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5c;
   sha_init(&hm_out); sha_upd(&hm_out, pad, 64);
 }
+
 static void hmac(const unsigned char *m, size_t n, unsigned char *out) {
   sha_t s = hm_in; unsigned char ih[32];
   sha_upd(&s, m, n); sha_fin(&s, ih);
@@ -351,7 +309,7 @@ static int b64dec(const char *s, size_t n, unsigned char *out) {
   return o;
 }
 
-// ---------- JSON (strict RFC 8259) ----------
+// ---------- JSON (Strict RFC 8259) ----------
 typedef struct { const char *p, *e; } js_t;
 static inline void ws(js_t *j) { while (j->p < j->e && (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r')) j->p++; }
 static int hexv(int c) { return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1; }
@@ -371,6 +329,7 @@ static int utf8_len(const unsigned char *p, const unsigned char *e) {
   }
   return 0;
 }
+
 static long jstr(js_t *j, char *out, size_t cap) {
   const unsigned char *p = (const unsigned char *)j->p + 1, *e = (const unsigned char *)j->e; size_t o = 0; int over = 0;
   while (p < e) {
@@ -418,6 +377,7 @@ static long jstr(js_t *j, char *out, size_t cap) {
   }
   return -1;
 }
+
 static int jnumber(js_t *j) {
   const char *p = j->p, *e = j->e;
   if (p < e && *p == '-') p++;
@@ -427,7 +387,9 @@ static int jnumber(js_t *j) {
   if (p < e && (*p == 'e' || *p == 'E')) { p++; if (p < e && (*p == '+' || *p == '-')) p++; if (p >= e || *p < '0' || *p > '9') return 0; while (p < e && *p >= '0' && *p <= '9') p++; }
   j->p = p; return 1;
 }
+
 static int jlit(js_t *j, const char *s, size_t n) { if ((size_t)(j->e - j->p) < n || memcmp(j->p, s, n)) return 0; j->p += n; return 1; }
+
 static int jvalue(js_t *j, int depth) {
   if (depth > 64) return 0;
   ws(j); if (j->p >= j->e) return 0;
@@ -461,6 +423,7 @@ static int jvalue(js_t *j, int depth) {
     default: return jnumber(j);
   }
 }
+
 typedef struct { const char *key; const char *v, *ve; } want_t;
 static int jdoc(const char *s, size_t n, want_t *w, int nw) {
   js_t j = {s, s + n};
@@ -526,7 +489,7 @@ static const char *auth(const char *h, size_t hl, int64_t *uid, char *uname, siz
   *uid = v; *unl = ul; return NULL;
 }
 
-// ---------- Database ----------
+// ---------- Database Direct B-tree Access ----------
 static Btree *bt;
 static BtCursor *cur_posts, *cur_users, *cur_feed, *cur_likes;
 static Pgno root_posts, root_users, root_feed, root_likes;
@@ -539,6 +502,7 @@ static void close_cursors(void) {
   sqlite3BtreeCloseCursor(cur_feed); sqlite3BtreeCloseCursor(cur_likes);
   cur_open = 0;
 }
+
 static int open_cursors(void) {
   BtCursor *c[4] = {cur_posts, cur_users, cur_feed, cur_likes};
   Pgno roots[4] = {root_posts, root_users, root_feed, root_likes};
@@ -552,6 +516,7 @@ static int open_cursors(void) {
   }
   return cur_open = 1;
 }
+
 static int txn(void) {
   if (in_txn) return 1;
   int rc = sqlite3_step(st_begin); sqlite3_reset(st_begin);
@@ -562,14 +527,17 @@ static int txn(void) {
   }
   return in_txn = 1;
 }
+
 static int wstep(sqlite3_stmt *s) {
   int rc = sqlite3_step(s);
   if (rc == SQLITE_ROW || rc == SQLITE_DONE) txn_writes = 1;
   return rc;
 }
+
 static void db_fail(void) {
   if (in_txn && sqlite3_get_autocommit(db)) { close_cursors(); in_txn = 0; if (txn_writes) batch_failed = 1; txn_writes = 0; }
 }
+
 static void put_post_row(sqlite3_stmt *s) {
   PUTS("{\"id\":"); putu(sqlite3_column_int64(s, 0));
   PUTS(",\"body\":\""); putjs(sqlite3_column_text(s, 1), sqlite3_column_bytes(s, 1));
@@ -593,11 +561,13 @@ static inline int rec_parse(const unsigned char *p, const unsigned char *e, col_
   }
   return 1;
 }
+
 static inline int rec_cols(BtCursor *c, col_t *out, int nc) {
   getCellInfo(c);
   if (c->info.nLocal != c->info.nPayload) return 0;
   return rec_parse(c->info.pPayload, c->info.pPayload + c->info.nPayload, out, nc);
 }
+
 static inline int col_text(const col_t *c) { return c->type >= 13 && (c->type & 1); }
 static inline int col_int(const col_t *c, int64_t *v) {
   if (c->type == 8 || c->type == 9) { *v = c->type - 8; return 1; }
@@ -619,6 +589,7 @@ static int tally_cells(MemPage *pg, int first, int last, int64_t lo, int64_t hi,
   }
   return 1;
 }
+
 static int likes_from(int64_t lo) {
   Mem key; UnpackedRecord want; int cmp = 0;
   memset(&key, 0, sizeof key); key.flags = MEM_Int; key.u.i = lo;
@@ -630,6 +601,7 @@ static int likes_from(int64_t lo) {
   int rc = sqlite3BtreeNext(cur_likes, 0);
   return rc == SQLITE_OK ? 1 : rc == SQLITE_DONE ? 0 : -1;
 }
+
 static int count_likes(int64_t lo, int64_t hi, uint32_t *n) {
   int on = likes_from(lo);
   while (on == 1) {
@@ -643,11 +615,13 @@ static int count_likes(int64_t lo, int64_t hi, uint32_t *n) {
   }
   return on == 0 ? 1 : -1;
 }
+
 static inline int seek_row(BtCursor *c, int64_t id) {
   int res = 0;
   if (sqlite3BtreeTableMoveto(c, id, 0, &res) != SQLITE_OK) return -1;
   return res == 0 && c->eState == CURSOR_VALID;
 }
+
 static inline void put_row(int64_t id, const col_t *body, const unsigned char *ca, uint32_t cal, const col_t *name, uint32_t likes) {
   PUTS("{\"id\":"); putu(id);
   PUTS(",\"body\":\""); putjs(body->d, body->len);
@@ -655,6 +629,7 @@ static inline void put_row(int64_t id, const col_t *body, const unsigned char *c
   PUTS("\",\"author\":\""); putjs(name->d, name->len);
   PUTS("\",\"like_count\":"); putu(likes); PUTS("}");
 }
+
 static inline int row_author(int64_t uid, col_t *name) {
   int rc = seek_row(cur_users, uid); if (rc <= 0) return rc;
   col_t c[2];
@@ -665,7 +640,7 @@ static inline int row_author(int64_t uid, col_t *name) {
 #define FEED_N 20
 #define FEED_SPAN 512
 static int feed_btree(int close) {
-  static char tmp[BATCH_OUT];
+  static char tmp[64 * 1024]; // 64 KB is generous for 20 posts and stays in L1/L2 cache
   if (!bt_ok) return 0;
   int64_t ids[FEED_N]; unsigned char ca[FEED_N][32]; uint32_t cal[FEED_N], likes[FEED_N]; int n = 0, empty = 1, ord[FEED_N];
   if (sqlite3BtreeFirst(cur_feed, &empty) != SQLITE_OK) return -1;
@@ -703,7 +678,9 @@ static int feed_btree(int close) {
     if (rc <= 0) { alen = mark; return rc; }
     at[i] = alen - rows; put_row(ids[i], &c[2], ca[i], cal[i], &name, likes[i]); len[i] = alen - rows - at[i];
   }
-  size_t total = alen - rows; memcpy(tmp, arena + rows, total); alen = rows;
+  size_t total = alen - rows;
+  if (total > sizeof tmp) { alen = mark; return 0; }
+  memcpy(tmp, arena + rows, total); alen = rows;
   for (int i = 0; i < n; i++) { if (i) PUTS(","); put(tmp + at[i], len[i]); }
   PUTS("]}"); finish(); return 1;
 }
@@ -725,6 +702,7 @@ static int64_t parse_id(const char *s, size_t n) {
   for (size_t i = 0; i < n; i++) { if (s[i] < '0' || s[i] > '9') return -1; if (v < 100000000000000000LL) v = v * 10 + s[i] - '0'; else v = 0x7fffffffffffffffLL; }
   return v > 0 ? v : -1;
 }
+
 static int jsws_at(const unsigned char *p, const unsigned char *e) {
   if (*p == ' ' || (*p >= 9 && *p <= 13)) return 1;
   if (e - p >= 2 && p[0] == 0xc2 && p[1] == 0xa0) return 2;
@@ -734,6 +712,7 @@ static int jsws_at(const unsigned char *p, const unsigned char *e) {
   }
   return 0;
 }
+
 static int jsws_before(const unsigned char *s, const unsigned char *e) {
   if (e[-1] == ' ' || (e[-1] >= 9 && e[-1] <= 13)) return 1;
   if (e - s >= 2 && e[-2] == 0xc2 && e[-1] == 0xa0) return 2;
@@ -843,12 +822,19 @@ static void handle(const char *m, size_t ml, const char *path, size_t pl, const 
 static uint8_t no_conn, *sent100 = &no_conn;
 static int hdr_is(const char *p, size_t n, const char *name, size_t nl) { return n == nl && !strncasecmp(p, name, nl); }
 
-static long serve(char *buf, size_t n, int *closing) {
+static long serve(char *buf, size_t n, int *closing, conn_t *c, uint64_t who) {
   size_t used = 0;
   while (used < n && !*closing) {
     char *p = buf + used, *e = buf + n;
     if (alen + 2 * MAXREQ > BATCH_OUT || nsegs == MAXSEG) { arena_full = 1; break; }
-    if (hold_posts && *p == 'P') { hold_hit = 1; break; }
+    if (writes_held && *p == 'P') {
+      if (c && !c->held) {
+        c->held = 1;
+        if (nheld >= cap_held) { cap_held = cap_held ? cap_held * 2 : 1024; held = realloc(held, cap_held * sizeof *held); }
+        held[nheld++] = who;
+      }
+      break;
+    }
     char *he = memmem(p, e - p, "\r\n\r\n", 4);
     if (!he) { if ((size_t)(e - p) > MAXREQ) return -1; break; }
     char *le = memchr(p, '\r', he + 2 - p);
@@ -857,13 +843,13 @@ static long serve(char *buf, size_t n, int *closing) {
     int http10 = le - sp2 - 1 == 8 && !memcmp(sp2 + 1, "HTTP/1.0", 8);
     const char *authh = NULL; size_t al = 0, clen = 0; int close = http10, expect = 0;
     for (char *h = le + 2; h < he + 2;) {
-      char *hl = memchr(h, '\r', he + 2 - h), *c;
+      char *hl = memchr(h, '\r', he + 2 - h), *c2;
       if (!hl) return -1;
-      c = memchr(h, ':', hl - h);
-      if (c) {
-        char *v = c + 1; while (v < hl && (*v == ' ' || *v == '\t')) v++;
+      c2 = memchr(h, ':', hl - h);
+      if (c2) {
+        char *v = c2 + 1; while (v < hl && (*v == ' ' || *v == '\t')) v++;
         char *ve = hl; while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
-        size_t kn = c - h;
+        size_t kn = c2 - h;
         if (hdr_is(h, kn, "content-length", 14)) { clen = 0; for (char *d = v; d < ve; d++) { if (*d < '0' || *d > '9') return -1; clen = clen * 10 + *d - '0'; if (clen > MAXREQ) return -1; } }
         else if (hdr_is(h, kn, "authorization", 13)) { authh = v; al = ve - v; }
         else if (hdr_is(h, kn, "connection", 10)) { if (ve - v == 5 && !strncasecmp(v, "close", 5)) close = 1; else if (ve - v == 10 && !strncasecmp(v, "keep-alive", 10)) close = 0; }
@@ -888,56 +874,70 @@ static long serve(char *buf, size_t n, int *closing) {
 // ---------- Connections ----------
 #define K(who) ((int)((who) >> 3 & 31))
 #define SLOT(who) ((int)((who) >> 8 & 0xffffff))
+
 static conn_t *conn_of(uint64_t who) {
-  conn_t *c = &R[K(who)].c[SLOT(who)];
-  return c->open && c->gen == (uint32_t)(who >> 32) ? c : NULL;
+  int k = K(who); uint32_t s = SLOT(who), gen = (uint32_t)(who >> 32);
+  if (k >= nrings || s >= tsize) return NULL;
+  conn_t *c = &R[k].c[s];
+  return (c->open && c->gen == gen) ? c : NULL;
 }
-static void push(uint64_t **a, int *n, int *cap, uint64_t v) {
-  if (*n == *cap) { *cap = *cap ? *cap * 2 : 1024; *a = realloc(*a, *cap * sizeof **a); }
-  (*a)[(*n)++] = v;
-}
-static struct io_uring_sqe *sqe(int k) {
-  struct io_uring_sqe *s;
-  while (!(s = io_uring_get_sqe(&R[k].r))) io_uring_submit(&R[k].r);
+
+static inline struct io_uring_sqe *sqe(int k) {
+  struct io_uring_sqe *s = io_uring_get_sqe(&R[k].r);
+  if (!s) { io_uring_submit(&R[k].r); s = io_uring_get_sqe(&R[k].r); }
   return s;
 }
-typedef struct { uint64_t *a; int head, n, cap; } fifo_t;
-static fifo_t readq, readyq;
-static void conn_close(uint64_t who) {
-  int k = K(who), slot = SLOT(who); ring_t *r = &R[k]; conn_t *c = &r->c[slot];
-  free(c->in); free(c->q);
-  sop_t *out = c->sending ? c->out : NULL;
-  uint32_t g = c->gen + 1; memset(c, 0, sizeof *c); c->gen = g; r->n--;
-  if (io_uring_sq_space_left(&r->r) < 3) io_uring_submit(&r->r);
-  struct io_uring_sqe *s = sqe(k);
-  io_uring_prep_cancel64(s, who, 0); s->flags |= IOSQE_IO_HARDLINK; s->user_data = T_NOP;
-  if (out) { s = sqe(k); io_uring_prep_cancel64(s, (uintptr_t)out, 0); s->flags |= IOSQE_IO_HARDLINK; s->user_data = T_NOP; }
-  s = sqe(k); io_uring_prep_close_direct(s, slot); s->user_data = T_NOP;
+
+#define POOL_CAP 4096
+#define POOL_N 2048
+static sop_t *pool[POOL_N]; static int npool;
+static inline sop_t *sop_new(uint32_t n) {
+  if (n <= POOL_CAP && npool) return pool[--npool];
+  uint32_t cap = n <= POOL_CAP ? POOL_CAP : n;
+  sop_t *o = malloc(sizeof *o + cap); o->cap = cap; return o;
 }
-static void queue_read(uint64_t who, conn_t *c) {
-  if (!c->queued) { c->queued = 1; push(&readq.a, &readq.n, &readq.cap, who); }
+static inline void sop_free(sop_t *o) {
+  if (o->cap == POOL_CAP && npool < POOL_N) pool[npool++] = o; else free(o);
 }
-static void arm_recv(uint64_t who) {
-  struct io_uring_sqe *s = sqe(K(who));
-  io_uring_prep_recv_multishot(s, SLOT(who), NULL, 0, 0);
-  s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT; s->buf_group = 0; s->user_data = who;
-}
+
 static void send_op(sop_t *o) {
-  struct io_uring_sqe *s = sqe(K(o->who));
+  int k = K(o->who); struct io_uring_sqe *s = sqe(k);
   io_uring_prep_send(s, SLOT(o->who), o->d + o->off, o->len - o->off, MSG_NOSIGNAL);
   s->flags |= IOSQE_FIXED_FILE; s->user_data = (uintptr_t)o;
 }
-#define POOL_CAP (8192 - sizeof(sop_t))
-#define POOL_MAX 512
-static sop_t *pool[POOL_MAX]; static int npool;
-static inline sop_t *sop_new(uint32_t n) {
-  if (n <= POOL_CAP && npool) return pool[--npool];
-  return malloc(sizeof(sop_t) + (n <= POOL_CAP ? POOL_CAP : n));
+
+static void arm_recv(uint64_t who) {
+  int k = K(who); struct io_uring_sqe *s = sqe(k);
+  io_uring_prep_recv_multishot(s, SLOT(who), NULL, 0, 0);
+  s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT; s->buf_group = 0; s->user_data = who;
 }
-static inline void sop_free(sop_t *o) {
-  if (o->cap == POOL_CAP && npool < POOL_MAX) pool[npool++] = o; else free(o);
+
+typedef struct { uint64_t *a; int n, cap, head; } fifo_t;
+static fifo_t readq, readyq;
+static void queue_read(uint64_t who, conn_t *c) {
+  if (c->queued) return;
+  c->queued = 1;
+  if (readq.n >= readq.cap) { readq.cap = readq.cap ? readq.cap * 2 : 1024; readq.a = realloc(readq.a, readq.cap * sizeof *readq.a); }
+  readq.a[readq.n++] = who;
 }
+
+static void conn_close(uint64_t who) {
+  int k = K(who); uint32_t s = SLOT(who); conn_t *c = &R[k].c[s];
+  if (!c->open || c->gen != (uint32_t)(who >> 32)) return;
+  if (c->in) { free(c->in); c->in = NULL; }
+  c->inlen = c->incap = 0;
+  for (sop_t *o = c->q, *n; o; o = n) { n = (sop_t *)(uintptr_t)o->who; sop_free(o); }
+  c->q = NULL;
+  struct io_uring_sqe *sq = sqe(k);
+  io_uring_prep_shutdown(sq, s, SHUT_RDWR); sq->flags |= IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK; sq->user_data = T_NOP;
+  sq = sqe(k);
+  io_uring_prep_close_direct(sq, s); sq->user_data = T_NOP;
+  c->open = c->closing = c->sending = c->eof = c->sent100 = c->queued = c->ready = c->held = 0;
+  c->gen++; R[k].n--;
+}
+
 static void send_bytes(uint64_t who, conn_t *c, const char *p, uint32_t n) {
+  if (c->closing) return;
   if (!c->sending) {
     sop_t *o = sop_new(n); *o = (sop_t){who, n, 0, n <= POOL_CAP ? (uint32_t)POOL_CAP : n}; memcpy(o->d, p, n);
     c->sending = 1; c->out = o; send_op(o); return;
@@ -951,9 +951,9 @@ static void send_bytes(uint64_t who, conn_t *c, const char *p, uint32_t n) {
 }
 
 static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
-  uint32_t start = alen; int closing = 0; arena_full = hold_hit = 0;
+  uint32_t start = alen; int closing = 0; arena_full = 0;
   sent100 = &c->sent100;
-  long used = serve(buf, n, &closing);
+  long used = serve(buf, n, &closing, c, who);
   if (used < 0) { alen = start; conn_close(who); return; }
   if (alen > start) segs[nsegs++] = (seg_t){who, start, alen - start};
   c->closing = closing;
@@ -962,21 +962,25 @@ static void process(uint64_t who, conn_t *c, char *buf, size_t n) {
     if (buf != c->in) { c->incap = left + BSZ; c->in = malloc(c->incap); memcpy(c->in, buf + used, left); }
     else if (used) memmove(c->in, c->in + used, left);
     c->inlen = left;
-    if (arena_full) push(&deferred, &ndef, &cap_def, who);
-    if (hold_hit) push(&held, &nheld, &cap_held, who);
+    if (arena_full) {
+      if (ndef >= cap_def) { cap_def = cap_def ? cap_def * 2 : 1024; deferred = realloc(deferred, cap_def * sizeof *deferred); }
+      deferred[ndef++] = who;
+    }
   } else if (c->in) { free(c->in); c->in = NULL; c->inlen = c->incap = 0; }
-  if (alen == start && (closing || (c->eof && !c->sending && !arena_full && !hold_hit))) conn_close(who);
+  if (alen == start && (closing || (c->eof && !c->sending && !arena_full && !c->held))) conn_close(who);
 }
 
-#define ANSWERS 1024
+#define ANSWERS 2048
 #define READS 4096
 static int answers_left = ANSWERS;
+
 static inline uint64_t fifo_pop(fifo_t *f) {
   uint64_t v = f->a[f->head++];
   if (f->head == f->n) f->head = f->n = 0;
   else if (f->head >= 65536 && f->head * 2 >= f->n) { f->n -= f->head; memmove(f->a, f->a + f->head, f->n * sizeof *f->a); f->head = 0; }
   return v;
 }
+
 static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
   if (c->closing) return;
   int later = c->ready || !answers_left;
@@ -985,9 +989,15 @@ static void on_data(uint64_t who, conn_t *c, const char *p, uint32_t n) {
   if (c->incap - c->inlen < n) { c->incap = (c->inlen + n) * 2; c->in = realloc(c->in, c->incap); }
   memcpy(c->in + c->inlen, p, n); c->inlen += n;
   if (c->inlen > 4 * MAXREQ) { conn_close(who); return; }
-  if (later) { if (!c->ready) { c->ready = 1; push(&readyq.a, &readyq.n, &readyq.cap, who); } }
-  else if (!c->sending) process(who, c, c->in, c->inlen);
+  if (later) {
+    if (!c->ready) {
+      c->ready = 1;
+      if (readyq.n >= readyq.cap) { readyq.cap = readyq.cap ? readyq.cap * 2 : 1024; readyq.a = realloc(readyq.a, readyq.cap * sizeof *readyq.a); }
+      readyq.a[readyq.n++] = who;
+    }
+  } else if (!c->sending) process(who, c, c->in, c->inlen);
 }
+
 static void run_ready(void) {
   while (answers_left && readyq.n) {
     uint64_t who = fifo_pop(&readyq); conn_t *c = conn_of(who);
@@ -996,10 +1006,14 @@ static void run_ready(void) {
     if (c->inlen && !c->sending) { answers_left--; process(who, c, c->in, c->inlen); }
   }
 }
+
 static void send_done(sop_t *o, int res) {
   uint64_t who = o->who; conn_t *c = conn_of(who);
   if (c && res > 0 && (o->off += res) < o->len) { send_op(o); return; }
-  if (!c) { push(&limbo, &nlimbo, &cap_limbo, (uintptr_t)o); return; }
+  if (!c) {
+    if (nlimbo >= cap_limbo) { cap_limbo = cap_limbo ? cap_limbo * 2 : 1024; limbo = realloc(limbo, cap_limbo * sizeof *limbo); }
+    limbo[nlimbo++] = (uintptr_t)o; return;
+  }
   sop_free(o);
   if (res <= 0) { c->sending = 0; conn_close(who); return; }
   if (c->q) { o = c->q; c->q = NULL; c->out = o; send_op(o); return; }
@@ -1009,14 +1023,10 @@ static void send_done(sop_t *o, int res) {
   else if (c->eof) conn_close(who);
 }
 
-// Commits the batch, then sends every response produced in it.
-// in_commit_call = 1 activates Coalescing WAL VFS!
 static void flush_batch(void) {
   if (in_txn) {
     close_cursors();
-    in_commit_call = 1;
     int rc = sqlite3_step(st_commit); sqlite3_reset(st_commit);
-    in_commit_call = 0;
     if (rc != SQLITE_DONE) { sqlite3_step(st_rollback); sqlite3_reset(st_rollback); if (txn_writes) batch_failed = 1; }
     in_txn = 0; txn_writes = 0;
   }
@@ -1029,7 +1039,7 @@ static void flush_batch(void) {
   nsegs = 0; alen = 0; batch_failed = 0;
 }
 
-// ---------- Rings ----------
+// ---------- Ring Management ----------
 static struct io_uring_buf_ring *buf_ring(struct io_uring *u) {
   void *p = mmap(NULL, NBUF * sizeof(struct io_uring_buf), PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   if (p == MAP_FAILED) return NULL;
@@ -1040,6 +1050,7 @@ static struct io_uring_buf_ring *buf_ring(struct io_uring *u) {
   io_uring_buf_ring_init(p);
   return p;
 }
+
 static int ring_init(int k) {
   ring_t *r = &R[k];
   struct io_uring_params p = {.flags = IORING_SETUP_SUBMIT_ALL | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_CQSIZE |
@@ -1052,7 +1063,7 @@ static int ring_init(int k) {
   r->c = huge_alloc(tsize * sizeof *r->c); r->bufs = huge_alloc((size_t)NBUF * BSZ);
   for (int i = 0; i < NBUF; i++) io_uring_buf_ring_add(r->br, r->bufs + (size_t)i * BSZ, BSZ, i, NBUF - 1, i);
   io_uring_buf_ring_advance(r->br, NBUF);
-  if (k) fprintf(stderr, "%u connections: added ring %d\n", k * (tsize - 16), k);
+  if (k) fprintf(stderr, "%u connections: added ring %d\n", k * (tsize - 1024), k);
   nrings = k + 1;
   return 0;
 }
@@ -1063,18 +1074,15 @@ static void arm_accepts(void) {
   for (int l = 0, k = 0; l < NLISTEN; l++) {
     while (armed[l] < ACCEPTS && k < MAXRINGS) {
       if (k == nrings && ring_init(k) < 0) return;
-      if (R[k].n + R[k].pend + 16 >= tsize) { k++; continue; }
+      if (R[k].n + R[k].pend + 1024 >= tsize) { k++; continue; }
       struct io_uring_sqe *s = sqe(k);
-      io_uring_prep_accept_direct(s, lfd[l], NULL, NULL, 0, IORING_FILE_INDEX_ALLOC); s->user_data = T_ACCEPT | (uint64_t)l << 3;
+      io_uring_prep_accept_direct(s, lfd[l], NULL, NULL, 0, IORING_FILE_INDEX_ALLOC);
+      s->user_data = T_ACCEPT | (uint64_t)l << 3;
       R[k].pend++; armed[l]++;
     }
   }
 }
-static uint64_t wal_msg, wal_outcome;
-static int wal_replies = -1;
-static void arm_wal_msg(void) {
-  struct io_uring_sqe *s = sqe(0); io_uring_prep_read(s, wal_replies, &wal_msg, 8, 0); s->user_data = T_WAL;
-}
+
 static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
   ring_t *r = &R[k]; conn_t *c;
   switch (ud & 7) {
@@ -1092,10 +1100,13 @@ static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
       }
       if (!(f & IORING_CQE_F_MORE) && (c = conn_of(ud))) {
         if (res > 0 || res == -ENOBUFS) queue_read(ud, c);
-        else { c->eof = 1; push(&eofs, &neof, &cap_eof, ud); }
+        else {
+          c->eof = 1;
+          if (neof >= cap_eof) { cap_eof = cap_eof ? cap_eof * 2 : 1024; eofs = realloc(eofs, cap_eof * sizeof *eofs); }
+          eofs[neof++] = ud;
+        }
       }
       break;
-    case T_WAL: wal_outcome = res == 8 ? wal_msg : 1; arm_wal_msg(); break;
     case T_READ: {
       uint64_t who = (ud & ~7ULL) | T_RECV;
       r->reads--; c = conn_of(who);
@@ -1107,12 +1118,23 @@ static void on_cqe(int k, uint64_t ud, int res, unsigned f) {
       if (!(c = conn_of(who))) break;
       if (res == BSZ || res == -ENOBUFS) queue_read(who, c);
       else if (res > 0 || res == -EAGAIN) arm_recv(who);
-      else { c->eof = 1; push(&eofs, &neof, &cap_eof, who); }
+      else {
+        c->eof = 1;
+        if (neof >= cap_eof) { cap_eof = cap_eof ? cap_eof * 2 : 1024; eofs = realloc(eofs, cap_eof * sizeof *eofs); }
+        eofs[neof++] = who;
+      }
       break;
     }
   }
 }
-static unsigned drain(int k);
+
+static unsigned drain(int k) {
+  struct io_uring_cqe *cqe; unsigned head, n = 0;
+  io_uring_for_each_cqe(&R[k].r, head, cqe) { on_cqe(k, cqe->user_data, cqe->res, cqe->flags); n++; }
+  io_uring_cq_advance(&R[k].r, n);
+  return n;
+}
+
 static unsigned read_rounds(void) {
   unsigned seen = 0;
   for (int budget = READS; budget > 0 && readq.n;) {
@@ -1120,7 +1142,10 @@ static unsigned read_rounds(void) {
     for (int i = 0; i < stop && issued < budget; i++) {
       uint64_t who = fifo_pop(&readq); conn_t *c = conn_of(who); int k = K(who);
       if (!c) continue;
-      if (R[k].reads >= NBUF) { push(&readq.a, &readq.n, &readq.cap, who); continue; }
+      if (R[k].reads >= NBUF) {
+        if (readq.n >= readq.cap) { readq.cap = readq.cap ? readq.cap * 2 : 1024; readq.a = realloc(readq.a, readq.cap * sizeof *readq.a); }
+        readq.a[readq.n++] = who; continue;
+      }
       c->queued = 0; R[k].reads++; issued++;
       struct io_uring_sqe *s = sqe(k);
       io_uring_prep_recv(s, SLOT(who), NULL, 0, MSG_DONTWAIT);
@@ -1132,39 +1157,43 @@ static unsigned read_rounds(void) {
   }
   return seen;
 }
-static unsigned drain(int k) {
-  struct io_uring_cqe *cqe; unsigned head, n = 0;
-  io_uring_for_each_cqe(&R[k].r, head, cqe) { on_cqe(k, cqe->user_data, cqe->res, cqe->flags); n++; }
-  io_uring_cq_advance(&R[k].r, n);
-  return n;
+
+static void release_held(void) {
+  if (!nheld) return;
+  uint64_t *todo = held; int n = nheld; held = NULL; nheld = cap_held = 0;
+  for (int i = 0; i < n; i++) {
+    conn_t *c = conn_of(todo[i]);
+    if (c && c->open && !c->closing) {
+      c->held = 0;
+      if (c->inlen && !c->sending) {
+        answers_left--;
+        process(todo[i], c, c->in, c->inlen);
+      }
+    }
+  }
+  free(todo);
 }
 
-#define WAIT_N 128
-#define WAIT_NS 2000000
-static int wal_hold_over(void);
-static void wal_after_commit(void);
 static void run(void) {
-  unsigned seen = 0;
   for (;;) {
     arm_accepts();
-    uint32_t open = R[0].n;
-    for (int k = 1; k < nrings; k++) { open += R[k].n; io_uring_submit_and_get_events(&R[k].r); }
-    int rc; struct io_uring_cqe *cq;
-    if (readq.n || readyq.n) rc = io_uring_submit_and_get_events(&R[0].r);
-    else if (seen >= 4 || nrings > 1 || nheld) {
-      unsigned want = seen >= 4 ? WAIT_N / nrings + 1 : 1;
-      if (want > open / 3 + 1) want = open / 3 + 1;
-      struct __kernel_timespec ts = {.tv_nsec = WAIT_NS};
-      rc = io_uring_submit_and_wait_timeout(&R[0].r, &cq, want, &ts, NULL);
-    } else rc = io_uring_submit_and_wait(&R[0].r, 1);
+    int busy = (readq.n > 0 || readyq.n > 0);
+    for (int k = nrings - 1; k >= 0; k--) {
+      if (k == 0 && !busy) {
+        struct __kernel_timespec ts = {.tv_sec = 0, .tv_nsec = 1000000}; // 1 ms wait
+        struct io_uring_cqe *cq = NULL;
+        io_uring_submit_and_wait_timeout(&R[0].r, &cq, 256, &ts, NULL);
+      } else {
+        io_uring_submit_and_get_events(&R[k].r);
+      }
+    }
     for (int i = 0; i < nlimbo; i++) sop_free((sop_t *)(uintptr_t)limbo[i]);
     nlimbo = 0;
-    if (rc < 0 && rc != -EINTR && rc != -EBUSY && rc != -ETIME && rc != -EAGAIN) { fprintf(stderr, "io_uring_enter: %s\n", strerror(-rc)); exit(1); }
-    now_s = time(NULL); seen = 0;
+    now_s = time(NULL);
     answers_left = ANSWERS;
-    for (int k = 0; k < nrings; k++) seen += drain(k);
+    for (int k = 0; k < nrings; k++) drain(k);
     run_ready();
-    seen += read_rounds();
+    read_rounds();
     flush_batch();
     if (neof) {
       for (int i = 0; i < neof; i++) {
@@ -1179,73 +1208,37 @@ static void run(void) {
       for (int i = 0; i < n; i++) { conn_t *c = conn_of(todo[i]); if (c && c->inlen && !c->sending) process(todo[i], c, c->in, c->inlen); }
       free(todo); flush_batch();
     }
-    wal_after_commit();
-    if (nheld && wal_hold_over()) {
-      uint64_t *todo = held; int n = nheld; held = NULL; nheld = cap_held = 0;
-      for (int i = 0; i < n; i++) { conn_t *c = conn_of(todo[i]); if (c && c->inlen && !c->sending) process(todo[i], c, c->in, c->inlen); }
-      free(todo); flush_batch();
+    td_tick();
+    if (!writes_held && nheld) {
+      release_held();
+      flush_batch();
     }
   }
 }
 
-// ---------- WAL Checkpoint Worker ----------
-#define WAL_START 4000
-#define WAL_MAX 16384
-#define POST_WAIT_NS 250000000ULL
-#define WAL_ALL 0x100000000ULL
-static int wal_asks = -1, wal_busy, wal_last_pass;
-static uint64_t wal_frames, wal_asked_at, post_deadline;
-static sqlite3 *wal_db;
-static inline uint64_t mono_ns(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec; }
-static int wal_hook(void *arg, sqlite3 *d, const char *name, int n) { (void)arg; (void)d; (void)name; wal_frames = (uint32_t)n; return SQLITE_OK; }
-static void *wal_worker(void *arg) {
-  (void)arg; setpriority(PRIO_PROCESS, 0, 19);
-  uint64_t tok;
-  while (read(wal_asks, &tok, 8) == 8) {
-    int log = 0, ckpt = 0;
-    int rc = sqlite3_wal_checkpoint_v2(wal_db, NULL, SQLITE_CHECKPOINT_PASSIVE, &log, &ckpt);
-    uint64_t res = rc != SQLITE_OK ? 1 : log == ckpt && log > 0 ? WAL_ALL : (uint32_t)log;
-    (void)write(wal_replies, &res, 8);
-  }
-  return NULL;
-}
-static void wal_ask(void) { uint64_t one = 1; wal_busy = 1; wal_asked_at = wal_frames; if (write(wal_asks, &one, 8) != 8) wal_busy = 0; }
-static void wal_copied(uint64_t outcome) {
-  wal_busy = 0;
-  if (outcome == WAL_ALL && wal_frames == wal_asked_at) { wal_frames = 0; wal_last_pass = 0; hold_posts = 0; return; }
-  if (wal_last_pass) { wal_last_pass = 0; hold_posts = 0; return; }
-  wal_last_pass = 1; hold_posts = 1;
-  post_deadline = wal_frames >= WAL_MAX ? 0 : mono_ns() + POST_WAIT_NS;
-  wal_ask();
-}
-static void wal_after_commit(void) {
-  if (wal_outcome) { uint64_t o = wal_outcome; wal_outcome = 0; wal_copied(o); }
-  if (wal_frames >= WAL_MAX && wal_busy) { hold_posts = 1; post_deadline = 0; }
-  else if (!wal_busy && wal_frames >= WAL_START) wal_ask();
-}
-static int wal_hold_over(void) {
-  if (hold_posts && post_deadline && mono_ns() > post_deadline) hold_posts = 0;
-  return !hold_posts;
-}
-
+// ---------- Database Setup ----------
 static sqlite3_stmt *prep(const char *sql) {
   sqlite3_stmt *s = NULL;
   if (sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &s, NULL) != SQLITE_OK) {
-    fprintf(stderr, "prepare %s: %s\n", sql, sqlite3_errmsg(db)); exit(1);
+    fprintf(stderr, "prep: %s\n", sqlite3_errmsg(db)); exit(1);
   }
   return s;
 }
 
+static Pgno rootpage(const char *name) {
+  sqlite3_stmt *s; Pgno r = 0;
+  if (sqlite3_prepare_v2(db, "SELECT rootpage FROM sqlite_schema WHERE name = ?1", -1, &s, NULL) != SQLITE_OK) return 0;
+  sqlite3_bind_text(s, 1, name, -1, SQLITE_STATIC);
+  if (sqlite3_step(s) == SQLITE_ROW) r = (Pgno)sqlite3_column_int64(s, 0);
+  sqlite3_finalize(s);
+  return r;
+}
+
 static void btree_setup(void) {
   bt = db->aDb[0].pBt;
-  sqlite3_stmt *s = prep("SELECT rootpage FROM sqlite_schema WHERE type='table' AND name='posts'");
-  if (sqlite3_step(s) != SQLITE_ROW) exit(1); root_posts = (Pgno)sqlite3_column_int(s, 0); sqlite3_finalize(s);
-  s = prep("SELECT rootpage FROM sqlite_schema WHERE type='table' AND name='users'");
-  if (sqlite3_step(s) != SQLITE_ROW) exit(1); root_users = (Pgno)sqlite3_column_int(s, 0); sqlite3_finalize(s);
-  s = prep("SELECT rootpage FROM sqlite_schema WHERE type='index' AND name='posts_created_at_id_idx'");
-  if (sqlite3_step(s) != SQLITE_ROW) exit(1); root_feed = (Pgno)sqlite3_column_int(s, 0); sqlite3_finalize(s);
-  s = prep("SELECT rootpage FROM sqlite_schema WHERE type='index' AND name='likes_post_id_idx'");
-  if (sqlite3_step(s) != SQLITE_ROW) exit(1); root_likes = (Pgno)sqlite3_column_int(s, 0); sqlite3_finalize(s);
+  root_posts = rootpage("posts"); root_users = rootpage("users");
+  root_feed = rootpage("posts_created_at_id_idx"); root_likes = rootpage("likes_post_id_idx");
+  if (!root_posts || !root_users || !root_feed || !root_likes) { bt_ok = 0; return; }
 
   cur_posts = malloc(sqlite3BtreeCursorSize()); cur_users = malloc(sqlite3BtreeCursorSize());
   cur_feed = malloc(sqlite3BtreeCursorSize()); cur_likes = malloc(sqlite3BtreeCursorSize());
@@ -1263,18 +1256,23 @@ static void btree_setup(void) {
 
 static void db_open(const char *path) {
   int fl = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
-  install_wal_vfs();
-  if (sqlite3_open_v2(path, &db, fl, "coalesce-wal") != SQLITE_OK) { fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1); }
+  if (sqlite3_open_v2(path, &db, fl, "unix-excl") != SQLITE_OK) {
+    fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1);
+  }
   sqlite3_busy_timeout(db, 5000);
   char *e = NULL;
-  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0;"
-                   "SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
+  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0; SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) {
+    fprintf(stderr, "pragma: %s\n", e); exit(1);
+  }
   sqlite3_wal_hook(db, wal_hook, NULL);
-  wal_asks = eventfd(0, EFD_CLOEXEC); wal_replies = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
-  if (wal_asks < 0 || wal_replies < 0 || sqlite3_open_v2(path, &wal_db, fl, "coalesce-wal") != SQLITE_OK ||
-      sqlite3_exec(wal_db, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) { fprintf(stderr, "checkpoint connection failed\n"); exit(1); }
+
+  if (sqlite3_open_v2(path, &ckdb, fl, "unix-excl") != SQLITE_OK ||
+      sqlite3_exec(ckdb, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) {
+    fprintf(stderr, "checkpoint connection failed\n"); exit(1);
+  }
   pthread_t t; pthread_attr_t a; pthread_attr_init(&a); pthread_attr_setstacksize(&a, 256 << 10);
-  if (pthread_create(&t, &a, wal_worker, NULL)) { fprintf(stderr, "checkpoint thread failed\n"); exit(1); }
+  if (pthread_create(&t, &a, ck_main, NULL)) { fprintf(stderr, "checkpoint thread failed\n"); exit(1); }
+
   btree_setup();
   const char *cols = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ";
   char sql[512];
@@ -1299,18 +1297,18 @@ int main(int argc, char **argv) {
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET"), *host = getenv("HOST"), *ports = getenv("PORT");
   if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
 
-  // Install Pcache1 xRekey hook to neutralize lock-byte page key (262145) during splits
-  install_pcache_rekey();
-
-  { // One contiguous page cache on huge pages instead of a malloc per page.
+  {
     int hdr = 0; sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &hdr);
     int sz = (4096 + hdr + 7) & ~7, npg = CACHE_KB / 4;
     sqlite3_config(SQLITE_CONFIG_PAGECACHE, huge_alloc((size_t)sz * npg), sz, npg);
   }
   sqlite3_initialize();
+
   struct rlimit rl; getrlimit(RLIMIT_NOFILE, &rl);
   if (rl.rlim_cur < rl.rlim_max) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
-  tsize = rl.rlim_cur > (1 << 20) ? 1 << 20 : rl.rlim_cur;
+  tsize = (rl.rlim_cur > 63) ? rl.rlim_cur - 63 : 1024;
+  if (tsize > 65472) tsize = 65472;
+
   memset(b64t, -1, sizeof b64t);
   for (int i = 0; i < 64; i++) b64t[(unsigned char)"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"[i]] = i;
   hmac_key(secret);
@@ -1330,7 +1328,6 @@ int main(int argc, char **argv) {
   }
   arena = huge_alloc(BATCH_OUT);
   if (ring_init(0) < 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }
-  arm_wal_msg();
   run();
   return 0;
 }

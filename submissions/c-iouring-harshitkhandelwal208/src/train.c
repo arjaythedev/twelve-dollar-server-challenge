@@ -30,7 +30,7 @@ static void train(void) {
     else if (k < 215) n = snprintf(req, sizeof req, "POST /posts/%d/like HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Length: 0\r\n\r\n", id, tok);
     else { char b[64]; int bl = snprintf(b, sizeof b, "{\"body\":\"training post %d\"}", i);
       n = snprintf(req, sizeof req, "POST /posts HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", tok, bl, b); }
-    serve(req, n, &closing);
+    serve(req, n, &closing, NULL, 0);
     if (i % 64 == 0) { nsegs = 0; flush_batch(); }
   }
   exit(0);

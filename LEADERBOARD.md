@@ -957,7 +957,10 @@ head (`10ad775`, 2026-11-14: admission at the door as in #435, no accepting whil
 checkpoint hold and accept on handshake) held **290,000** at 79 % CPU (27,591 req/s, p95 38.3 / p99 271.7 ms, 0
 errors, 707 MB; TCP connect p99 1,052 ms, which k6 counts outside request latency; 300k failed the 2-minute probe on
 p99 2.09 s, 320k on p99 2.57 s), below #398's 300,000, so #437 is still not merged. Whether connect-time waits should
-count is the same open question for Arjay as on #435.
+count is the same open question for Arjay as on #435. The follow-up **#427** (`af73d3d`, 2026-11-14: the same code as
+`10ad775` with the admission thresholds halved, `ADMITHI` 25 ms and `ADMITLO` 5 ms) held **300,000** at 83 % CPU
+(28,399 req/s, p95 57.0 / p99 633.1 ms, 0 errors, 1,301 MB; TCP connect p99 3,111 ms; 310k failed the 2-minute probe on
+p99 2.20 s, 320k on p99 3.14 s), the same as #398's 300,000 and not above it, so #427 is not merged either.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

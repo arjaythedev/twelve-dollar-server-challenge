@@ -97,10 +97,21 @@ and the OOM killer ends it. Nothing the loop needs is left to be found at that m
   buffers, which reached 300 MB in that burst, were back near zero 20 s later instead of climbing
   to 650 MB. The 2,048 cap keeps turns short (30–350 ms after a burst, against 1–4 s uncapped), so
   replies go out while the backlog is still being read.
-- The checkpoint thread runs at nice 19. On one vCPU a checkpoint pass at the default priority holds
-  the loop off the CPU for its whole length, 300–430 ms at the memory wall on the box
-  (c-iouring-public, #158, measured 2 of 3 holds dying at nice 0 and 3 of 3 holding at nice 19).
-  The loop's batches are short, so the thread still runs between them.
+- The checkpoint thread runs at nice 10. At nice 0 a pass competes with the loop as an equal. The
+  scored version ran it at nice 19, and that starved it at the edge: when the CPU saturates, the
+  scheduler gives a nice-19 thread about 1.4% of it, while the checkpoint needs about 4.5% at 300,000
+  users. In load tests at 300,000–310,000 users (a 1 vCPU / 2 GB KVM guest on GitHub's EPYC 9V74
+  runners, the server under the box's systemd limits) it then barely progressed for the rest of
+  the hold:
+  - the log grew to 970,000 frames;
+  - the write gate shut 4,431 times;
+  - the loop tried the last-resort checkpoint 4,411 times;
+  - likes and new posts had four times the p99 of reads even in a run that passed (906 and 971
+    against 230 ms).
+
+  At nice 10 (about 9.7% of a saturated CPU) the log stayed under 4,300 frames at 310,000 users and
+  the gate shut 179 times. The nice-19 result this README used to cite (#158, 3 of 3 holds) has
+  since been withdrawn by its author: 1 of 3 on stock SQLite.
 - A memory valve, off by default (`VALVE=1` turns it on; see rule 7). Every 200 ms the loop reads
   `/proc/meminfo` and takes `MemAvailable` minus `SReclaimable` as what the kernel could still hand
   out (the sockets' own dentries and inodes count as reclaimable but are pinned while the socket is
@@ -179,10 +190,13 @@ Each wake-up of the loop is one batch:
   poll path (commit 3f5c305): 0.23 (`io_uring_enter` 0.05, `pwrite` 0.095 including the checkpoint
   thread's, everything else ≈ 0.08).
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`. A WAL hook wakes a checkpoint thread past 1,000
-  frames (PASSIVE, on its own connection, never on the loop, at nice 19). Past 4,000 frames, writes
-  are held until the thread reports the log fully copied (at most 1 s; reads go on), so the next
-  write restarts the log and it stays small. Past 16,384 frames the loop checkpoints itself, as a
-  last resort.
+  frames (PASSIVE, on its own connection, never on the loop, at nice 10). Past 4,000 frames, writes
+  are held until the thread reports the log fully copied, so the next write restarts the log and it
+  stays small. Reads go on during a hold.
+  - A hold lasts at most 250 ms. If it runs out, the checkpoint is behind: writes go on, and the
+    gate holds them again only 2,048 frames later. A slow checkpoint then costs writes a short hold
+    now and then, not a one-second hold every time the gate opens.
+  - Past 16,384 frames the loop checkpoints itself, as a last resort, at most every 100 ms.
 - No memory map (`mmap_size=0`) and an 8 MB page cache. With a memory map every page fetch first
   probes the WAL index; with the pages in SQLite's own cache a hit returns at once (measured at
   120,000 users: 17.6 → 15.5 µs per request). SQLite's own counters (`SQLITE_DBSTATUS_CACHE_*`,

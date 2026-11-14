@@ -50,7 +50,7 @@ def plan : (op : Op) → ReadyPlan op
   | .cancel => ⟨[assign .addr .here, assign .tag (.there .here)], rfl⟩
 
 def Op.constants : Op → String
-  | .accept => "s->opcode = IORING_OP_ACCEPT; s->ioprio = IORING_ACCEPT_MULTISHOT; s->file_index = IORING_FILE_INDEX_ALLOC;"
+  | .accept => "s->opcode = IORING_OP_ACCEPT; s->file_index = IORING_FILE_INDEX_ALLOC;"
   | .recv => "s->opcode = IORING_OP_RECV; s->flags = IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT; s->ioprio = IORING_RECV_MULTISHOT; s->buf_group = 0;"
   | .send => "s->opcode = IORING_OP_SEND; s->flags = IOSQE_FIXED_FILE; s->msg_flags = MSG_NOSIGNAL | MSG_WAITALL;"
   | .shutdown => "s->opcode = IORING_OP_SHUTDOWN; s->flags = IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS; s->len = SHUT_RDWR;"

@@ -2,8 +2,8 @@
 /* io_uring transport. One thread drives several rings. Each ring owns a table of direct
  * (fixed) socket descriptors and a provided-buffer ring. Direct descriptors do not occupy the
  * process file table, so the number of connections is bounded by rings x per-ring table size
- * rather than by RLIMIT_NOFILE. Rings are opened on demand: one listener is shared, exactly one
- * ring accepts at a time, and accepting moves on before that ring's table fills. Rings are
+ * rather than by RLIMIT_NOFILE. Rings are opened on demand: one listener is shared, one ring replenishes bounded
+ * single-shot accepts at a time, and replenishment moves before that ring's table fills. Rings are
  * created with DEFER_TASKRUN: completions are produced only when this thread asks, so each
  * loop iteration collects a batch of requests that is then served by one SQLite transaction. */
 
@@ -31,7 +31,7 @@
 #define NBUF 512            /* provided receive buffers per ring */
 #define BUFSZ 2048
 #define CQE_BUDGET 2048     /* completions handled per ring per iteration */
-#define ACCEPT_SPARE 2048   /* stop accepting into a ring this many slots before it is full */
+#define ACCEPT_DEPTH 512    /* bounded single-shot accepts; never exceed free direct slots */
 
 enum { OP_ACCEPT = 1, OP_RECV, OP_SEND, OP_CLOSE, OP_SHUTDOWN };
 enum { C_FREE = 0, C_OPEN, C_CLOSING };
@@ -64,7 +64,7 @@ typedef struct ring {
   u32 nslots, nopen;      /* table size; slots in use (open or closing) */
   conn *conns;
   u8 hot;
-  u8 accept_armed;
+  u32 accepts;           /* submitted or queued single-shot accepts reserve this many slots */
 } ring;
 
 static ring rings[MAX_RINGS];
@@ -94,6 +94,18 @@ static void stats_tick(void) {
 static inline int sys_setup(u32 e, struct io_uring_params *p) { return (int)syscall(__NR_io_uring_setup, e, p); }
 static inline int sys_enter(int fd, u32 sub, u32 minc, u32 flags) { return (int)syscall(__NR_io_uring_enter, fd, sub, minc, flags, NULL, 0); }
 static inline int sys_register(int fd, u32 op, void *arg, u32 n) { return (int)syscall(__NR_io_uring_register, fd, op, arg, n); }
+
+/* Ubuntu LP #2162843: affected 6.8 kernels invert the reserved-word validation.
+ * Try the specified ABI first; only EINVAL permits the compatibility retry. */
+static int register_buffers(int fd, struct io_uring_buf_reg *reg) {
+  int rc = sys_register(fd, IORING_REGISTER_PBUF_RING, reg, 1);
+  if (rc < 0 && errno == EINVAL) {
+    reg->resv[0] = 1;
+    rc = sys_register(fd, IORING_REGISTER_PBUF_RING, reg, 1);
+    reg->resv[0] = 0;
+  }
+  return rc;
+}
 
 static inline u64 ud(u8 op, u8 ri, u16 gen, u32 slot) { return (u64)op << 56 | (u64)ri << 48 | (u64)gen << 32 | slot; }
 
@@ -133,7 +145,7 @@ static void sqe_commit(ring *r, sqe_ready ready) {
 
 static void arm_accept(ring *r) {
   sqe_accept(r, listen_fd, ud(OP_ACCEPT, (u8)r->idx, 0, 0));
-  r->accept_armed = 1;
+  r->accepts++;
 }
 static void arm_recv(ring *r, u32 slot) {
   conn *c = &r->conns[slot];
@@ -287,6 +299,7 @@ static void handle_cqe(ring *r, struct io_uring_cqe *e) {
   int res = e->res;
   switch (op) {
   case OP_ACCEPT:
+    if (r->accepts) r->accepts--;
     if (res >= 0) {
       conn *c = &r->conns[res];
       if (c->state != C_FREE) conn_reset(c);
@@ -298,7 +311,6 @@ static void handle_cqe(ring *r, struct io_uring_cqe *e) {
       static time_t last;
       if (time(0) != last) { last = time(0); fprintf(stderr, "accept: %s\n", strerror(-res)); }
     }
-    if (!(e->flags & IORING_CQE_F_MORE)) r->accept_armed = 0;
     return;
   case OP_RECV: {
     conn *c = &r->conns[slot];
@@ -430,7 +442,7 @@ static void ring_init(ring *r, int idx, u32 slots, const char *host, int port) {
   reg.ring_addr = (u64)(uintptr_t)r->br;
   reg.ring_entries = NBUF;
   reg.bgid = 0;
-  if (sys_register(fd, IORING_REGISTER_PBUF_RING, &reg, 1) < 0) { perror("register buffer ring"); exit(1); }
+  if (register_buffers(fd, &reg) < 0) { perror("register buffer ring"); exit(1); }
   r->bufs = mmap(0, (size_t)NBUF * BUFSZ, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   if (r->bufs == MAP_FAILED) { perror("mmap bufs"); exit(1); }
   r->br_tail = 0;
@@ -444,32 +456,44 @@ static void ring_init(ring *r, int idx, u32 slots, const char *host, int port) {
   r->hot = 1;
 }
 
-static void cancel_accept(ring *r) {
-  sqe_cancel(r, ud(OP_ACCEPT, (u8)r->idx, 0, 0), ud(OP_SHUTDOWN, (u8)r->idx, 0, 0));
+/* Each queued accept reserves one table slot until its CQE is consumed. This includes
+ * accepts submitted by a capacity flush: nopen + accepts never exceeds nslots. Old rings
+ * may finish their bounded in-flight accepts after replenishment moves to a new ring. */
+static u32 accept_depth(const ring *r) {
+  u32 depth = r->nslots / 16;
+  if (!depth) depth = 1;
+  return depth < ACCEPT_DEPTH ? depth : ACCEPT_DEPTH;
 }
-/* Keep exactly one ring accepting, on a ring with room: the emptiest open ring if it is at most
- * three quarters full, else a new ring. */
+static void fill_accepts(ring *r) {
+  u32 depth = accept_depth(r);
+  while (r->accepts < depth && r->nopen + r->accepts < r->nslots) arm_accept(r);
+}
 static void accept_balance(void) {
   ring *a = &rings[acc_ring];
-  if (a->nopen + ACCEPT_SPARE < a->nslots) {
-    if (!a->accept_armed) arm_accept(a);
+  u32 margin = accept_depth(a) * 2;
+  if (a->nopen + a->accepts + margin < a->nslots) {
+    fill_accepts(a);
     return;
   }
   int best = -1;
   for (int i = 0; i < nrings; i++)
-    if (i != acc_ring && (best < 0 || rings[i].nopen < rings[best].nopen)) best = i;
-  if ((best < 0 || rings[best].nopen > ring_slots / 4 * 3) && nrings < MAX_RINGS) {
+    if (i != acc_ring && rings[i].nopen + rings[i].accepts + margin < rings[i].nslots &&
+        (best < 0 || rings[i].nopen + rings[i].accepts < rings[best].nopen + rings[best].accepts)) best = i;
+  if (best < 0 && nrings < MAX_RINGS) {
     best = nrings++;
     ring_init(&rings[best], best, ring_slots, 0, 0);
     fprintf(stderr, "transport: ring %d opened (%u connections in ring %d)\n", best, a->nopen, acc_ring);
   }
-  if (best < 0 || rings[best].nopen + ACCEPT_SPARE >= rings[best].nslots) {
-    if (!a->accept_armed) arm_accept(a);   /* everything is full: keep trying where we are */
-    return;
+  if (best < 0 && nrings == MAX_RINGS) {
+    /* Once all tables exist, even one newly free slot must be usable. */
+    for (int i = 0; i < nrings; i++)
+      if (rings[i].nopen + rings[i].accepts < rings[i].nslots &&
+          (best < 0 || rings[i].nopen + rings[i].accepts < rings[best].nopen + rings[best].accepts)) best = i;
   }
-  if (a->accept_armed) cancel_accept(a);
-  acc_ring = best;
-  arm_accept(&rings[best]);
+  if (best >= 0) acc_ring = best;
+  /* At total capacity leave new connections on the listener. Existing closes wake the
+   * loop and release slots; never accept a socket that cannot be installed. */
+  fill_accepts(&rings[acc_ring]);
 }
 
 static void transport_init(const char *host, int port, u32 want_conns) {
@@ -488,7 +512,7 @@ static void transport_init(const char *host, int port, u32 want_conns) {
   listen_fd = listen_socket(host, port);
   nrings = 1;
   ring_init(&rings[0], 0, ring_slots, host, port);
-  arm_accept(&rings[0]);
+  fill_accepts(&rings[0]);
   fprintf(stderr, "transport: rings of %u direct descriptors, opened on demand (up to %d)\n", (unsigned)per, MAX_RINGS);
 }
 

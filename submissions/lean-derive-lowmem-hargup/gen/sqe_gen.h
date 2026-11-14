@@ -2,7 +2,7 @@
 static void sqe_accept(ring *r, int fd, u64 tag) {
   sqe_reserved slot = sqe_reserve(r);
   struct io_uring_sqe *s = slot.p;
-  s->opcode = IORING_OP_ACCEPT; s->ioprio = IORING_ACCEPT_MULTISHOT; s->file_index = IORING_FILE_INDEX_ALLOC;
+  s->opcode = IORING_OP_ACCEPT; s->file_index = IORING_FILE_INDEX_ALLOC;
   s->fd = fd;
   s->user_data = tag;
   sqe_commit(r, (sqe_ready){s});

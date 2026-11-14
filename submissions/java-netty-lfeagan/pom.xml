@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>challenge</groupId>
+  <artifactId>server</artifactId>
+  <version>1.0</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.release>25</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <netty.version>4.2.19.Final</netty.version>
+    <!-- the native epoll library for this machine; overridden by the profiles below -->
+    <netty.epoll.classifier>linux-x86_64</netty.epoll.classifier>
+  </properties>
+
+  <profiles>
+    <profile>
+      <id>aarch64</id>
+      <activation><os><arch>aarch64</arch></os></activation>
+      <properties><netty.epoll.classifier>linux-aarch_64</netty.epoll.classifier></properties>
+    </profile>
+  </profiles>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport</artifactId>
+      <version>${netty.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-classes-epoll</artifactId>
+      <version>${netty.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-native-epoll</artifactId>
+      <version>${netty.version}</version>
+      <classifier>${netty.epoll.classifier}</classifier>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <finalName>server</finalName>
+    <pluginManagement>
+      <plugins>
+        <plugin><artifactId>maven-clean-plugin</artifactId><version>3.5.0</version></plugin>
+        <plugin><artifactId>maven-resources-plugin</artifactId><version>3.5.0</version></plugin>
+        <plugin><artifactId>maven-compiler-plugin</artifactId><version>3.16.0</version></plugin>
+        <plugin><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version></plugin>
+        <plugin><artifactId>maven-jar-plugin</artifactId><version>3.5.1</version></plugin>
+        <plugin><artifactId>maven-install-plugin</artifactId><version>3.2.0</version></plugin>
+      </plugins>
+    </pluginManagement>
+    <plugins>
+      <plugin>
+        <artifactId>maven-dependency-plugin</artifactId>
+        <version>3.11.0</version>
+        <executions>
+          <execution>
+            <phase>package</phase>
+            <goals><goal>copy-dependencies</goal></goals>
+            <configuration>
+              <outputDirectory>${project.build.directory}/lib</outputDirectory>
+              <includeScope>runtime</includeScope>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

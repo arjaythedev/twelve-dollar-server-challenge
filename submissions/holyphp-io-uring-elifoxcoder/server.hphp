@@ -369,6 +369,7 @@ class Server {
     pub bool $feedjson = false;
     pub bool $feedBatchAuthors = false;
     pub bool $feedBatchUsers = false;
+    pub bool $feedRawIarr = true;
     pub bool $feedLikeRange = false;
     pub bool $feedTailBatch = false;
     pub bool $listenerFirst = true;
@@ -667,6 +668,7 @@ class Server {
         $this->feedRawUserDecode = (getenv("HPHP_FEED_USER_RAW") == "1");
         $this->feedBatchAuthors = (getenv("HPHP_FEED_BATCH_AUTHORS") == "1");
         $this->feedBatchUsers = (getenv("HPHP_FEED_BATCH_USERS") == "1");
+        $this->feedRawIarr = (getenv("HPHP_FEED_IARR_PTR") != "0");
         $this->feedTailBatch = (getenv("HPHP_FEED_TAIL_BATCH") == "1");
         $this->feedLikeRange = (getenv("HPHP_FEED_LIKE_RANGE") == "1");
         if (getenv("HPHP_LISTENER_FIRST") == "0") { $this->listenerFirst = false; }
@@ -1404,6 +1406,20 @@ class Server {
         $rows = iarr_new_uninit(200);      /* 10 integers per post */
         $uids = iarr_new_uninit(20);
         $hits = iarr_new_uninit(60);       /* found, payload pointer, payload size */
+        unsafe {
+        /* These arrays have fixed capacity and stay leased until the response
+         * has been assembled. Use typed storage directly in this hot loop to
+         * avoid hundreds of builtin calls per feed. */
+        $rowAddr = iarr_data_ptr($rows);
+        $uidAddr = iarr_data_ptr($uids);
+        $hitAddr = iarr_data_ptr($hits);
+        if ($this->feedRawIarr && ($rowAddr == 0 || $uidAddr == 0 || $hitAddr == 0)) {
+            iarr_release($rows); iarr_release($uids); iarr_release($hits);
+            return false;
+        }
+        $rowData = $rowAddr as *int;
+        $uidData = $uidAddr as *int;
+        $hitData = $hitAddr as *int;
         $tailMulti = 0;
         $bulkCount = 0;
         $bulkPosts = $this->feedTailBatch;
@@ -1431,9 +1447,15 @@ class Server {
             $base = $n * 10;
             $psz = 0;
             if ($bulkPosts) {
-                $id = iarr_get_fast($uids, $n);
-                $p = iarr_get_fast($hits, $n * 3 + 1);
-                $psz = iarr_get_fast($hits, $n * 3 + 2);
+                if ($this->feedRawIarr) {
+                    $id = *($uidData + $n);
+                    $p = *($hitData + $n * 3 + 1);
+                    $psz = *($hitData + $n * 3 + 2);
+                } else {
+                    $id = iarr_get_fast($uids, $n);
+                    $p = iarr_get_fast($hits, $n * 3 + 1);
+                    $psz = iarr_get_fast($hits, $n * 3 + 2);
+                }
             } else {
                 $id = bt_rowid($this->btPosts);
                 $p = bt_payload_ptr($this->btPosts);
@@ -1519,22 +1541,34 @@ class Server {
                 if ($pin == 0) { $ok = false; break; }
             }
 
-            iarr_set_fast($rows, $base, $id);
-            iarr_set_fast($rows, $base + 1, $p);
-            iarr_set_fast($rows, $base + 2, $bo);
-            iarr_set_fast($rows, $base + 3, $bl);
-            iarr_set_fast($rows, $base + 4, $co);
-            iarr_set_fast($rows, $base + 5, $cl);
-            iarr_set_fast($rows, $base + 6, 0);
-            iarr_set_fast($rows, $base + 7, $pin);
-            iarr_set_fast($uids, $n, $uid);
+            if ($this->feedRawIarr) {
+                *($rowData + $base) = $id;
+                *($rowData + $base + 1) = $p;
+                *($rowData + $base + 2) = $bo;
+                *($rowData + $base + 3) = $bl;
+                *($rowData + $base + 4) = $co;
+                *($rowData + $base + 5) = $cl;
+                *($rowData + $base + 6) = 0;
+                *($rowData + $base + 7) = $pin;
+                *($uidData + $n) = $uid;
+            } else {
+                iarr_set_fast($rows, $base, $id);
+                iarr_set_fast($rows, $base + 1, $p);
+                iarr_set_fast($rows, $base + 2, $bo);
+                iarr_set_fast($rows, $base + 3, $bl);
+                iarr_set_fast($rows, $base + 4, $co);
+                iarr_set_fast($rows, $base + 5, $cl);
+                iarr_set_fast($rows, $base + 6, 0);
+                iarr_set_fast($rows, $base + 7, $pin);
+                iarr_set_fast($uids, $n, $uid);
+            }
             $pinned = $pinned + 1;
             $n = $n + 1;
             if (!$bulkPosts) { $r = bt_prev($this->btPosts); }
         }
         if (!$ok) {
             $i = 0;
-            while ($i < $pinned) { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); $i = $i + 1; }
+            while ($i < $pinned) { if ($this->feedRawIarr) { bt_page_release(*($rowData + $i * 10 + 7)); } else { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); } $i = $i + 1; }
             if ($tailMulti != 0) { bt_multi_release($tailMulti); }
             iarr_release($rows); iarr_release($uids); iarr_release($hits);
             return false;
@@ -1549,21 +1583,35 @@ class Server {
         /* Count likes in one generic index-range walk. The feed posts come
          * from a descending rowid cursor, so their first and last IDs bound
          * the range. Fall back when this request spans sparse or wide IDs. */
-        $lo = iarr_get_fast($rows, ($n - 1) * 10);
-        $hi = iarr_get_fast($rows, 0);
+        if ($this->feedRawIarr) { $lo = *($rowData + ($n - 1) * 10); $hi = *$rowData; }
+        else { $lo = iarr_get_fast($rows, ($n - 1) * 10); $hi = iarr_get_fast($rows, 0); }
         $counts = iarr_new_uninit(256);
+        $countAddr = iarr_data_ptr($counts);
+        if ($this->feedRawIarr && $countAddr == 0) {
+            $i = 0;
+            while ($i < $pinned) { if ($this->feedRawIarr) { bt_page_release(*($rowData + $i * 10 + 7)); } else { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); } $i = $i + 1; }
+            if ($tailMulti != 0) { bt_multi_release($tailMulti); }
+            iarr_release($rows); iarr_release($uids); iarr_release($hits); iarr_release($counts);
+            return false;
+        }
+        $countData = $countAddr as *int;
         if ($hi < $lo || $hi - $lo >= 256 ||
             bt_count_range($this->btLikes, $lo, $hi, $counts) != 0) {
             $i = 0;
-            while ($i < $pinned) { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); $i = $i + 1; }
+            while ($i < $pinned) { if ($this->feedRawIarr) { bt_page_release(*($rowData + $i * 10 + 7)); } else { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); } $i = $i + 1; }
             if ($tailMulti != 0) { bt_multi_release($tailMulti); }
             iarr_release($rows); iarr_release($uids); iarr_release($hits); iarr_release($counts);
             return false;
         }
         $i = 0;
         while ($i < $n) {
-            $id = iarr_get_fast($rows, $i * 10);
-            iarr_set_fast($rows, $i * 10 + 6, iarr_get_fast($counts, $id - $lo));
+            if ($this->feedRawIarr) {
+                $id = *($rowData + $i * 10);
+                *($rowData + $i * 10 + 6) = *($countData + $id - $lo);
+            } else {
+                $id = iarr_get_fast($rows, $i * 10);
+                iarr_set_fast($rows, $i * 10 + 6, iarr_get_fast($counts, $id - $lo));
+            }
             $i = $i + 1;
         }
         iarr_release($counts);
@@ -1573,9 +1621,15 @@ class Server {
         $i = 0;
         while ($ok && $i < $n) {
             $base = $i * 10;
-            if (iarr_get_fast($hits, $i * 3) == 0) { $ok = false; break; }
-            $up = iarr_get_fast($hits, $i * 3 + 1);
-            $us = iarr_get_fast($hits, $i * 3 + 2);
+            if ($this->feedRawIarr) {
+                if (*($hitData + $i * 3) == 0) { $ok = false; break; }
+                $up = *($hitData + $i * 3 + 1);
+                $us = *($hitData + $i * 3 + 2);
+            } else {
+                if (iarr_get_fast($hits, $i * 3) == 0) { $ok = false; break; }
+                $up = iarr_get_fast($hits, $i * 3 + 1);
+                $us = iarr_get_fast($hits, $i * 3 + 2);
+            }
             $al = 0;
             $a = 0;
             unsafe {
@@ -1588,14 +1642,14 @@ class Server {
                 if ($uh <= 0 || $uh + $al > $us) { $ok = false; }
                 $a = $up + $uh;
             }
-            iarr_set_fast($rows, $base + 8, $a);
-            iarr_set_fast($rows, $base + 9, $al);
+            if ($this->feedRawIarr) { *($rowData + $base + 8) = $a; *($rowData + $base + 9) = $al; }
+            else { iarr_set_fast($rows, $base + 8, $a); iarr_set_fast($rows, $base + 9, $al); }
             $i = $i + 1;
         }
         if (!$ok) {
             if ($multi != 0) { bt_multi_release($multi); }
             $i = 0;
-            while ($i < $pinned) { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); $i = $i + 1; }
+            while ($i < $pinned) { if ($this->feedRawIarr) { bt_page_release(*($rowData + $i * 10 + 7)); } else { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); } $i = $i + 1; }
             if ($tailMulti != 0) { bt_multi_release($tailMulti); }
             iarr_release($rows); iarr_release($uids); iarr_release($hits);
             return false;
@@ -1609,15 +1663,18 @@ class Server {
             $base = $i * 10;
             if ($i > 0) { sb_put($sb, ','); }
             sb_put($sb, '{"id":');
-            sb_int($sb, iarr_get_fast($rows, $base));
+            if ($this->feedRawIarr) { sb_int($sb, *($rowData + $base)); } else { sb_int($sb, iarr_get_fast($rows, $base)); }
             sb_put($sb, ',"body":');
-            sb_json($sb, iarr_get_fast($rows, $base + 1) + iarr_get_fast($rows, $base + 2), iarr_get_fast($rows, $base + 3));
+            if ($this->feedRawIarr) { sb_json($sb, *($rowData + $base + 1) + *($rowData + $base + 2), *($rowData + $base + 3)); }
+            else { sb_json($sb, iarr_get_fast($rows, $base + 1) + iarr_get_fast($rows, $base + 2), iarr_get_fast($rows, $base + 3)); }
             sb_put($sb, ',"created_at":');
-            sb_json($sb, iarr_get_fast($rows, $base + 1) + iarr_get_fast($rows, $base + 4), iarr_get_fast($rows, $base + 5));
+            if ($this->feedRawIarr) { sb_json($sb, *($rowData + $base + 1) + *($rowData + $base + 4), *($rowData + $base + 5)); }
+            else { sb_json($sb, iarr_get_fast($rows, $base + 1) + iarr_get_fast($rows, $base + 4), iarr_get_fast($rows, $base + 5)); }
             sb_put($sb, ',"author":');
-            sb_json($sb, iarr_get_fast($rows, $base + 8), iarr_get_fast($rows, $base + 9));
+            if ($this->feedRawIarr) { sb_json($sb, *($rowData + $base + 8), *($rowData + $base + 9)); }
+            else { sb_json($sb, iarr_get_fast($rows, $base + 8), iarr_get_fast($rows, $base + 9)); }
             sb_put($sb, ',"like_count":');
-            sb_int($sb, iarr_get_fast($rows, $base + 6));
+            if ($this->feedRawIarr) { sb_int($sb, *($rowData + $base + 6)); } else { sb_int($sb, iarr_get_fast($rows, $base + 6)); }
             sb_put($sb, '}');
             $i = $i + 1;
         }
@@ -1631,13 +1688,14 @@ class Server {
         }
         bt_multi_release($multi);
         $i = 0;
-        while ($i < $pinned) { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); $i = $i + 1; }
+        while ($i < $pinned) { if ($this->feedRawIarr) { bt_page_release(*($rowData + $i * 10 + 7)); } else { bt_page_release(iarr_get_fast($rows, $i * 10 + 7)); } $i = $i + 1; }
         if ($tailMulti != 0) { bt_multi_release($tailMulti); }
         iarr_release($rows); iarr_release($uids); iarr_release($hits);
         $sent = stream_send_sb($fd, $sb);
         if ($sent == -2) { $this->close_fd($fd); return true; }
         if ($shed) { $this->close_fd($fd); }
         return true;
+        }
     }
 
     public function on_feed_bt_legacy(int $fd): void {

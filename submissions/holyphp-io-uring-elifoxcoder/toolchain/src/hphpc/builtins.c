@@ -925,6 +925,7 @@ void builtins_init(void) {
     add("iarr_set",            B_MISC, ty_bool,   false, false);
     add("iarr_get_fast",       B_MISC, ty_int,    false, false);
     add("iarr_set_fast",       B_MISC, ty_bool,   false, false);
+    add("iarr_data_ptr",       B_MISC, ty_int,    false, false);
     add("iarr_len",            B_MISC, ty_int,    false, false);
     add("sb_new",               B_MISC, ty_int,    false, false);
     add("sb_put",               B_MISC, ty_bool,   false, false);

@@ -1186,6 +1186,7 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
             {"iarr_set",          "iii", 'b'},
             {"iarr_get_fast",     "ii",  'i'},
             {"iarr_set_fast",    "iii", 'b'},
+            {"iarr_data_ptr",    "i",   'i'},
             {"iarr_len",          "i",   'i'},
             {"epoll_wait_iarr2",  "iii", 'b'},
             {"sb_new",           "",    'i'},
@@ -2318,6 +2319,15 @@ static void emit_assign(Codegen *g, Expr *e, Buf *dst) {
         }
         free((void *)os); free((void *)vs);
         free(ix.data); free(o.data); free(v.data);
+        return;
+    }
+    if (tgt->kind == EX_DEREF && op == T_ASSIGN) {
+        Buf lval, value;
+        buf_init(&lval); buf_init(&value);
+        emit_expr(g, tgt, &lval);
+        emit_to_type(g, e->u.assign.value, tgt->type, &value);
+        buf_printf(dst, "(%s = %s)", buf_take(&lval), buf_take(&value));
+        free(lval.data); free(value.data);
         return;
     }
     if (tgt->kind == EX_FIELD) {

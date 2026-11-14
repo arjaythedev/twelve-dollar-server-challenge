@@ -9669,6 +9669,10 @@ hval hpbi_iarr_set_fast(hval h, hval i, hval v) {
     return hp_of_bool(hp_iarr_set_fast_impl(hp_val_to_int(h), hp_val_to_int(i),
                                             hp_val_to_int(v)));
 }
+hval hpbi_iarr_data_ptr(hval h) {
+    hp_iarr_t *a = iarr_of(h);
+    return hp_of_int((a && a->leased) ? (int64_t)(intptr_t)a->v : 0);
+}
 hval hpbi_iarr_len(hval h) {
     hp_iarr_t *a = iarr_of(h);
     return hp_of_int(a && a->leased ? a->len : 0);
@@ -9739,6 +9743,10 @@ int64_t hp_iarr_get_fast_t(int64_t h, int64_t k) {
 }
 bool hp_iarr_set_fast_t(int64_t h, int64_t k, int64_t v) {
     return hp_iarr_set_fast_impl(h, k, v);
+}
+int64_t hp_iarr_data_ptr_t(int64_t h) {
+    hp_iarr_t *a = (hp_iarr_t *)(intptr_t)h;
+    return (a && a->leased) ? (int64_t)(intptr_t)a->v : 0;
 }
 int64_t hp_bt_read_t(int64_t h, int64_t out, int64_t cols) {
     hp_iarr_t *a = (hp_iarr_t *)(intptr_t)out;

@@ -823,3 +823,19 @@ Two optional regressions require Python 3 and a private test database:
   commit. Inspect the server log for `mode=forced`; after releasing the reader,
   all 136 acknowledged posts must be present. The old runtime recorded zero
   forced checkpoints in this probe; the corrected runtime reaches that path.
+
+#### Typed feed-array access (local WSL, 2026-11-14)
+
+The hot feed renderer keeps fixed-capacity, leased `iarr` buffers for its
+per-post fields. The generic runtime now exposes their storage address, and
+HolyPHP uses typed pointer reads and writes inside `unsafe` for that fixed
+buffer lifetime. This keeps the feed logic in `server.hphp`; `iarr_data_ptr`
+is a generic builtin and `HPHP_FEED_IARR_PTR=0` restores checked builtin
+accesses for comparison.
+
+Same-binary A/B/B/A on the valid seed (800 VUs, 5 s ramp, 20 s hot mix) averaged
+19.25 µs CPU/request with builtin array access and 18.82 µs with typed direct
+access (2.2% less CPU/request). Mean throughput was 46.1k versus 46.7k requests/s;
+all four runs had zero HTTP failures. Exact challenge suites passed 42/42 in
+both Direct-6 and Classic modes. These are WSL diagnostics, not Box measurements
+or evidence that 280k users are reached.

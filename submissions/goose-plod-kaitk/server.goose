@@ -45,9 +45,12 @@ fn main() {
     // One worker on the box's one vCPU. Every client holds a connection, and
     // the box gives a process 65,535 descriptors, so connections are direct
     // descriptors, in as many io_uring rings as they need. A wait holds up
-    // to 1 ms for more completions, so the worker wakes once for many.
+    // to 1 ms for more completions, so the worker wakes once for many. Each
+    // connection with data in a pass takes a receive buffer: past the ring's
+    // buffers, the rest end their receives and are queued again, pass after
+    // pass, so there are 1,024 buffers rather than goose-http's 64.
     var cfg = http::Config { workers: 1, max_conns: 1000000, idle_ms: 120000, server: "",
-                             ring_direct: true, ring_batch_us: 1000, .. };
+                             ring_direct: true, ring_batch_us: 1000, ring_buffers: 1024, .. };
     if env("HOST", host) && host != "0.0.0.0" { format(cfg.address, host); }
     if env("PORT", port) {
         let p, ok = parse_int(trim(port));

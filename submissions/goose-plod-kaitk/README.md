@@ -38,6 +38,11 @@ no C: `app.goose` is the whole application, about 250 lines.
   page caches.
 - **Batched waits.** `ring_batch_us: 1000` lets a wait hold up to 1 ms for more
   completions, so the worker wakes once for many requests, not once each.
+- **1,024 receive buffers.** Each connection with data in a pass takes one of the
+  ring's 4 KB receive buffers. With goose-http's default of 64, the other
+  connections' receives end with `ENOBUFS` and are queued again, pass after pass, so
+  CPU climbs with the number of connections ready at once. `ring_buffers: 1024` costs
+  4 MB.
 - **The connection** is opened `NO_MUTEX`, since only its worker uses it: a feed
   request reads 100 columns, and each read would otherwise take a lock.
 - **The single post's query** reads the author with a subquery, not a join. With the
@@ -52,6 +57,24 @@ no C: `app.goose` is the whole application, about 250 lines.
   std's `find_any`, not a byte-at-a-time loop.
 
 ## Measured
+
+The first version, without `ring_buffers`, held 115,000 users on the board; it ran
+at half the CPU during the hold, and at 120,000 failed at 97% with timeouts. Past
+the CPU it has, connections queue, many are ready in each pass, and 64 buffers
+leave the rest re-queuing their receives. In Docker on an M1 Pro (Linux arm64),
+the server held to 0.4 CPU so that k6 saturates it (20,000 users, think times
+divided by 10, 60 s after a 15 s ramp), two alternating runs each:
+
+| Build | req/s | p95 | p99 | µs a request |
+|---|---:|---:|---:|---:|
+| 64 buffers | 13,084 to 13,110 | 459 to 634 ms | 693 to 1,075 ms | 24.9 to 25.3 |
+| 1,024 buffers | 14,805 to 15,021 | 200 to 261 ms | 329 to 393 ms | 21.7 to 22.2 |
+
+Below saturation the two are level: at 1 CPU and 8,000 requests a second, p99 11 to
+33 ms against 10 to 26 ms, and 21.5 to 21.7 µs a request against 21.3 to 23.3,
+three runs each.
+
+The measurements below are of the first version, at 4,000 users.
 
 In Docker on an M1 Pro (Linux arm64), the server in a container of 1 CPU and 2 GB, k6
 in another, with `bench/load.js`'s think times divided by 20 so that 4,000 users make

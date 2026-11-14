@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Builds twelve-loop from this submission: fetches SQLite 3.53.4's autoconf archive, checks its SHA-256,
+# Builds twelve-loop from this submission: fetches SQLite 3.54.1's autoconf archive, checks its SHA-256,
 # publishes its sqlite3.c and sqlite3.h into vendor/, trains a C profile when TWELVE_PGO=1, then runs
 # cargo build --release --locked with this script's arguments appended unchanged.
 #
 # Usage: bash build.sh [cargo build arguments...], as the normal build user after install.sh.
 # Environment: TWELVE_BUILD (unset or fast builds the fast build, safe the safe build); RUSTFLAGS (unset
-# becomes -C target-cpu=native; a set value, empty included, passes unchanged in the fast build, and the safe
-# build appends --cfg twelve_safe -C force-frame-pointers=yes; a value naming a twelve_ cfg flag is refused);
+# becomes -C target-cpu=native; a set value, empty included, is kept, and both builds append
+# -C target-feature=-avx512f; the safe build then appends --cfg twelve_safe -C force-frame-pointers=yes; a
+# value naming a twelve_ cfg flag is refused);
 # TWELVE_C_TARGET (a GCC -march token, default native); TWELVE_PGO (0 or 1, default 0; 1 with the fast build only); CC (one compiler
 # executable, default /usr/bin/gcc). An inherited TWELVE_PGO_DIR is cleared; only this script sets it.
 # Inherited CARGO_PROFILE_RELEASE_OVERFLOW_CHECKS, _LTO and _CODEGEN_UNITS are cleared; only the safe build
@@ -20,9 +21,9 @@ set -euo pipefail
 # Bracket ranges in patterns follow ASCII order whatever the locale.
 shopt -s globasciiranges
 
-readonly sqlite_url=https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
-readonly sqlite_sha256=0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c
-readonly sqlite_member_dir=sqlite-autoconf-3530400
+readonly sqlite_url=https://www.sqlite.org/2026/sqlite-autoconf-3540100.tar.gz
+readonly sqlite_sha256=926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
+readonly sqlite_member_dir=sqlite-autoconf-3540100
 
 tmp_dir=''
 
@@ -65,6 +66,9 @@ if [[ $RUSTFLAGS == *twelve_safe* || $RUSTFLAGS == *twelve_small_limits* || $RUS
     printf 'build.sh: invalid RUSTFLAGS\n' >&2
     exit 1
 fi
+# No 512-bit instructions in either build, whatever -C target-cpu names: a Cascade Lake core lowers its clock
+# while it runs them and for about 2 ms after. build.rs passes the C unit's equal, -mno-avx512f.
+RUSTFLAGS="$RUSTFLAGS -C target-feature=-avx512f"
 : "${TWELVE_C_TARGET=native}"
 : "${TWELVE_PGO=0}"
 : "${CC=/usr/bin/gcc}"
@@ -137,12 +141,13 @@ if [[ $TWELVE_PGO == 1 ]]; then
     mkdir -- "$tmp_dir/profile" "$tmp_dir/training" || fail profile-directory "$?" || exit
     profile_dir=$(CDPATH='' cd -- "$tmp_dir/profile" && pwd -P) || fail profile-directory "$?" || exit
     # build.rs's C compile options for the selected build, kept equal to its compile so that the profile matches
-    # the unit: the release options, the C warning set with -Werror (-Wframe-larger-than takes build.rs's
-    # STACK_BUFFER_MAX_BYTES), vendor/ through -isystem, SQLite's options and the safe build's define and flags.
+    # the unit: the release options with -mno-avx512f, the C warning set with -Werror (-Wframe-larger-than takes
+    # build.rs's STACK_BUFFER_MAX_BYTES), vendor/ through -isystem, SQLite's options, then the safe build's define
+    # and flags or the fast build's switches that turn GCC's default hardening off.
     # The unity unit leaves out -Wnull-dereference: GCC diagnoses it in the optimizer after inlining, so its
     # findings land in the vendored sqlite3.c, which -isystem cannot scope; the trainer keeps it.
     c_options=(
-        -O3 -g -fno-semantic-interposition "-march=$TWELVE_C_TARGET"
+        -O3 -g -fno-semantic-interposition "-march=$TWELVE_C_TARGET" -mno-avx512f
         -pedantic-errors -Wall -Wextra -Werror -Wconversion -Wsign-conversion -Wshadow -Wstrict-prototypes
         -Wmissing-prototypes -Wold-style-definition -Wvla -Wundef -Wformat=2 -Wcast-qual -Wcast-align
         -Wimplicit-fallthrough -Wswitch-enum -Wdouble-promotion -Wframe-larger-than=16384
@@ -158,6 +163,8 @@ if [[ $TWELVE_PGO == 1 ]]; then
             -fno-delete-null-pointer-checks -ftrivial-auto-var-init=zero -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3
             -fstack-protector-strong -fstack-clash-protection
         )
+    else
+        c_options+=(-fno-stack-protector -U_FORTIFY_SOURCE -fno-stack-clash-protection -fcf-protection=none)
     fi
     readonly c_options
     # build.rs writes the release unit to this same object path, which names the profile GCC looks up.

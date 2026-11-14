@@ -109,12 +109,30 @@ void *hp_bt_multi_seek_impl(void *v, const sqlite3_int64 *keys_in, int n) {
     }
     for (int depth = 0; !cur[0]->leaf; depth++) {
         if (depth > 20) { rc = SQLITE_CORRUPT_BKPT; goto fail; }
-        for (int i = 0; i < n; i++) {
+        for (int i = 0; i < n;) {
             MemPage *pg = cur[i];
-            int lb = hp_bt_multi_lower_bound(pg, keys[i]);
-            child[i] = lb >= pg->nCell
-                ? get4byte(&pg->aData[pg->hdrOffset + 8])
-                : get4byte(findCell(pg, lb));
+            int end = i + 1;
+            while (end < n && cur[end] == pg) end++;
+            if (end - i >= 4) {
+                /* Keys and page groups are both sorted. Resolve a dense
+                 * group with one forward walk over the page instead of
+                 * repeating an interpolation/binary search for each key. */
+                int lb = 0;
+                for (int j = i; j < end; j++) {
+                    while (lb < pg->nCell && hp_bt_multi_cell_key(pg, lb) < keys[j]) lb++;
+                    child[j] = lb >= pg->nCell
+                        ? get4byte(&pg->aData[pg->hdrOffset + 8])
+                        : get4byte(findCell(pg, lb));
+                }
+            } else {
+                for (int j = i; j < end; j++) {
+                    int lb = hp_bt_multi_lower_bound(pg, keys[j]);
+                    child[j] = lb >= pg->nCell
+                        ? get4byte(&pg->aData[pg->hdrOffset + 8])
+                        : get4byte(findCell(pg, lb));
+                }
+            }
+            i = end;
         }
         /* The descent array contains one reference per key, including keys
          * sharing a page. Rebuild those shared references before the next
@@ -426,6 +444,26 @@ const unsigned char *hp_bt_payload_impl(void *v, int *pn) {
     p = sqlite3BtreePayloadFetch(&h->cur, &amt);
     *pn = (int)amt;
     return (const unsigned char *)p;
+}
+
+/* Return the contiguous bytes available on the current page without asking
+ * sqlite3BtreePayloadFetch() to resolve the same pointer again. The result
+ * intentionally matches PayloadFetch's local-byte count, not the full
+ * payload length, so callers can detect overflow records and fall back. */
+int hp_bt_payload_size_impl(void *v) {
+    HpBt *h = (HpBt *)v;
+    u32 n;
+    u32 avail;
+    if (!h || h->cur.eState != CURSOR_VALID || !h->cur.pPage) return 0;
+    /* A preceding payload_ptr call already populated cur.info. Keep the
+     * builtin usable on its own by populating it only after cursor movement. */
+    if (h->cur.info.nSize == 0) (void)sqlite3BtreePayloadSize(&h->cur);
+    n = h->cur.info.nLocal;
+    if (!h->cur.info.pPayload ||
+        h->cur.info.pPayload > h->cur.pPage->aDataEnd) return 0;
+    avail = (u32)(h->cur.pPage->aDataEnd - h->cur.info.pPayload);
+    if (n > avail) n = avail;              /* match fetchPayload's corrupt-page clamp */
+    return (int)n;
 }
 
 /* Pin the current table page so a caller can keep a borrowed payload pointer

@@ -11,8 +11,8 @@ const EMIT_PERIOD: Duration = Duration::from_secs(10);
 // one full turn of closures; fewer, about 102 a second between two regular lines, open none.
 const WIND_DOWN_CLOSES: u64 = 1024;
 // One write of at most PIPE_BUF (4,096) bytes reaches a pipe whole or not at all (pipe(7)). The
-// longest stats line is 3,221 bytes: "stats t=" with a 20-character t, then 96 keys with 20-digit
-// values.
+// longest stats line is 3,260 bytes including LF: "stats t=" with a 20-character t, then 97 keys
+// with 20-digit values.
 const LINE_MAX: usize = 4_096;
 
 // Lines stderr could not take at once, which stderr_line dropped: counted in memory only, since
@@ -80,11 +80,18 @@ macro_rules! counters {
     };
 }
 
+// The line a turn writes: a regular line, or the start or end line of a wind-down episode.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Line {
+    Regular,
+    EpisodeStart,
+    EpisodeEnd,
+}
+
 impl Stats {
-    pub(crate) fn emit_if_due(&mut self, now: Instant) {
-        let Some(elapsed) = now.checked_duration_since(self.last) else {
-            return;
-        };
+    // The line due at now, if any, with the closure-start total it records.
+    fn line(&self, now: Instant) -> Option<(Line, u64)> {
+        let elapsed = now.checked_duration_since(self.last)?;
         let closes = self
             .closed_eof
             .saturating_add(self.closed_reset)
@@ -93,22 +100,39 @@ impl Stats {
         // The four closure-start counters are cumulative and their sum saturates, so closes never
         // falls below the value stored at the last written line.
         let since = closes.strict_sub(self.closes_at_line);
-        if elapsed >= EMIT_PERIOD {
-            self.write_line();
-            self.last = now;
-            self.closes_at_line = closes;
-            // A regular line at live 0 is also the end line of an open episode.
-            if self.episode && self.live == 0 {
-                self.episode = false;
-            }
+        let line = if elapsed >= EMIT_PERIOD {
+            Line::Regular
         } else if !self.episode && since >= WIND_DOWN_CLOSES {
-            self.write_line();
-            self.closes_at_line = closes;
-            self.episode = true;
+            Line::EpisodeStart
         } else if self.episode && self.live == 0 {
-            self.write_line();
-            self.closes_at_line = closes;
-            self.episode = false;
+            Line::EpisodeEnd
+        } else {
+            return None;
+        };
+        Some((line, closes))
+    }
+
+    /// Whether emit_if_due writes a line at now; the loop gathers its counters first.
+    pub(crate) fn line_due(&self, now: Instant) -> bool {
+        self.line(now).is_some()
+    }
+
+    pub(crate) fn emit_if_due(&mut self, now: Instant) {
+        let Some((line, closes)) = self.line(now) else {
+            return;
+        };
+        self.write_line();
+        self.closes_at_line = closes;
+        match line {
+            Line::Regular => {
+                self.last = now;
+                // A regular line at live 0 is also the end line of an open episode.
+                if self.episode && self.live == 0 {
+                    self.episode = false;
+                }
+            }
+            Line::EpisodeStart => self.episode = true,
+            Line::EpisodeEnd => self.episode = false,
         }
     }
 }
@@ -152,6 +176,7 @@ counters! {
     framing_errors: count, close_after_reply: count,
     ingress_held: count, ingress_held_max: max,
     live: gauge, outq_errors: count, linger_errors: count,
+    rearm_buffer_wait: count,
 }
 
 struct Number<T>(T);

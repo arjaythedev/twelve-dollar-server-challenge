@@ -1,4 +1,5 @@
 use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+use std::cell::Cell;
 use std::ptr::NonNull;
 
 pub(crate) const INPUT_BUDGET: u64 = if cfg!(twelve_small_limits) {
@@ -122,6 +123,8 @@ struct Record {
     rearm_next: u16,
     sweep_prev: u16,
     sweep_next: u16,
+    // Physical-slot metadata survives generation changes until the last cancel acknowledgement.
+    cell: Cell<u32>,
 }
 const _: () = assert!(size_of::<Record>() == 64);
 
@@ -246,6 +249,8 @@ pub(crate) struct Conns {
     out_charged: u64,
     out_pooled: u64,
     paused: u32,
+    // Live records over all eight rings, moved at open and at the free path of ended.
+    live: u32,
     ready: List,
     wait: List,
     lean: List,
@@ -270,6 +275,7 @@ impl Conns {
             out_charged: 0,
             out_pooled: 0,
             paused: 0,
+            live: 0,
             ready: List::new(),
             wait: List::new(),
             lean: List::new(),
@@ -339,8 +345,10 @@ impl Conns {
             return None;
         }
         let generation = self.record(key).generation;
+        let cell = Cell::new(self.record(key).cell.get());
         *self.record_mut(key) = Record {
             generation,
+            cell,
             flags: flag::LIVE,
             touched: self.now_s,
             ready_prev: NONE,
@@ -359,6 +367,8 @@ impl Conns {
             .expect("ring < 8, asserted by key");
         // UNSAFE PATH (speed): unchecked arithmetic; this count moves by one per record transition and stays between 0 and the 524,280 records of 8 rings of 65,535 slots
         table.live += 1;
+        // At most the 524,280 records of 8 rings of 65,535 slots are live, so this cannot overflow.
+        self.live = self.live.strict_add(1);
         Some(self.id(key))
     }
     fn storage(&self, index: u32) -> &Storage {
@@ -407,6 +417,14 @@ impl Conns {
             unsent: self.held_len(r.output) + self.held_len(r.flight),
         })
     }
+    /// A live connection's flags, read from its record alone (no storage is touched), or None for a
+    /// stale generation.
+    /// # Panics
+    /// Panics for an out-of-range ring or slot.
+    pub(crate) fn flags(&self, id: ConnId) -> Option<u32> {
+        let r = self.record(self.key(id.ring, id.slot));
+        (r.flags & flag::LIVE != 0 && r.generation == id.generation).then_some(r.flags)
+    }
     /// # Panics
     /// Panics for a ring outside the eight allocated tables.
     pub(crate) fn live(&self, ring: u8) -> u32 {
@@ -415,6 +433,40 @@ impl Conns {
             .get(usize::from(ring))
             .expect("ring < 8, asserted above")
             .live
+    }
+    /// Live records over all eight rings.
+    pub(crate) fn live_total(&self) -> u32 {
+        self.live
+    }
+    /// The metadata cell of a physical slot, including an old generation's outstanding acks.
+    /// # Panics
+    /// Panics for an out-of-range ring or slot.
+    pub(crate) fn cell(&self, id: ConnId) -> Option<u32> {
+        self.record(self.key(id.ring, id.slot))
+            .cell
+            .get()
+            .checked_sub(1)
+    }
+    /// Sets a physical slot's metadata cell; zero means none.
+    /// # Panics
+    /// Panics for an out-of-range ring or slot.
+    pub(crate) fn set_cell(&self, id: ConnId, cell: Option<u32>) {
+        self.record(self.key(id.ring, id.slot))
+            .cell
+            .set(cell.map_or(0, |index| index.strict_add(1)));
+    }
+    /// The address of the record of (ring, slot), for a cache prefetch, or None outside the tables;
+    /// computing it reads no memory.
+    pub(crate) fn record_address(&self, ring: u8, slot: u16) -> Option<*const u8> {
+        let table = self.tables.get(usize::from(ring))?;
+        (usize::from(slot) < table.len).then(|| {
+            table
+                .records
+                .as_ptr()
+                .wrapping_add(usize::from(slot))
+                .cast::<u8>()
+                .cast_const()
+        })
     }
     pub(crate) fn usage(&self) -> Usage {
         Usage {
@@ -426,6 +478,32 @@ impl Conns {
             rearm: self.tables.each_ref().map(|table| table.rearm.len),
             holding: self.tables.iter().map(|table| table.sweep.len).sum(),
         }
+    }
+    /// Charged input bytes: usage().input_bytes without the snapshot of the per-ring lists.
+    pub(crate) fn input_bytes(&self) -> u64 {
+        self.in_charged
+    }
+    /// Charged output bytes: usage().output_bytes.
+    pub(crate) fn output_bytes(&self) -> u64 {
+        self.out_charged
+    }
+    /// Input waiters: usage().waiting.
+    pub(crate) fn waiting(&self) -> u32 {
+        self.wait.len
+    }
+    /// Records on the ready list: usage().ready.
+    pub(crate) fn ready(&self) -> u32 {
+        self.ready.len
+    }
+    /// Records on ring's re-arm list: usage().rearm's entry for ring.
+    /// # Panics
+    /// Panics for a ring outside the eight allocated tables.
+    pub(crate) fn rearm(&self, ring: u8) -> u32 {
+        self.tables
+            .get(usize::from(ring))
+            .expect("ring < 8: a ConnId's ring is one of the eight")
+            .rearm
+            .len
     }
     /// # Panics
     /// Panics for an invalid/stale/closing id, an already armed operation, or an
@@ -525,6 +603,7 @@ impl Conns {
                 (r.input, r.output, r.flight, r.generation.wrapping_add(1));
             *r = Record {
                 generation,
+                cell: Cell::new(r.cell.get()),
                 ..Record::default()
             };
             if input != 0 {
@@ -542,6 +621,8 @@ impl Conns {
                 .expect("id.ring < 8, checked by key");
             // UNSAFE PATH (speed): unchecked arithmetic; this count moves by one per record transition and stays between 0 and the 524,280 records of 8 rings of 65,535 slots
             table.live -= 1;
+            // Every freed record was opened once and counted then, so this cannot underflow.
+            self.live = self.live.strict_sub(1);
             End::Freed
         } else {
             End::Live
@@ -741,8 +822,6 @@ impl Conns {
         let s = self.storage_mut(index);
         if s.bytes.capacity() < total as usize {
             s.bytes.reserve_exact(total as usize - s.bytes.len());
-        } else if s.bytes.capacity() > total as usize {
-            s.bytes.shrink_to(total as usize);
         }
         s.charge = u32::try_from(s.bytes.capacity()).expect("bounded input capacity");
         let after = s.charge;
@@ -1253,18 +1332,23 @@ impl Conns {
         }
     }
     fn acquire(&mut self, kind: BufferKind, need: u32) -> u32 {
-        let top = self.totals(kind).2.last().copied();
-        if let Some(index) = top {
-            let capacity = self.storage(index).bytes.capacity();
-            if capacity >= need as usize {
-                self.totals(kind).2.pop();
-                // UNSAFE PATH (speed): unchecked arithmetic; the charged and pooled totals are sums of held and kept capacities, at most the 32 MiB budget, so these u64 sums and differences cannot wrap
-                *self.totals(kind).1 -= capacity as u64;
-                *self.totals(kind).0 += capacity as u64;
-                self.storage_mut(index).charge =
-                    u32::try_from(capacity).expect("bounded pooled buffer");
-                return index;
+        // Search newest first, but do not let one small buffer hide every usable older buffer.
+        let mut found = None;
+        for at in (0..self.totals(kind).2.len()).rev() {
+            let index = *self.totals(kind).2.get(at).expect("at is inside the pool");
+            if self.storage(index).bytes.capacity() >= need as usize {
+                found = Some((at, index));
+                break;
             }
+        }
+        if let Some((at, index)) = found {
+            let capacity = self.storage(index).bytes.capacity();
+            self.totals(kind).2.swap_remove(at);
+            *self.totals(kind).1 = self.totals(kind).1.strict_sub(capacity as u64);
+            *self.totals(kind).0 = self.totals(kind).0.strict_add(capacity as u64);
+            self.storage_mut(index).charge =
+                u32::try_from(capacity).expect("bounded pooled buffer");
+            return index;
         }
         let index = self.empty.pop().unwrap_or_else(|| {
             assert!(

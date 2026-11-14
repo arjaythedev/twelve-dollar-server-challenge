@@ -54,6 +54,12 @@ java-nio-stohirov keeps its merged #88 row (102,000); its follow-up PR #303 (`bf
 held, not merged: open copies question, see the rule flags) scored 195,000 (19,187 req/s, p95 12.6 / p99 98.5 ms, 0 err,
 60 % CPU, 29 µs/req, 1,249 MB, 2026-11-04; 200,000 failed the 2-minute probe on p99 6.1 s). rust-iouring-tbsvttr is scored at its follow-up PR #323
 (`53cf87c`, merged); its merged #313 code (`bfc4be0`) held 250,000 and its earlier #313 run (`7effd5c`) 71,000.
+rust-iouring-not-my-segfault is scored at its follow-up PR #401 (`4881ff1`, merged); its merged #356 code (`f53ec18`) held
+220,000. Its later follow-up #426 (`dffecfb`, ring-0 work-based waits, PGO removed; held, not merged: it didn't beat the
+merged row) scored 250,000 (24,097 req/s, p95 102.5 / p99 493.6 ms, 0 err, 79 % CPU, 30 µs/req, 1,305 MB, 2026-11-13;
+260,000 failed the 2-minute probe on p99 1.12 s). c-iouring-PROGABBOMALA is scored at its follow-up PR #430 (`24a47f4`, merged); its merged #406 code (`740ab89`)
+held 250,000 and its merged #399 code (`bab1010`) 220,000. asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
+#414 code (`7c9e722`, thread per connection behind Nginx) held 24,000.
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -69,212 +75,227 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 2 | mojo-iouring-oh-meh | #257 | Mojo (io_uring, SQLite B-tree reads) | **304,000** | 28,705 | 159 | 545 | 0.00 | 82 | 26 | 726 | 2026-11-01 |
 | 3 | rust-iouring-rkkautsar | #355 | Rust (io_uring, SQLite B-tree reads) | **300,000** ᴿ | 28,417 | 107.7 | 345.0 | 0.00 | 96 | 30 | 1,159 | 2026-11-09 |
 | 3 | swift-iouring-akbashev | #376 | Swift (io_uring, SQLite B-tree reads) | **300,000** ᴬ | 28,183 | 112.1 | 942.5 | 0.00 | 92 | 29 | 1,240 | 2026-11-09 |
-| 5 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
-| 6 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
-| 6 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
-| 8 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
-| 8 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** ᴺ | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
-| 8 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
-| 11 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
-| 11 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
-| 13 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
-| 14 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 14 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
-| 14 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
-| 14 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
-| 14 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
-| 14 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
-| 14 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
-| 14 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
-| 22 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 23 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 24 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
-| 24 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
-| 24 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
-| 27 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 27 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
-| 27 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
-| 30 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 30 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
-| 32 | holyphp-io-uring-elifoxcoder | #336 | HolyPHP (io_uring, SQLite B-tree reads) | **244,000** ᵘ | 23,557 | 128.8 | 735.0 | 0.00 | 81 | 31 | 907 | 2026-11-07 |
-| 33 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
-| 33 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
-| 33 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
-| 36 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 36 | c-epoll-patrickryankenneth | #289 | C (io_uring, epoll fallback, SQLite B-tree reads) | **238,000** | 23,026 | 163.6 | 508.6 | 0.00 | 81 | 32 | 711 | 2026-11-08 |
-| 38 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 38 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
-| 40 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
-| 40 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
-| 40 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
-| 40 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
-| 40 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
-| 40 | asm-btree-ninhnv | #373 | x86-64 asm (NASM, io_uring, SQLite B-tree reads) | **230,000** | 22,362 | 21.9 | 103.5 | 0.00 | 58 | 24 | 581 | 2026-11-09 |
-| 46 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
-| 47 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
-| 48 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
-| 48 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
-| 48 | rust-iouring-not-my-segfault | #356 | Rust (io_uring, SQLite B-tree reads) | **220,000** | 21,438 | 57.5 | 474.4 | 0.00 | 83 | 36 | 1,118 | 2026-11-08 |
-| 51 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 52 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
-| 52 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
-| 52 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
-| 52 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
-| 52 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
-| 57 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
-| 58 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
-| 59 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
-| 59 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
-| 61 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
-| 62 | sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN | #243 | SQL (one SELECT over a virtual table, C io_uring) | **190,000** | 18,653 | 129 | 573 | 0.00 | 94 | 47 | 1,205 | 2026-11-02 |
-| 63 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
-| 63 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
-| 65 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
-| 65 | c-modular-ascendnoosphere | #333 | C (io_uring, SQLite B-tree reads) | **185,000** | 18,127 | 178.9 | 294.2 | 0.00 | 79 | 41 | 397 | 2026-11-06 |
-| 67 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
-| 68 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
-| 69 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |
-| 70 | asm-nasm-melroy89 | #86 | x86-64 asm (io_uring) | **171,000** | 16,777 | 87 | 142 | 0.00 | 78 | 43 | 358 | 2026-10-21 |
-| 71 | go-epoll-unorig-username | #186 | Go (raw epoll, cgo SQLite) | **165,000** | 16,020 | 479 | 952 | 0.00 | 97 | 56 | 665 | 2026-10-29 |
-| 72 | asm-epoll-HauLTCE | #207 | x86-64 asm (epoll, forked workers) | **160,000** ᵃ | 15,682 | 291 | 757 | 0.61 | 95 | 56 | 1,307 | 2026-10-30 |
-| 72 | ruby-cring-cicloid | #309 | Ruby (C io_uring extension, SQLite B-tree reads) | **160,000** | 15,628 | 266 | 699 | 0.01 | 84 | 50 | 1,017 | 2026-11-04 |
-| 74 | java-uring-crux | #170 | Java (FFM io_uring, C row formatter) | **158,000** | 15,531 | 137 | 312 | 0.00 | 72 | 43 | 1,139 | 2026-10-29 |
-| 75 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
-| 75 | python-pypy-iouring-kiwamizamurai | #284 | PyPy (io_uring, SQLite B-tree reads) | **155,000** | 15,201 | 120 | 277 | 0.00 | 80 | 49 | 525 | 2026-11-03 |
-| 75 | ruby-btreereads-cicloid | #308 | Ruby (io_uring, SQLite B-tree reads) | **155,000** | 15,121 | 274 | 545 | 0.00 | 87 | 53 | 791 | 2026-11-04 |
-| 78 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
-| 79 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
-| 79 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
-| 79 | cider-iouring-pomilon | #208 | Cider (native x86-64, io_uring) | **135,000** | 13,168 | 256 | 489 | 0.00 | 88 | 62 | 425 | 2026-10-30 |
-| 82 | odin-odinhttp-wanderingaura | #139 | Odin (odin-http) | **130,000** | 12,644 | 429 | 924 | 0.00 | 82 | 60 | 624 | 2026-10-28 |
-| 82 | ruby-uring-cicloid | #197 | Ruby (io_uring) | **130,000** ᵛ | 12,625 | 366 | 573 | 0.00 | 90 | 66 | 679 | 2026-10-29 |
-| 84 | c-iouring-fajarreza-gif | #302 | C (io_uring) | **128,000** | 12,592 | 60 | 80 | 0.04 | 55 | 41 | 316 | 2026-11-05 |
-| 84 | go-epoll-champ3oy | #76 | Go (io_uring) | **128,000** | 12,604 | 3 | 23 | 0.00 | 77 | 57 | 385 | 2026-10-21 |
-| 86 | cobol-gnucobol-unorig-username | #185 | COBOL (GnuCOBOL, epoll) | **126,000** | 12,398 | 34 | 125 | 0.00 | 93 | 70 | 607 | 2026-10-29 |
-| 87 | cpp-uwebsockets-v2-tbsvttr | #15 | C++ (uWebSockets) | **125,000** | 12,188 | 204 | 306 | 0.00 | 89 | 68 | 182 | 2026-10-26 |
-| 87 | go-epoll-Antheurus | #65 | Go (raw epoll, 3 processes) | **125,000** | 12,274 | 116 | 665 | 0.00 | 98 | 74 | 292 | 2026-10-27 |
-| 87 | go-lowlevel-janso123 | #91 | Go (io_uring, PGO + ThinLTO) | **125,000** | 12,284 | 68 | 261 | 0.00 | 95 | 72 | 500 | 2026-10-27 |
-| 87 | java-nio-unorig-username | #187 | Java (NIO, FFM SQLite) | **125,000** | 12,303 | 9.2 | 49 | 0.00 | 88 | 66 | 1,038 | 2026-10-29 |
-| 91 | kotlin-nio-3x3xX3N0N | #83 | Kotlin (NIO, 2 JVMs) | **120,000** ᴷ | 11,759 | 246 | 524 | 0.00 | 100 | 79 | 1,380 | 2026-10-21 |
-| 91 | rust-iouring-unorig-username | #188 | Rust (io_uring) | **120,000** | 11,799 | 12 | 144 | 0.00 | 46 | 36 | 543 | 2026-10-29 |
-| 93 | cpp-uwebsockets-tbsvttr | #6 | C++ (uWebSockets) | **115,000** | 10,940 | 261 | 652 | 0.00 | 87 | 74 | 215 | 2026-10-26 |
-| 94 | d-iouring-cyrusmsk | #163 | D (io_uring, during) | **114,000** | 11,158 | 248 | 567 | 0.00 | 87 | 73 | 475 | 2026-11-01 |
-| 95 | zig-usockets-tbsvttr | #25 | Zig (uSockets) | **110,000** | 10,442 | 335 | 721 | 0.00 | 90 | 80 | 188 | 2026-10-26 |
-| 96 | c-epoll-TheFirstIstari | #64 | C (epoll) | **107,000** | 10,493 | 212 | 409 | 0.94 | 78 | 69 | 169 | 2026-10-21 |
-| 97 | java-nio-stohirov | #88 | Java (FFM epoll) | **102,000** | 10,023 | 86 | 128 | 0.85 | 66 | 61 | 555 | 2026-10-21 |
-| 98 | d-eventcore-cyrusmsk | #165 | D (eventcore) | **98,000** | 9,610 | 109 | 750 | 0.00 | 85 | 82 | 475 | 2026-11-01 |
-| 99 | node-uwebsockets-zahidcakici | #102 | Node (uWebSockets) | **97,000** | 9,471 | 264 | 484 | 0.00 | 92 | 90 | 336 | 2026-10-21 |
-| 100 | saad-web-jakobsaadbye | #375 | Saad (native via LLVM, 4 SO_REUSEPORT processes) | **93,000** | 9,114 | 218.3 | 590.5 | 0.00 | 95 | 97 | 1,434 | 2026-11-09 |
-| 101 | typescript-bun-xxmohamed012 | #3 | Bun | **90,000** | 8,826 | 140 | 359 | 0.00 | 83 | 87 | 301 | 2026-10-21 |
-| 101 | scala-netty-jacksonhoran | #107 | Scala (Netty) | **90,000** ʸ | 8,801 | 484 | 757 | 0.00 | 87 | 92 | 825 | 2026-10-21 |
-| 101 | python-pypy-epoll-pranavds-codes | #84 | PyPy (epoll) | **90,000** | 8,801 | 280 | 474 | 0.00 | 89 | 94 | 270 | 2026-10-21 |
-| 101 | java-springboot-bogdan-blaj | #124 | Java (Spring Boot, Netty, FFM SQLite) | **90,000** | 8,804 | 342 | 888 | 0.00 | 85 | 90 | 1,172 | 2026-10-28 |
-| 105 | lua-openresty-yar0slav | #94 | Lua (OpenResty) | **88,000** | 8,477 | 434 | 591 | 0.04 | 92 | 101 | 267 | 2026-10-21 |
-| 105 | asm-epoll-FlavouredTux | #75 | x86-64 asm (epoll) | **88,000** | 8,628 | 170 | 438 | 0.00 | 85 | 92 | 189 | 2026-10-27 |
-| 105 | go-gnet-kaikegm | #180 | Go (gnet) | **88,000** ⁿ | 8,633 | 236 | 363 | 0.00 | 77 | 83 | 313 | 2026-10-29 |
-| 108 | archbtw-epoll-BlueFill | #200 | ArchBTW (transpiled to C, epoll) | **85,000** | 8,284 | 349 | 562 | 0.02 | 88 | 99 | 525 | 2026-10-30 |
-| 109 | rust-axum-tbsvttr | #17 | Rust (Axum) | **76,000** | 7,434 | 280 | 551 | 0.00 | 85 | 106 | 1,118 | 2026-10-26 |
-| 110 | python-stdlib-shawal-mbalire | #118 | Python (stdlib, PGO CPython) | **75,000** | 7,327 | 342 | 514 | 0.00 | 90 | 114 | 326 | 2026-10-27 |
-| 111 | zig-iouring-marler8997 ᵖ | #125 | Zig (io_uring) | **71,000** ᶠ | 6,559 | 1.0 | 1.5 | 0.93 | 31 | 44 | 199 | 2026-10-21 |
-| 111 | typescript-deno-JakeAve | #119 | Deno | **71,000** ᶠ | 6,558 | 5.6 | 13 | 0.93 | 47 | 67 | 412 | 2026-10-21 |
-| 111 | dart-rawsocket-C-Hatton | #46 | Dart | **71,000** ᶠ | 6,550 | 34 | 80 | 0.93 | 94 | 134 | 475 | 2026-10-21 |
-| 111 | cpp-epoll-khalefa-ow | #8 | C++ (epoll) | **71,000** ᶠ | 6,558 | 19 | 37 | 0.93 | 94 | 134 | 184 | 2026-10-21 |
-| 111 | go-fib-sirkostya009 | #34 | Go (fib, epoll) | **71,000** ᶠ | 6,552 | 109 | 248 | 0.93 | 61 | 87 | 674 | 2026-10-26 |
-| 111 | cpp-epoll_inmem-khalefa-ow | #9 | C++ (epoll) | **71,000** ᶠ | 6,555 | 30 | 148 | 0.93 | 92 | 131 | 353 | 2026-10-26 |
-| 111 | c-h2o-einhornimmond | #39 | C (H2O) | **71,000** ᶠ | 6,558 | 0.8 | 4.9 | 0.93 | 39 | 56 | 331 | 2026-10-26 |
-| 111 | c-epoll-benclawbot | #42 | C (epoll) | **71,000** ᶠ | 6,555 | 29 | 53 | 0.93 | 94 | 134 | 409 | 2026-10-26 |
-| 111 | go-stdlib-vkrishna03 | #44 | Go (stdlib, epoll) | **71,000** ᶠ | 6,547 | 74 | 251 | 0.93 | 38 | 54 | 231 | 2026-10-26 |
-| 111 | php-swoole-mattsplat | #24 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 45 | 103 | 0.93 | 66 | 94 | 1,025 | 2026-10-26 |
-| 111 | go-epoll-damianoneill | #52 | Go (raw epoll) | **71,000** ᶠ | 6,551 | 50 | 78 | 0.93 | 41 | 59 | 157 | 2026-10-26 |
-| 111 | c-iouring-einhornimmond | #55 | C (io_uring) | **71,000** ᶠ | 6,556 | 2.7 | 10 | 0.92 | 36 | 51 | 190 | 2026-10-27 |
-| 111 | php-swoole-tzimpel | #28 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 17 | 175 | 0.93 | 71 | 101 | 325 | 2026-10-27 |
-| 111 | c-iouring-27bhd | #68 | C (io_uring) | **71,000** ᶠ | 6,554 | 30 | 44 | 0.93 | 84 | 120 | 186 | 2026-10-27 |
-| 111 | go-nethttp-mattn-vedic | #100 | Go (raw epoll, cgo SQLite) | **71,000** ᶠ | 6,552 | 36 | 50 | 0.93 | 55 | 78 | 332 | 2026-10-27 |
-| 111 | rust-axum-mjc | #114 | Rust (Axum) | **71,000** ᶠ | 6,556 | 2.2 | 3.5 | 0.93 | 40 | 57 | 1,551 | 2026-10-27 |
-| 111 | java-micronaut-Clickin | #116 | Java (Micronaut, JDBC SQLite) | **71,000** ᶠ | 6,546 | 78 | 148 | 0.93 | 85 | 121 | 1,293 | 2026-10-27 |
-| 111 | c-libco-ssmurfgg04-gif | #121 | C (libco coroutines, epoll) | **71,000** ᶠ | 6,546 | 141 | 210 | 0.93 | 52 | 74 | 717 | 2026-10-27 |
-| 111 | java-springboot-reactor-mohkamfer | #138 | Java (Spring Boot, Reactor Netty, FFM SQLite) | **71,000** ᶠ | 6,555 | 11 | 56 | 0.93 | 62 | 88 | 503 | 2026-10-28 |
-| 111 | rust-axum-connorw-dev | #140 | Rust (Axum) | **71,000** ᶠ | 6,554 | 6.1 | 11 | 0.93 | 52 | 74 | 1,131 | 2026-10-28 |
-| 111 | bun-yatta-psrockstar098 | #179 | Bun (Yatta JS, bun:sqlite) | **71,000** ᶠ ᵠ | 6,545 | 54 | 133 | 0.93 | 91 | 130 | 213 | 2026-10-29 |
-| 111 | rust-mqbridge-marcomq | #253 | Rust (mq-bridge, sqlx SQLite) | **71,000** ᶠ | 6,548 | 72 | 106 | 0.93 | 76 | 109 | 1,409 | 2026-11-01 |
-| 111 | c-iouring-marwanabdelhameed | #270 | C (io_uring) | **71,000** ᶠ | 6,558 | 0.8 | 3.4 | 0.93 | 39 | 56 | 1,448 | 2026-11-02 |
-| 111 | c-fio-tbsvttr | #5 | C (facil.io) | **71,000** | 6,959 | 130 | 621 | 0.00 | 81 | 108 | 646 | 2026-10-26 |
-| 111 | ruby-async-cicloid | #71 | Ruby (async, YJIT) | **71,000** | 6,967 | 121 | 349 | 0.00 | 83 | 111 | 362 | 2026-10-27 |
-| 111 | forth-gforth-FantasticForth | #171 | Forth (gforth, epoll) | **71,000** | 6,916 | 291 | 765 | 0.00 | 92 | 124 | 318 | 2026-10-29 |
-| 137 | python-fastapi-granian-shawal-mbalire | #41 | Python (FastAPI, Granian) | **70,000** | 6,801 | 465 | 862 | 0.00 | 94 | 129 | 1,192 | 2026-10-26 |
-| 137 | fortran-microhttpd-tbsvttr | #16 | Fortran (libmicrohttpd) | **70,000** | 6,866 | 141 | 401 | 0.00 | 89 | 120 | 1,134 | 2026-10-26 |
-| 139 | trux-http-claudioscheer | #145 | Trux (io_uring) | **69,000** ᵗ | 6,514 | 1.6 | 234 | 0.59 | 49 | 70 | 1,043 | 2026-10-28 |
-| 140 | fsharp-oxpecker-delneg | #108 | F# (Oxpecker) | **65,000** ᵍ | 6,392 | 84 | 229 | 0.00 | 55 | 80 | 1,255 | 2026-10-21 |
-| 140 | go-gnet-Haris0059 | #38 | Go (gnet) | **65,000** ⁿ | 6,396 | 39 | 54 | 0.00 | 42 | 61 | 350 | 2026-10-26 |
-| 140 | kotlin-ktor-C-Hatton | #45 | Kotlin (Ktor, Netty, FFM SQLite) | **65,000** | 6,374 | 198 | 713 | 0.00 | 65 | 95 | 1,273 | 2026-10-26 |
-| 140 | go-fasthttp-b3nhard | #56 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,399 | 4.8 | 19 | 0.00 | 77 | 112 | 547 | 2026-10-27 |
-| 140 | cpp-drogon-hendy643 | #29 | C++ (Drogon) | **65,000** | 6,398 | 36 | 60 | 0.00 | 52 | 76 | 814 | 2026-10-27 |
-| 140 | java-netty-lfeagan | #63 | Java (Netty, FFM SQLite) | **65,000** | 6,401 | 1.9 | 28 | 0.00 | 62 | 90 | 1,494 | 2026-10-27 |
-| 140 | csharp-aspnetcore-vijay-highlo | #77 | C# (ASP.NET Core, Native AOT) | **65,000** | 6,389 | 87 | 319 | 0.00 | 56 | 82 | 1,278 | 2026-10-27 |
-| 140 | node-net-barrard | #78 | Node (node:net, node:sqlite) | **65,000** | 6,383 | 133 | 312 | 0.00 | 75 | 109 | 483 | 2026-10-28 |
-| 140 | cpp-iouring-edwin-2024 | #98 | C++ (io_uring) | **65,000** ˢ | 6,399 | 33 | 55 | 0.00 | 30 | 44 | 200 | 2026-10-27 |
-| 140 | java-raw-agrison | #101 | Java (raw NIO, FFM SQLite) | **65,000** | 6,387 | 99 | 443 | 0.00 | 81 | 118 | 731 | 2026-10-27 |
-| 140 | lean-c-iouring-loafecho | #239 | C (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,399 | 32 | 56 | 0.00 | 28 | 41 | 605 | 2026-11-01 |
-| 140 | go-fasthttp-savak1990 | #106 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,397 | 45 | 66 | 0.00 | 66 | 96 | 875 | 2026-11-05 |
-| 152 | bun-elysia-shashishsoni | #59 | Bun (Elysia) | **64,000** | 6,300 | 14 | 75 | 0.00 | 89 | 131 | 1,507 | 2026-10-27 |
-| 153 | csharp-aspnetcore-maks-march | #27 | C# (ASP.NET Core) | **63,000** | 6,136 | 417 | 757 | 0.00 | 87 | 131 | 925 | 2026-10-27 |
-| 153 | csharp-aspnetcore-devv-guru | #195 | C# (ASP.NET Core, Native AOT) | **63,000** | 6,156 | 202 | 679 | 0.00 | 79 | 119 | 1,081 | 2026-10-29 |
-| 155 | pypy-twisted-perkinslr | #79 | PyPy (Twisted) | **62,000** | 6,017 | 474 | 757 | 0.00 | 73 | 113 | 563 | 2026-10-27 |
-| 155 | go-nethttp-rkkautsar | #277 | Go (net/http, cgo SQLite) | **62,000** | 6,059 | 465 | 742 | 0.00 | 93 | 143 | 1,152 | 2026-11-03 |
-| 157 | go-fasthttp-riyaz-ali | #344 | Go (fasthttp, cgo SQLite) | **61,000** ᶳ | 5,984 | 243.6 | 836.5 | 0.00 | 79 | 123 | 1,162 | 2026-11-07 |
-| 158 | java-netty-itsnaveenk | #57 | Java (Netty) | **58,000** | 5,665 | 349 | 519 | 0.00 | 83 | 136 | 879 | 2026-10-27 |
-| 159 | typescript-bun-tbsvttr | #4 | Bun | **57,000** | 5,593 | 103 | 291 | 0.00 | 86 | 143 | 301 | 2026-10-25 |
-| 159 | java-quarkus-panama-raisinsfried | #73 | Java (Quarkus, FFM SQLite) | **57,000** | 5,607 | 9.6 | 359 | 0.00 | 60 | 100 | 725 | 2026-10-27 |
-| 159 | typescript-fastify-melroy89 | #51 | TypeScript (Fastify, Node) | **57,000** | 5,582 | 212 | 614 | 0.00 | 77 | 128 | 1,072 | 2026-10-30 |
-| 162 | haskell-warp-staticfx | #104 | Haskell (Warp) | **55,000** | 5,411 | 2.5 | 198 | 0.00 | 62 | 107 | 1,587 | 2026-10-21 |
-| 162 | go-nethttp-fi5HiE | #99 | Go (net/http) | **55,000** | 5,382 | 425 | 679 | 0.00 | 90 | 156 | 1,465 | 2026-10-21 |
-| 162 | java-jdkhttpserver-razorree | #262 | Java (JDK HttpServer, virtual threads) | **55,000** | 5,384 | 306 | 862 | 0.00 | 92 | 159 | 1,291 | 2026-11-02 |
-| 162 | ecko-stdhttp-sn | #334 | Ecko (std.http) | **55,000** | 5,403 | 68.1 | 227.2 | 0.00 | 81 | 139 | 582 | 2026-11-06 |
-| 166 | go-nethttp-tbsvttr | #18 | Go (net/http) | **53,000** | 5,165 | 374 | 659 | 0.00 | 93 | 168 | 624 | 2026-10-26 |
-| 166 | python-pyrustapi-rajboopathiking | #147 | Python (PyRustAPI, Rust/Hyper core) | **53,000** | 5,185 | 294 | 429 | 0.00 | 90 | 162 | 1,232 | 2026-10-28 |
-| 168 | koru-orisha-denstad | #310 | Koru (Orisha, io_uring, native-compiled) | **50,000** | 4,913 | 66 | 125 | 0.00 | 52 | 98 | 166 | 2026-11-05 |
-| 169 | csharp-aspnetcore-andrexx | #20 | C# (ASP.NET Core) | **49,000** | 4,815 | 84 | 234 | 0.00 | 88 | 170 | 846 | 2026-10-26 |
-| 169 | rust-hyper-dannie203 | #178 | Rust (hyper) | **49,000** | 4,820 | 34 | 370 | 0.00 | 86 | 166 | 1,254 | 2026-11-04 |
-| 171 | python-fastapi-tejasnafde | #10 | Python (FastAPI) | **48,000** | 4,701 | 303 | 465 | 0.00 | 89 | 176 | 583 | 2026-10-21 |
-| 171 | swift-hummingbird-denizak ᵖ | #43 | Swift (Hummingbird) | **48,000** | 4,700 | 210 | 300 | 0.00 | 97 | 191 | 1,269 | 2026-10-21 |
-| 173 | java-helidon-dglynch | #159 | Java (Helidon) | **46,000** | 4,525 | 76 | 121 | 0.00 | 84 | 173 | 1,579 | 2026-10-29 |
-| 174 | python-granian-tbsvttr | #13 | Python (Granian) | **45,000** | 4,400 | 202 | 812 | 0.00 | 93 | 197 | 709 | 2026-10-26 |
-| 174 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
-| 176 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
-| 177 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
-| 178 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
-| 179 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
-| 180 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
-| 181 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
-| 181 | goose-native-tbsvttr | #143 | Goose (native, epoll) | **32,000** | 3,150 | 0.6 | 148 | 0.00 | 15 | 44 | 384 | 2026-11-02 |
-| 183 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
-| 183 | go-iouring-pmatteo | #168 | Go (io_uring, PGO) | **29,000** ʲ | 2,857 | 2.2 | 42 | 0.00 | 21 | 68 | 326 | 2026-10-29 |
-| 185 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
-| 186 | go-gin-lincolng4 | #103 | Go (Gin) | **27,000** ᵐ | 2,658 | 1.2 | 4.8 | 0.00 | 42 | 147 | 1,600 | 2026-10-27 |
-| 187 | java-flash-relism | #133 | Java (Flash) | **25,000** | 2,449 | 280 | 991 | 0.00 | 38 | 144 | 1,464 | 2026-10-28 |
-| 188 | lua-lunet-simbo1905 | #126 | Lua (lunet), behind Nginx | **24,000** ˡ | 2,362 | 20 | 38 | 0.93 | 93 | 366 | 38 | 2026-10-28 |
-| 188 | crystal-kemal-faustinoaq | #194 | Crystal (Kemal), behind Nginx | **24,000** ʷ | 2,362 | 24 | 70 | 0.96 | 51 | 201 | 126 | 2026-10-29 |
-| 188 | jww-fiber | #328 | Go (Fiber, fasthttp), behind Nginx | **24,000** ᵞ | 2,361 | 28.4 | 76.0 | 0.94 | 49 | 193 | 85 | 2026-11-05 |
-| 191 | typescript-effect-SeeThruHead | #49 | TypeScript (Effect, Node) | **23,000** | 2,229 | 413 | 765 | 0.00 | 96 | 399 | 623 | 2026-10-26 |
-| 192 | d-arsd-hybridcgi-cyrusmsk | #160 | D (arsd hybrid cgi) | **22,000** ʰ | 2,167 | 10 | 97 | 0.00 | 37 | 159 | 1,688 | 2026-10-29 |
-| 193 | php-symfony-pklebba | #40 | PHP (Symfony, FrankenPHP) | **21,000** | 2,061 | 186 | 274 | 0.00 | 95 | 428 | 915 | 2026-10-26 |
-| 194 | pascal-horse-viniabreu | #134 | Pascal (Horse) | **20,000** | 1,966 | 81 | 111 | 0.00 | 90 | 426 | 270 | 2026-10-28 |
-| 195 | csharp-aspnetcore-larsholm | #47 | C# (ASP.NET Core) | **19,000** | 1,854 | 381 | 943 | 0.00 | 57 | 286 | 439 | 2026-10-26 |
-| 195 | crystal-kemal-krthr | #146 | Crystal (Kemal) | **19,000** ᵐ | 1,869 | 27 | 153 | 0.00 | 24 | 119 | 1,631 | 2026-10-28 |
-| 195 | php-symfony-gnugat | #338 | PHP (Symfony, FrankenPHP) | **19,000** | 1,863 | 253 | 608 | 0.00 | 92 | 459 | 1,090 | 2026-11-06 |
-| 198 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
-| 199 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
-| 200 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
-| 201 | kotlin-ktor-graalvm-noamm9 | #53 | Kotlin (Ktor, GraalVM native) | **10,500** | 1,027 | 356 | 906 | 0.00 | 79 | 715 | 314 | 2026-10-26 |
-| 202 | php-codeigniter-melroy89 | #50 | PHP (CodeIgniter, FrankenPHP) | **9,500** | 926 | 332 | 456 | 0.00 | 99 | 995 | 626 | 2026-10-30 |
-| 202 | scala-http4s-sideeffffect | #172 | Scala (http4s Ember, Cats Effect), behind Nginx | **9,500** | 934 | 7.0 | 179 | 0.00 | 50 | 498 | 1,392 | 2026-11-01 |
-| 204 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
-| 204 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
-| 206 | sql-sqlite3cli-public | #232 | SQL (sqlite3 CLI, Bash accept), behind Nginx | **7,000** | 688 | 167 | 309 | 0.80 | 96 | 1,298 | 258 | 2026-10-31 |
-| 207 | c-dreamcast-public | #221 | C (KallistiOS on an emulated Dreamcast in Flycast, SQLite on the SH-4), behind Nginx | **6,000** | 590 | 26.5 | 97.5 | 0.04 | 64 | 1,008 | 319 | 2026-11-02 |
-| 208 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
-| 209 | r-plumber2-josiahparry | #242 | R (plumber2), behind Nginx | **2,000** | 195 | 300 | 924 | 0.00 | 86 | 4,103 | 279 | 2026-11-01 |
-| 210 | spice-ngspice-public | #220 | SPICE (ngspice + Verilog chip, SQLite in the network card), behind Nginx | **500** | 49 | 246 | 519 | 0.00 | 82 | 15,675 | 29 | 2026-11-01 |
+| 3 | fsharp-uring-delneg | #398 | F# (.NET 11, io_uring, SQLite B-tree reads) | **300,000** ᴱ | 28,419 | 56.4 | 404.6 | 0.00 | 82 | 26 | 1,347 | 2026-11-13 |
+| 6 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
+| 7 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
+| 7 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
+| 7 | c-iouring-jowinjestine | #404 | C (io_uring, SQLite B-tree reads) | **290,000** ᴸ | 27,567 | 77.6 | 271.7 | 0.00 | 80 | 26 | 1,146 | 2026-11-12 |
+| 10 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
+| 10 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** ᴺ | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
+| 10 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
+| 10 | asm-btree-ninhnv | #388 | x86-64 asm (NASM, io_uring, SQLite B-tree reads) | **280,000** ᴮ | 26,699 | 195.7 | 396.6 | 0.00 | 82 | 28 | 794 | 2026-11-10 |
+| 10 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** ᵁ | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
+| 10 | c-iouring-PROGABBOMALA | #430 | C (io_uring, SQLite B-tree reads) | **280,000** | 26,712 | 151.1 | 479.1 | 0.00 | 78 | 26 | 1,550 | 2026-11-14 |
+| 16 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
+| 16 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
+| 18 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
+| 19 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
+| 19 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
+| 19 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
+| 19 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
+| 19 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
+| 19 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
+| 19 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
+| 19 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
+| 19 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,755 | 222.7 | 980.8 | 0.00 | 83 | 29 | 1,105 | 2026-11-14 |
+| 28 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 29 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
+| 30 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
+| 30 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
+| 30 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
+| 33 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 33 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
+| 33 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
+| 33 | rust-iouring-not-my-segfault | #401 | Rust (io_uring, SQLite B-tree reads) | **250,000** | 24,071 | 138.1 | 678.7 | 0.00 | 79 | 30 | 1,297 | 2026-11-12 |
+| 33 | holyphp-io-uring-elifoxcoder | #418 | HolyPHP (io_uring, SQLite B-tree reads) | **250,000** ᵘ | 24,124 | 91.9 | 297.2 | 0.00 | 82 | 31 | 1,334 | 2026-11-13 |
+| 33 | luajit-iouring-asxpi | #436 | LuaJIT (io_uring, SQLite B-tree reads) | **250,000** | 24,064 | 149.6 | 460.4 | 0.00 | 78 | 30 | 1,187 | 2026-11-14 |
+| 39 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 39 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
+| 41 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
+| 41 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
+| 41 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
+| 41 | java-iouring-davidhsv | #393 | Java (FFM, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 80.7 | 961.5 | 0.00 | 74 | 29 | 1,458 | 2026-11-11 |
+| 45 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 45 | c-epoll-patrickryankenneth | #289 | C (io_uring, epoll fallback, SQLite B-tree reads) | **238,000** | 23,026 | 163.6 | 508.6 | 0.00 | 81 | 32 | 711 | 2026-11-08 |
+| 47 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 47 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
+| 49 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
+| 49 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
+| 49 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
+| 49 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
+| 49 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
+| 54 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
+| 55 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
+| 56 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
+| 56 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
+| 56 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
+| 59 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 60 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
+| 60 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
+| 60 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
+| 60 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
+| 60 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
+| 65 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
+| 66 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
+| 67 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
+| 67 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
+| 67 | lean-derive-lowmem-hargup | #434 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **200,000** | 19,673 | 55.3 | 189.9 | 0.00 | 72 | 34 | 1,222 | 2026-11-14 |
+| 70 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
+| 71 | sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN | #243 | SQL (one SELECT over a virtual table, C io_uring) | **190,000** | 18,653 | 129 | 573 | 0.00 | 94 | 47 | 1,205 | 2026-11-02 |
+| 72 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
+| 72 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
+| 74 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
+| 74 | c-modular-ascendnoosphere | #333 | C (io_uring, SQLite B-tree reads) | **185,000** | 18,127 | 178.9 | 294.2 | 0.00 | 79 | 41 | 397 | 2026-11-06 |
+| 76 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
+| 77 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
+| 78 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |
+| 79 | asm-nasm-melroy89 | #86 | x86-64 asm (io_uring) | **171,000** | 16,777 | 87 | 142 | 0.00 | 78 | 43 | 358 | 2026-10-21 |
+| 80 | go-epoll-unorig-username | #186 | Go (raw epoll, cgo SQLite) | **165,000** | 16,020 | 479 | 952 | 0.00 | 97 | 56 | 665 | 2026-10-29 |
+| 81 | asm-epoll-HauLTCE | #207 | x86-64 asm (epoll, forked workers) | **160,000** ᵃ | 15,682 | 291 | 757 | 0.61 | 95 | 56 | 1,307 | 2026-10-30 |
+| 81 | ruby-cring-cicloid | #309 | Ruby (C io_uring extension, SQLite B-tree reads) | **160,000** | 15,628 | 266 | 699 | 0.01 | 84 | 50 | 1,017 | 2026-11-04 |
+| 83 | java-uring-crux | #170 | Java (FFM io_uring, C row formatter) | **158,000** | 15,531 | 137 | 312 | 0.00 | 72 | 43 | 1,139 | 2026-10-29 |
+| 84 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
+| 84 | python-pypy-iouring-kiwamizamurai | #284 | PyPy (io_uring, SQLite B-tree reads) | **155,000** | 15,201 | 120 | 277 | 0.00 | 80 | 49 | 525 | 2026-11-03 |
+| 84 | ruby-btreereads-cicloid | #308 | Ruby (io_uring, SQLite B-tree reads) | **155,000** | 15,121 | 274 | 545 | 0.00 | 87 | 53 | 791 | 2026-11-04 |
+| 87 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
+| 88 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
+| 88 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
+| 88 | cider-iouring-pomilon | #208 | Cider (native x86-64, io_uring) | **135,000** | 13,168 | 256 | 489 | 0.00 | 88 | 62 | 425 | 2026-10-30 |
+| 91 | odin-odinhttp-wanderingaura | #139 | Odin (odin-http) | **130,000** | 12,644 | 429 | 924 | 0.00 | 82 | 60 | 624 | 2026-10-28 |
+| 91 | ruby-uring-cicloid | #197 | Ruby (io_uring) | **130,000** ᵛ | 12,625 | 366 | 573 | 0.00 | 90 | 66 | 679 | 2026-10-29 |
+| 93 | c-iouring-fajarreza-gif | #302 | C (io_uring) | **128,000** | 12,592 | 60 | 80 | 0.04 | 55 | 41 | 316 | 2026-11-05 |
+| 93 | go-epoll-champ3oy | #76 | Go (io_uring) | **128,000** | 12,604 | 3 | 23 | 0.00 | 77 | 57 | 385 | 2026-10-21 |
+| 95 | cobol-gnucobol-unorig-username | #185 | COBOL (GnuCOBOL, epoll) | **126,000** | 12,398 | 34 | 125 | 0.00 | 93 | 70 | 607 | 2026-10-29 |
+| 96 | cpp-uwebsockets-v2-tbsvttr | #15 | C++ (uWebSockets) | **125,000** | 12,188 | 204 | 306 | 0.00 | 89 | 68 | 182 | 2026-10-26 |
+| 96 | go-epoll-Antheurus | #65 | Go (raw epoll, 3 processes) | **125,000** | 12,274 | 116 | 665 | 0.00 | 98 | 74 | 292 | 2026-10-27 |
+| 96 | go-lowlevel-janso123 | #91 | Go (io_uring, PGO + ThinLTO) | **125,000** | 12,284 | 68 | 261 | 0.00 | 95 | 72 | 500 | 2026-10-27 |
+| 96 | java-nio-unorig-username | #187 | Java (NIO, FFM SQLite) | **125,000** | 12,303 | 9.2 | 49 | 0.00 | 88 | 66 | 1,038 | 2026-10-29 |
+| 96 | asm-raw-StefanoC90 | #431 | x86-64 asm (NASM, epoll, 4 SO_REUSEPORT processes) | **125,000** | 12,200 | 388.8 | 596.4 | 0.00 | 91 | 69 | 1,336 | 2026-11-14 |
+| 101 | kotlin-nio-3x3xX3N0N | #83 | Kotlin (NIO, 2 JVMs) | **120,000** ᴷ | 11,759 | 246 | 524 | 0.00 | 100 | 79 | 1,380 | 2026-10-21 |
+| 101 | rust-iouring-unorig-username | #188 | Rust (io_uring) | **120,000** | 11,799 | 12 | 144 | 0.00 | 46 | 36 | 543 | 2026-10-29 |
+| 103 | cpp-uwebsockets-tbsvttr | #6 | C++ (uWebSockets) | **115,000** | 10,940 | 261 | 652 | 0.00 | 87 | 74 | 215 | 2026-10-26 |
+| 103 | goose-plod-kaitk | #417 | Goose (Plod, io_uring) | **115,000** | 11,293 | 180.7 | 465.0 | 0.00 | 50 | 41 | 382 | 2026-11-12 |
+| 105 | d-iouring-cyrusmsk | #163 | D (io_uring, during) | **114,000** | 11,158 | 248 | 567 | 0.00 | 87 | 73 | 475 | 2026-11-01 |
+| 106 | zig-usockets-tbsvttr | #25 | Zig (uSockets) | **110,000** | 10,442 | 335 | 721 | 0.00 | 90 | 80 | 188 | 2026-10-26 |
+| 107 | c-epoll-TheFirstIstari | #64 | C (epoll) | **107,000** | 10,493 | 212 | 409 | 0.94 | 78 | 69 | 169 | 2026-10-21 |
+| 108 | java-nio-stohirov | #88 | Java (FFM epoll) | **102,000** | 10,023 | 86 | 128 | 0.85 | 66 | 61 | 555 | 2026-10-21 |
+| 109 | saad-web-jakobsaadbye | #389 | Saad (native via LLVM, 4 SO_REUSEPORT processes) | **100,000** ᴶ | 9,838 | 35.0 | 160.4 | 0.00 | 93 | 88 | 703 | 2026-11-10 |
+| 109 | c-iouring-Pranjay-kumar | #424 | C (io_uring) | **100,000** | 9,843 | 19.6 | 91.9 | 0.00 | 93 | 88 | 591 | 2026-11-13 |
+| 111 | d-eventcore-cyrusmsk | #165 | D (eventcore) | **98,000** | 9,610 | 109 | 750 | 0.00 | 85 | 82 | 475 | 2026-11-01 |
+| 112 | node-uwebsockets-zahidcakici | #102 | Node (uWebSockets) | **97,000** | 9,471 | 264 | 484 | 0.00 | 92 | 90 | 336 | 2026-10-21 |
+| 113 | typescript-bun-xxmohamed012 | #3 | Bun | **90,000** | 8,826 | 140 | 359 | 0.00 | 83 | 87 | 301 | 2026-10-21 |
+| 113 | scala-netty-jacksonhoran | #107 | Scala (Netty) | **90,000** ʸ | 8,801 | 484 | 757 | 0.00 | 87 | 92 | 825 | 2026-10-21 |
+| 113 | python-pypy-epoll-pranavds-codes | #84 | PyPy (epoll) | **90,000** | 8,801 | 280 | 474 | 0.00 | 89 | 94 | 270 | 2026-10-21 |
+| 113 | java-springboot-bogdan-blaj | #124 | Java (Spring Boot, Netty, FFM SQLite) | **90,000** | 8,804 | 342 | 888 | 0.00 | 85 | 90 | 1,172 | 2026-10-28 |
+| 117 | lua-openresty-yar0slav | #94 | Lua (OpenResty) | **88,000** | 8,477 | 434 | 591 | 0.04 | 92 | 101 | 267 | 2026-10-21 |
+| 117 | asm-epoll-FlavouredTux | #75 | x86-64 asm (epoll) | **88,000** | 8,628 | 170 | 438 | 0.00 | 85 | 92 | 189 | 2026-10-27 |
+| 117 | go-gnet-kaikegm | #180 | Go (gnet) | **88,000** ⁿ | 8,633 | 236 | 363 | 0.00 | 77 | 83 | 313 | 2026-10-29 |
+| 120 | archbtw-epoll-BlueFill | #200 | ArchBTW (transpiled to C, epoll) | **85,000** | 8,284 | 349 | 562 | 0.02 | 88 | 99 | 525 | 2026-10-30 |
+| 121 | rust-axum-tbsvttr | #17 | Rust (Axum) | **76,000** | 7,434 | 280 | 551 | 0.00 | 85 | 106 | 1,118 | 2026-10-26 |
+| 122 | python-stdlib-shawal-mbalire | #118 | Python (stdlib, PGO CPython) | **75,000** | 7,327 | 342 | 514 | 0.00 | 90 | 114 | 326 | 2026-10-27 |
+| 123 | zig-iouring-marler8997 ᵖ | #125 | Zig (io_uring) | **71,000** ᶠ | 6,559 | 1.0 | 1.5 | 0.93 | 31 | 44 | 199 | 2026-10-21 |
+| 123 | typescript-deno-JakeAve | #119 | Deno | **71,000** ᶠ | 6,558 | 5.6 | 13 | 0.93 | 47 | 67 | 412 | 2026-10-21 |
+| 123 | dart-rawsocket-C-Hatton | #46 | Dart | **71,000** ᶠ | 6,550 | 34 | 80 | 0.93 | 94 | 134 | 475 | 2026-10-21 |
+| 123 | cpp-epoll-khalefa-ow | #8 | C++ (epoll) | **71,000** ᶠ | 6,558 | 19 | 37 | 0.93 | 94 | 134 | 184 | 2026-10-21 |
+| 123 | go-fib-sirkostya009 | #34 | Go (fib, epoll) | **71,000** ᶠ | 6,552 | 109 | 248 | 0.93 | 61 | 87 | 674 | 2026-10-26 |
+| 123 | cpp-epoll_inmem-khalefa-ow | #9 | C++ (epoll) | **71,000** ᶠ | 6,555 | 30 | 148 | 0.93 | 92 | 131 | 353 | 2026-10-26 |
+| 123 | c-h2o-einhornimmond | #39 | C (H2O) | **71,000** ᶠ | 6,558 | 0.8 | 4.9 | 0.93 | 39 | 56 | 331 | 2026-10-26 |
+| 123 | c-epoll-benclawbot | #42 | C (epoll) | **71,000** ᶠ | 6,555 | 29 | 53 | 0.93 | 94 | 134 | 409 | 2026-10-26 |
+| 123 | go-stdlib-vkrishna03 | #44 | Go (stdlib, epoll) | **71,000** ᶠ | 6,547 | 74 | 251 | 0.93 | 38 | 54 | 231 | 2026-10-26 |
+| 123 | php-swoole-mattsplat | #24 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 45 | 103 | 0.93 | 66 | 94 | 1,025 | 2026-10-26 |
+| 123 | go-epoll-damianoneill | #52 | Go (raw epoll) | **71,000** ᶠ | 6,551 | 50 | 78 | 0.93 | 41 | 59 | 157 | 2026-10-26 |
+| 123 | c-iouring-einhornimmond | #55 | C (io_uring) | **71,000** ᶠ | 6,556 | 2.7 | 10 | 0.92 | 36 | 51 | 190 | 2026-10-27 |
+| 123 | php-swoole-tzimpel | #28 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 17 | 175 | 0.93 | 71 | 101 | 325 | 2026-10-27 |
+| 123 | c-iouring-27bhd | #68 | C (io_uring) | **71,000** ᶠ | 6,554 | 30 | 44 | 0.93 | 84 | 120 | 186 | 2026-10-27 |
+| 123 | go-nethttp-mattn-vedic | #100 | Go (raw epoll, cgo SQLite) | **71,000** ᶠ | 6,552 | 36 | 50 | 0.93 | 55 | 78 | 332 | 2026-10-27 |
+| 123 | rust-axum-mjc | #114 | Rust (Axum) | **71,000** ᶠ | 6,556 | 2.2 | 3.5 | 0.93 | 40 | 57 | 1,551 | 2026-10-27 |
+| 123 | java-micronaut-Clickin | #116 | Java (Micronaut, JDBC SQLite) | **71,000** ᶠ | 6,546 | 78 | 148 | 0.93 | 85 | 121 | 1,293 | 2026-10-27 |
+| 123 | c-libco-ssmurfgg04-gif | #121 | C (libco coroutines, epoll) | **71,000** ᶠ | 6,546 | 141 | 210 | 0.93 | 52 | 74 | 717 | 2026-10-27 |
+| 123 | java-springboot-reactor-mohkamfer | #138 | Java (Spring Boot, Reactor Netty, FFM SQLite) | **71,000** ᶠ | 6,555 | 11 | 56 | 0.93 | 62 | 88 | 503 | 2026-10-28 |
+| 123 | rust-axum-connorw-dev | #140 | Rust (Axum) | **71,000** ᶠ | 6,554 | 6.1 | 11 | 0.93 | 52 | 74 | 1,131 | 2026-10-28 |
+| 123 | bun-yatta-psrockstar098 | #179 | Bun (Yatta JS, bun:sqlite) | **71,000** ᶠ ᵠ | 6,545 | 54 | 133 | 0.93 | 91 | 130 | 213 | 2026-10-29 |
+| 123 | rust-mqbridge-marcomq | #253 | Rust (mq-bridge, sqlx SQLite) | **71,000** ᶠ | 6,548 | 72 | 106 | 0.93 | 76 | 109 | 1,409 | 2026-11-01 |
+| 123 | c-iouring-marwanabdelhameed | #270 | C (io_uring) | **71,000** ᶠ | 6,558 | 0.8 | 3.4 | 0.93 | 39 | 56 | 1,448 | 2026-11-02 |
+| 123 | c-fio-tbsvttr | #5 | C (facil.io) | **71,000** | 6,959 | 130 | 621 | 0.00 | 81 | 108 | 646 | 2026-10-26 |
+| 123 | ruby-async-cicloid | #71 | Ruby (async, YJIT) | **71,000** | 6,967 | 121 | 349 | 0.00 | 83 | 111 | 362 | 2026-10-27 |
+| 123 | forth-gforth-FantasticForth | #171 | Forth (gforth, epoll) | **71,000** | 6,916 | 291 | 765 | 0.00 | 92 | 124 | 318 | 2026-10-29 |
+| 149 | python-fastapi-granian-shawal-mbalire | #41 | Python (FastAPI, Granian) | **70,000** | 6,801 | 465 | 862 | 0.00 | 94 | 129 | 1,192 | 2026-10-26 |
+| 149 | fortran-microhttpd-tbsvttr | #16 | Fortran (libmicrohttpd) | **70,000** | 6,866 | 141 | 401 | 0.00 | 89 | 120 | 1,134 | 2026-10-26 |
+| 151 | trux-http-claudioscheer | #145 | Trux (io_uring) | **69,000** ᵗ | 6,514 | 1.6 | 234 | 0.59 | 49 | 70 | 1,043 | 2026-10-28 |
+| 152 | fsharp-oxpecker-delneg | #108 | F# (Oxpecker) | **65,000** ᵍ | 6,392 | 84 | 229 | 0.00 | 55 | 80 | 1,255 | 2026-10-21 |
+| 152 | go-gnet-Haris0059 | #38 | Go (gnet) | **65,000** ⁿ | 6,396 | 39 | 54 | 0.00 | 42 | 61 | 350 | 2026-10-26 |
+| 152 | kotlin-ktor-C-Hatton | #45 | Kotlin (Ktor, Netty, FFM SQLite) | **65,000** | 6,374 | 198 | 713 | 0.00 | 65 | 95 | 1,273 | 2026-10-26 |
+| 152 | go-fasthttp-b3nhard | #56 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,399 | 4.8 | 19 | 0.00 | 77 | 112 | 547 | 2026-10-27 |
+| 152 | cpp-drogon-hendy643 | #29 | C++ (Drogon) | **65,000** | 6,398 | 36 | 60 | 0.00 | 52 | 76 | 814 | 2026-10-27 |
+| 152 | java-netty-lfeagan | #63 | Java (Netty, FFM SQLite) | **65,000** | 6,401 | 1.9 | 28 | 0.00 | 62 | 90 | 1,494 | 2026-10-27 |
+| 152 | csharp-aspnetcore-vijay-highlo | #77 | C# (ASP.NET Core, Native AOT) | **65,000** | 6,389 | 87 | 319 | 0.00 | 56 | 82 | 1,278 | 2026-10-27 |
+| 152 | node-net-barrard | #78 | Node (node:net, node:sqlite) | **65,000** | 6,383 | 133 | 312 | 0.00 | 75 | 109 | 483 | 2026-10-28 |
+| 152 | cpp-iouring-edwin-2024 | #98 | C++ (io_uring) | **65,000** ˢ | 6,399 | 33 | 55 | 0.00 | 30 | 44 | 200 | 2026-10-27 |
+| 152 | java-raw-agrison | #101 | Java (raw NIO, FFM SQLite) | **65,000** | 6,387 | 99 | 443 | 0.00 | 81 | 118 | 731 | 2026-10-27 |
+| 152 | lean-c-iouring-loafecho | #239 | C (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,399 | 32 | 56 | 0.00 | 28 | 41 | 605 | 2026-11-01 |
+| 152 | go-fasthttp-savak1990 | #106 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,397 | 45 | 66 | 0.00 | 66 | 96 | 875 | 2026-11-05 |
+| 152 | cpp-io_uring-0329-at | #412 | C++ (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,391 | 109 | 221 | 0.00 | 31 | 45 | 401 | 2026-11-13 |
+| 165 | bun-elysia-shashishsoni | #59 | Bun (Elysia) | **64,000** | 6,300 | 14 | 75 | 0.00 | 89 | 131 | 1,507 | 2026-10-27 |
+| 166 | csharp-aspnetcore-maks-march | #27 | C# (ASP.NET Core) | **63,000** | 6,136 | 417 | 757 | 0.00 | 87 | 131 | 925 | 2026-10-27 |
+| 166 | csharp-aspnetcore-devv-guru | #195 | C# (ASP.NET Core, Native AOT) | **63,000** | 6,156 | 202 | 679 | 0.00 | 79 | 119 | 1,081 | 2026-10-29 |
+| 168 | pypy-twisted-perkinslr | #79 | PyPy (Twisted) | **62,000** | 6,017 | 474 | 757 | 0.00 | 73 | 113 | 563 | 2026-10-27 |
+| 168 | go-nethttp-rkkautsar | #277 | Go (net/http, cgo SQLite) | **62,000** | 6,059 | 465 | 742 | 0.00 | 93 | 143 | 1,152 | 2026-11-03 |
+| 170 | go-fasthttp-riyaz-ali | #344 | Go (fasthttp, cgo SQLite) | **61,000** ᶳ | 5,984 | 243.6 | 836.5 | 0.00 | 79 | 123 | 1,162 | 2026-11-07 |
+| 171 | java-netty-itsnaveenk | #57 | Java (Netty) | **58,000** | 5,665 | 349 | 519 | 0.00 | 83 | 136 | 879 | 2026-10-27 |
+| 172 | typescript-bun-tbsvttr | #4 | Bun | **57,000** | 5,593 | 103 | 291 | 0.00 | 86 | 143 | 301 | 2026-10-25 |
+| 172 | java-quarkus-panama-raisinsfried | #73 | Java (Quarkus, FFM SQLite) | **57,000** | 5,607 | 9.6 | 359 | 0.00 | 60 | 100 | 725 | 2026-10-27 |
+| 172 | typescript-fastify-melroy89 | #51 | TypeScript (Fastify, Node) | **57,000** | 5,582 | 212 | 614 | 0.00 | 77 | 128 | 1,072 | 2026-10-30 |
+| 175 | haskell-warp-staticfx | #104 | Haskell (Warp) | **55,000** | 5,411 | 2.5 | 198 | 0.00 | 62 | 107 | 1,587 | 2026-10-21 |
+| 175 | go-nethttp-fi5HiE | #99 | Go (net/http) | **55,000** | 5,382 | 425 | 679 | 0.00 | 90 | 156 | 1,465 | 2026-10-21 |
+| 175 | java-jdkhttpserver-razorree | #262 | Java (JDK HttpServer, virtual threads) | **55,000** | 5,384 | 306 | 862 | 0.00 | 92 | 159 | 1,291 | 2026-11-02 |
+| 175 | ecko-stdhttp-sn | #334 | Ecko (std.http) | **55,000** | 5,403 | 68.1 | 227.2 | 0.00 | 81 | 139 | 582 | 2026-11-06 |
+| 179 | go-nethttp-tbsvttr | #18 | Go (net/http) | **53,000** | 5,165 | 374 | 659 | 0.00 | 93 | 168 | 624 | 2026-10-26 |
+| 179 | python-pyrustapi-rajboopathiking | #147 | Python (PyRustAPI, Rust/Hyper core) | **53,000** | 5,185 | 294 | 429 | 0.00 | 90 | 162 | 1,232 | 2026-10-28 |
+| 181 | koru-orisha-denstad | #310 | Koru (Orisha, io_uring, native-compiled) | **50,000** | 4,913 | 66 | 125 | 0.00 | 52 | 98 | 166 | 2026-11-05 |
+| 182 | csharp-aspnetcore-andrexx | #20 | C# (ASP.NET Core) | **49,000** | 4,815 | 84 | 234 | 0.00 | 88 | 170 | 846 | 2026-10-26 |
+| 182 | rust-hyper-dannie203 | #178 | Rust (hyper) | **49,000** | 4,820 | 34 | 370 | 0.00 | 86 | 166 | 1,254 | 2026-11-04 |
+| 182 | c-epoll-Pranjay-kumar | #421 | C (epoll) | **49,000** ᴾ | 4,823 | 37.1 | 76.0 | 0.00 | 35 | 67 | 1,507 | 2026-11-13 |
+| 185 | python-fastapi-tejasnafde | #10 | Python (FastAPI) | **48,000** | 4,701 | 303 | 465 | 0.00 | 89 | 176 | 583 | 2026-10-21 |
+| 185 | swift-hummingbird-denizak ᵖ | #43 | Swift (Hummingbird) | **48,000** | 4,700 | 210 | 300 | 0.00 | 97 | 191 | 1,269 | 2026-10-21 |
+| 187 | java-helidon-dglynch | #159 | Java (Helidon) | **46,000** | 4,525 | 76 | 121 | 0.00 | 84 | 173 | 1,579 | 2026-10-29 |
+| 188 | python-granian-tbsvttr | #13 | Python (Granian) | **45,000** | 4,400 | 202 | 812 | 0.00 | 93 | 197 | 709 | 2026-10-26 |
+| 188 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
+| 190 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
+| 191 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
+| 191 | typescript-tinyjs-animuni-express | #382 | TypeScript (TinyJS on Bun) | **43,000** ᵀ | 4,219 | 138.1 | 584.6 | 0.00 | 86 | 189 | 489 | 2026-11-11 |
+| 193 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
+| 194 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
+| 195 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
+| 196 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
+| 196 | goose-native-tbsvttr | #143 | Goose (native, epoll) | **32,000** | 3,150 | 0.6 | 148 | 0.00 | 15 | 44 | 384 | 2026-11-02 |
+| 198 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
+| 198 | go-iouring-pmatteo | #168 | Go (io_uring, PGO) | **29,000** ʲ | 2,857 | 2.2 | 42 | 0.00 | 21 | 68 | 326 | 2026-10-29 |
+| 200 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
+| 201 | go-gin-lincolng4 | #103 | Go (Gin) | **27,000** ᵐ | 2,658 | 1.2 | 4.8 | 0.00 | 42 | 147 | 1,600 | 2026-10-27 |
+| 202 | java-flash-relism | #133 | Java (Flash) | **25,000** | 2,449 | 280 | 991 | 0.00 | 38 | 144 | 1,464 | 2026-10-28 |
+| 203 | lua-lunet-simbo1905 | #126 | Lua (lunet), behind Nginx | **24,000** ˡ | 2,362 | 20 | 38 | 0.93 | 93 | 366 | 38 | 2026-10-28 |
+| 203 | crystal-kemal-faustinoaq | #194 | Crystal (Kemal), behind Nginx | **24,000** ʷ | 2,362 | 24 | 70 | 0.96 | 51 | 201 | 126 | 2026-10-29 |
+| 203 | jww-fiber | #328 | Go (Fiber, fasthttp), behind Nginx | **24,000** ᵞ | 2,361 | 28.4 | 76.0 | 0.94 | 49 | 193 | 85 | 2026-11-05 |
+| 206 | typescript-effect-SeeThruHead | #49 | TypeScript (Effect, Node) | **23,000** | 2,229 | 413 | 765 | 0.00 | 96 | 399 | 623 | 2026-10-26 |
+| 207 | d-arsd-hybridcgi-cyrusmsk | #160 | D (arsd hybrid cgi) | **22,000** ʰ | 2,167 | 10 | 97 | 0.00 | 37 | 159 | 1,688 | 2026-10-29 |
+| 208 | php-symfony-pklebba | #40 | PHP (Symfony, FrankenPHP) | **21,000** | 2,061 | 186 | 274 | 0.00 | 95 | 428 | 915 | 2026-10-26 |
+| 209 | pascal-horse-viniabreu | #134 | Pascal (Horse) | **20,000** | 1,966 | 81 | 111 | 0.00 | 90 | 426 | 270 | 2026-10-28 |
+| 210 | csharp-aspnetcore-larsholm | #47 | C# (ASP.NET Core) | **19,000** | 1,854 | 381 | 943 | 0.00 | 57 | 286 | 439 | 2026-10-26 |
+| 210 | crystal-kemal-krthr | #146 | Crystal (Kemal) | **19,000** ᵐ | 1,869 | 27 | 153 | 0.00 | 24 | 119 | 1,631 | 2026-10-28 |
+| 210 | php-symfony-gnugat | #338 | PHP (Symfony, FrankenPHP) | **19,000** | 1,863 | 253 | 608 | 0.00 | 92 | 459 | 1,090 | 2026-11-06 |
+| 213 | kotlin-springboot-Mindstorm1750 | #66 | Kotlin (Spring Boot, Tomcat, virtual threads) | **18,000** | 1,760 | 397 | 870 | 0.00 | 61 | 323 | 792 | 2026-10-27 |
+| 214 | python-litestar-przwr | #23 | Python (Litestar) | **16,000** | 1,569 | 259 | 788 | 0.00 | 66 | 391 | 256 | 2026-10-26 |
+| 215 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
+| 216 | kotlin-ktor-graalvm-noamm9 | #53 | Kotlin (Ktor, GraalVM native) | **10,500** | 1,027 | 356 | 906 | 0.00 | 79 | 715 | 314 | 2026-10-26 |
+| 217 | php-codeigniter-melroy89 | #50 | PHP (CodeIgniter, FrankenPHP) | **9,500** | 926 | 332 | 456 | 0.00 | 99 | 995 | 626 | 2026-10-30 |
+| 217 | scala-http4s-sideeffffect | #172 | Scala (http4s Ember, Cats Effect), behind Nginx | **9,500** | 934 | 7.0 | 179 | 0.00 | 50 | 498 | 1,392 | 2026-11-01 |
+| 219 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
+| 219 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
+| 221 | sql-sqlite3cli-public | #232 | SQL (sqlite3 CLI, Bash accept), behind Nginx | **7,000** | 688 | 167 | 309 | 0.80 | 96 | 1,298 | 258 | 2026-10-31 |
+| 222 | c-dreamcast-public | #221 | C (KallistiOS on an emulated Dreamcast in Flycast, SQLite on the SH-4), behind Nginx | **6,000** | 590 | 26.5 | 97.5 | 0.04 | 64 | 1,008 | 319 | 2026-11-02 |
+| 223 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
+| 224 | r-plumber2-josiahparry | #242 | R (plumber2), behind Nginx | **2,000** | 195 | 300 | 924 | 0.00 | 86 | 4,103 | 279 | 2026-11-01 |
+| 225 | spice-ngspice-public | #220 | SPICE (ngspice + Verilog chip, SQLite in the network card), behind Nginx | **500** | 49 | 246 | 519 | 0.00 | 82 | 15,675 | 29 | 2026-11-01 |
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
@@ -289,9 +310,18 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 62 ms, 0 err, 91 % CPU, 37 µs/req, 931 MB, 2026-10-28) and is CPU-bound, not source-port-bound: 240,000 failed at 95 % CPU
 (p99 1.5 s). The row above stays on #82's merged code until #141 is rebased and merged.
 
-ᵘ **HolyPHP** is scored at its follow-up **#336** at commit **`4758859`** (forced PASSIVE checkpoint through
-`sqlite3_wal_checkpoint_v2`, extended error codes; merged 2026-11-07, above the 230,000 row). The 244,000 hold had 0
-errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
+ᵘ **HolyPHP** is scored at its follow-up **#418** at commit **`0dde0df`** (restarts the SQLite WAL after background
+checkpoints; merged 2026-11-13, above #336's 244,000 row). The 250,000 hold had 0 errors; 260,000 failed the 2-minute
+probe on p95/p99 (728 / 879 ms, 85 % CPU), 280,000 on p95 (1.2 s, 93 %) and 320,000 on p95 (2.8 s, 100 %). Its later
+follow-up **#420** (`f1f8d45`, `unix-excl` VFS + WAL-write-coalescing shim VFS; held, not merged: not above 250,000)
+held **230,000** (22,342 req/s, p95 84.8 / p99 483.9 ms, 0 err, 74 % CPU, 30 µs/req, 653 MB, 2026-11-13); 240,000
+failed the 2-minute probe on p95/p99 (529 / 742 ms, 77 % CPU) and 320,000 on p95 (4.2 s, 100 %). Re-run at
+`71bd2c7` (`start.sh` back to the default VFS, runtime speedups kept; held, not merged: ties 250,000, not above it) it
+held **250,000** (24,106 req/s, p95 149.6 / p99 300.2 ms, 0 err, 82 % CPU, 31 µs/req, 1,282 MB, 2026-11-13); 260,000
+failed the 2-minute probe on p95/p99 (1.6 / 2.9 s, 87 % CPU). Before that
+it was scored at **#336** at commit **`4758859`** (**244,000**, 23,557 req/s, p95 128.8 / p99 735.0 ms, 81 % CPU, 31
+µs/req, 907 MB, 2026-11-07; forced PASSIVE checkpoint through `sqlite3_wal_checkpoint_v2`, extended error codes; merged
+2026-11-07, above the 230,000 row). That 244,000 hold had 0 errors; 257,000 and 270,000 passed the 2-minute probe but failed the 5-minute hold on p95 (4.6 / 13.8 s), 280,000 failed
 the 2-minute probe on p95 (9.4 s, 76 % CPU) and 320,000 on p95 (2.9 s, 100 % CPU). Its later follow-up **#348**
 (`8dabf64`, shim WAL-coalescing VFS; held, not merged: not above 244,000) held **238,000** (23,050 req/s, p95 46.2 /
 p99 258.5 ms, 0 err, 81 % CPU, 32 µs/req, 1,366 MB, 2026-11-07); 250,000 passed the 2-minute probe but failed the
@@ -377,6 +407,10 @@ Its follow-up **#285** (`f3d9412`, io_uring transport fixes on top of #282; held
 row) scored **143,000** (14,074 req/s, p95 5.0 / p99 41 ms, 0 err, 69 % CPU, 46 µs/req, 1,359 MB, 2026-11-03).
 Connection-capped, not CPU-bound: 150,000 passed the 2-minute probe but failed the 5-minute hold, and 155,000/160,000
 failed the 2-minute probe, on refused connections at ~70 % CPU.
+Its follow-up **#429** (`659f445`, bounded epoll input-buffer pool, 6 workers; held, not merged: it didn't beat the
+merged row) scored **185,000** (18,160 req/s, p95 125 / p99 335 ms, 0 err, 91 % CPU, 47 µs/req, 1,354 MB, 2026-11-14).
+CPU-bound: 195,000 passed the 2-minute probe but failed the 5-minute hold (p95 393 / p99 1,083 ms at 92 % CPU). (Its
+first run was discarded: the target's disk filled up during its holds.)
 
 ᶻ **swift-iouring-Tabonx** stays on its merged #173 row. Its follow-up **#293** (`38868fc`; held, not merged: it
 didn't beat the merged row, it tied it) also held **219,000** (21,352 req/s, p95 16.9 / p99 567 ms, 0 err, 63 % CPU,
@@ -400,7 +434,10 @@ errors). Re-run at `28151db` (checkpointer sync before RESTART, 64 MB chunk size
 probe on p99 (2.1 s, 0 errors), 200,000 / 240,000 on refused connections (76 % / 82 % errors). Re-run at `bb2b6c2`
 (dex v0.9.33, busy handler, reads don't wait for the checkpoint restart, writes parked with `http.later`): **185,000**
 (18,210 req/s, p95 4.9 / p99 32 ms, 0 err, 68 % CPU, 35 µs/req, 1,230 MB, 2026-11-08); 190,000 and 200,000 failed the
-2-minute probe on p99 (1.0 s / 3.0 s, 0 errors), 240,000 on refused connections (65 % errors).
+2-minute probe on p99 (1.0 s / 3.0 s, 0 errors), 240,000 on refused connections (65 % errors). Re-run at `17fdb72`
+(dex v0.9.40, one multishot receive per connection, program unchanged): **195,000** (19,173 req/s, p95 12.8 / p99 535
+ms, 0 err, 73 % CPU, 35 µs/req, 831 MB, 2026-11-12); 200,000 failed the 2-minute probe on p99 (1.2 s, 0 errors),
+240,000 / 320,000 on refused connections (71 % / 59 % errors).
 
 ᵟ **rust-iouring-tbsvttr** stays on its merged #323 row. Its follow-up **#325** (`f87f432`, PCACHE2 max-key truncate
 filter, coalescing WAL shim VFS, interpolated B-tree descent for /feed; held, not merged: it didn't beat the merged row)
@@ -534,18 +571,143 @@ connection refused (75 % errors). Not merged (below the merged row). Follow-up *
 to 10,000): **280,000** (26,684 req/s, p95 157.2 / p99 652.2 ms, 0 err, 96 % CPU, 32 µs/req, 1,198 MB, 2026-11-10);
 290,000 failed the 2-minute probe on p95/p99 (1,221 / 3,402 ms at 97 % CPU, 0 errors), 300,000 on connection refused
 (75 % errors) and 320,000 on p95/p99 (1,836 / 2,844 ms at 99 % CPU, 0 errors). Not merged (below the merged row).
+Follow-up **#381** (`43b79c7`, 30 ms group-commit window by default): **219,000** (21,373 req/s, p95 46.7 / p99 381.1 ms,
+0 err, 78 % CPU, 34 µs/req, 1,385 MB, 2026-11-10); 230,000 passed the 2-minute probe but failed the 5-minute hold on
+p99 (10.5 s, writes stalled ~12–14 s at 81 % CPU, 0 errors), 240,000 failed the 2-minute probe on p95/p99 (214 /
+2,378 ms at 84 % CPU) and 320,000 on connection refused (74 % errors). Not merged (below the merged row).
+Follow-up **#385** (`390df4e`, writer `wal_autocheckpoint=0` plus a passive `wal_checkpoint` after each pass once the WAL
+passes 64 MiB): **250,000** (24,064 req/s, p95 224.9 / p99 803.8 ms, 0 err, 95 % CPU, 36 µs/req, 962 MB, 2026-11-10);
+260,000 failed the 2-minute probe on p95/p99 (524 / 1,139 ms at 98 % CPU, 0 errors), 280,000 on p95/p99 (3,989 /
+8,932 ms at 94 % CPU) and 320,000 on connection refused (74 % errors). Not merged (below the merged row).
+Follow-up **#386** (`6d929d2`, the database opened through SQLite's `unix-excl` VFS): **280,000** (26,703 req/s, p95
+140.9 / p99 412.7 ms, 0 err, 96 % CPU, 32 µs/req, 756 MB, 2026-11-10); 290,000 failed the 2-minute probe on p95/p99
+(1,782 / 3,505 ms at 97 % CPU, 0 errors), 300,000 on connection refused (74 % errors) and 320,000 on p95/p99 (1,197 /
+2,285 ms at 99 % CPU). Not merged (below the merged row).
+Follow-up **#387** (`5ae3b71`, writes held up to 5 ms so they share a commit): **260,000** (25,006 req/s, p95 47.2 / p99
+216.1 ms, 0 err, 91 % CPU, 33 µs/req, 877 MB, 2026-11-10); 270,000 failed the 2-minute probe on p95/p99 (545 / 1,270 ms
+at 91 % CPU, 0 errors), 280,000 on p95/p99 (971 / 4,868 ms at 92 % CPU) and 320,000 on connection refused (75 % errors).
+Not merged (below the merged row).
+Follow-up **#391** (`19312b5`, rings set up with `SINGLE_ISSUER|DEFER_TASKRUN|TASKRUN_FLAG` instead of `COOP_TASKRUN`):
+**247,000** (23,843 req/s, p95 182.5 / p99 460.4 ms, 0 err, 90 % CPU, 34 µs/req, 653 MB, 2026-11-11); 260,000 passed the
+2-minute probe but failed the 5-minute hold on p99 (1,185 ms at 94 % CPU, 0 errors), 270,000 failed the 2-minute probe on
+p95/p99 (728 / 1,185 ms at 96 % CPU), 280,000 on p95/p99 (2,761 / 5,377 ms at 98 % CPU) and 320,000 on connection refused
+(79 % errors). Not merged (below the merged row). Re-run at `6cd7a1d` (the `DEFER_TASKRUN` drain moved to idle passes):
+**230,000** (22,366 req/s, p95 28.4 / p99 186.2 ms, 0 err, 88 % CPU, 36 µs/req, 640 MB, 2026-11-11); 240,000 failed the
+2-minute probe on p95/p99 (1,001 / 4,820 ms at 91 % CPU, 0 errors) and 320,000 on connection refused (78 % errors). Not
+merged (below the merged row).
+Follow-up **#397** (`c882e4f`, held read snapshot ended every 20 ms for a passive `wal_checkpoint` after writer commits):
+**220,000** (21,322 req/s, p95 243.6 / p99 539.9 ms, 0 err, 77 % CPU, 33 µs/req, 803 MB, 2026-11-11); 230,000 failed the
+2-minute probe on p95/p99 (773 / 1,505 ms at 82 % CPU, 0 errors), 240,000 on p95/p99 (540 / 1,173 ms at 83 % CPU) and
+320,000 on connection refused (80 % errors). Not merged (below the merged row).
+Follow-up **#405** (`bb9d938`, `READ_MMAP_MB` default 0 → 128, i.e. `mmap_size` on the read connection): **238,000**
+(23,042 req/s, p95 85.7 / p99 318.6 ms, 0 err, 95 % CPU, 38 µs/req, 618 MB, 2026-11-12); 250,000 passed the 2-minute
+probe but failed the 5-minute hold on p95/p99 (393 / 2,873 ms at 97 % CPU, 0 errors), 260,000 failed the 2-minute probe on
+p95/p99 (1,712 / 4,586 ms at 98 % CPU), 280,000 on p95/p99 (1,968 / 4,451 ms at 97 % CPU) and 320,000 on connection
+refused (80 % errors). Not merged (below the merged row).
+Follow-up **#407** (`38928a9`, cached `BEGIN IMMEDIATE`/`COMMIT` statements, writer Vec reuse, fewer clones): **250,000**
+(24,074 req/s, p95 203.6 / p99 652.2 ms, 0 err, 94 % CPU, 36 µs/req, 1,253 MB, 2026-11-12); 260,000 failed the 2-minute
+probe on p95/p99 (1,011 / 1,490 ms at 96 % CPU, 0 errors), 280,000 and 320,000 on connection refused (79 % errors). Not
+merged (below the merged row).
+Follow-up **#411** (`869ad3d`, `/feed` emitted in index order, no 20-id sort or staging buffer): **250,000**
+(24,101 req/s, p95 131.4 / p99 388.8 ms, 0 err, 93 % CPU, 35 µs/req, 1,268 MB, 2026-11-12); 260,000 failed the 2-minute
+probe on p95/p99 (757 / 1,695 ms at 95 % CPU, 0 errors), 280,000 on p95/p99 (991 / 2,240 ms at 97 % CPU) and 320,000 on
+connection refused (73 % errors). Not merged (below the merged row).
+Follow-up **#416** (`be75c12`, #411's index-order `/feed` plus direct like binding, cached transaction statements and
+the `unix-excl` VFS): **250,000** (24,082 req/s, p95 99.5 / p99 961.5 ms, 0 err, 93 % CPU, 35 µs/req, 1,297 MB,
+2026-11-12); 260,000 failed the 2-minute probe on p95/p99 (567 / 962 ms at 95 % CPU, 0 errors), 280,000 and 320,000 on
+connection refused (77 % / 76 % errors). Not merged (below the merged row).
 
 ᴺ **c-iouring-unorig-username** stays on its merged #290 row. Its follow-up **#362** (`177f00e`, parked requests served
 newest first with an 8 s age cap, `journal_size_limit=0`, read-only segments `mlock`ed; held, not merged: it didn't beat
 the merged row, it tied it) also held **280,000** (26,658 req/s, p95 44.9 / p99 749.7 ms, 0 err, 78 % CPU, 26 µs/req,
 710 MB, 2026-11-08). 290,000 and 300,000 failed the 2-minute probe on p99 (1.04 s / 2.79 s, 0 errors) and 320,000 on
-p95/p99 (1.03 / 6.50 s at 93 % CPU).
+p95/p99 (1.03 / 6.50 s at 93 % CPU). Its next commit `34b739a` (parked requests older than 200 ms go first, oldest
+first; held, not merged: below the merged row) held **270,000** (25,845 req/s, p95 37.1 / p99 556.2 ms, 0 err, 77 % CPU,
+27 µs/req, 871 MB, 2026-11-11); 280,000 failed the 2-minute probe on p99 (1.35 s, 0 errors). Its next commit `3d2dfaf`
+(writes group-committed at most every 20 ms; held, not merged: it tied the merged row) held **280,000** (26,728 req/s,
+p95 34.6 / p99 315.5 ms, 0 err, 77 % CPU, 26 µs/req, 1,057 MB, 2026-11-12); 290,000 and 300,000 failed the 2-minute
+probe on p99 (1.11 s / 2.01 s, 0 errors) and 320,000 on p95/p99 (3.99 / 5.76 s at 92 % CPU). Its next commit `96387b0`
+(checkpoint worker starts at 1,024 WAL frames, POSTs held at most 1 s past the log limit; held, not merged: below the
+merged row) held **270,000** (25,825 req/s, p95 52.6 / p99 811.9 ms, 0 err, 80 % CPU, 28 µs/req, 1,034 MB,
+2026-11-13); 280,000 failed the 2-minute probe on p99 (1.13 s, 0 errors) and 320,000 on p95/p99 (2.76 / 4.68 s). Its
+next commit `fefd71a` (no time limit on POSTs held past the log limit; held, not merged: below the merged row) held
+**260,000** (24,964 req/s, p95 43.6 / p99 508.6 ms, 0 err, 75 % CPU, 27 µs/req, 576 MB, 2026-11-14); 270,000 and
+280,000 failed the 2-minute probe on p99 (2.45 s / 2.99 s, 0 errors) and 320,000 on p95/p99 (1.45 / 6.00 s).
 
 ᴷ **kotlin-nio-3x3xX3N0N** stays on its merged #83 row. Its follow-up **#377** (`9ab23cc`, rejects tokens without a
 numeric `exp`, two-step /feed, checkpointer thread through `PRAGMA wal_checkpoint`, 2 ms group-commit window, 3 workers;
 held, not merged: it didn't beat the merged row) scored **110,000** (10,812 req/s, p95 85.7 / p99 331.6 ms, 0 err, 95 %
 CPU, 82 µs/req, 636 MB, 2026-11-10). CPU-bound: 115,000 and 120,000 failed the 2-minute probe on p95/p99 (627 / 1,041 ms
-and 591 / 1,221 ms at 97–98 % CPU, 0 errors).
+and 591 / 1,221 ms at 97–98 % CPU, 0 errors). Its next commit `c0f58b9` (faster header parser) scored **115,000**
+(11,292 req/s, p95 165.2 / p99 539.9 ms, 0 err, 96 % CPU, 79 µs/req, 996 MB, 2026-11-10); still below the merged row,
+so not merged. 120,000 failed the 2-minute probe on p95/p99 (943 / 1,662 ms at 99 % CPU, 0 errors).
+
+ᴳ **goose-iouring-ahmadsh2007** stays on its merged #291 row. Its follow-up **#395** (`f963d02`, rings made at startup,
+≤1,024 connections answered per pass, newest first for 15 s after a loop stall, 4 ms pass wait; held, not merged: it
+didn't beat the merged row) scored **230,000** (22,354 req/s, p95 32.6 / p99 285.6 ms, 0 err, 67 % CPU, 28 µs/req,
+999 MB, 2026-11-11). 240,000 failed the 2-minute probe on p95/p99 (241 / 1,475 ms at 72 % CPU, 0 errors) and 320,000
+on p95/p99 (2,285 / 2,524 ms at 97 % CPU).
+
+ᴸ **c-iouring-jowinjestine** is scored at its follow-up PR **#404** (`1e7fb4d`, merged 2026-11-12: the tail
+checkpoint thread restarts the log itself, `BEGIN IMMEDIATE` batches, WAL-coalescing shim fix, rings created at
+startup): 290,000 held at 80 % CPU, 0 errors; 300,000 failed the 2-minute probe on p99 (3.83 s at 83 % CPU), 320,000 on
+p99 (21.7 s at 89 % CPU). Its first merged code, #396 (`c3fdb10`), held **270,000** (25,692 req/s, p95 114.3 / p99
+550.7 ms, 0 err, 77 % CPU, 27 µs/req, 904 MB, 2026-11-12). Its follow-up **#402** was scored at commit
+**`f2f9227`** (held, not merged: it didn't beat the merged row): **253,000** (24,302 req/s, p95 285.6 / p99 665.4 ms,
+0 err, 73 % CPU, 27 µs/req, 1,216 MB, 2026-11-12). 280,000 passed the 2-minute probe but failed the 5-minute hold on
+p99 (1.76 s at 83 % CPU, 0 errors), 266,000 failed the 5-minute hold on p99 (3.47 s at 79 % CPU), and 320,000 failed the 2-minute probe (0.59 % connection
+refused, 94 % CPU). #402's head moved to `9caa0a5` during the run; that commit was then scored too: **270,000**
+(25,718 req/s, p95 366.2 / p99 961.5 ms, 0 err, 78 % CPU, 27 µs/req, 1,482 MB, 2026-11-12), level with the merged
+row, so not merged (280,000 failed the 2-minute probe on p99, 1.68 s at 80 % CPU). The head moved again to `42abbf3`
+during that run; `42abbf3` was then scored too: **270,000** (25,859 req/s, p95 52.6 / p99 178.9 ms, 0 err, 74 % CPU,
+26 µs/req, 1,314 MB, 2026-11-12), again level with the merged row, so not merged (280,000 failed the 2-minute probe on
+p99, 1.40 s at 78 % CPU; 320,000 failed it on p99, 7.39 s at 96 % CPU). #402 stays open, unmerged. An earlier head of
+#404, **`90e3bf6`**, held **270,000** (25,879 req/s, p95 29.5 / p99 146.6 ms, 0 err, 73 % CPU, 26 µs/req, 1,004 MB,
+2026-11-12), level with the merged row, so not merged (280,000 failed the 2-minute probe on p99, 1.31 s at 75 % CPU;
+320,000 failed it with 76 % connection refused). A later follow-up, **#415** (`297c8ea`: group commit across batches,
+a second WAL write-shim fix, kernel counters), held **270,000** (25,863 req/s, p95 40.6 / p99 160.4 ms, 0 err, 75 %
+CPU, 26 µs/req, 798 MB, 2026-11-12), below the merged row, so not merged (280,000 failed the 2-minute probe on p99,
+4.19 s at 79 % CPU; 320,000 failed it on p99, 20.4 s at 86 % CPU). On the box its PGO training client hit its own
+300-second timeout, so `build.sh` fell back to a plain (non-PGO) build for that run. #415's next head, **`2703df3`**
+(small batches commit at once, group-commit wake timer, 900-second training timeout; PGO build worked), held
+**244,000** (23,616 req/s, p95 24.5 / p99 143.7 ms, 0 err, 66 % CPU, 26 µs/req, 771 MB, 2026-11-13), below the merged
+row, so not merged: 270,000 and 260,000 passed the 2-minute probe, but the 5-minute holds failed on p99 at 270,000
+(11.7 s at 77 % CPU) and 257,000 (1.91 s at 72 % CPU), all with 0 errors; 280,000 failed the 2-minute probe on p99
+(2.63 s at 81 % CPU). #415's head then moved to **`09b27be`** (batch wait 64 / 2 ms, the urgent bulk checkpoint thread
+removed; PGO build worked), which held **260,000** (24,973 req/s, p95 36.0 / p99 216.1 ms, 0 err, 73 % CPU, 27 µs/req,
+1,245 MB, 2026-11-13), below the merged row, so not merged: 270,000 failed the 2-minute probe on p99 (2.15 s at 78 %
+CPU), 280,000 on p99 (4.23 s at 78 % CPU) and 320,000 on p99 (12.7 s at 92 % CPU), all with 0 errors. Its next head,
+**`f4ec9c5`** (batch window back to 1 ms; PGO build worked), held **280,000** (26,670 req/s, p95 94.6 / p99 328.3 ms,
+0 err, 78 % CPU, 26 µs/req, 1,369 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
+2-minute probe on p99 (1.32 s at 81 % CPU), 300,000 on p99 (3.83 s at 84 % CPU) and 320,000 on p99 (12.2 s at 92 %
+CPU), all with 0 errors. Its next head, **`594fc37`** (a second ring sweep per batch, 2 ms batch window, readahead of
+the database file when memory allows; PGO build worked), held **280,000** (26,718 req/s, p95 82.3 / p99 318.6 ms,
+0 err, 76 % CPU, 26 µs/req, 856 MB, 2026-11-13), still below the merged row, so not merged: 290,000 failed the
+2-minute probe on p99 (2.38 s at 81 % CPU), 300,000 on p99 (2.93 s at 82 % CPU) and 320,000 on p99 (3.80 s at 97 %
+CPU), all with 0 errors. Its next head, **`5d2fa6b`** (checkpoint holds capped at 250 ms whatever the log's length;
+PGO build worked), held **270,000** (25,865 req/s, p95 39.0 / p99 211.9 ms, 0 err, 73 % CPU, 26 µs/req, 1,420 MB,
+2026-11-13), still below the merged row, so not merged: 280,000 failed the 2-minute probe on p99 (1.07 s at 75 % CPU)
+and 320,000 on p99 (5.07 s at 89 % CPU), all with 0 errors. Its next head, **`ca5743b`** (bulk checkpoint thread at
+nice 12, checkpoint hold limit back to 400 ms and growing with the log; PGO build worked), held **270,000** (25,861
+req/s, p95 36.0 / p99 297.2 ms, 0 err, 73 % CPU, 26 µs/req, 1,308 MB, 2026-11-13), still below the merged row, so not
+merged: 280,000 failed the 2-minute probe on p99 (1.87 s at 79 % CPU) and 320,000 on p99 (5.49 s at 88 % CPU), all
+with 0 errors. Its next head, **`2f08e6d`** (the merged row's checkpoint policy: 4,096-frame checkpoints, 250 ms hold
+limit, checkpoint thread at nice 19, no database warm-up; PGO build worked), held **280,000** (26,676 req/s, p95 171.9 /
+p99 757.2 ms, 0 err, 79 % CPU, 27 µs/req, 860 MB, 2026-11-13), still below the merged row, so not merged: 290,000
+failed the 2-minute probe on p99 (1.34 s at 84 % CPU), 300,000 on p99 (1.70 s at 88 % CPU) and 320,000 on p99 (5.38 s
+at 96 % CPU), all with 0 errors. #415 stays open. A later follow-up, **#432** (`11a7ef5`: the merged #404 build with a
+WAL write-shim fix; PGO build worked), held **257,000** (24,743 req/s, p95 39.0 / p99 177.1 ms, 0 err, 71 % CPU,
+26 µs/req, 766 MB, 2026-11-14), below the merged row, so not merged: 270,000 passed the 2-minute probe but failed the
+5-minute hold on p99 (6.56 s at 77 % CPU), 280,000 failed the 2-minute probe on p99 (2.90 s at 79 % CPU) and 320,000
+on p99 (6.06 s at 97 % CPU), all with 0 errors. #432 stays open. Its companion **#433** (`58b9ffc`: #432's shim fix
+plus `TCP_DEFER_ACCEPT` on the listeners; PGO build worked) held **270,000** (25,874 req/s, p95 39.4 / p99 140.9 ms,
+0 err, 74 % CPU, 26 µs/req, 1,138 MB, 2026-11-14), below the merged row, so not merged: 280,000 failed the 2-minute
+probe on p99 (3.17 s at 78 % CPU) and 320,000 on p99 (11.2 s at 96 % CPU), all with 0 errors. #433 stays open.
+**#435** (`b686fea`: #432's shim fix plus admission at the door, a 64-connection listen backlog and no accepting while
+the loop is behind) held **280,000** (26,722 req/s, p95 68.8 / p99 220.5 ms, 0 err, 77 % CPU, 26 µs/req, 907 MB; TCP
+connect p99 1,031 ms, which k6 counts outside request latency; 2026-11-14), below the merged row, so not merged:
+290,000 failed the 2-minute probe on p99 (4.11 s at 83 % CPU), 300,000 on p99 (3.24 s at 86 % CPU) and 320,000 on p99
+(8.58 s, 0.1 % timeouts, 97 % CPU). #435 stays open; whether connect-time waits should count is a question for Arjay.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at
@@ -615,7 +777,35 @@ serializer on amd64, smaller non-feed buffers, queued requests first) held **271
 269 ms, 0 errors; 300k passed the 2-minute probe but 300k and 285k failed the 5-minute hold on p99, 12.8 s / 1.46 s).
 Still below 276,000, so the row stays at #369. Re-run at `7fb41dd` (2026-11-10: background WAL checkpoints start at
 4,096 frames instead of 8,192) held **260,000** at 88 % CPU (24,946 req/s, p99 621 ms, 0 errors; 270k and 280k failed
-the 2-minute probe on p99, 3.72 s / 1.36 s). Still below 276,000, so the row stays at #369.
+the 2-minute probe on p99, 3.72 s / 1.36 s). Still below 276,000, so the row stays at #369. Re-run at `1ca0c03`
+(2026-11-10: adaptive passive-checkpoint budget of 8,192–16,384 pages) held **266,000** at 90 % CPU (25,444 req/s, p99
+608 ms, 0 errors; 280k passed the 2-minute probe but failed the 5-minute hold on p99, 11.2 s; 290k failed the 2-minute
+probe). Still below 276,000, so the row stays at #369. Re-run at `a898775` (2026-11-10: bulk/tail checkpoint split with
+POSTs held up to 250 ms during the tail, checkpoint worker at nice 5, 64 MiB WAL chunk size) held **260,000** at 91 % CPU
+(24,999 req/s, p99 316 ms, 0 errors; 270k and 280k failed the 2-minute probe on p99, 812 ms / 1.22 s). Still below
+276,000, so the row stays at #369. Re-run at `9b938fb` (2026-11-10: #369's code plus the `a898775` checkpoint change)
+held **270,000** at 92 % CPU (25,867 req/s, p99 118 ms, 0 errors; 280k failed the 2-minute probe on p99, 2.99 s).
+Still below 276,000, so the row stays at #369. Re-run at `8777f61` (2026-11-10: checkpoint trigger 8,192 → 10,240
+frames) held **155,000** at 59 % CPU (15,263 req/s, p99 8.9 ms, 0 errors); 160k failed the 2-minute probe on p99
+(1.31 s) at only 60 % CPU with TCP-connect p99 1.03 s, so the limit in this run was not CPU. Still below 276,000, so the
+row stays at #369. Re-run at `5cb9710` (2026-11-11: checkpoint trigger back to 8,192, SSE2 feed path on amd64) held
+**260,000** at 91 % CPU (24,942 req/s, p99 246 ms, 0 errors; 270k and 280k failed the 2-minute probe on p99, 3.21 s /
+4.77 s). Still below 276,000, so the row stays at #369. Re-run at `420e718` (2026-11-11: secondary io_uring rings are
+only entered when they have work) held **260,000** at 89 % CPU (24,993 req/s, p99 177 ms, 0 errors; 270k and 280k
+failed the 2-minute probe on p99, 1.66 s / 5.88 s). Still below 276,000, so the row stays at #369. Re-run at `9a20ada`
+(2026-11-11: idle ring completions batched, wait target capped by open connections) held **250,000** at 80 % CPU
+(24,094 req/s, p99 291 ms, 0 errors; 260k and 280k failed the 2-minute probe on p99, 19.0 s / 3.27 s). Still below
+276,000, so the row stays at #369. Re-run at `4d2921a` (2026-11-11: server code back to #369's, plus a README note and
+a test file) held **240,000** at 86 % CPU (23,220 req/s, p99 545 ms, 0 errors; 250k, 260k and 280k failed the 2-minute
+probe on p99, 1.80 s / 2.71 s / 25.6 s). Still below 276,000, so the row stays at #369. Re-run at `a9552cf`
+(2026-11-12: ring-0 wait target 1 → 4, capped by open connections) held **240,000** at 81 % CPU (23,188 req/s, p99
+562 ms, 0 errors; 250k, 260k and 280k failed the 2-minute probe on p99, 1.46 s / 1.87 s / 5.02 s). Still below 276,000,
+so the row stays at #369. Re-run at `d57b119` (2026-11-12: ring-0 wait target 4 → 2) held **238,000** at 83 % CPU
+(23,047 req/s, p99 335 ms, 0 errors; 250k passed the 2-minute probe but failed the 5-minute hold on p99, 1.21 s; 260k
+and 280k failed the 2-minute probe on p99, 3.17 s / 8.09 s). Still below 276,000, so the row stays at #369. Re-run at
+`890d528` (2026-11-12: ring-0 wait target 2 → 4, checkpoint diagnostics behind a build tag that is off by default) held
+**250,000** at 85 % CPU (24,090 req/s, p99 602 ms, 0 errors; 260k and 280k failed the 2-minute probe on p99, 2.09 s /
+4.72 s). Still below 276,000, so the row stays at #369.
 go-gnet-kaikegm is now scored at its follow-up #180 (`372538d`, was 65,000 at #48): it closes the oldest idle
 connections past 55k open, so it no longer hits the limit at 80–93k (88,000 held at 77 % CPU, CPU-bound: 93k failed the
 5-minute hold on p99), but a fast ramp to 120k/160k still fills the fd table and the process exits the same way (89–94 %
@@ -644,6 +834,10 @@ at 40k) while CPU stays at 50–79 %, so the write path, not CPU, is the limit.
 on POSTs: 13 % of likes and 11 % of new posts failed, 0 reads. They grow with load (0.25 % at 23k, 1.37 % at 25k, 5.5 %
 at 40k) while CPU stays at 48–79 %, so the write path, not CPU, is the limit.
 
+ᴾ **C epoll #421 is memory-bound.** At 49,000 it was clean at 35 % CPU (76 ms p99), but its cgroup peaked at 1.5 GB
+(1.6 GB at 52k). From 52k up (52k-5m, 53k/55k/60k/80k-2m) the box ran out of memory and rebooted itself mid-probe
+(journal silent), so most connections were refused (73–92 % errors).
+
 ᵏ **Go net/http #129 is memory-bound.** At 45,000 it was clean at 67 % CPU (303 ms p99), but its cgroup peaked at 1.5 GB.
 At 47k/48k/50k/60k/80k it was OOM-killed during the ramp (kernel log) and most later connections were refused (54–93 %
 errors, 6–36 % CPU).
@@ -670,7 +864,10 @@ and a 1.6 s p99 at 40,000.
 ᶜ **C io_uring #239 is connection-capped at ~65k, not CPU-bound.** At 65,000 it ran at 28 % CPU (32 ms p95, 56 ms p99,
 0 errors). From 68,000 up, connections past the cap got EOF / `connection reset by peer` (5.2 % at 68k, 9.1 % at 70k,
 24.6 % at 80k) while CPU stayed at 37–51 %. Its fixed-file table is sized from `RLIMIT_NOFILE` (server.c:1117), one slot
-per connection.
+per connection. **C++ io_uring #412** (`7315af0`) is capped at the same point: at 65,000 it ran at 31 % CPU (109 ms
+p95, 221 ms p99, 0 errors, 401 MB); 68,000, 70,000 and 80,000 failed on EOF / `connection reset by peer` (5.5 %, 9.3 %,
+24.8 %) at 37–56 % CPU. `7315af0` widened the completion tag's slot to 24 bits, but the connection table is still sized
+from `RLIMIT_NOFILE` minus 128 (main.cpp:643), and systemd gives 65,535. Its earlier `2598291` run also held 65,000.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute
@@ -680,7 +877,15 @@ probe but failed the 5-minute hold on p99 (2.8 s), 280,000 failed on p99 (2.7 s)
 ᴬ **swift-iouring-akbashev** is scored at its follow-up PR **#376** (`77d91a7`, merged 2026-11-09: checkpointer at
 nice 5, bulk PASSIVE checkpoints with the database file synced before writes are held, 64 MiB
 `SQLITE_FCNTL_CHUNK_SIZE`): 300,000 held at 92 % CPU, 0 errors; 310,000 failed the 2-minute probe on p99 (19.4 s,
-98 % CPU) and 320,000 on p99 (7.1 s). Its #371 code (`bd715b2`: full LTO, checkpointer tuning, like counts stepped
+98 % CPU) and 320,000 on p99 (7.1 s). Its open follow-up **#380** (`e520dc0`: feed off the posts table's tail, fewer
+header checks) held **240,000** (23,241 req/s, p95 41.0 / p99 152.6 ms, 0 errors, 81 % CPU, 657 MB, 2026-11-10;
+250,000–280,000 failed the 2-minute probe on p99), below the merged row, so it isn't merged. Its open follow-up
+**#383** (`9133a4d`: release build with Swift's checks on) also held **240,000** (23,222 req/s, p95 92.8 / p99 222.7 ms,
+0 errors, 86 % CPU, 748 MB, 2026-11-10; 250,000 and 260,000 failed the 2-minute probe on p99, 1.05 s / 1.03 s), below
+the merged row, so it isn't merged. Its open follow-up **#419** (`292888a`: byte loops in bulk, seed-layout claims
+read as words, SHA-256 rounds written out) held **260,000** (24,941 req/s, p95 105.6 / p99 412.7 ms, 0 errors, 91 %
+CPU, 675 MB, 2026-11-13; 270,000 and 280,000 failed the 2-minute probe on p99, 12.3 s / 3.8 s), below the merged
+row, so it isn't merged. Its #371 code (`bd715b2`: full LTO, checkpointer tuning, like counts stepped
 entry by entry through `sqlite3BtreeNext`) held **270,000** (25,841 req/s, p95 87.4 / p99 216.1 ms, 89 % CPU,
 2026-11-09). An earlier #371 run (`a04c2ad`) held 280,000 but wrote SQLite's private `BtCursor.ix` field (ruling 8),
 so it wasn't merged; `bd715b2` dropped that write. Its merged #361 code (`e417d34`: io_uring in pure Swift over syscalls, B-tree reads through SQLite's
@@ -688,6 +893,56 @@ own `sqlite3Btree*` functions on the unmodified amalgamation, checkpointer throu
 held **250,000** (24,108 req/s, p95 83.2 / p99 222.7 ms, 85 % CPU, 2026-11-09) and its #297 code (`e3d25b3`)
 **210,000** (20,571 req/s, p95 22.4 / p99 149.6 ms, 75 % CPU, 2026-11-05). Its first follow-up, #349 (`250251a`,
 reopened as #361), couldn't be scored: the box ran out of disk unpacking the Swift toolchain, not the entry's fault.
+
+ᴮ **asm-btree-ninhnv** is scored at its follow-up PR **#388** (`1960322`, merged 2026-11-10: checkpoint rounds only
+while the WAL is short and still gaining, 1 ms loop wait instead of 4 ms): 280,000 held at 82 % CPU, 0 errors;
+290,000 failed the 2-minute probe on p99 (735 ms), 300,000 on p99 (1.78 s). Its merged #373 code held **260,000**
+(24,997 req/s, p95 27.6 / p99 59.3 ms, 72 % CPU, 2026-11-10). Follow-up #390 (`8a8c4e1`, 2026-11-11: bulk-thread
+checkpoint rounds and the explicit WAL sync removed, one passive checkpoint per cycle) held **230,000** at 64 % CPU
+(22,374 req/s, p95 17.3 / p99 155.6 ms, 0 errors; 240k failed the 2-minute probe on p99 1.16 s). Its next head
+`4853419` (2026-11-11: #388's bounded checkpoint rounds back, `journal_size_limit` 1 MB) held **260,000** at 77 % CPU
+(24,995 req/s, p95 76.0 / p99 250.9 ms, 0 errors, 659 MB; 270k failed the 2-minute probe on p99 1.84 s, 280k on p99
+3.17 s). Head `73c09c9` (2026-11-12: both checkpoint threads at nice 5, database file grown in 64 MiB chunks) held
+**240,000** at 70 % CPU (23,221 req/s, p95 29.8 / p99 853.3 ms, 0 errors, 617 MB; 250k failed the 2-minute probe on
+p99 1.25 s, 260k on p99 1.05 s, 280k on p99 1.85 s). All three are below #388's 280,000, so #390 is not merged and the
+row stays at #388. PR **#400** (`2451eae`, 2026-11-13, by Pranjay-kumar: loop wait `WAIT_NS` 1 ms → 125 µs) held
+**244,000** at 78 % CPU (23,626 req/s, p95 16.1 / p99 117.8 ms, 0 errors, 631 MB; 270k and 257k failed the 5-minute
+hold on p99 2.11 s / 1.87 s), also below 280,000, so #400 is not merged either.
+
+ᴱ **fsharp-uring-delneg** is scored at its follow-up PR **#398** (`8921ed9`, merged 2026-11-13: the write window
+`WWIN` raised from 10 to 20 ms on top of the shim VFS, `SQLITE_CONFIG_PCACHE2` wrapper and read-transaction carry-over
+of its earlier heads): 300,000 held at 82 % CPU, 0 errors, 1,347 MB; 310,000 failed the 2-minute probe on p99 (4.36 s),
+320,000 on p99 (3.72 s). Its previous merged follow-up **#394** (`bbc1c39`, 2026-11-11: held writes in their
+own queue, drained in bulk after a hold; `CKPASS` 4000 and `HOLD` 16384, checkpoint thread at nice 19) held 290,000
+at 87 % CPU, 0 errors; 300,000 failed the 2-minute probe on p99 (1.38 s), 320,000 on p99 (4.5 s). An earlier head of
+#394 (`e6763f4`) held **230,000** (22,379 req/s, p95 11.5 / p99 84.0 ms, 69 % CPU). Its merged #392 code held
+**280,000** (26,687 req/s, p95 39.8 / p99 742.3 ms, 86 % CPU, 2026-11-11). Its next follow-up **#398** (`389ae2a`,
+2026-11-11: checkpoint passes every 16,000 frames, short holds only once a pass has caught up) held **280,000** at
+82 % CPU (26,733 req/s, p95 22.8 / p99 222.7 ms, 0 errors, 1,228 MB; 290k failed the 2-minute probe on p99 8.09 s,
+300k on p99 3.76 s). A newer head of #398 (`5425165`, 2026-11-12: a shim VFS that writes each commit's WAL frames in
+one `pwrite`, a `SQLITE_CONFIG_PCACHE2` wrapper around pcache1's `xRekey`, `CKPASS` back to 4000) held **266,000** at
+78 % CPU (25,523 req/s, p95 20.2 / p99 189.9 ms, 0 errors, 1,291 MB; the 280k 5-minute hold failed on p99 8.01 s, 290k
+failed the 2-minute probe on p99 8.67 s, 300k on p99 1.09 s). The next head (`fb7a386`, 2026-11-12: the database
+file's page cache is dropped only after a checkpoint pass that copied the whole WAL) held **290,000** at 83 % CPU
+(27,570 req/s, p95 43.1 / p99 408.6 ms, 0 errors, 720 MB; 300k failed the 2-minute probe on p99 3.72 s, 320k on p99
+3.30 s). Its latest head (`9296b9a`, 2026-11-13: a read-only pass keeps its read transaction open for the next pass
+until the WAL is fully backfilled) held **276,000** at 77 % CPU (26,371 req/s, p95 29.0 / p99 291.3 ms, 0 errors,
+663 MB; the 290k 5-minute hold failed on p99 4.59 s, 300k failed the 2-minute probe on p99 1.52 s, 320k on p99 8.01 s).
+None of those earlier #398 heads was above #394's 290,000 (`fb7a386` tied it); `8921ed9` is, so #398 was merged there.
+Its next follow-up **#427** (`229fa4a`, 2026-11-13: `HOLDMS` raised from 250 to 700 ms) held **285,000** at 80 % CPU
+(27,130 req/s, p95 39.8 / p99 429.4 ms, 0 errors, 1,165 MB; the 300k 5-minute hold failed on p99 1.66 s, 310k failed
+the 2-minute probe on p99 2.82 s, 320k on p99 4.15 s), below #398's 300,000, so #427 is not merged. Its newer head
+(`2d786ca`, 2026-11-14: no `TCP_DEFER_ACCEPT`, `HOLDMS` back to 250 ms) held **300,000** at 81 % CPU (28,393 req/s,
+p95 57.5 / p99 534.5 ms, 0 errors, 1,158 MB; 310k failed the 2-minute probe on p99 6.12 s, 320k on p99 2.15 s), which
+ties #398's 300,000 and is not above it, so #427 is still not merged. Its follow-up **#437** (`0e2c166`, 2026-11-14:
+a checkpoint hold may ride up to 1.5 s, `HOLDRIDE`) held **300,000** at 81 % CPU (28,373 req/s, p95 59.9 / p99
+764.8 ms, 0 errors, 1,480 MB; 310k failed the 2-minute probe on p99 3.40 s, 320k on p99 2.40 s), which also ties
+#398's 300,000, so #437 is not merged.
+
+ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
+to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed
+the 5-minute hold on p99 (2.15 s), 110,000 failed the 2-minute probe on p99 (933 ms). Its merged #375 code held
+**93,000** (9,114 req/s, p95 218.3 / p99 590.5 ms, 95 % CPU, 2026-11-09).
 
 ᵒ **wat-wasmedge-delneg** is scored at its follow-up **#288** (`a5c516a`, shim VFS + checkpointer through public
 SQLite APIs; merged 2026-11-04): 220,000 held at 72 % CPU (31 µs/req, 913 MB); 230,000 and 240,000 failed the 2-minute
@@ -714,6 +969,26 @@ an open rule 2 / ruling 8 question for Arjay) held **270,000** (25,856 req/s, p9
 2 → 4; held, not merged: it scored below the merged row) held **120,000** (11,712 req/s, p95 272 / p99 627 ms, 0 err,
 90 % CPU, 71 µs/req, 672 MB, 2026-11-04): 125,000 and 130,000 failed on p99 (1.2 s / 2.8 s, 0 err, 90–91 % CPU), 140,000
 on p99 (4.0 s) and 160,000 on timeouts (1.6 % err).
+
+ᵁ **c-uring-willwang** is scored at its merged #403 code (`0142ba2`). Its follow-up **#409** (`3bee708`, an optional
+AF_XDP + lwIP transport behind `start.sh --bypass`, which the rig doesn't use, so the benchmarked binary is #403's code;
+the PR was closed by its author during the run, so it can't be merged) held **270,000** (25,882 req/s, p95 31.4 / p99
+266.4 ms, 0 err, 80 % CPU, 28 µs/req, 1,467 MB, 2026-11-12): 280,000 failed the 2-minute probe on p99 (1.08 s at 82 %
+CPU, 0 errors) and 320,000 on p95/p99 (1.30 / 2.31 s at 93 % CPU). Its follow-up **#428** (`9970034`, a public
+`SQLITE_CONFIG_PCACHE2` wrapper + batched registration; not merged, below the row) held **257,000** (24,756 req/s, p95
+27.3 / p99 177.1 ms, 0 err, 76 % CPU, 28 µs/req, 815 MB, 2026-11-13), 42/42 tests: 270,000 failed the 5-minute hold on
+p99 (2.45 s at 80 % CPU) and 280,000 the 2-minute probe (p99 1.55 s at 81 %).
+
+ᵀ **typescript-tinyjs-animuni-express** is scored at its merged #382 code (`e6a08ba`). Its follow-up **#410**
+(`3b3c64f`, a native `Bun.serve` transport feeding TinyJS's handler; held, not merged yet: it conflicts with `main`, so
+CI hasn't run) held **71,000** (6,553 req/s, p95 45.8 / p99 59.3 ms, 0.93 % err, 92 % CPU, 131 µs/req, 211 MB,
+2026-11-12), 42/42 tests: 75,000 failed the 5-minute hold on timeouts (1.59 % err) and 78,000 the 2-minute probe (1.36 %).
+The row moves to #410's score once it's rebased on `main`, CI is green and that head is re-run.
+
+ᶫ **c-iouring-Londopy #438** (`0aa265c`, new entry; held, not merged: its B-tree *writes* are an open question for
+Arjay, see the rule flags below) held **270,000** (25,755 req/s, p95 222.7 / p99 980.8 ms, 0 err, 83 % CPU, 29 µs/req,
+1,105 MB, 2026-11-14), 42/42 tests. 280,000 and 320,000 failed the 2-minute probe on `connection refused` (71 % / 78 %
+errors; no crash or OOM kill in the box's journal).
 
 ## Patches (ᵖ) and failures
 
@@ -762,6 +1037,13 @@ committed in this repo.
   probe passed. From 20,000 down to the 500-user floor the app sat at 1–2 % CPU while 75–99 % of requests timed out
   (500 users: 5 req/s, p50 60 s, 11 MB RAM): its fixed worker-thread pool is held by idle keep-alive connections, as
   its README warns. Its sibling #160 (hybrid cgi) is the one scored above.
+- **TypeScript #382 — scored 0 at `a70aa8a`, now scored 43,000 at `e6a08ba`** (TinyJS on Bun, direct): the first run (TinyJS 0.1.1) installed, built and passed 42/42, but no
+  probe passed. From 20,000 down to the 500-user floor a flat ~2.8–3.3 % of requests failed with `EOF` (connection
+  closed with no response) at 5–65 % CPU, p99 ≤ 80 ms: ~40 % of `POST /posts/:id/like` and ~35 % of `POST /posts`, 0
+  reads. Each user sends about one request every 11 s, just past Bun's default 10 s `idleTimeout`, so the POSTs likely
+  land on keep-alive sockets the server has just closed (reads are retried by the client, POSTs aren't), as with Go #277.
+  `e6a08ba` (TinyJS 0.1.2, keep-alive fix) had 0 errors and held 43,000 (row above); 45k failed the 2-minute probe on
+  p95 (1.1 s at 93 % CPU).
 - **Go #277 — scored 0 at `26d1785`, then 45,000 at `d9d93f3`, 60,000 at `70145d4`, now 62,000 at `a1d2732`** (net/http, direct): the first run passed 42/42,
   but no probe passed. From 20,000 down to the 500-user floor ~7 % of requests failed with `EOF` (connection closed with
   no response) at 4–45 % CPU: every `POST /posts/:id/like` and ~75–86 % of `POST /posts`, 0 reads. It closed keep-alive
@@ -778,13 +1060,18 @@ committed in this repo.
   off. Patch: `export CGO_CFLAGS=…` (held 37,000). The author's `e95e747` fixes it and was re-run unpatched: 45,000;
   the row above is its later `aea8b28` (61,000, unpatched).
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
+- **C #396 — build failed** (`34f1024`, direct): install was fine, but the build's PGO training step (`src/train.sh`)
+  never finished. The instrumented `bin/server.inst` sat in `io_cqring_wait` and `bin/train … 60000` in `wait_woken` on
+  its socket, both at ~0 % CPU for over an hour, so the client was waiting for a reply the server never sent. The build
+  hit the rig's 90-minute timeout (exit 124) and the app never ran (1/42 tests). Not patched. The author's `c3fdb10`
+  fixes the training client and was re-run unpatched: 270,000 (the row above).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
 
 - **Tokens without `exp` accepted** (SPEC requires rejecting them): java-nio #88, quarkus #67 (SmallRye
   grace), kotlin #83, scala #107, node-uws #102, dart #46, go-champ3oy #76, pypy #84 (deliberately), bash #89,
   go-gnet #38, kotlin-ktor #36, python-fastapi-granian #41, go-stdlib #44, kotlin-ktor-C-Hatton #45, go-epoll-damianoneill #52,
-  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, r-plumber2 #242, c-iouring-marwanabdelhameed #270 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, spice-ngspice #220 in `23d5dd7`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, java-jdkhttpserver #209 in `89e75e0`, c-epoll-patrickryankenneth #246 in `f9cf266`, kotlin-trikeshed #128 in `2fb010a`, rust-iouring-tbsvttr #313 in `bfc4be0`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
+  kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, pypy-twisted #79, go-nethttp-mattn #100, java-raw #101, python-stdlib #118, java-springboot-reactor #138, trux-http #145, r-plumber2 #242, c-iouring-marwanabdelhameed #270 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225`, spice-ngspice #220 in `23d5dd7`, c-iouring-meros #137 in `b2a5207`, python-pyrustapi #147 in `82abaab`, node-net #78 in `5e7080d`, typescript-fastify #51 in `7820a24`, java-jdkhttpserver #209 in `89e75e0`, c-epoll-patrickryankenneth #246 in `f9cf266`, kotlin-trikeshed #128 in `2fb010a`, rust-iouring-tbsvttr #313 in `bfc4be0`, cpp-io_uring-0329-at #412 in `7315af0`, asm-epoll #117 in its follow-up #152 (`ad7a72c`) and csharp-epoll #74 in its follow-up #174 (`51de5a6`) (re-scored and merged).
 - **Kotlin Ktor #36 (and #53, based on it) commit `gradle/wrapper/gradle-wrapper.jar`**. Arjay ruled (2026-10-26) that
   the standard Gradle wrapper jar is fine and not a prebuilt binary under rule 10. Kotlin Ktor #36 also returned a few HTTP 500s on writes under load (1–5 per probe,
   0 in the scored hold); its StatusPages handler doesn't log the exception. kotlin-springboot #66 commits the same
@@ -881,11 +1168,11 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   #245 credit (plus whitespace-only restores in the vendored stock sqlite3.c) → merged at `1d952d2`. Scored at
   `a0443a9` (195k); then at its merged follow-up #341 (`abcc24a`, 210k); now at follow-up #352 (`3e10490`, 220k, not
   merged yet).
-- **asm-btree-ninhnv #373 writes SQLite's private page-cache state**: `src/shim.c`'s `cache_maxkey()` sets
-  `PCache1.iMaxKey` directly before each commit (ruling 8: use SQLite's own mechanisms or a `SQLITE_CONFIG_PCACHE2`
-  wrapper instead). `shim.c` is also adapted from rust-iouring-kensac #264's `csrc/shim.c` (same `td_*` API,
-  checkpoint state machine and spill buffer), but the README credits #264 only for the design (ruling 9: credit the
-  file). The NASM app is the author's own. Scored as submitted (230k at `9f80f1f`); held until both are fixed.
+- **c-iouring-Londopy #438 also writes through SQLite's B-tree API**: a new post or like is inserted with
+  `sqlite3BtreeInsert` into the table and each of its indexes, with records built by the entry in SQLite's format and
+  the constraints (body length, post exists, unique like) checked by its own code, inside SQLite's own transactions and
+  WAL. Open question for Arjay: ruling 1 covers B-tree *reads* only (stock SQLite 3.54.1, no source patch, no private
+  struct writes). `WRITES=sql` switches to prepared INSERTs. Scored as submitted (270k at `0aa265c`); held open.
 - **Reads can see uncommitted writes** in the same batch: Deno #119 (also serves a snapshot up to 20 ms stale), Zig #125.
 - **start.sh restart loops** (the app restarts itself instead of letting systemd see a crash): Deno #119, c-epoll #64,
   c-iouring-raoz #26 (restarts after a signal exit), go-epoll-Antheurus #65 (worker 0 re-spawns dead workers).

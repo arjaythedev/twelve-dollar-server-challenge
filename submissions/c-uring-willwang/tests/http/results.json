@@ -1,0 +1,587 @@
+{
+  "challenge_revision": "3effe1d05ff3cdde7eb5b4695d1b8e6c2fac1f1c",
+  "official_reference": {
+    "submission": "rust-iouring-kensac",
+    "scored_commit": "4298101",
+    "entry_tree": "94966f6cc58c436ee382107b937f3bfe02548966",
+    "connected_users": 310000
+  },
+  "local_environment": {
+    "cpu": "AMD EPYC Genoa",
+    "kernel": "Linux 6.8.0-147-generic",
+    "distribution": "Ubuntu 24.04",
+    "server_cpu": 10,
+    "client_cpus": [
+      11,
+      12,
+      13,
+      14
+    ],
+    "memory_bytes": 2147483648,
+    "swap_bytes": 0,
+    "descriptor_limit": 65535,
+    "network": "Private loopback namespace, one trial at a time. The four native clients and host OS are outside the server cgroup.",
+    "measurement": "300 seconds at full load. The first 90 seconds, including the 60-second ramp, are excluded. Client histograms include complete HTTP response bodies. Pending requests were counted at cutoff.",
+    "seed_content_sha256": "738d11ab3164c13177e347f75038d1e80b43c64e754544a42d1c32bd8d7bcf1d",
+    "seed_rows": {
+      "users": 50000,
+      "posts": 500000,
+      "likes": 2016005
+    },
+    "server_compilers": {
+      "C": "GCC 13.3.0",
+      "Kensac": "rustc 1.94.0"
+    },
+    "memory_setting": "The original 311k/315k paired runs use 2,048 MiB. The newer 350k observation uses 1,750 MiB. Each run records its own cgroup ceiling."
+  },
+  "read_benchmark": {
+    "rounds": 3,
+    "operations_per_round": 750000,
+    "feed_count_per_round": 346203,
+    "point_count_per_round": 345422,
+    "per_round_read_bytes_sha256": "57851f751a118a50c6729900698c4ee563d545d30073eee4da78a13c76306106",
+    "median_round_mean_microseconds": {
+      "C": {
+        "feed": 2.8095,
+        "point": 0.7049
+      },
+      "Kensac": {
+        "feed": 3.9866,
+        "point": 0.8215
+      }
+    }
+  },
+  "runs": [
+    {
+      "implementation": "Earlier C implementation with a single readiness queue",
+      "server_sha256": "e40a3ce82919e5b0b4218d9cb9df601a6b18892d625e3f43b74597e7ee04f84f",
+      "generator_sha256": "d57e0bd7bda0d21dc004529ea061aeeca89b51e8c3bcc3624e5bbffe6039499c",
+      "vus": 311000,
+      "ramp_s": 60,
+      "warm_s": 90,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "seed": 20261111,
+      "requests": 9703289,
+      "endpoints": {
+        "feed": 4471135,
+        "get_post": 4472343,
+        "like": 669975,
+        "create": 89836
+      },
+      "rps": 32344.3,
+      "p50_ms": 131.45,
+      "p95_ms": 440.35,
+      "p99_ms": 618.11,
+      "errors": 0,
+      "tcp": {
+        "start": 311000,
+        "end": 311000,
+        "peak": 311000,
+        "successes": 311000,
+        "failed": 0
+      },
+      "completed_at_or_above_500ms": 289835,
+      "completed_at_or_above_1s": 0,
+      "completed_at_or_above_60s": 0,
+      "outstanding_at_stop": {
+        "connecting": 0,
+        "endpoints": {
+          "GET /feed": {
+            "pending": 3464,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 293.135
+          },
+          "GET /posts/:id": {
+            "pending": 3372,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 293.099
+          },
+          "POST /posts/:id/like": {
+            "pending": 508,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 290.325
+          },
+          "POST /posts": {
+            "pending": 82,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 283.257
+          }
+        }
+      },
+      "endpoint_observations": {
+        "GET /feed": {
+          "requests": 4471135,
+          "mean_ms": 160.46,
+          "per_shard_p99_ms_min_max": [
+            618.7,
+            619.7
+          ],
+          "max_ms": 740
+        },
+        "GET /posts/:id": {
+          "requests": 4472343,
+          "mean_ms": 160.06,
+          "per_shard_p99_ms_min_max": [
+            616.6,
+            617.6
+          ],
+          "max_ms": 740
+        },
+        "POST /posts/:id/like": {
+          "requests": 669975,
+          "mean_ms": 160.4,
+          "per_shard_p99_ms_min_max": [
+            615.5,
+            619.2
+          ],
+          "max_ms": 738
+        },
+        "POST /posts": {
+          "requests": 89836,
+          "mean_ms": 162.23,
+          "per_shard_p99_ms_min_max": [
+            613.9,
+            630.3
+          ],
+          "max_ms": 737
+        }
+      },
+      "cpu_s": 299.147,
+      "cpu_pct": 99.72,
+      "cpu_us_per_req": 30.829,
+      "cgroup": {
+        "current": 1004195840,
+        "peak": 1027452928,
+        "max": 2147483648,
+        "swap_max": 0,
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "anon": 93708288,
+        "file": 380243968,
+        "kernel": 502394880,
+        "sock": 27848704,
+        "slab": 495511768
+      },
+      "passes_latency_error_thresholds": true
+    },
+    {
+      "implementation": "Kensac #264, Rust 1.94.0",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "generator_sha256": "d57e0bd7bda0d21dc004529ea061aeeca89b51e8c3bcc3624e5bbffe6039499c",
+      "vus": 311000,
+      "ramp_s": 60,
+      "warm_s": 90,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "seed": 20261111,
+      "requests": 9335729,
+      "endpoints": {
+        "feed": 4300262,
+        "get_post": 4304732,
+        "like": 644252,
+        "create": 86483
+      },
+      "rps": 31119.1,
+      "p50_ms": 91.91,
+      "p95_ms": 134.03,
+      "p99_ms": 15281,
+      "errors": 0,
+      "tcp": {
+        "start": 311000,
+        "end": 311000,
+        "peak": 311000,
+        "successes": 311000,
+        "failed": 0
+      },
+      "completed_at_or_above_500ms": 383725,
+      "completed_at_or_above_1s": 354064,
+      "completed_at_or_above_60s": 0,
+      "outstanding_at_stop": {
+        "connecting": 0,
+        "endpoints": {
+          "GET /feed": {
+            "pending": 9634,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 3992.989
+          },
+          "GET /posts/:id": {
+            "pending": 9426,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 3992.946
+          },
+          "POST /posts/:id/like": {
+            "pending": 1775,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 3994.899
+          },
+          "POST /posts": {
+            "pending": 231,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 3978.254
+          }
+        }
+      },
+      "endpoint_observations": {
+        "GET /feed": {
+          "requests": 4300262,
+          "mean_ms": 525.47,
+          "per_shard_p99_ms_min_max": [
+            15241.0,
+            15286.0
+          ],
+          "max_ms": 21327
+        },
+        "GET /posts/:id": {
+          "requests": 4304732,
+          "mean_ms": 532.59,
+          "per_shard_p99_ms_min_max": [
+            15256.0,
+            15281.0
+          ],
+          "max_ms": 21327
+        },
+        "POST /posts/:id/like": {
+          "requests": 644252,
+          "mean_ms": 551.85,
+          "per_shard_p99_ms_min_max": [
+            15370.0,
+            15508.0
+          ],
+          "max_ms": 21327
+        },
+        "POST /posts": {
+          "requests": 86483,
+          "mean_ms": 588.28,
+          "per_shard_p99_ms_min_max": [
+            15424.0,
+            15835.0
+          ],
+          "max_ms": 21303
+        }
+      },
+      "cpu_s": 295.053,
+      "cpu_pct": 98.35,
+      "cpu_us_per_req": 31.605,
+      "cgroup": {
+        "current": 1380118528,
+        "peak": 1453146112,
+        "max": 2147483648,
+        "swap_max": 0,
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "anon": 153083904,
+        "file": 698863616,
+        "kernel": 527503360,
+        "sock": 450560,
+        "slab": 515273688
+      },
+      "passes_latency_error_thresholds": false,
+      "foreground_file_reads": {
+        "complete_seconds": 299,
+        "seconds_above_1000_read_syscalls": [
+          94,
+          116,
+          138,
+          162,
+          185,
+          209,
+          235,
+          262,
+          282,
+          302,
+          322,
+          344,
+          365,
+          387
+        ],
+        "read_syscalls_in_those_seconds": [
+          3611,
+          4143,
+          4162,
+          4681,
+          4854,
+          5052,
+          5220,
+          5605,
+          5615,
+          5802,
+          5816,
+          5978,
+          6314,
+          6673
+        ],
+        "read_syscalls_outside_those_seconds": 3
+      }
+    },
+    {
+      "implementation": "Earlier C implementation with a single readiness queue",
+      "server_sha256": "e40a3ce82919e5b0b4218d9cb9df601a6b18892d625e3f43b74597e7ee04f84f",
+      "generator_sha256": "d57e0bd7bda0d21dc004529ea061aeeca89b51e8c3bcc3624e5bbffe6039499c",
+      "vus": 315000,
+      "ramp_s": 60,
+      "warm_s": 90,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "seed": 20261111,
+      "requests": 9689336,
+      "endpoints": {
+        "feed": 4465233,
+        "get_post": 4465912,
+        "like": 668523,
+        "create": 89668
+      },
+      "rps": 32297.8,
+      "p50_ms": 326.93,
+      "p95_ms": 742.83,
+      "p99_ms": 924.18,
+      "errors": 0,
+      "tcp": {
+        "start": 315000,
+        "end": 315000,
+        "peak": 315000,
+        "successes": 315000,
+        "failed": 0
+      },
+      "completed_at_or_above_500ms": 1352206,
+      "completed_at_or_above_1s": 0,
+      "completed_at_or_above_60s": 0,
+      "outstanding_at_stop": {
+        "connecting": 0,
+        "endpoints": {
+          "GET /feed": {
+            "pending": 2825,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 259.064
+          },
+          "GET /posts/:id": {
+            "pending": 2947,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 263.594
+          },
+          "POST /posts/:id/like": {
+            "pending": 418,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 262.553
+          },
+          "POST /posts": {
+            "pending": 63,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 255.04
+          }
+        }
+      },
+      "endpoint_observations": {
+        "GET /feed": {
+          "requests": 4465233,
+          "mean_ms": 303.72,
+          "per_shard_p99_ms_min_max": [
+            924.0,
+            924.4
+          ],
+          "max_ms": 973
+        },
+        "GET /posts/:id": {
+          "requests": 4465912,
+          "mean_ms": 303.68,
+          "per_shard_p99_ms_min_max": [
+            923.8,
+            924.2
+          ],
+          "max_ms": 972
+        },
+        "POST /posts/:id/like": {
+          "requests": 668523,
+          "mean_ms": 304.24,
+          "per_shard_p99_ms_min_max": [
+            924.0,
+            925.8
+          ],
+          "max_ms": 997
+        },
+        "POST /posts": {
+          "requests": 89668,
+          "mean_ms": 307.07,
+          "per_shard_p99_ms_min_max": [
+            924.7,
+            927.9
+          ],
+          "max_ms": 995
+        }
+      },
+      "cpu_s": 299.155,
+      "cpu_pct": 99.72,
+      "cpu_us_per_req": 30.875,
+      "cgroup": {
+        "current": 1002360832,
+        "peak": 1040355328,
+        "max": 2147483648,
+        "swap_max": 0,
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "anon": 93892608,
+        "file": 378597376,
+        "kernel": 508219392,
+        "sock": 21450752,
+        "slab": 501349912
+      },
+      "passes_latency_error_thresholds": false,
+      "foreground_file_reads": {
+        "complete_seconds": 299,
+        "seconds_above_1000_read_syscalls": [],
+        "read_syscalls_in_those_seconds": [],
+        "read_syscalls_outside_those_seconds": 0
+      }
+    },
+    {
+      "implementation": "C fixed-file epoll banks with shared receive credits and adaptive group commit",
+      "server_sha256": "50e607858336e3dad7c45f068873be34895a256a4e005d5ee91f3628ad56e76f",
+      "generator_sha256": "d57e0bd7bda0d21dc004529ea061aeeca89b51e8c3bcc3624e5bbffe6039499c",
+      "vus": 350000,
+      "ramp_s": 60,
+      "warm_s": 90,
+      "hold_s": 300,
+      "think_scale": 1.0,
+      "seed": 20261111,
+      "requests": 10415677,
+      "endpoints": {
+        "feed": 4799607,
+        "get_post": 4800370,
+        "like": 719111,
+        "create": 96589
+      },
+      "rps": 34718.9,
+      "p50_ms": 616.51,
+      "p95_ms": 1029,
+      "p99_ms": 1093,
+      "errors": 0,
+      "tcp": {
+        "start": 350000,
+        "end": 350000,
+        "peak": 350000,
+        "successes": 350000,
+        "failed": 0
+      },
+      "completed_at_or_above_500ms": 8527363,
+      "completed_at_or_above_1s": 718619,
+      "completed_at_or_above_60s": 0,
+      "outstanding_at_stop": {
+        "connecting": 0,
+        "endpoints": {
+          "GET /feed": {
+            "pending": 10705,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 721.608
+          },
+          "GET /posts/:id": {
+            "pending": 10301,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 722.356
+          },
+          "POST /posts/:id/like": {
+            "pending": 1662,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 760.224
+          },
+          "POST /posts": {
+            "pending": 199,
+            "aged_at_or_above_60s": 0,
+            "max_age_ms": 729.144
+          }
+        }
+      },
+      "endpoint_observations": {
+        "GET /feed": {
+          "requests": 4799607,
+          "mean_ms": 627.28,
+          "per_shard_p99_ms_min_max": [
+            1088.0,
+            1089.0
+          ],
+          "max_ms": 1263
+        },
+        "GET /posts/:id": {
+          "requests": 4800370,
+          "mean_ms": 627.94,
+          "per_shard_p99_ms_min_max": [
+            1088.0,
+            1089.0
+          ],
+          "max_ms": 1262
+        },
+        "POST /posts/:id/like": {
+          "requests": 719111,
+          "mean_ms": 650.44,
+          "per_shard_p99_ms_min_max": [
+            1116.0,
+            1119.0
+          ],
+          "max_ms": 1323
+        },
+        "POST /posts": {
+          "requests": 96589,
+          "mean_ms": 648.57,
+          "per_shard_p99_ms_min_max": [
+            1114.0,
+            1120.0
+          ],
+          "max_ms": 1316
+        }
+      },
+      "cpu_s": 299.533,
+      "cpu_pct": 99.84,
+      "cpu_us_per_req": 28.758,
+      "cgroup": {
+        "current": 1162633216,
+        "peak": 1205260288,
+        "max": 1835008000,
+        "swap_max": 0,
+        "events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "anon": 84905984,
+        "file": 422170624,
+        "kernel": 565682176,
+        "sock": 89874432,
+        "slab": 557502576
+      },
+      "passes_latency_error_thresholds": false
+    }
+  ],
+  "original_c_baseline_source_sha256": {
+    "app.c": "08e1dea645b9ade17bad84b91f25d1bc9c19589a7eedb830e576548e8187ef53",
+    "buffer.c": "c09dfc08f019cfc6baa91b698e1185c67edf27580eefd999fcc626447544bc45",
+    "challenge.h": "c2cfd92f88ae73d98f6c5cf81b2fac92875e9e8ca2b26e1362d17eeebe4a9c35",
+    "database.c": "383faf094b64df93d367ab8c4250703d1c7f31498fea0beb20ea08919da8a688",
+    "json_input.h": "25ace3c600a1c765a9345c1da7cb35457ec408cb8ce917a5d7a32b00af610429",
+    "main.c": "8c98fd7d33fde7bbda83d612d2b29b8b527d2122820b9203c1ce60d6a8dad731",
+    "reactor.c": "4944085d97c943d6cc6a6824f518cc1f2e7b3739ad9500ba6319f0a997b734e4",
+    "reader.c": "a8a18d0174718196c70d8321613c8a68af81e95951e609678f668852993c14dd",
+    "wal.c": "e0af115bd229a38d2533ce0c50a9dbc9ced6d18d2c23ab315b0c1ae29fd85433",
+    "Makefile": "6a14261cc0e9449b5060a20aa61260f41e54a2eef4a7a199d2e3573a4ad1e85f",
+    "build.sh": "113a252867c151c95fdc2216e39c778f3ec5d7f7d621358b0611b28384fd1201"
+  }
+}

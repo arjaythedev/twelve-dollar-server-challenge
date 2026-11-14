@@ -24,6 +24,11 @@ const WHOLE_MAX: usize = BODY_MAX + http::HEAD_ROOM;
 // The 100 ms sample retries an accept paused by an operational error; it reads no file.
 const SAMPLE_PERIOD: Duration = Duration::from_millis(100);
 const STATS_PERIOD: Duration = Duration::from_secs(10);
+// The counters the loop gathers from rings, store and WAL, and its peak samples, are folded into the
+// stats every 100 ms and before each written stats line, not every turn.
+const COUNTS_PERIOD: Duration = Duration::from_millis(100);
+// The write window adapts once per 250 ms epoch; the process CPU clock is read only then.
+const ADAPT_EPOCH: Duration = Duration::from_millis(250);
 const SWEEP_PERIOD: Duration = Duration::from_secs(if cfg!(twelve_small_limits) { 1 } else { 10 });
 // The safe build follows every rule an unsafe path of this file skips; every use is an
 // ordinary `if SAFE_BUILD`, so both builds compile and type-check both branches.
@@ -38,7 +43,9 @@ const DEPENDENT: u32 = 1 << 5;
 const MUTATED: u32 = 1 << 6;
 const EXECUTED: u32 = 1 << 7;
 
+// Copy: a turn reads a queued work out, updates it and writes it back, with no empty placeholder.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Work {
     id: ConnId,
     route: Route,
@@ -58,7 +65,10 @@ struct Work {
     error: Option<ErrorBody>,
     close: bool,
     version: Version,
-    padding: [u8; 24],
+    // A write's reply bytes (Store::create_need or like_need), computed once when the write is
+    // admitted; None when the reply could not fit BODY_MAX, and for every other work.
+    reply_need: Option<u32>,
+    padding: [u8; 16],
 }
 const _: () = assert!(size_of::<Work>() == 128 && align_of::<Work>() == 8);
 
@@ -87,7 +97,8 @@ impl Work {
             error: None,
             close: false,
             version: Version::Http11,
-            padding: [0; 24],
+            reply_need: None,
+            padding: [0; 16],
         }
     }
     fn write(&self) -> bool {
@@ -203,19 +214,13 @@ impl Pending {
         }
     }
 }
-struct Chunk {
-    cells: Option<Box<[Pending]>>,
-    free: u64,
-    prev: u32,
-    next: u32,
-}
 struct Metadata {
-    slots: u32,
-    lookup: Box<[u32]>,
-    chunks: Vec<Chunk>,
-    unused: Vec<u32>,
-    available: u32,
-    warm: u32,
+    // One flat array of every cell made so far, at most one per slot of the 8 rings: its capacity is
+    // reserved at startup and touched only as cells are pushed, so a cell never moves and no cell
+    // memory is freed and remade under load; a released cell is reset and reused from free, the most
+    // recently released first.
+    cells: Vec<Pending>,
+    free: Vec<u32>,
     first: u32,
     last: u32,
     queued: usize,
@@ -229,21 +234,9 @@ struct Metadata {
 impl Metadata {
     fn new(slots: u32, now: Instant) -> Self {
         let count = slots as usize * ring::RINGS;
-        let chunks = count.div_ceil(64);
         Self {
-            slots,
-            lookup: vec![0; count].into_boxed_slice(),
-            chunks: (0..chunks)
-                .map(|_| Chunk {
-                    cells: None,
-                    free: 0,
-                    prev: NONE,
-                    next: NONE,
-                })
-                .collect(),
-            unused: (0..u32n(chunks, "capacity")).rev().collect(),
-            available: NONE,
-            warm: NONE,
+            cells: Vec::with_capacity(count),
+            free: Vec::with_capacity(count),
             first: NONE,
             last: NONE,
             queued: 0,
@@ -255,51 +248,26 @@ impl Metadata {
             now,
         }
     }
-    fn key(&self, id: ConnId) -> usize {
-        if usize::from(id.ring) >= ring::RINGS || u32::from(id.slot) >= self.slots {
-            invariant("operation");
-        }
-        usize::from(id.ring) * self.slots as usize + usize::from(id.slot)
-    }
-    fn index(&self, id: ConnId) -> Option<u32> {
-        self.lookup
-            .get(self.key(id))
-            .expect("key < lookup.len(): key checks ring and slot")
-            .checked_sub(1)
-    }
-    fn chunk(&self, chunk: u32) -> &Chunk {
-        self.chunks
-            .get(chunk as usize)
-            .expect("chunk < P: chunk numbers come from cell indices and the chunk lists")
-    }
-    fn chunk_mut(&mut self, chunk: u32) -> &mut Chunk {
-        self.chunks
-            .get_mut(chunk as usize)
-            .expect("chunk < P: chunk numbers come from cell indices and the chunk lists")
+    fn index(&self, conns: &Conns, id: ConnId) -> Option<u32> {
+        conns.cell(id)
     }
     fn cell(&self, index: u32) -> &Pending {
-        self.chunk(index / 64)
-            .cells
-            .as_ref()
-            .expect("allocated metadata")
-            .get(index as usize % 64)
-            .expect("a cell index names a cell of its allocated chunk")
+        self.cells
+            .get(index as usize)
+            .expect("a cell index names a cell made by ensure")
     }
     fn cell_mut(&mut self, index: u32) -> &mut Pending {
-        self.chunk_mut(index / 64)
-            .cells
-            .as_mut()
-            .expect("allocated metadata")
-            .get_mut(index as usize % 64)
-            .expect("a cell index names a cell of its allocated chunk")
+        self.cells
+            .get_mut(index as usize)
+            .expect("a cell index names a cell made by ensure")
     }
-    fn get(&self, id: ConnId) -> Option<&Pending> {
-        self.index(id)
+    fn get(&self, conns: &Conns, id: ConnId) -> Option<&Pending> {
+        self.index(conns, id)
             .map(|index| self.cell(index))
             .filter(|p| p.id == id)
     }
-    fn ensure(&mut self, id: ConnId) -> u32 {
-        if let Some(index) = self.index(id) {
+    fn ensure(&mut self, conns: &Conns, id: ConnId) -> u32 {
+        if let Some(index) = self.index(conns, id) {
             if self.cell(index).id != id {
                 let old = self.cell(index);
                 if old.bits & PUSH_MASK != 0 || old.work.flags & VALID != 0 || old.old_acks != 0 {
@@ -315,65 +283,19 @@ impl Metadata {
             }
             return index;
         }
-        if self.available == NONE {
-            let chunk = self.unused.pop().unwrap_or_else(|| invariant("capacity"));
-            // UNSAFE PATH (speed): unchecked arithmetic; chunk < P, so chunk * 64 < lookup.len().
-            let len = (self.lookup.len() - chunk as usize * 64).min(64);
-            let cells = (0..len)
-                .map(|_| Pending::empty(self.now))
-                .collect::<Vec<_>>()
-                .into_boxed_slice();
-            *self.chunk_mut(chunk) = Chunk {
-                cells: Some(cells),
-                free: if len == 64 {
-                    u64::MAX
-                } else {
-                    (1_u64 << len) - 1
-                },
-                prev: NONE,
-                next: NONE,
-            };
-            self.available = chunk;
-        }
-        let chunk = self.available;
-        if self.warm == chunk {
-            self.warm = NONE;
-        }
-        let lane = self.chunk(chunk).free.trailing_zeros();
-        self.chunk_mut(chunk).free &= !(1_u64 << lane);
-        if self.chunk(chunk).free == 0 {
-            self.unlink_chunk(chunk);
-        }
-        let index = chunk * 64 + lane;
-        let key = self.key(id);
-        *self
-            .lookup
-            .get_mut(key)
-            .expect("key < lookup.len(): key checks ring and slot") = index + 1;
+        let index = match self.free.pop() {
+            Some(index) => index,
+            None => {
+                // Each cell is free or named by one physical slot. This slot names none, so
+                // the push stays inside the capacity reserved at startup.
+                let index = u32n(self.cells.len(), "capacity");
+                self.cells.push(Pending::empty(self.now));
+                index
+            }
+        };
+        conns.set_cell(id, Some(index));
         self.cell_mut(index).id = id;
         index
-    }
-    fn unlink_chunk(&mut self, index: u32) {
-        let (prev, next) = (self.chunk(index).prev, self.chunk(index).next);
-        if prev == NONE {
-            self.available = next;
-        } else {
-            self.chunk_mut(prev).next = next;
-        }
-        if next != NONE {
-            self.chunk_mut(next).prev = prev;
-        }
-        self.chunk_mut(index).prev = NONE;
-        self.chunk_mut(index).next = NONE;
-    }
-    fn link_chunk(&mut self, index: u32) {
-        let available = self.available;
-        self.chunk_mut(index).next = available;
-        self.chunk_mut(index).prev = NONE;
-        if available != NONE {
-            self.chunk_mut(available).prev = index;
-        }
-        self.available = index;
     }
     fn enqueue(&mut self, index: u32) {
         if self.cell(index).bits & LINKED != 0 {
@@ -422,9 +344,10 @@ impl Metadata {
             self.output_paused -= 1;
         }
         self.release_name(index);
-        let now = self.now;
         let cell = self.cell_mut(index);
-        cell.work = Work::empty(now);
+        // A cell's work is read only while its flags hold VALID or HEAD, and every new request's
+        // work is built whole (request_work), so clearing the flags empties it.
+        cell.work.flags = 0;
         cell.bits &= !(BLOCKED
             | OUTPUT_PAUSE
             | OUTPUT_COUNTED
@@ -446,68 +369,38 @@ impl Metadata {
     }
     fn save_name(&mut self, index: u32, bytes: &[u8]) {
         self.release_name(index);
-        let mut name = std::mem::take(&mut self.kept_name);
-        // The name is charged at exactly the bytes it holds for this request: a kept buffer
-        // shrinks or grows to the name's length.
-        if name.capacity() < bytes.len() {
-            name.reserve_exact(bytes.len());
+        let available = self.names_max.strict_sub(self.names);
+        // The encoded Authorization value covers up to 4/3 of its decoded name length.
+        let name_bound = bytes.len().strict_mul(4) / 3;
+        let mut name = if self.kept_name.capacity() >= bytes.len()
+            && self.kept_name.capacity() <= available
+            && self.kept_name.capacity() <= name_bound
+        {
+            std::mem::take(&mut self.kept_name)
         } else {
-            name.shrink_to(bytes.len());
-        }
+            Vec::with_capacity(bytes.len())
+        };
         name.extend_from_slice(bytes);
         self.names = self
             .names
             .checked_add(name.capacity())
             .unwrap_or_else(|| invariant("capacity"));
-        // Passing the budget is a broken invariant, not load: a live name is a checked Expect
-        // head's username, which base64url and JSON decoding make at most 3/4 of that head's
-        // Authorization value; the input reservation charged to INPUT_BUDGET for the head covers
-        // that value, and a connection keeps at most one name, so names <= 3/4 * INPUT_BUDGET
-        // (12 MiB, or 192 KiB under small limits).
+        // Actual capacities, including reusable slack, stay within INPUT_BUDGET. A fresh name
+        // fits because decoded live names occupy at most 3/4 of their charged request heads.
         // UNSAFE PATH (speed): unchecked arithmetic; names is the sum of live name capacities, at most INPUT_BUDGET.
         if self.names + self.kept_name.capacity() > self.names_max {
             invariant("capacity");
         }
         self.cell_mut(index).name = name;
     }
-    fn release(&mut self, index: u32) {
+    fn release(&mut self, conns: &Conns, index: u32) {
         self.unlink(index);
         self.clear_request(index);
         let id = self.cell(index).id;
-        let key = self.key(id);
-        *self
-            .lookup
-            .get_mut(key)
-            .expect("key < lookup.len(): key checks ring and slot") = 0;
-        let chunk = index / 64;
-        let was_full = self.chunk(chunk).free == 0;
+        conns.set_cell(id, None);
         let now = self.now;
         *self.cell_mut(index) = Pending::empty(now);
-        self.chunk_mut(chunk).free |= 1_u64 << (index % 64);
-        if was_full {
-            self.link_chunk(chunk);
-        }
-        let len = self
-            .chunk(chunk)
-            .cells
-            .as_ref()
-            .expect("allocated metadata")
-            .len();
-        let mask = if len == 64 {
-            u64::MAX
-        } else {
-            (1_u64 << len) - 1
-        };
-        if self.chunk(chunk).free == mask {
-            if self.warm == NONE {
-                self.warm = chunk;
-            } else {
-                self.unlink_chunk(chunk);
-                self.chunk_mut(chunk).cells = None;
-                self.chunk_mut(chunk).free = 0;
-                self.unused.push(chunk);
-            }
-        }
+        self.free.push(index);
     }
 }
 
@@ -658,7 +551,7 @@ struct Window {
 impl Window {
     fn new(now: Instant) -> Self {
         Self {
-            us: 2_000,
+            us: 4_000,
             growing: true,
             epoch: now,
             cpu: 0,
@@ -668,8 +561,13 @@ impl Window {
             previous: None,
         }
     }
+    // Whether a 250 ms epoch has passed since the last adapt: the caller reads the process CPU clock,
+    // a system call, only then.
+    fn due(&self, now: Instant) -> bool {
+        now.duration_since(self.epoch) >= ADAPT_EPOCH
+    }
     fn adapt(&mut self, now: Instant, cpu: u128, finals: u128) {
-        if now.duration_since(self.epoch) < Duration::from_millis(250) {
+        if !self.due(now) {
             return;
         }
         let requests = finals
@@ -691,9 +589,9 @@ impl Window {
                 }
             }
             self.us = if self.growing {
-                (self.us + 500).min(5_000)
+                (self.us + 1_000).min(10_000)
             } else {
-                self.us.saturating_sub(500).max(2_000)
+                self.us.saturating_sub(1_000).max(4_000)
             };
             self.previous = Some((elapsed_cpu, requests, self.latency, self.writes));
         }
@@ -751,12 +649,22 @@ pub(crate) struct Server {
     cap: usize,
     // The effective turn cap as main computed it; cap is the same value as usize.
     turn_cap: u32,
-    wake_batch: u32,
+    batch_target: u32,
+    ring_spread: crate::settings::RingSpread,
+    rearm_budget: [u32; 8],
     timeout: Duration,
     start: Instant,
+    // The turn's one monotonic clock reading, taken right after wait() returns; receipts, timers, the
+    // gate's hold samples, commit starts and the turn timer read it, and the next wait() computes
+    // its timeout from it.
+    now: Instant,
+    // UTC offset from monotonic time since start, refreshed by the 100 ms sample.
+    wall_offset_ns: i128,
+    wall: Option<i64>,
     next_sample: Instant,
     next_sweep: Instant,
     next_stats: Instant,
+    next_counts: Instant,
     window: Window,
     completions: Vec<(Completion, Option<End>)>,
     candidates: Vec<ConnId>,
@@ -781,6 +689,8 @@ pub(crate) struct Server {
     cache: (u64, u64),
     busy: bool,
     advanced: bool,
+    // A write joined the queue this turn: the window's idle rule waits for a turn without one.
+    write_joined: bool,
     left: bool,
     refill: bool,
     #[cfg(twelve_fault_inject)]
@@ -849,15 +759,16 @@ fn cpu_time() -> u128 {
     let nanoseconds = u128::try_from(time.tv_nsec).unwrap_or_else(|_| invariant("clock-range"));
     sum(product(seconds, 1_000_000_000), nanoseconds)
 }
-fn unix_seconds() -> i64 {
-    let value = match SystemTime::now().duration_since(UNIX_EPOCH) {
-        Ok(value) => i128::from(value.as_secs()),
+fn unix_nanos() -> i128 {
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(value) => i128::try_from(value.as_nanos()).unwrap_or_else(|_| runtime("clock")),
         Err(error) => {
-            -i128::from(error.duration().as_secs())
-                - i128::from(error.duration().subsec_nanos() != 0)
+            -i128::try_from(error.duration().as_nanos()).unwrap_or_else(|_| runtime("clock"))
         }
-    };
-    i64::try_from(value).unwrap_or_else(|_| runtime("clock"))
+    }
+}
+fn unix_seconds() -> i64 {
+    i64::try_from(unix_nanos().div_euclid(1_000_000_000)).unwrap_or_else(|_| runtime("clock"))
 }
 fn range(span: Span, len: usize) -> std::ops::Range<usize> {
     let start = span.start as usize;
@@ -872,6 +783,45 @@ fn text(bytes: &[u8], span: Span) -> &str {
         .get(range(span, bytes.len()))
         .unwrap_or_else(|| invariant("framing"));
     std::str::from_utf8(bytes).unwrap_or_else(|_| invariant("framing"))
+}
+// The text of a write's name or body span, which admit already checked as UTF-8 (write_need's text)
+// and nothing rewrites until the reply is released: validate's rewrites come first, and compacting
+// or growing the input moves the bytes with their span offsets.
+fn admitted_text(bytes: &[u8], span: Span) -> &str {
+    if SAFE_BUILD {
+        return text(bytes, span);
+    }
+    let bytes = bytes
+        .get(range(span, bytes.len()))
+        .unwrap_or_else(|| invariant("framing"));
+    // UNSAFE PATH (speed): UTF-8 checked once; a write's name and body are checked when the write is admitted and read unchecked when it executes, since twelve-dollar-lab RESULT.md's "Speed profile at 310,000" measures core::str::from_utf8 at 0.021 us a request.
+    // SAFETY: from_utf8_unchecked needs valid UTF-8: admit's write_need ran text over this same span
+    // of this request's input, which exits on invalid UTF-8, and the bytes are unchanged since.
+    unsafe { std::str::from_utf8_unchecked(bytes) }
+}
+// Starts loading the cache line at address, the connection record of a reaped completion, so that the
+// turn's first read of it finds it in the cache.
+fn prefetch(address: *const u8) {
+    if SAFE_BUILD {
+        return;
+    }
+    // UNSAFE PATH (speed): unsafe code for a cache hint; the fast build prefetches each reaped completion's connection record, a random 64-byte line of a 32 MiB table, while twelve-dollar-lab RESULT.md's "Speed profile at 310,000" measures Conns::get at 0.216 us a request.
+    // SAFETY: a prefetch is a hint that never faults and changes no memory; address is computed by
+    // Conns::record_address inside its live table and is not dereferenced.
+    unsafe {
+        std::arch::x86_64::_mm_prefetch::<{ std::arch::x86_64::_MM_HINT_T0 }>(address.cast())
+    };
+}
+// The ring and slot of the completions that name a connection on the hot path, for prefetch.
+fn completion_slot(event: Completion) -> Option<(u8, u16)> {
+    match event {
+        Completion::Recv { ring, slot, .. }
+        | Completion::RecvOnce { ring, slot, .. }
+        | Completion::Send { ring, slot, .. }
+        | Completion::Poll { ring, slot, .. }
+        | Completion::Close { ring, slot, .. } => Some((ring, slot)),
+        _ => None,
+    }
 }
 fn escaped_len(bytes: &[u8]) -> Option<usize> {
     bytes.iter().try_fold(2_usize, |size, byte| {
@@ -943,12 +893,18 @@ impl Server {
             poll_recv: settings.poll_recv(),
             cap,
             turn_cap,
-            wake_batch: settings.effective_wake_batch(),
+            batch_target: settings.batch_target(),
+            ring_spread: settings.ring_spread(),
+            rearm_budget: [0; 8],
             timeout: Duration::from_micros(u64::from(settings.wake_wait_us())),
             start,
+            now: start,
+            wall_offset_ns: unix_nanos(),
+            wall: None,
             next_sample: start + SAMPLE_PERIOD,
             next_sweep: start + SWEEP_PERIOD,
             next_stats: start + STATS_PERIOD,
+            next_counts: start + COUNTS_PERIOD,
             window: Window::new(start),
             completions: Vec::with_capacity(cap),
             candidates: Vec::with_capacity(cap),
@@ -971,6 +927,7 @@ impl Server {
             finals: 0,
             busy: false,
             advanced: false,
+            write_joined: false,
             left: false,
             refill: true,
             cache: (0, 0),
@@ -989,31 +946,55 @@ impl Server {
         self.maintain_accept();
         self.submit();
         loop {
-            let begun = Instant::now();
             self.turn = self.turn.wrapping_add(1);
             // Relaxed: this atomic publishes only its own value; no other data is read through it.
             self.progress.turn.store(self.turn, Ordering::Relaxed);
-            self.metadata.now = begun;
             self.ring_blocked = [false; 8];
             self.accept_attempted = false;
             self.advanced = false;
+            self.write_joined = false;
             self.refill = self.batch.is_empty();
-            self.conns.tick(self.seconds(begun));
             self.candidates.clear();
             let ready = if self.refill {
-                self.conns.usage().ready.min(self.turn_cap)
+                self.conns.ready().min(self.turn_cap)
             } else {
                 0
             };
             self.conns.take_ready(ready, |id| self.candidates.push(id));
             self.step(1);
             self.wait();
+            // The turn's one clock reading: the turn timer spans from the last turn's reading to
+            // this one, one wait and one turn of work.
+            let previous = self.now;
+            self.now = Instant::now();
+            let wall_ns = self
+                .wall_offset_ns
+                .checked_add(
+                    i128::try_from(self.now.duration_since(self.start).as_nanos())
+                        .unwrap_or_else(|_| invariant("clock-range")),
+                )
+                .unwrap_or_else(|| invariant("clock-range"));
+            self.wall = Some(
+                i64::try_from(wall_ns.div_euclid(1_000_000_000))
+                    .unwrap_or_else(|_| invariant("clock-range")),
+            );
+            self.metadata.now = self.now;
+            self.store.tick(self.now);
+            self.conns.tick(self.seconds(self.now));
+            let turn_us = duration_us(self.now.saturating_duration_since(previous));
+            self.stats.turn_us_max = self.stats.turn_us_max.max(turn_us);
             self.lifted = self.close_wait > self.turn_cap;
             self.completions.clear();
             let reap_cap = if self.lifted { usize::MAX } else { self.cap };
-            let reaped = self
-                .rings
-                .reap(reap_cap, |event| self.completions.push((event, None)));
+            let (completions, conns) = (&mut self.completions, &self.conns);
+            let reaped = self.rings.reap(reap_cap, |event| {
+                if let Some((ring, slot)) = completion_slot(event)
+                    && let Some(address) = conns.record_address(ring, slot)
+                {
+                    prefetch(address);
+                }
+                completions.push((event, None));
+            });
             self.left = reaped.left;
             self.stats.reaped_max = self.stats.reaped_max.max(u64::from(reaped.count));
             if !self.lifted && reaped.count as usize == reap_cap && reaped.left {
@@ -1070,6 +1051,10 @@ impl Server {
                 }
             }
             self.grants();
+            self.rearm_budget = std::array::from_fn(|r| {
+                self.rings
+                    .free_buffers(u8::try_from(r).expect("eight rings"))
+            });
             self.step(4);
             self.pending_turn();
             self.lean_turn();
@@ -1087,9 +1072,6 @@ impl Server {
                 self.reads();
             }
             self.step(7);
-            if !self.batch_commit {
-                self.submit();
-            }
             self.step(8);
             if self.batch_commit {
                 self.batch_unit();
@@ -1112,18 +1094,16 @@ impl Server {
             self.timers();
             self.step(11);
             self.maintain_accept();
-            self.submit();
-            self.counts();
+            // No submit here: the next wait() submits every ring's queued SQEs in its own enters.
             add(&mut self.stats.turns, 1);
-            let turn_us = duration_us(begun.elapsed());
-            self.stats.turn_us_max = self.stats.turn_us_max.max(turn_us);
-            let now = Instant::now();
-            // Relaxed: this atomic publishes only its own value; no other data is read through it.
-            self.stats.stalls = self.progress.stalls.load(Ordering::Relaxed);
-            self.stats.live = (0..8_u8).map(|ring| u64::from(self.conns.live(ring))).sum();
-            self.stats.emit_if_due(now);
-            if now >= self.next_stats {
-                self.next_stats = now + STATS_PERIOD;
+            self.stats.live = u64::from(self.conns.live_total());
+            if self.now >= self.next_counts || self.stats.line_due(self.now) {
+                self.counts();
+                self.next_counts = self.now + COUNTS_PERIOD;
+            }
+            self.stats.emit_if_due(self.now);
+            if self.now >= self.next_stats {
+                self.next_stats = self.now + STATS_PERIOD;
             }
             self.busy = reaped.count != 0 || self.advanced;
             self.trim_scratch();
@@ -1144,64 +1124,72 @@ impl Server {
         u32::try_from(now.duration_since(self.start).as_secs())
             .unwrap_or_else(|_| invariant("clock-range"))
     }
+    // usable and prepared read the connection's flags alone (Conns::flags touches no storage).
     fn usable(&self, id: ConnId) -> bool {
         self.conns
-            .get(id)
-            .is_some_and(|conn| conn.flags & flag::CLOSING == 0)
+            .flags(id)
+            .is_some_and(|flags| flags & flag::CLOSING == 0)
             && self
                 .metadata
-                .get(id)
+                .get(&self.conns, id)
                 .is_none_or(|p| p.bits & CLOSE_INTENT == 0)
     }
     fn prepared(&self, id: ConnId) -> bool {
         self.metadata
-            .get(id)
+            .get(&self.conns, id)
             .is_some_and(|p| p.work.flags & VALID != 0)
             || self
                 .conns
-                .get(id)
-                .is_some_and(|conn| conn.flags & flag::IN_SERVICE != 0)
+                .flags(id)
+                .is_some_and(|flags| flags & flag::IN_SERVICE != 0)
     }
     fn wait(&mut self) {
-        let mut live = [0_u32; 8];
-        for (ring, count) in (0_u8..).zip(live.iter_mut()) {
-            *count = self.conns.live(ring);
-        }
-        let [live0, ..] = live;
-        let total: u64 = live.iter().map(|count| u64::from(*count)).sum();
-        let k0 = if total == 0 {
+        let live0 = u64::from(self.conns.live(0));
+        let total = u64::from(self.conns.live_total());
+        // The batch target applies while completions keep coming. After a turn that reaped and
+        // advanced nothing, ring 0 waits for one completion, so a lone arrival is served at once
+        // and the cap below never wakes a loop that has nothing it can advance.
+        let k0 = if total == 0 || !self.busy {
             1
         } else {
             u32::try_from(
-                (u64::from(self.wake_batch) * u64::from(live0) / total)
-                    .min(2 * u64::from(live0) / 5)
+                (2 * u64::from(self.batch_target) * live0)
+                    .div_ceil(total)
                     .max(1),
             )
             .unwrap_or_else(|_| invariant("capacity"))
         };
+        // Deadlines are absolute: work in the previous round must not extend a sleep.
         let now = Instant::now();
         let mut timeout = self
             .next_sample
             .saturating_duration_since(now)
             .min(self.next_sweep.saturating_duration_since(now))
             .min(self.next_stats.saturating_duration_since(now));
-        let others_active = (1_u8..8)
-            .zip(live.iter().skip(1))
-            .any(|(ring, count)| *count != 0 || self.rings.active(ring));
-        if self.busy || others_active {
-            timeout = timeout.min(self.timeout);
+        let others_active =
+            (1_u8..8).any(|ring| self.conns.live(ring) != 0 || self.rings.active(ring));
+        // The cap bounds how long a partial batch waits on ring 0, and how long rings 1..7, whose
+        // completions cannot wake ring 0's wait, go unpolled.
+        if k0 > 1 || others_active {
+            timeout = timeout.min(self.timeout).min(Duration::from_millis(1));
         }
-        let held = self.wal.writes_held(Instant::now());
+        let held = self.wal.writes_held(now);
+        // A capped hold ends at its deadline: the loop looks at the gate again then.
+        if held && let Some(deadline) = self.wal.hold_deadline() {
+            timeout = timeout.min(deadline.saturating_duration_since(now));
+        }
         let write_credit = self
             .writes
             .front()
             .filter(|work| self.usable(work.id))
             .is_some_and(|work| {
-                let need =
-                    http::HEAD_ROOM + self.write_need(work).unwrap_or(conn::KEEP_MAX as usize);
+                let need = http::HEAD_ROOM
+                    + work
+                        .reply_need
+                        .map_or(conn::KEEP_MAX as usize, |need| need as usize);
                 // Charged output bytes never exceed OUTPUT_BUDGET and the added need never exceeds
                 // WHOLE_MAX, so this sum cannot overflow.
-                self.conns.usage().output_bytes.strict_add(need as u64) <= conn::OUTPUT_BUDGET
+                self.conns.output_bytes().strict_add(need as u64) <= conn::OUTPUT_BUDGET
             });
         if !held
             && write_credit
@@ -1215,18 +1203,16 @@ impl Server {
         // Charged output bytes never exceed OUTPUT_BUDGET and WHOLE_MAX is a constant far below
         // u64::MAX, so this sum cannot overflow.
         let read_credit =
-            self.conns.usage().output_bytes.strict_add(WHOLE_MAX as u64) <= conn::OUTPUT_BUDGET;
-        if self.wal.runnable()
+            self.conns.output_bytes().strict_add(WHOLE_MAX as u64) <= conn::OUTPUT_BUDGET;
+        if self.left
+            || self.wal.runnable()
             || (!self.candidates.is_empty() && self.refill)
             || (self.batch.iter().any(|work| !work.write() || !held) && read_credit)
             || (!held && self.writes.len() >= Q && write_credit)
         {
             timeout = Duration::ZERO;
         }
-        match transport(
-            self.rings
-                .wait(if self.busy { k0 } else { 1 }, Some(timeout)),
-        ) {
+        match transport(self.rings.wait(k0, Some(timeout))) {
             WaitEnd::Retry => {}
             WaitEnd::Ready => {
                 if !self.busy {
@@ -1282,14 +1268,39 @@ impl Server {
     }
     fn maintain_accept(&mut self) {
         let slots = self.rings.slots();
+        if self.ring_spread == crate::settings::RingSpread::Spread
+            && matches!(
+                self.accept,
+                AcceptState::Unarmed | AcceptState::CapacityPaused
+            )
+        {
+            if let Some(ring) = (0_u8..8)
+                .filter(|&ring| self.conns.live(ring) < slots)
+                .min_by_key(|&ring| (self.conns.live(ring), (ring + 8 - self.accept_owner) % 8))
+            {
+                self.accept_owner = ring;
+                self.accept = AcceptState::Unarmed;
+            } else {
+                self.accept = AcceptState::CapacityPaused;
+            }
+        }
         let h = (slots / 10).max(1_024.min(slots / 8));
         // A ring's live count never exceeds its slots, so this difference cannot underflow.
         let free = |ring: u8, conns: &Conns| slots.strict_sub(conns.live(ring));
         if let AcceptState::Armed { ring, arm } = self.accept
-            && free(ring, &self.conns) <= h
+            && (free(ring, &self.conns) <= h
+                || (self.ring_spread == crate::settings::RingSpread::Spread
+                    && self.conns.live(ring)
+                        > (0_u8..8)
+                            .map(|r| self.conns.live(r))
+                            .min()
+                            .expect("eight rings")
+                            .saturating_add(self.turn_cap)))
         {
-            let successor = if free(ring, &self.conns) > h {
-                Some(ring)
+            let successor = if self.ring_spread == crate::settings::RingSpread::Spread {
+                (0_u8..8)
+                    .filter(|&r| free(r, &self.conns) > h)
+                    .min_by_key(|&r| (self.conns.live(r), (r + 8 - ring) % 8))
             } else {
                 (1..8)
                     .map(|offset| (ring + offset) % 8)
@@ -1336,7 +1347,8 @@ impl Server {
                     return;
                 }
                 self.accept_attempted = true;
-                match transport(self.rings.arm_accept(ring, self.listener.as_fd())) {
+                let result = self.rings.arm_accept(ring, self.listener.as_fd());
+                match transport(result) {
                     Submit::Done(arm) => self.accept = AcceptState::Armed { ring, arm },
                     Submit::RetryNextTurn => self.block_ring(ring),
                 }
@@ -1395,8 +1407,8 @@ impl Server {
                                 _ => invariant("operation"),
                             };
                             *peak = (*peak).max(u64::from(self.conns.live(ring)));
-                            if let Some(index) = self.metadata.index(id) {
-                                self.metadata.ensure(id);
+                            if let Some(index) = self.conns.cell(id) {
+                                self.metadata.ensure(&self.conns, id);
                                 self.maybe_release(index);
                             }
                             self.schedule_arm(id, false);
@@ -1438,18 +1450,23 @@ impl Server {
                     slot,
                     generation,
                 };
-                if let Some(index) = self.metadata.index(id) {
+                if let Some(index) = self.conns.cell(id) {
                     let cell = self.metadata.cell_mut(index);
                     if cell.id == id {
                         cell.acks = cell
                             .acks
                             .checked_sub(1)
                             .unwrap_or_else(|| invariant("operation"));
+                        // The pending pass retries the arm or close this acknowledgement held back,
+                        // then releases the cell once nothing is owed; a release here would drop
+                        // that retry and leave a reserved connection with no receive armed.
                         self.metadata.enqueue(index);
-                    } else if cell.old_generation == generation && cell.old_acks != 0 {
-                        cell.old_acks -= 1;
+                    } else {
+                        if cell.old_generation == generation && cell.old_acks != 0 {
+                            cell.old_acks -= 1;
+                        }
+                        self.maybe_release(index);
                     }
-                    self.maybe_release(index);
                 }
             }
             Completion::Fsync { result } => {
@@ -1477,7 +1494,7 @@ impl Server {
                     slot,
                     generation,
                 };
-                if let Some(index) = self.metadata.index(id) {
+                if let Some(index) = self.conns.cell(id) {
                     self.maybe_release(index);
                 }
             }
@@ -1504,7 +1521,7 @@ impl Server {
                 if self.conns.lean_answer(id, unacked) {
                     return;
                 }
-                let Some(index) = self.metadata.index(id) else {
+                let Some(index) = self.conns.cell(id) else {
                     invariant("operation")
                 };
                 let cell = self.metadata.cell_mut(index);
@@ -1550,7 +1567,7 @@ impl Server {
                     slot,
                     generation: 0,
                 };
-                if let Some(index) = self.metadata.index(id) {
+                if let Some(index) = self.conns.cell(id) {
                     self.metadata.cell_mut(index).bits &= !PUSH_ORPHAN;
                     self.maybe_release(index);
                 }
@@ -1571,12 +1588,12 @@ impl Server {
                         self.close(id, socket_reason(result));
                     } else {
                         self.send(id);
-                        if let Some(index) = self.metadata.index(id) {
+                        if let Some(index) = self.conns.cell(id) {
                             self.metadata.enqueue(index);
                         }
                         self.maybe_close(id);
                     }
-                } else if let Some(index) = self.metadata.index(id) {
+                } else if let Some(index) = self.conns.cell(id) {
                     self.maybe_release(index);
                 }
             }
@@ -1597,7 +1614,7 @@ impl Server {
                 }
                 if result > 0 {
                     add(&mut self.stats.poll_fires, 1);
-                    let index = self.metadata.ensure(id);
+                    let index = self.metadata.ensure(&self.conns, id);
                     self.metadata.cell_mut(index).bits |= POLL_READY;
                     if more {
                         self.cancel(id);
@@ -1618,10 +1635,10 @@ impl Server {
             slot,
             generation: 0,
         };
-        let index = if let Some(index) = self.metadata.index(id) {
+        let index = if let Some(index) = self.conns.cell(id) {
             index
         } else {
-            self.metadata.ensure(id)
+            self.metadata.ensure(&self.conns, id)
         };
         if self.metadata.cell(index).bits & PUSH_ORPHAN != 0 {
             invariant("operation");
@@ -1642,7 +1659,7 @@ impl Server {
         // nothing unsent and no held ingress, the close keeps its state in the connection's own
         // record and allocates nothing.
         // UNSAFE PATH (speed): no orderly close; the fast build closes without the half-close and the read to the peer's end of stream, and resets a connection whose SIOCOUTQ answer is 0, because then every reply byte is acknowledged, and otherwise the graceful close keeps the kernel sending the unacknowledged bytes.
-        if self.metadata.index(id).is_none()
+        if self.conns.cell(id).is_none()
             && !self.ingress.has(id)
             && self.conns.get(id).is_some_and(|conn| {
                 conn.unsent == 0
@@ -1658,7 +1675,7 @@ impl Server {
             self.lean_close(id, reason);
             return;
         }
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         self.metadata.cell_mut(index).bits |= CLOSE_INTENT;
         self.metadata.cell_mut(index).reason = reason;
         self.metadata.enqueue(index);
@@ -1745,7 +1762,7 @@ impl Server {
         while let Some(node) = self.ingress.pop(id) {
             self.rings.return_buffer(id.ring, node.bid);
         }
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         self.metadata.cell_mut(index).bits |= PUSH_SHUTDOWN;
         self.metadata.enqueue(index);
     }
@@ -1777,7 +1794,14 @@ impl Server {
         self.metadata.cell_mut(index).bits |= PUSH_CLOSE;
     }
     fn maybe_close(&mut self, id: ConnId) {
-        if !self.usable(id) {
+        // Both closes below need CLOSE_AFTER or READ_EOF, so any other connection is decided from
+        // its flags alone.
+        if self
+            .conns
+            .flags(id)
+            .is_none_or(|flags| flags & (flag::CLOSE_AFTER | flag::READ_EOF) == 0)
+            || !self.usable(id)
+        {
             return;
         }
         let conn = self.conns.get(id).expect("live connection");
@@ -1812,28 +1836,28 @@ impl Server {
             || cell.old_acks != 0
             || self.ingress.has(id);
         if !owned
-            || (self.conns.get(id).is_none()
+            || (self.conns.flags(id).is_none()
                 && cell.bits & PUSH_CLOSE == 0
                 && cell.acks == 0
                 && cell.old_acks == 0
                 && !self.ingress.has(id))
         {
-            self.metadata.release(index);
+            self.metadata.release(&self.conns, index);
         }
     }
     fn cancel(&mut self, id: ConnId) {
-        let Some(conn) = self.conns.get(id) else {
+        let Some(flags) = self.conns.flags(id) else {
             return;
         };
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         if self.metadata.cell(index).acks != 0
             || self.metadata.cell(index).bits & (CANCEL_RECV | CANCEL_POLL) != 0
         {
             return;
         }
-        let bit = if conn.flags & flag::RECEIVING != 0 {
+        let bit = if flags & flag::RECEIVING != 0 {
             CANCEL_RECV
-        } else if conn.flags & flag::POLLING != 0 {
+        } else if flags & flag::POLLING != 0 {
             CANCEL_POLL
         } else {
             return;
@@ -1845,13 +1869,13 @@ impl Server {
         if !self.usable(id)
             || self
                 .conns
-                .get(id)
-                .is_none_or(|conn| conn.flags & flag::SENDING != 0)
+                .flags(id)
+                .is_none_or(|flags| flags & flag::SENDING != 0)
         {
             return;
         }
         if let Some((pointer, len)) = self.conns.start_send(id) {
-            let index = self.metadata.ensure(id);
+            let index = self.metadata.ensure(&self.conns, id);
             let cell = self.metadata.cell_mut(index);
             cell.send = Some(pointer);
             cell.send_len = len;
@@ -1861,19 +1885,12 @@ impl Server {
         }
     }
     fn schedule_arm(&mut self, id: ConnId, rearm: bool) {
-        if !self.usable(id) {
+        // Every test before the reservation reads flags and cells alone; the full connection view
+        // (Conns::get) is read once, only for a connection that may arm.
+        let Some(flags) = self.conns.flags(id) else {
             return;
-        }
-        let conn = self.conns.get(id).expect("live connection");
-        if self.prepared(id)
-            && self
-                .metadata
-                .get(id)
-                .is_none_or(|p| p.work.flags & HEAD == 0)
-        {
-            return;
-        }
-        if conn.flags
+        };
+        if flags
             & (flag::CLOSING
                 | flag::READ_EOF
                 | flag::PAUSED
@@ -1885,7 +1902,30 @@ impl Server {
         {
             return;
         }
-        let index = self.metadata.ensure(id);
+        let cell = self.metadata.get(&self.conns, id);
+        if cell.is_some_and(|p| p.bits & CLOSE_INTENT != 0) {
+            return;
+        }
+        let head = cell.is_some_and(|p| p.work.flags & HEAD != 0);
+        let prepared =
+            cell.is_some_and(|p| p.work.flags & VALID != 0) || flags & flag::IN_SERVICE != 0;
+        if prepared && !head {
+            return;
+        }
+        let conn = self.conns.get(id).expect("live connection");
+        // A receive into the connection's own input reservation takes no provided buffer, so only a
+        // receive that selects a provided buffer waits its turn in the ring's re-arm FIFO.
+        let once = conn.input_room > 0 && (conn.flags & flag::IN_SERVICE == 0 || head);
+        if !rearm
+            && !once
+            && (flags & flag::REARM != 0
+                || (conn.input_len == 0 && conn.input_room == 0 && !self.poll_recv))
+        {
+            self.conns.queue_rearm(id);
+            self.observe_rearm(id.ring);
+            return;
+        }
+        let index = self.metadata.ensure(&self.conns, id);
         if self.metadata.cell(index).acks != 0 {
             self.metadata.enqueue(index);
             return;
@@ -1896,10 +1936,7 @@ impl Server {
         if rearm {
             self.metadata.cell_mut(index).bits |= REARM_COUNT;
         }
-        if conn.input_room > 0
-            && (conn.flags & flag::IN_SERVICE == 0
-                || self.metadata.cell(index).work.flags & HEAD != 0)
-        {
+        if once {
             if let Some((pointer, len)) = self.conns.start_once(id) {
                 let cell = self.metadata.cell_mut(index);
                 cell.once = Some(pointer);
@@ -1927,6 +1964,10 @@ impl Server {
         if self.ring_blocked(id.ring) {
             return;
         }
+        // A cell with no push owed and no close intent pushes nothing: no kind below would act.
+        if self.metadata.cell(index).bits & (PUSH_MASK | CLOSE_INTENT) == 0 {
+            return;
+        }
         let kinds = [
             PUSH_ONCE,
             PUSH_SEND,
@@ -1940,28 +1981,27 @@ impl Server {
             PUSH_ORPHAN,
         ];
         for kind in kinds {
-            if self.metadata.cell(index).bits & CLOSE_INTENT != 0
-                && self.metadata.cell(index).bits & (PUSH_ONCE | PUSH_SEND | PUSH_CLOSE) == 0
-            {
+            let mut bits = self.metadata.cell(index).bits;
+            if bits & CLOSE_INTENT != 0 && bits & (PUSH_ONCE | PUSH_SEND | PUSH_CLOSE) == 0 {
                 self.start_close(index);
+                bits = self.metadata.cell(index).bits;
             }
-            if self.metadata.cell(index).bits & kind == 0 {
+            if bits & kind == 0 {
                 continue;
             }
-            let conn = self.conns.get(id);
-            if kind == PUSH_SHUTDOWN && conn.is_none_or(|conn| conn.flags & flag::DRAINING == 0) {
+            let flags = self.conns.flags(id);
+            if kind == PUSH_SHUTDOWN && flags.is_none_or(|flags| flags & flag::DRAINING == 0) {
                 // The drain ended before its shutdown was pushed: no SQE names a closing slot.
                 self.metadata.cell_mut(index).bits &= !PUSH_SHUTDOWN;
                 continue;
             }
-            let bits = self.metadata.cell(index).bits;
             if kind == PUSH_CLOSE && bits & OUTQ_WAIT != 0 {
                 continue;
             }
             // The close's shape at this attempt: the fd-wide cancel only while an operation the
             // close must end is in flight.
-            let io = if conn.is_some_and(|conn| {
-                conn.flags & (flag::RECEIVING | flag::ONCE | flag::POLLING | flag::SENDING) != 0
+            let io = if flags.is_some_and(|flags| {
+                flags & (flag::RECEIVING | flag::ONCE | flag::POLLING | flag::SENDING) != 0
             }) {
                 CloseIo::Pending
             } else {
@@ -1972,8 +2012,22 @@ impl Server {
                 && kind == PUSH_CLOSE
                 && io == CloseIo::Quiet
                 && bits & OUTQ_DONE == 0
-                && conn.is_some_and(|conn| conn.unsent == 0);
+                && self.conns.get(id).is_some_and(|conn| conn.unsent == 0);
             let linger = self.close_linger(bits & OUTQ_ZERO != 0);
+            if matches!(kind, PUSH_RECV | PUSH_SINGLE)
+                && *self
+                    .rearm_budget
+                    .get(usize::from(id.ring))
+                    .expect("ring < 8")
+                    == 0
+            {
+                if self.metadata.cell(index).attempted != self.turn {
+                    self.metadata.cell_mut(index).attempted = self.turn;
+                    add(&mut self.stats.rearm_buffer_wait, 1);
+                }
+                self.metadata.enqueue(index);
+                return;
+            }
             let result = match kind {
                 PUSH_ONCE => {
                     let cell = self.metadata.cell(index);
@@ -2049,6 +2103,11 @@ impl Server {
                         PUSH_ONCE => self.metadata.cell_mut(index).once = None,
                         PUSH_SEND => self.metadata.cell_mut(index).send = None,
                         PUSH_RECV | PUSH_SINGLE => {
+                            let budget = self
+                                .rearm_budget
+                                .get_mut(usize::from(id.ring))
+                                .expect("ring < 8");
+                            *budget = budget.strict_sub(1);
                             self.conns.armed(id, Op::Recv);
                             self.metadata.cell_mut(index).bits &= !POLL_READY;
                         }
@@ -2088,7 +2147,15 @@ impl Server {
     }
     fn rearms(&mut self) {
         for ring in 0..8 {
-            let free = self.rings.free_buffers(ring);
+            let free = *self.rearm_budget.get(usize::from(ring)).expect("ring < 8");
+            add(
+                &mut self.stats.rearm_buffer_wait,
+                u64::from(
+                    self.conns
+                        .rearm(ring)
+                        .saturating_sub(free.min(self.turn_cap)),
+                ),
+            );
             self.candidates.clear();
             self.conns
                 .take_rearm(ring, free.min(self.turn_cap), |id| self.candidates.push(id));
@@ -2235,15 +2302,15 @@ impl Server {
             if let Some(bid) = bid {
                 self.rings.return_buffer(id.ring, bid);
             }
-            if let Some(index) = self.metadata.index(id) {
+            if let Some(index) = self.conns.cell(id) {
                 self.maybe_release(index);
             }
             return;
         }
         let draining = self
             .conns
-            .get(id)
-            .is_some_and(|conn| conn.flags & flag::DRAINING != 0);
+            .flags(id)
+            .is_some_and(|flags| flags & flag::DRAINING != 0);
         if draining {
             self.drain_receive(id, result, bid);
         } else if result > 0 {
@@ -2278,8 +2345,8 @@ impl Server {
                 if self.ingress.has(id)
                     || self
                         .conns
-                        .get(id)
-                        .is_some_and(|conn| conn.flags & flag::WAITING != 0)
+                        .flags(id)
+                        .is_some_and(|flags| flags & flag::WAITING != 0)
                 {
                     self.hold_bid(id, bid, len, 0, None);
                 } else {
@@ -2304,7 +2371,7 @@ impl Server {
                                 Parse::Complete { .. }
                             );
                         if complete {
-                            let index = self.metadata.ensure(id);
+                            let index = self.metadata.ensure(&self.conns, id);
                             if self.metadata.cell(index).bits & HALF_COUNTED == 0 {
                                 self.metadata.cell_mut(index).bits |= HALF_COUNTED;
                                 add(&mut self.stats.half_close, 1);
@@ -2316,18 +2383,36 @@ impl Server {
                     }
                     self.maybe_close(id);
                 }
-                n if n == -libc::ENOBUFS => {
-                    add(&mut self.stats.enobufs, 1);
-                    self.conns.queue_rearm(id);
-                    self.observe_rearm(id.ring);
-                }
+                // The receive's end below decides where the connection waits for its next arm.
+                n if n == -libc::ENOBUFS => add(&mut self.stats.enobufs, 1),
                 n if n == -libc::ECANCELED => {}
                 _ => self.close(id, socket_reason(result)),
             }
         }
         if !more && self.usable(id) {
-            let index = self.metadata.ensure(id);
-            self.metadata.enqueue(index);
+            // A receive into the connection's own input reservation takes no provided buffer: such
+            // a connection arms on this turn's pending pass. Only one that needs a provided buffer
+            // waits in the ring's re-arm FIFO for buffer credit.
+            let reserved = self.conns.get(id).is_some_and(|conn| {
+                conn.input_room > 0
+                    && (conn.flags & flag::IN_SERVICE == 0
+                        || self
+                            .metadata
+                            .get(&self.conns, id)
+                            .is_some_and(|p| p.work.flags & HEAD != 0))
+            });
+            if reserved {
+                let index = self.metadata.ensure(&self.conns, id);
+                self.metadata.enqueue(index);
+            } else {
+                if !once {
+                    self.conns.queue_rearm(id);
+                    self.observe_rearm(id.ring);
+                }
+                if let Some(index) = self.conns.cell(id) {
+                    self.metadata.enqueue(index);
+                }
+            }
         }
     }
     // The safe build's drain parses nothing: a received buffer goes back unread, a one-shot
@@ -2350,7 +2435,8 @@ impl Server {
     }
 
     fn request_work(&mut self, id: ConnId, request: Request) -> Work {
-        let mut work = Work::empty(Instant::now());
+        // The receipt is the turn's clock reading: every request of a turn is received after it.
+        let mut work = Work::empty(self.now);
         work.id = id;
         work.route = request.route;
         work.close = request.close;
@@ -2371,13 +2457,10 @@ impl Server {
         work
     }
     fn stage_complete(&mut self, id: ConnId, request: Request, consumed: usize, retained: bool) {
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         let cached = self.metadata.cell(index).work.flags & HEAD != 0;
         let mut work = if cached {
-            std::mem::replace(
-                &mut self.metadata.cell_mut(index).work,
-                Work::empty(self.start),
-            )
+            self.metadata.cell(index).work
         } else {
             self.request_work(id, request)
         };
@@ -2415,7 +2498,7 @@ impl Server {
             close: true,
             version: Version::Http11,
         };
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         let mut work = self.request_work(id, request);
         work.flags = VALID | EARLY;
         work.error = Some(ErrorBody::Internal);
@@ -2429,6 +2512,11 @@ impl Server {
         self.cancel(id);
     }
     fn process_input(&mut self, id: ConnId) {
+        self.process_parsed(id, None);
+    }
+    // process_input with the Parse of the connection's input when the caller already holds it: bid
+    // passes the parse of a whole request it has just moved, byte for byte, into the empty input.
+    fn process_parsed(&mut self, id: ConnId, parsed: Option<Parse>) {
         if !self.usable(id) {
             return;
         }
@@ -2436,20 +2524,30 @@ impl Server {
         if conn.flags & (flag::ONCE | flag::WAITING) != 0 {
             return;
         }
-        let (checked_head, growing) = self.metadata.get(id).map_or((false, false), |p| {
-            (p.work.flags & HEAD != 0, p.bits & GROW_WAIT != 0)
-        });
-        if self.prepared(id) && !checked_head {
+        let (checked_head, growing, valid) =
+            self.metadata
+                .get(&self.conns, id)
+                .map_or((false, false, false), |p| {
+                    (
+                        p.work.flags & HEAD != 0,
+                        p.bits & GROW_WAIT != 0,
+                        p.work.flags & VALID != 0,
+                    )
+                });
+        if (valid || conn.flags & flag::IN_SERVICE != 0) && !checked_head {
             return;
         }
         if conn.input_len == 0 {
             self.maybe_close(id);
             return;
         }
-        let parse = http::parse(self.conns.input(id), &mut self.chunk);
+        let parse = match parsed {
+            Some(parse) => parse,
+            None => http::parse(self.conns.input(id), &mut self.chunk),
+        };
         // A growth wait ends at this parse unless the reservation still cannot grow below.
         if growing {
-            let index = self.metadata.ensure(id);
+            let index = self.metadata.ensure(&self.conns, id);
             self.metadata.cell_mut(index).bits &= !GROW_WAIT;
         }
         match parse {
@@ -2463,7 +2561,7 @@ impl Server {
                     self.grow_wait(id);
                 }
                 self.cancel(id);
-                let index = self.metadata.ensure(id);
+                let index = self.metadata.ensure(&self.conns, id);
                 self.metadata.enqueue(index);
             }
             Parse::Continue { request, need } => {
@@ -2482,7 +2580,7 @@ impl Server {
                     let mut work = self.request_work(id, request);
                     work.flags |= HEAD;
                     work.need = need;
-                    let index = self.metadata.ensure(id);
+                    let index = self.metadata.ensure(&self.conns, id);
                     self.metadata.cell_mut(index).work = work;
                     self.metadata.enqueue(index);
                 }
@@ -2499,7 +2597,7 @@ impl Server {
     // request keeps its reservation, its bytes and their order, counted once in input_full, and
     // waits for input credit; bytes past the reservation stay in their provided buffers.
     fn grow_wait(&mut self, id: ConnId) {
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         let cell = self.metadata.cell_mut(index);
         cell.bits |= GROW_WAIT;
         if cell.bits & INPUT_COUNTED == 0 {
@@ -2522,7 +2620,18 @@ impl Server {
             self.hold_bid(id, bid, len, offset, prior);
             return;
         }
-        if conn.input_len == 0 && conn.input_room == 0 && !self.prepared(id) {
+        // A write (or a Continue head, or a chunked body) whole in this buffer is parsed once: its
+        // Parse is kept and staged after the bytes move into the connection's input.
+        let mut whole = None;
+        let valid = self
+            .metadata
+            .get(&self.conns, id)
+            .is_some_and(|p| p.work.flags & VALID != 0);
+        if conn.input_len == 0
+            && conn.input_room == 0
+            && !valid
+            && conn.flags & flag::IN_SERVICE == 0
+        {
             let source = self
                 .rings
                 .buffer(id.ring, bid, u32::from(len))
@@ -2536,7 +2645,24 @@ impl Server {
                         Route::Create | Route::Like(_) | Route::InvalidId { auth: true }
                     ) && !matches!(request.body, Body::Chunked { .. }) =>
                 {
-                    self.stage_complete(id, request, consumed, false);
+                    let direct = matches!(request.route, Route::Health | Route::Feed | Route::Post(_))
+                            && self.refill
+                            && self.batch.len() < self.cap
+                            && self.conns.cell(id).is_none()
+                            && conn.unsent < conn::UNSENT_MAX
+                            // Admission only observes credit; reads() reserves it once at execution.
+                            && self.conns.output_bytes().strict_add(WHOLE_MAX as u64)
+                                <= conn::OUTPUT_BUDGET;
+                    if direct {
+                        let mut work = self.request_work(id, request);
+                        work.flags &= !UNCHECKED;
+                        work.consumed = u32n(consumed, "framing");
+                        self.conns.begin_service(id);
+                        self.batch.push(work);
+                        self.advanced = true;
+                    } else {
+                        self.stage_complete(id, request, consumed, false);
+                    }
                     offset = offset
                         .checked_add(
                             u16::try_from(consumed).unwrap_or_else(|_| invariant("framing")),
@@ -2552,12 +2678,17 @@ impl Server {
                 _ => {
                     let want = match parse {
                         Parse::Incomplete { need } | Parse::Continue { need, .. } => need,
-                        Parse::Complete { consumed, .. } => u32n(consumed, "framing"),
+                        Parse::Complete { request, consumed } => {
+                            if !matches!(request.body, Body::Chunked { .. }) {
+                                whole = Some(parse);
+                            }
+                            u32n(consumed, "framing")
+                        }
                         Parse::Error { .. } => invariant("framing"),
                     };
-                    let grantable = self.conns.usage().waiting == 0
+                    let grantable = self.conns.waiting() == 0
                         // UNSAFE PATH (speed): unchecked arithmetic; charged bytes never exceed their budget and the addend never exceeds INPUT_MAX or WHOLE_MAX, far below u64::MAX.
-                        && self.conns.usage().input_bytes + u64::from(want) <= conn::INPUT_BUDGET;
+                        && self.conns.input_bytes() + u64::from(want) <= conn::INPUT_BUDGET;
                     if let Parse::Continue { request, need } = parse
                         && grantable
                     {
@@ -2573,10 +2704,11 @@ impl Server {
                             &self.auth,
                             &mut self.claims,
                             &mut self.stats,
+                            &mut self.wall,
                             source,
                             &mut work,
                         );
-                        let index = self.metadata.ensure(id);
+                        let index = self.metadata.ensure(&self.conns, id);
                         if work.error.is_some() {
                             work.flags &= !(HEAD | UNCHECKED);
                             work.flags |= EARLY;
@@ -2608,14 +2740,16 @@ impl Server {
         }
         if offset < len {
             let conn = self.conns.get(id).expect("live connection");
-            if conn.input_len == 0 && conn.input_room == 0 {
+            let room = if conn.input_len == 0 && conn.input_room == 0 {
                 let want = u32::from(len - offset);
                 if !self.reserve_input(id, want) {
                     self.input_wait(id, bid, len, offset, want);
                     return;
                 }
-            }
-            let room = self.conns.get(id).expect("live connection").input_room;
+                self.conns.get(id).expect("live connection").input_room
+            } else {
+                conn.input_room
+            };
             // UNSAFE PATH (speed): unchecked narrowing casts; a positive receive result is at most the provided buffer's ring::BUF_SIZE (2,048) bytes, checked just above, so it fits u32 and u16 exactly.
             #[expect(
                 clippy::cast_possible_truncation,
@@ -2640,10 +2774,10 @@ impl Server {
             }
             let head = self
                 .metadata
-                .get(id)
+                .get(&self.conns, id)
                 .is_some_and(|p| p.work.flags & HEAD != 0);
             if !self.prepared(id) || head {
-                self.process_input(id);
+                self.process_parsed(id, whole);
             } else {
                 self.pipeline(id);
             }
@@ -2655,14 +2789,14 @@ impl Server {
         }
     }
     fn pipeline(&mut self, id: ConnId) {
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         if self.metadata.cell(index).bits & PIPE_COUNTED == 0 {
             self.metadata.cell_mut(index).bits |= PIPE_COUNTED;
             add(&mut self.stats.pipelined_waits, 1);
         }
     }
     fn input_wait(&mut self, id: ConnId, bid: u16, len: u16, offset: u16, want: u32) {
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         if self.metadata.cell(index).bits & INPUT_COUNTED == 0 {
             self.metadata.cell_mut(index).bits |= INPUT_COUNTED;
             add(&mut self.stats.input_full, 1);
@@ -2680,24 +2814,26 @@ impl Server {
             self.ingress
                 .insert(id, bid, len, offset, false, &mut self.stats);
         }
-        let index = self.metadata.ensure(id);
+        let index = self.metadata.ensure(&self.conns, id);
         self.metadata.enqueue(index);
         self.cancel(id);
     }
     fn grants(&mut self) {
-        let (metadata, ingress, stats) = (&mut self.metadata, &mut self.ingress, &mut self.stats);
+        self.candidates.clear();
+        let (ingress, stats, candidates) =
+            (&mut self.ingress, &mut self.stats, &mut self.candidates);
         self.conns.take_granted(|id, bid, len| {
             let at = ingress.node(id.ring, bid);
             let offset = ingress.entry(at).offset;
             ingress.entry_mut(at).offset = 0;
             ingress.insert(id, bid, len, offset, true, stats);
-            let index = metadata.ensure(id);
-            metadata.enqueue(index);
+            candidates.push(id);
         });
-        self.stats.input_bytes_max = self
-            .stats
-            .input_bytes_max
-            .max(self.conns.usage().input_bytes);
+        for id in self.candidates.drain(..) {
+            let index = self.metadata.ensure(&self.conns, id);
+            self.metadata.enqueue(index);
+        }
+        self.stats.input_bytes_max = self.stats.input_bytes_max.max(self.conns.input_bytes());
     }
     fn pending_turn(&mut self) {
         self.push_sync();
@@ -2717,13 +2853,13 @@ impl Server {
             self.metadata.unlink(index);
             self.push_slot(index);
             if self.usable(id) {
-                let conn = self.conns.get(id).expect("live connection");
-                if conn.flags & (flag::ONCE | flag::WAITING) == 0
+                let flags = self.conns.flags(id).expect("live connection");
+                if flags & (flag::ONCE | flag::WAITING) == 0
                     && let Some(node) = self.ingress.pop(id)
                 {
                     self.bid(id, node.bid, node.len, node.offset, Some(node));
                 } else if self.metadata.cell(index).bits & GROW_WAIT != 0
-                    && self.conns.usage().waiting == 0
+                    && self.conns.waiting() == 0
                 {
                     // A refused growth is retried once a turn; conn grants no growth while an input
                     // waiter queues.
@@ -2759,8 +2895,8 @@ impl Server {
                 || (cell.acks != 0
                     && self
                         .conns
-                        .get(id)
-                        .is_some_and(|c| c.flags & flag::CLOSING == 0));
+                        .flags(id)
+                        .is_some_and(|flags| flags & flag::CLOSING == 0));
             if keep {
                 self.metadata.enqueue(index);
             } else {
@@ -2775,12 +2911,8 @@ impl Server {
     }
     fn validate(&mut self, index: u32) {
         let id = self.metadata.cell(index).id;
-        let mut work = std::mem::replace(
-            &mut self.metadata.cell_mut(index).work,
-            Work::empty(self.start),
-        );
+        let mut work = self.metadata.cell(index).work;
         if work.flags & UNCHECKED == 0 {
-            self.metadata.cell_mut(index).work = work;
             return;
         }
         if work.flags & AUTH_CHECKED == 0 {
@@ -2788,6 +2920,7 @@ impl Server {
                 &self.auth,
                 &mut self.claims,
                 &mut self.stats,
+                &mut self.wall,
                 self.conns.input(id),
                 &mut work,
             );
@@ -2888,15 +3021,21 @@ impl Server {
             cell.bits |= QUEUE_COUNTED;
             add(&mut self.stats.write_queue_full, 1);
         }
-        if cell.bits & OUTPUT_PAUSE == 0 {
-            cell.bits |= OUTPUT_PAUSE;
-            // UNSAFE PATH (speed): unchecked arithmetic; output_paused counts the cells holding OUTPUT_PAUSE, at most 8 * slots.
-            self.metadata.output_paused += 1;
-            self.stats.paused_conns_max =
-                self.stats.paused_conns_max.max(self.metadata.output_paused);
+        // Only output pressure pauses the connection and cancels its receive: there the client is the
+        // one not reading. A request blocked by a full read batch or write queue stays in its cell with
+        // its receive armed and is admitted on a later turn; bytes a client pipelines behind it are
+        // held by hold_bid, as behind a request in service.
+        if output {
+            if cell.bits & OUTPUT_PAUSE == 0 {
+                cell.bits |= OUTPUT_PAUSE;
+                // UNSAFE PATH (speed): unchecked arithmetic; output_paused counts the cells holding OUTPUT_PAUSE, at most 8 * slots.
+                self.metadata.output_paused += 1;
+                self.stats.paused_conns_max =
+                    self.stats.paused_conns_max.max(self.metadata.output_paused);
+            }
+            self.conns.pause(id, Pause::Output);
+            self.cancel(id);
         }
-        self.conns.pause(id, Pause::Output);
-        self.cancel(id);
         self.metadata.enqueue(index);
     }
     fn admit(&mut self, index: u32) {
@@ -2974,25 +3113,41 @@ impl Server {
             }
         }
         self.metadata.cell_mut(index).bits &= !BLOCKED;
-        let mut work = std::mem::replace(
-            &mut self.metadata.cell_mut(index).work,
-            Work::empty(self.start),
-        );
+        let mut work = self.metadata.cell(index).work;
+        // The request leaves its cell for a queue, which empties the cell's work (clear_request).
+        self.metadata.cell_mut(index).work.flags = 0;
         if early {
             let error = work.error.unwrap_or_else(|| invariant("framing"));
             self.render_error(&mut work, error);
             self.release_reply(&mut work);
-        } else if !self.batch_commit && write {
-            self.writes.push_back(work);
-            self.stats.write_queue_max = self.stats.write_queue_max.max(self.writes.len() as u64);
         } else {
-            self.batch.push(work);
+            if write {
+                // The reply's size, and with it the UTF-8 check of the name and body, is computed
+                // once, here; the window, its credit and the store read the stored value.
+                work.reply_need = self.write_need(&work).map(|need| u32n(need, "capacity"));
+            }
+            if !self.batch_commit && write {
+                self.writes.push_back(work);
+                self.write_joined = true;
+                self.stats.write_queue_max =
+                    self.stats.write_queue_max.max(self.writes.len() as u64);
+            } else {
+                self.batch.push(work);
+            }
         }
         self.advanced = true;
     }
 }
 
-fn route_auth(auth: &Auth, claims: &mut Claims, stats: &mut Stats, input: &[u8], work: &mut Work) {
+// wall caches the turn's wall clock: token expiry is checked against a reading at most one turn old.
+fn route_auth(
+    auth: &Auth,
+    claims: &mut Claims,
+    stats: &mut Stats,
+    wall: &mut Option<i64>,
+    input: &[u8],
+    work: &mut Work,
+) {
     let needs_auth = matches!(
         work.route,
         Route::Create | Route::Like(_) | Route::InvalidId { auth: true }
@@ -3007,7 +3162,7 @@ fn route_auth(auth: &Auth, claims: &mut Claims, stats: &mut Stats, input: &[u8],
         } else {
             None
         };
-        match auth.verify(header, unix_seconds(), claims) {
+        match auth.verify(header, *wall.get_or_insert_with(unix_seconds), claims) {
             Ok(()) => {
                 add(&mut stats.auth_ok, 1);
                 work.user_id = claims.user_id().unwrap_or_else(|| invariant("claims"));
@@ -3056,26 +3211,17 @@ impl Server {
     }
     fn reserve_input(&mut self, id: ConnId, want: u32) -> bool {
         let admitted = self.conns.reserve_input(id, want);
-        self.stats.input_bytes_max = self
-            .stats
-            .input_bytes_max
-            .max(self.conns.usage().input_bytes);
+        self.stats.input_bytes_max = self.stats.input_bytes_max.max(self.conns.input_bytes());
         admitted
     }
     fn reserve_output(&mut self, id: ConnId, want: u32) -> bool {
         let admitted = self.conns.reserve_output(id, want);
-        self.stats.output_bytes_max = self
-            .stats
-            .output_bytes_max
-            .max(self.conns.usage().output_bytes);
+        self.stats.output_bytes_max = self.stats.output_bytes_max.max(self.conns.output_bytes());
         admitted
     }
     fn observe_rearm(&mut self, ring: u8) {
-        let rearm = self.conns.usage().rearm;
-        let queued = rearm
-            .get(usize::from(ring))
-            .expect("ring < 8: a ConnId's ring is one of the eight");
-        self.stats.rearm_max = self.stats.rearm_max.max(u64::from(*queued));
+        let queued = self.conns.rearm(ring);
+        self.stats.rearm_max = self.stats.rearm_max.max(u64::from(queued));
     }
     fn resume(&mut self, id: ConnId) {
         self.conns.resume(id);
@@ -3083,7 +3229,7 @@ impl Server {
     }
     fn read_credit(&mut self, id: ConnId) -> bool {
         // UNSAFE PATH (speed): unchecked arithmetic; charged bytes never exceed their budget and the addend never exceeds INPUT_MAX or WHOLE_MAX, far below u64::MAX.
-        if self.conns.usage().output_bytes + WHOLE_MAX as u64 > conn::OUTPUT_BUDGET {
+        if self.conns.output_bytes() + WHOLE_MAX as u64 > conn::OUTPUT_BUDGET {
             return false;
         }
         if !self.reserve_output(id, conn::KEEP_MAX) {
@@ -3094,8 +3240,7 @@ impl Server {
             output.capacity() - output.len()
         };
         // UNSAFE PATH (speed): unchecked arithmetic; charged bytes never exceed their budget and the addend never exceeds INPUT_MAX or WHOLE_MAX, far below u64::MAX.
-        if self.conns.usage().output_bytes + WHOLE_MAX.saturating_sub(spare) as u64
-            > conn::OUTPUT_BUDGET
+        if self.conns.output_bytes() + WHOLE_MAX.saturating_sub(spare) as u64 > conn::OUTPUT_BUDGET
         {
             invariant("capacity");
         }
@@ -3112,7 +3257,9 @@ impl Server {
         }
     }
     fn write_credit(&mut self, work: &Work) -> bool {
-        let need = self.write_need(work).unwrap_or(conn::KEEP_MAX as usize);
+        let need = work
+            .reply_need
+            .map_or(conn::KEEP_MAX as usize, |need| need as usize);
         self.reserve_output(work.id, u32n(http::HEAD_ROOM + need, "capacity"))
     }
     fn execute_read(&mut self, work: &mut Work) -> bool {
@@ -3205,7 +3352,7 @@ impl Server {
         invariant("capacity")
     }
     fn execute_write(&mut self, work: &mut Work) -> bool {
-        if self.write_need(work).is_none() {
+        if work.reply_need.is_none() {
             self.render_error(work, ErrorBody::Internal);
             return false;
         }
@@ -3216,8 +3363,8 @@ impl Server {
         let result = match work.route {
             Route::Create => self.store.create(
                 work.user_id,
-                text(input, work.name),
-                text(input, work.body),
+                admitted_text(input, work.name),
+                admitted_text(input, work.body),
                 &mut output,
             ),
             Route::Like(id) => self.store.like(work.user_id, id, &mut output),
@@ -3283,7 +3430,7 @@ impl Server {
         }
         self.finals = sum(self.finals, 1);
         work.flags |= FINISHED;
-        if let Some(index) = self.metadata.index(id) {
+        if let Some(index) = self.conns.cell(id) {
             self.metadata.clear_request(index);
         }
         self.advanced = true;
@@ -3310,15 +3457,22 @@ impl Server {
             .get_mut(at)
             .expect("at < batch.len(): callers loop over the batch")
     }
+    fn write_at(&self, at: usize) -> &Work {
+        self.writes
+            .get(at)
+            .expect("at < writes.len(): the window selects from the queue's head")
+    }
     fn write_at_mut(&mut self, at: usize) -> &mut Work {
         self.writes
             .get_mut(at)
             .expect("at < writes.len(): the window selects from the queue's head")
     }
+    // Reads the work at `at` out and leaves its slot FINISHED; a caller that keeps the work writes it
+    // back. Loops read a FINISHED slot's flags alone, and the turn's retain drops it.
     fn take_batch(&mut self, at: usize) -> Work {
-        let mut empty = Work::empty(self.start);
-        empty.flags = FINISHED;
-        std::mem::replace(self.batch_at_mut(at), empty)
+        let work = *self.batch_at(at);
+        self.batch_at_mut(at).flags = FINISHED;
+        work
     }
     fn reads(&mut self) {
         let mut began = false;
@@ -3396,25 +3550,29 @@ impl Server {
         }
     }
     fn write_window(&mut self) {
-        if self.writes.is_empty() || self.wal.writes_held(Instant::now()) {
+        if self.writes.is_empty() || self.wal.writes_held(self.now) {
             return;
         }
-        let now = Instant::now();
+        let now = self.now;
         let oldest = self.writes.front().expect("nonempty write queue").receipt;
         let full = self.writes.len() >= Q;
         let due = now.duration_since(oldest) >= Duration::from_micros(self.window.us);
-        let idle = !self.left
-            && self.conns.usage().ready == 0
+        // Idle closes a window only on a quiet turn: one that received at most one request, or one in
+        // which no write joined the queue. Under load the window or Q waiting writes close it, so a
+        // commit carries the writes of several turns and writes each page they share once; a lone
+        // write at low load still commits in the turn that received it.
+        let quiet = self.recv_reaped <= 1 || !self.write_joined;
+        let idle = quiet
+            && !self.left
+            && self.conns.ready() == 0
             && self.batch.iter().all(|work| work.flags & FINISHED != 0);
         if !full && !due && !idle {
             return;
         }
         let mut selected = 0;
         for at in 0..self.writes.len().min(Q) {
-            let empty = Work::empty(self.start);
-            let work = std::mem::replace(self.write_at_mut(at), empty);
+            let work = *self.write_at(at);
             let admitted = self.usable(work.id) && self.write_credit(&work);
-            *self.write_at_mut(at) = work;
             if !admitted {
                 break;
             }
@@ -3435,8 +3593,7 @@ impl Server {
         let mut failed = !began;
         let mut attempts = 0_u64;
         for at in 0..selected {
-            let empty = Work::empty(self.start);
-            let mut work = std::mem::replace(self.write_at_mut(at), empty);
+            let mut work = *self.write_at(at);
             if failed {
                 self.render_error(&mut work, ErrorBody::Internal);
             } else {
@@ -3455,7 +3612,12 @@ impl Server {
         if !success {
             self.rollback();
         }
-        let completed = Instant::now();
+        // Only the 250 ms adaptation boundary needs a fresh commit-end clock read.
+        let completed = if self.window.due(self.now) {
+            Instant::now()
+        } else {
+            self.now
+        };
         self.stats.writes_per_commit_max = self.stats.writes_per_commit_max.max(attempts);
         self.stats.write_wait_us_max = self
             .stats
@@ -3473,10 +3635,12 @@ impl Server {
             self.window.writes = sum(self.window.writes, 1);
             self.release_reply(&mut work);
         }
-        self.window.adapt(completed, cpu_time(), self.finals);
+        if self.window.due(completed) {
+            self.window.adapt(completed, cpu_time(), self.finals);
+        }
     }
     fn batch_unit(&mut self) {
-        let held = self.wal.writes_held(Instant::now());
+        let held = self.wal.writes_held(self.now);
         if held {
             for at in 0..self.batch.len() {
                 if self.batch_at(at).write()
@@ -3518,8 +3682,7 @@ impl Server {
                 (Some(old), Some(new)) => old < new,
             };
             let mut work = if from_queue {
-                let empty = Work::empty(self.start);
-                std::mem::replace(self.write_at_mut(queued), empty)
+                *self.write_at(queued)
             } else {
                 self.take_batch(at)
             };
@@ -3591,6 +3754,8 @@ impl Server {
             self.rollback();
         }
         self.stats.writes_per_commit_max = self.stats.writes_per_commit_max.max(attempts);
+        // One reading after the commit for every write's wait.
+        let completed = Instant::now();
         for _ in 0..queued {
             let mut work = self.writes.pop_front().expect("selected batch prefix");
             if work.flags & RENDERED == 0 {
@@ -3602,7 +3767,7 @@ impl Server {
             self.stats.write_wait_us_max = self
                 .stats
                 .write_wait_us_max
-                .max(duration_us(work.receipt.elapsed()));
+                .max(duration_us(completed.duration_since(work.receipt)));
             self.release_reply(&mut work);
         }
         for index in 0..self.batch.len() {
@@ -3617,16 +3782,22 @@ impl Server {
                 self.stats.write_wait_us_max = self
                     .stats
                     .write_wait_us_max
-                    .max(duration_us(work.receipt.elapsed()));
+                    .max(duration_us(completed.duration_since(work.receipt)));
             }
             self.release_reply(&mut work);
             *self.batch_at_mut(index) = work;
         }
     }
     fn timers(&mut self) {
-        let now = Instant::now();
+        let now = self.now;
         if now >= self.next_sample {
             self.next_sample = now + SAMPLE_PERIOD;
+            self.wall_offset_ns = unix_nanos()
+                .checked_sub(
+                    i128::try_from(now.duration_since(self.start).as_nanos())
+                        .unwrap_or_else(|_| invariant("clock-range")),
+                )
+                .unwrap_or_else(|| invariant("clock-range"));
             if matches!(self.accept, AcceptState::ErrorPausedUntilSample) {
                 self.accept = AcceptState::Unarmed;
             }
@@ -3645,7 +3816,7 @@ impl Server {
                 // bytes wait for the client's reads, and a checked Expect head for the client's body. A
                 // refused reservation growth stays under the sweep, which breaks a credit deadlock among
                 // such waiters.
-                let pending = metadata.get(id);
+                let pending = metadata.get(conns, id);
                 let growing = pending.is_some_and(|p| p.bits & GROW_WAIT != 0);
                 let request = pending.map(|p| p.work.flags & (VALID | HEAD));
                 let server_wait = !growing
@@ -3661,7 +3832,7 @@ impl Server {
                 if server_wait {
                     return;
                 }
-                let index = metadata.ensure(id);
+                let index = metadata.ensure(conns, id);
                 if metadata.cell(index).bits & CLOSE_INTENT == 0 {
                     metadata.cell_mut(index).bits |= CLOSE_INTENT;
                     metadata.cell_mut(index).reason = CloseReason::Stall;
@@ -3693,7 +3864,7 @@ impl Server {
         add(&mut self.stats.checked, store.checked);
         add(&mut self.stats.commit_fail, store.commit_fail);
         add(&mut self.stats.auto_rollback, store.auto_rollback);
-        let wal = self.wal.take_counts(Instant::now());
+        let wal = self.wal.take_counts(self.now);
         add(&mut self.stats.passes, wal.passes);
         add(&mut self.stats.pass_busy, wal.pass_busy);
         add(&mut self.stats.pass_errors, wal.pass_errors);
@@ -3744,6 +3915,8 @@ impl Server {
             );
             self.stats.w_us_max = self.stats.w_us_max.max(self.window.us);
         }
+        // Relaxed: this atomic publishes only its own value; no other data is read through it.
+        self.stats.stalls = self.progress.stalls.load(Ordering::Relaxed);
     }
     fn trim_scratch(&mut self) {
         for scratch in [&mut self.chunk, &mut self.unescape] {

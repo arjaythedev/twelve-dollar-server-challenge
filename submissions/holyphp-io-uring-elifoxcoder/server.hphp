@@ -352,12 +352,26 @@ class Server {
     /* Operator introspection: leapfrogged only when HPHP_STATS=1 (the run
      * scripts never set it, so bench requests pay exactly zero for this). */
     pub bool $statsmode = false;
+    pub bool $diagmode = false;
+    pub int $diagNext = 0;
+    pub int $diagPolls = 0;
+    pub int $diagWaitNs = 0;
+    pub int $diagReadyNs = 0;
+    pub int $diagWriteNs = 0;
+    pub int $diagCheckpointTickNs = 0;
+    pub int $diagReadNs = 0;
+    pub int $diagReadCalls = 0;
+    pub int $diagReadMaxNs = 0;
+    pub int $diagFlushNs = 0;
+    pub int $diagFlushCalls = 0;
     pub bool $ring = false;
     pub bool $feedjson = false;
     pub bool $feedBatchAuthors = false;
     pub bool $feedBatchUsers = false;
+    pub bool $listenerFirst = true;
     pub bool $postSendBuilder = false;
     pub bool $feedRawDecode = false;
+    pub bool $feedRawUserDecode = false;
     pub bool $sparseBufs = false;
     pub bool $retryingWrites = false;
     pub int $persistedPending = 0;
@@ -419,7 +433,21 @@ class Server {
          * shared WAL index. The unix-excl VFS is for single-connection use. */
         if (!$bgCheckpoint) { sqlite_exec($db, "PRAGMA locking_mode=EXCLUSIVE"); }
         sqlite_exec($db, "PRAGMA temp_store=MEMORY");
-        sqlite_exec($db, "PRAGMA cache_size=-65536");
+        $sqliteCacheKiB = 65536;
+        $sqliteCacheEnv = getenv("HPHP_SQLITE_CACHE_KIB");
+        if ($sqliteCacheEnv != "") {
+            $sqliteCacheSet = intval($sqliteCacheEnv);
+            if ($sqliteCacheSet >= 1024 && $sqliteCacheSet <= 262144) { $sqliteCacheKiB = $sqliteCacheSet; }
+        }
+        sqlite_exec($db, "PRAGMA cache_size=-" . $sqliteCacheKiB);
+        /* Warm SQLite's internal page cache for the index/table pages that
+         * random like/post writes and author reads touch. This stores no
+         * request results and leaves the fixed database schema unchanged. */
+        if (getenv("HPHP_SQLITE_WARM") == "1") {
+            sqlite_exec($db, "SELECT sum(user_id) FROM likes INDEXED BY sqlite_autoindex_likes_1");
+            sqlite_exec($db, "SELECT sum(user_id) FROM posts INDEXED BY posts_user_id_idx");
+            sqlite_exec($db, "SELECT sum(length(username)) FROM users");
+        }
         if (getenv("HPHP_MMAP") == "1") { sqlite_exec($db, "PRAGMA mmap_size=268435456"); }
         else { sqlite_exec($db, "PRAGMA mmap_size=0"); }
         sqlite_exec($db, "PRAGMA foreign_keys=OFF");
@@ -624,8 +652,10 @@ class Server {
          * of the VM B-tree walk (operator measurement, unset in the bench). */
         $this->feedjson = (getenv("HPHP_FEED") == "json");
         $this->feedRawDecode = (getenv("HPHP_FEED_RAW") == "1");
+        $this->feedRawUserDecode = (getenv("HPHP_FEED_USER_RAW") == "1");
         $this->feedBatchAuthors = (getenv("HPHP_FEED_BATCH_AUTHORS") == "1");
         $this->feedBatchUsers = (getenv("HPHP_FEED_BATCH_USERS") == "1");
+        if (getenv("HPHP_LISTENER_FIRST") == "0") { $this->listenerFirst = false; }
         /* The hot path does not need one empty PHP-array entry per idle
          * connection. Keep it opt-out so direct binary launches get the same
          * sparse receive-state layout as start.sh. */
@@ -637,6 +667,8 @@ class Server {
         }
         $this->start = time();
         $this->sweep = $this->start;
+        $this->diagmode = (getenv("HPHP_DIAG") == "1");
+        $this->diagNext = $this->start + 5;
         return true;
     }
 
@@ -644,6 +676,18 @@ class Server {
 
     public function handle_ready(): void {
         if ($this->fdArrays) {
+            /* Accept completions can share the ready list with a large FIFO
+             * of already-readable clients. Admit those sockets first so a
+             * larger response batch cannot leave newly accepted direct fds
+             * unregistered in the application until the next poll round. */
+            if ($this->listenerFirst) {
+                $i = 0; $n = iarr_len($this->readyIds);
+                while ($i < $n) {
+                    $fd = iarr_get($this->readyIds, $i);
+                    if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) { $this->accept_all($fd); }
+                    $i = $i + 1;
+                }
+            }
             $i = 0; $n = iarr_len($this->writableIds);
             while ($i < $n) {
                 $fd = iarr_get($this->writableIds, $i);
@@ -653,13 +697,24 @@ class Server {
             $i = 0; $n = iarr_len($this->readyIds);
             while ($i < $n) {
                 $fd = iarr_get($this->readyIds, $i);
-                if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) { $this->accept_all($fd); $i = $i + 1; continue; }
+                if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) {
+                    if (!$this->listenerFirst) { $this->accept_all($fd); }
+                    $i = $i + 1; continue;
+                }
                 if (!(iarr_get($this->socks, $fd) != 0)) { $i = $i + 1; continue; }
                 if (isset($this->out[$fd])) { $i = $i + 1; continue; }
                 $this->read_fd($fd);
                 $i = $i + 1;
             }
             return;
+        }
+        /* As above, process listener readiness before potentially long client
+         * response work. */
+        if ($this->listenerFirst) {
+            foreach ($this->ready as $h) {
+                $fd = intval($h);
+                if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) { $this->accept_all($fd); }
+            }
         }
         /* finish pending responses before reading new requests */
         foreach ($this->writable as $w) {
@@ -668,7 +723,10 @@ class Server {
         }
         foreach ($this->ready as $h) {
             $fd = intval($h);
-            if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) { $this->accept_all($fd); continue; }
+            if ($fd == $this->srv || ($fd < 65536 && iarr_get($this->listenerIds, $fd) != 0)) {
+                if (!$this->listenerFirst) { $this->accept_all($fd); }
+                continue;
+            }
             if (!(iarr_get($this->socks, $fd) != 0)) { continue; }
             if (isset($this->out[$fd])) { continue; }   /* write still pending */
             $this->read_fd($fd);
@@ -678,20 +736,35 @@ class Server {
     /* Write as much of the pending response as the socket takes; the rest
      * stays buffered until epoll reports the socket writable again. */
     public function flush_fd(int $fd): void {
+        $diagT = 0;
+        if ($this->diagmode) { $diagT = hrtime(true); }
         $data = $this->out[$fd];
         $sent = stream_send_nb($fd, $data);
-        if ($sent == -2) { $this->close_fd($fd); return; }
+        if ($sent == -2) {
+            $this->close_fd($fd);
+            if ($this->diagmode) { $this->diag_flush_done($diagT); }
+            return;
+        }
         /* -1 is EAGAIN, not an error: the peer's window is momentarily full.
          * Keep the buffer and wait for the next EPOLLOUT. Closing here is what
          * made a slice of connections lose their response under load. */
-        if ($sent < 0) { return; }
+        if ($sent < 0) {
+            if ($this->diagmode) { $this->diag_flush_done($diagT); }
+            return;
+        }
         if ($sent < strlen($data)) {
             $this->out[$fd] = substr($data, $sent);
+            if ($this->diagmode) { $this->diag_flush_done($diagT); }
             return;
         }
         unset($this->out[$fd]);
-        if (isset($this->closing[$fd])) { $this->close_fd($fd); return; }
+        if (isset($this->closing[$fd])) {
+            $this->close_fd($fd);
+            if ($this->diagmode) { $this->diag_flush_done($diagT); }
+            return;
+        }
         if (!epoll_mod($fd, 1)) { $this->close_fd($fd); }
+        if ($this->diagmode) { $this->diag_flush_done($diagT); }
     }
 
     public function run(): void {
@@ -702,21 +775,52 @@ class Server {
 
             $pollWaitMs = 50;
             if ($this->retryingWrites) { $pollWaitMs = 1; }
+            $diagT = 0;
+            if ($this->diagmode) { $diagT = hrtime(true); }
             if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, $pollWaitMs); }
             else { epoll_wait2($this->ready, $this->writable, $pollWaitMs); }
+            if ($this->diagmode) {
+                $diagNow = hrtime(true);
+                if ($diagNow > $diagT) { $this->diagWaitNs = $this->diagWaitNs + $diagNow - $diagT; }
+                $this->diagPolls = $this->diagPolls + 1;
+                $diagT = $diagNow;
+            }
             $this->handle_ready();
+            if ($this->diagmode) {
+                $diagNow = hrtime(true);
+                if ($diagNow > $diagT) { $this->diagReadyNs = $this->diagReadyNs + $diagNow - $diagT; }
+                $diagT = $diagNow;
+            }
             /* A transaction has a fixed cost; when only a few writes are
              * pending, wait briefly for more requests before
              * committing. That batches them without hurting the tail much. */
             $n = count($this->pending);
             if (!$this->retryingWrites && $n > 0 && $n < 32) {
                 if ($this->writeWaitMs > 0) {
+                    if ($this->diagmode) { $diagT = hrtime(true); }
                     if ($this->fdArrays) { epoll_wait_iarr2($this->readyIds, $this->writableIds, $this->writeWaitMs); }
                     else { epoll_wait2($this->ready, $this->writable, $this->writeWaitMs); }
+                    if ($this->diagmode) {
+                        $diagNow = hrtime(true);
+                        if ($diagNow > $diagT) { $this->diagWaitNs = $this->diagWaitNs + $diagNow - $diagT; }
+                        $this->diagPolls = $this->diagPolls + 1;
+                        $diagT = $diagNow;
+                    }
                 }
                 $this->handle_ready();
+                if ($this->diagmode) {
+                    $diagNow = hrtime(true);
+                    if ($diagNow > $diagT) { $this->diagReadyNs = $this->diagReadyNs + $diagNow - $diagT; }
+                    $diagT = $diagNow;
+                }
             }
+            if ($this->diagmode) { $diagT = hrtime(true); }
             $this->execute_writes();
+            if ($this->diagmode) {
+                $diagNow = hrtime(true);
+                if ($diagNow > $diagT) { $this->diagWriteNs = $this->diagWriteNs + $diagNow - $diagT; }
+                $diagT = $diagNow;
+            }
             /* Idle sweep: a bounded slice per cycle, so 110k sockets never
              * turn into one long stall. */
             if ($this->idleSweep == 1) { $this->expire(time()); }
@@ -724,10 +828,73 @@ class Server {
             /* Match Rust's batch-scoped B-tree snapshot and release the read
              * transaction before the next poll/checkpoint opportunity. */
             $this->close_bt_cursors();
-            if ($this->bgCheckpoint) { sqlite_bg_checkpoint_tick($this->db); }
+            if ($this->bgCheckpoint) {
+                if ($this->diagmode) { $diagT = hrtime(true); }
+                sqlite_bg_checkpoint_tick($this->db);
+                if ($this->diagmode) {
+                    $diagNow = hrtime(true);
+                    if ($diagNow > $diagT) { $this->diagCheckpointTickNs = $this->diagCheckpointTickNs + $diagNow - $diagT; }
+                }
+            }
+
+            if ($this->diagmode) { $this->diag_log(); }
 
             scope_end();
         }
+    }
+
+    /* Emits bounded, interval-based diagnostics even when /stats is delayed
+     * behind a saturated event loop. Timers are disabled unless HPHP_DIAG=1. */
+    public function diag_log(): void {
+        $now = time();
+        if ($now < $this->diagNext) { return; }
+        $this->diagNext = $now + 5;
+        $line = '[hphp_diag] {"time":' . $now
+              . ',"uptime_s":' . ($now - $this->start)
+              . ',"connections":' . $this->nconn
+              . ',"pending_writes":' . count($this->pending)
+              . ',"pending_responses":' . count($this->out)
+              . ',"polls":' . $this->diagPolls
+              . ',"wait_ns":' . $this->diagWaitNs
+              . ',"ready_ns":' . $this->diagReadyNs
+              . ',"app_read_ns":' . $this->diagReadNs
+              . ',"app_read_calls":' . $this->diagReadCalls
+              . ',"app_read_max_ns":' . $this->diagReadMaxNs
+              . ',"app_flush_ns":' . $this->diagFlushNs
+              . ',"app_flush_calls":' . $this->diagFlushCalls
+              . ',"write_ns":' . $this->diagWriteNs
+              . ',"checkpoint_tick_ns":' . $this->diagCheckpointTickNs
+              . ',"runtime":' . runtime_stats()
+              . ',"sqlite":' . sqlite_status($this->db) . '}';
+        runtime_diag_write($line);
+        $this->diagPolls = 0;
+        $this->diagWaitNs = 0;
+        $this->diagReadyNs = 0;
+        $this->diagReadNs = 0;
+        $this->diagReadCalls = 0;
+        $this->diagReadMaxNs = 0;
+        $this->diagFlushNs = 0;
+        $this->diagFlushCalls = 0;
+        $this->diagWriteNs = 0;
+        $this->diagCheckpointTickNs = 0;
+    }
+
+    public function diag_read_done(int $start): void {
+        if (!$this->diagmode) { return; }
+        $end = hrtime(true);
+        if ($end > $start) {
+            $elapsed = $end - $start;
+            $this->diagReadNs = $this->diagReadNs + $elapsed;
+            if ($elapsed > $this->diagReadMaxNs) { $this->diagReadMaxNs = $elapsed; }
+        }
+        $this->diagReadCalls = $this->diagReadCalls + 1;
+    }
+
+    public function diag_flush_done(int $start): void {
+        if (!$this->diagmode) { return; }
+        $end = hrtime(true);
+        if ($end > $start) { $this->diagFlushNs = $this->diagFlushNs + $end - $start; }
+        $this->diagFlushCalls = $this->diagFlushCalls + 1;
     }
 
     public function accept_all(int $listener): void {
@@ -808,18 +975,27 @@ class Server {
     /* -------------------------------------------------------- read side */
 
     public function read_fd(int $fd): void {
+        $diagT = 0;
+        if ($this->diagmode) { $diagT = hrtime(true); }
         $chunk = stream_recv($fd, 4096);
         if ($chunk == "") {
             if (stream_eof($fd)) { $this->close_fd($fd); }
+            if ($this->diagmode) { $this->diag_read_done($diagT); }
             return;
         }
         /* $this->bufs[$fd] is "" (static) or a heap copy of a partial
          * request; the concatenation lives in the request scope and is
          * either consumed here or copied back with str_persist(). */
-        if ($this->idleSweep == 1) { iarr_set($this->lasts, $fd, time()); }
+        /* `sweep` is refreshed once per second by run(). Reuse that cached
+         * second for activity timestamps instead of calling time() for every
+         * request. The +1 rounds conservatively forward, so coarse timestamps
+         * can only keep an idle connection slightly longer, never expire it
+         * early. */
+        if ($this->idleSweep == 1) { iarr_set($this->lasts, $fd, $this->sweep + 1); }
         if ($this->sparseBufs && !isset($this->bufs[$fd])) {
             $this->parse($fd, $chunk);
             stream_recv_release($fd);
+            if ($this->diagmode) { $this->diag_read_done($diagT); }
             return;
         }
         $old = $this->bufs[$fd];
@@ -835,6 +1011,7 @@ class Server {
             $this->parse($fd, $buf);
             stream_recv_release($fd);
         }
+        if ($this->diagmode) { $this->diag_read_done($diagT); }
     }
 
     public function parse(int $fd, string $in): void {
@@ -1191,51 +1368,103 @@ class Server {
      * This removes the per-post users-table seek while keeping row selection,
      * output order, and JSON rendering in HolyPHP. */
     public function on_feed_bt_batch_users(int $fd): bool {
-        $rows = iarr_new(240);      /* 12 integers per post */
+        $rows = iarr_new(200);      /* 10 integers per post */
         $uids = iarr_new(20);
         $hits = iarr_new(60);       /* found, payload pointer, payload size */
-        $lr = bt_last($this->btLikes);
-        $lpid = -1;
         $r = bt_last($this->btPosts);
         $n = 0;
         $pinned = 0;
         $ok = true;
 
         while ($r == 1 && $n < 20) {
-            $base = $n * 12;
+            $base = $n * 10;
             $id = bt_rowid($this->btPosts);
             $p = bt_payload_ptr($this->btPosts);
-            if ($p == 0 || bt_cols($this->btPosts) < 4) { $ok = false; break; }
-            $uid = bt_col_int(1);
-            $bo = bt_col_off(2);
-            $bl = bt_col_len(2);
-            $co = bt_col_off(3);
-            $cl = bt_col_len(3);
+            $uid: int = 0;
+            $bo: int = 0;
+            $bl: int = 0;
+            $co: int = 0;
+            $cl: int = 0;
+            $rawOk = false;
+            if ($this->feedRawDecode && $p != 0) {
+                $psz = bt_payload_size($this->btPosts);
+                $bad = false;
+                unsafe {
+                    $q = $p as *u8;
+                    $k = 0;
+                    $hdr = 0;
+                    $vb = 0;
+                    $vn = 0;
+                    $headerDone = false;
+                    $st1 = 0;
+                    $st2 = 0;
+                    $st3 = 0;
+                    while ($vn < 5 && $k < $psz) {
+                        $vb = *($q + $k) & 255;
+                        $k = $k + 1;
+                        $hdr = ($hdr << 7) | ($vb & 127);
+                        $vn = $vn + 1;
+                        if ($vb < 128) { $headerDone = true; break; }
+                    }
+                    if (!$headerDone || $hdr < $k || $hdr > $psz) { $bad = true; }
+                    if (!$bad && ($k >= $hdr || (*($q + $k) & 255) != 0)) { $bad = true; }
+                    if (!$bad) { $k = $k + 1; }
+                    if (!$bad && $k >= $hdr) { $bad = true; }
+                    if (!$bad) { $st1 = *($q + $k) & 255; $k = $k + 1; }
+                    if (!$bad && $st1 >= 128) {
+                        if ($k >= $hdr) { $bad = true; }
+                        else { $vb = *($q + $k) & 255; $st1 = (($st1 & 127) << 7) | ($vb & 127); $k = $k + 1; if ($vb >= 128) { $bad = true; } }
+                    }
+                    if (!$bad && $k >= $hdr) { $bad = true; }
+                    if (!$bad) { $st2 = *($q + $k) & 255; $k = $k + 1; }
+                    if (!$bad && $st2 >= 128) {
+                        if ($k >= $hdr) { $bad = true; }
+                        else { $vb = *($q + $k) & 255; $st2 = (($st2 & 127) << 7) | ($vb & 127); $k = $k + 1; if ($vb >= 128) { $bad = true; } }
+                    }
+                    if (!$bad && $k >= $hdr) { $bad = true; }
+                    if (!$bad) { $st3 = *($q + $k) & 255; $k = $k + 1; }
+                    if (!$bad && $st3 >= 128) {
+                        if ($k >= $hdr) { $bad = true; }
+                        else { $vb = *($q + $k) & 255; $st3 = (($st3 & 127) << 7) | ($vb & 127); $k = $k + 1; if ($vb >= 128) { $bad = true; } }
+                    }
+                    if (!$bad && ($k != $hdr || $st2 < 13 || ($st2 & 1) == 0 || $st3 < 13 || ($st3 & 1) == 0)) { $bad = true; }
+                    if (!$bad) {
+                        $l1 = 0;
+                        if ($st1 >= 1 && $st1 <= 4) { $l1 = $st1; }
+                        else if ($st1 == 5) { $l1 = 6; }
+                        else if ($st1 == 6) { $l1 = 8; }
+                        else if ($st1 == 9) { $uid = 1; }
+                        else if ($st1 != 8) { $bad = true; }
+                        $bo = $hdr + $l1;
+                        $bl = ($st2 - 13) >> 1;
+                        $co = $bo + $bl;
+                        $cl = ($st3 - 13) >> 1;
+                        if ($co + $cl > $psz) { $bad = true; }
+                        $j = 0;
+                        while (!$bad && $j < $l1) { $uid = ($uid << 8) | (*($q + $hdr + $j) & 255); $j = $j + 1; }
+                    }
+                }
+                if (!$bad) { $rawOk = true; }
+            }
+            if (!$rawOk) {
+                if ($p == 0 || bt_cols($this->btPosts) < 4) { $ok = false; break; }
+                $uid = bt_col_int(1);
+                $bo = bt_col_off(2);
+                $bl = bt_col_len(2);
+                $co = bt_col_off(3);
+                $cl = bt_col_len(3);
+            }
             $pin = bt_payload_pin($this->btPosts);
             if ($pin == 0) { $ok = false; break; }
 
-            $cnt = 0;
-            while ($lr == 1) {
-                if ($lpid < 0) {
-                    if (bt_cols($this->btLikes) < 1) { break; }
-                    $lpid = bt_col_int(0);
-                }
-                if ($lpid != $id) { break; }
-                $cnt = $cnt + 1;
-                $lpid = -1;
-                $lr = bt_prev($this->btLikes);
-            }
-
             iarr_set($rows, $base, $id);
-            iarr_set($rows, $base + 1, $uid);
-            iarr_set($rows, $base + 2, $p);
-            iarr_set($rows, $base + 3, bt_payload_size($this->btPosts));
-            iarr_set($rows, $base + 4, $bo);
-            iarr_set($rows, $base + 5, $bl);
-            iarr_set($rows, $base + 6, $co);
-            iarr_set($rows, $base + 7, $cl);
-            iarr_set($rows, $base + 8, $cnt);
-            iarr_set($rows, $base + 9, $pin);
+            iarr_set($rows, $base + 1, $p);
+            iarr_set($rows, $base + 2, $bo);
+            iarr_set($rows, $base + 3, $bl);
+            iarr_set($rows, $base + 4, $co);
+            iarr_set($rows, $base + 5, $cl);
+            iarr_set($rows, $base + 6, 0);
+            iarr_set($rows, $base + 7, $pin);
             iarr_set($uids, $n, $uid);
             $pinned = $pinned + 1;
             $n = $n + 1;
@@ -1243,7 +1472,7 @@ class Server {
         }
         if (!$ok) {
             $i = 0;
-            while ($i < $pinned) { bt_page_release(iarr_get($rows, $i * 12 + 9)); $i = $i + 1; }
+            while ($i < $pinned) { bt_page_release(iarr_get($rows, $i * 10 + 7)); $i = $i + 1; }
             iarr_release($rows); iarr_release($uids); iarr_release($hits);
             return false;
         }
@@ -1253,11 +1482,32 @@ class Server {
             return true;
         }
 
+        /* Count likes in one generic index-range walk. The feed posts come
+         * from a descending rowid cursor, so their first and last IDs bound
+         * the range. Fall back when this request spans sparse or wide IDs. */
+        $lo = iarr_get($rows, ($n - 1) * 10);
+        $hi = iarr_get($rows, 0);
+        $counts = iarr_new(256);
+        if ($hi < $lo || $hi - $lo >= 256 ||
+            bt_count_range($this->btLikes, $lo, $hi, $counts) != 0) {
+            $i = 0;
+            while ($i < $pinned) { bt_page_release(iarr_get($rows, $i * 10 + 7)); $i = $i + 1; }
+            iarr_release($rows); iarr_release($uids); iarr_release($hits); iarr_release($counts);
+            return false;
+        }
+        $i = 0;
+        while ($i < $n) {
+            $id = iarr_get($rows, $i * 10);
+            iarr_set($rows, $i * 10 + 6, iarr_get($counts, $id - $lo));
+            $i = $i + 1;
+        }
+        iarr_release($counts);
+
         $multi = bt_multi_seek($this->btUsers, $uids, $n);
         if ($multi == 0 || !bt_multi_payloads($multi, $hits)) { $ok = false; }
         $i = 0;
         while ($ok && $i < $n) {
-            $base = $i * 12;
+            $base = $i * 10;
             if (iarr_get($hits, $i * 3) == 0) { $ok = false; break; }
             $up = iarr_get($hits, $i * 3 + 1);
             $us = iarr_get($hits, $i * 3 + 2);
@@ -1273,14 +1523,14 @@ class Server {
                 if ($uh <= 0 || $uh + $al > $us) { $ok = false; }
                 $a = $up + $uh;
             }
-            iarr_set($rows, $base + 10, $a);
-            iarr_set($rows, $base + 11, $al);
+            iarr_set($rows, $base + 8, $a);
+            iarr_set($rows, $base + 9, $al);
             $i = $i + 1;
         }
         if (!$ok) {
             if ($multi != 0) { bt_multi_release($multi); }
             $i = 0;
-            while ($i < $pinned) { bt_page_release(iarr_get($rows, $i * 12 + 9)); $i = $i + 1; }
+            while ($i < $pinned) { bt_page_release(iarr_get($rows, $i * 10 + 7)); $i = $i + 1; }
             iarr_release($rows); iarr_release($uids); iarr_release($hits);
             return false;
         }
@@ -1290,18 +1540,18 @@ class Server {
         sb_put($sb, '{"posts":[');
         $i = 0;
         while ($i < $n) {
-            $base = $i * 12;
+            $base = $i * 10;
             if ($i > 0) { sb_put($sb, ','); }
             sb_put($sb, '{"id":');
             sb_int($sb, iarr_get($rows, $base));
             sb_put($sb, ',"body":');
-            sb_json($sb, iarr_get($rows, $base + 2) + iarr_get($rows, $base + 4), iarr_get($rows, $base + 5));
+            sb_json($sb, iarr_get($rows, $base + 1) + iarr_get($rows, $base + 2), iarr_get($rows, $base + 3));
             sb_put($sb, ',"created_at":');
-            sb_json($sb, iarr_get($rows, $base + 2) + iarr_get($rows, $base + 6), iarr_get($rows, $base + 7));
+            sb_json($sb, iarr_get($rows, $base + 1) + iarr_get($rows, $base + 4), iarr_get($rows, $base + 5));
             sb_put($sb, ',"author":');
-            sb_json($sb, iarr_get($rows, $base + 10), iarr_get($rows, $base + 11));
+            sb_json($sb, iarr_get($rows, $base + 8), iarr_get($rows, $base + 9));
             sb_put($sb, ',"like_count":');
-            sb_int($sb, iarr_get($rows, $base + 8));
+            sb_int($sb, iarr_get($rows, $base + 6));
             sb_put($sb, '}');
             $i = $i + 1;
         }
@@ -1315,7 +1565,7 @@ class Server {
         }
         bt_multi_release($multi);
         $i = 0;
-        while ($i < $pinned) { bt_page_release(iarr_get($rows, $i * 12 + 9)); $i = $i + 1; }
+        while ($i < $pinned) { bt_page_release(iarr_get($rows, $i * 10 + 7)); $i = $i + 1; }
         iarr_release($rows); iarr_release($uids); iarr_release($hits);
         $sent = stream_send_sb($fd, $sb);
         if ($sent == -2) { $this->close_fd($fd); return true; }
@@ -1438,8 +1688,7 @@ class Server {
             $cnt = 0;
             while ($lr == 1) {
                 if ($lpid < 0) {
-                    if (bt_cols($this->btLikes) < 1) { break; }
-                    $lpid = bt_col_int(0);
+                    $lpid = bt_col_int_at($this->btLikes, 0);
                 }
                 if ($lpid != $id) { break; }
                 $cnt = $cnt + 1;
@@ -1451,7 +1700,47 @@ class Server {
             $al = 0;
             if (bt_seek($this->btUsers, $uid) == 1) {
                 $up = bt_payload_ptr($this->btUsers);
-                if (bt_cols($this->btUsers) >= 2) {
+                $rawUserOk = false;
+                if ($this->feedRawUserDecode && $up != 0) {
+                    $usz = bt_payload_size($this->btUsers);
+                    $badUser = false;
+                    unsafe {
+                        $uq = $up as *u8;
+                        $uk = 0;
+                        $uhdr = 0;
+                        $uvn = 0;
+                        $uvb = 0;
+                        $uhdrDone = false;
+                        while ($uvn < 5 && $uk < $usz) {
+                            $uvb = *($uq + $uk) & 255;
+                            $uk = $uk + 1;
+                            $uhdr = ($uhdr << 7) | ($uvb & 127);
+                            $uvn = $uvn + 1;
+                            if ($uvb < 128) { $uhdrDone = true; break; }
+                        }
+                        if (!$uhdrDone || $uhdr < $uk || $uhdr > $usz) { $badUser = true; }
+                        if (!$badUser && ($uk >= $uhdr || (*($uq + $uk) & 255) != 0)) { $badUser = true; }
+                        if (!$badUser) { $uk = $uk + 1; }
+                        $ust = 0;
+                        $usvn = 0;
+                        $ustDone = false;
+                        while (!$badUser && !$ustDone && $usvn < 5 && $uk < $uhdr) {
+                            $uvb = *($uq + $uk) & 255;
+                            $uk = $uk + 1;
+                            $ust = ($ust << 7) | ($uvb & 127);
+                            $usvn = $usvn + 1;
+                            if ($uvb < 128) { $ustDone = true; }
+                        }
+                        if (!$badUser && (!$ustDone || $ust < 13 || ($ust & 1) == 0)) { $badUser = true; }
+                        if (!$badUser) {
+                            $al = ($ust - 13) >> 1;
+                            if ($uhdr + $al > $usz) { $badUser = true; }
+                            else { $a = $up + $uhdr; }
+                        }
+                    }
+                    if (!$badUser) { $rawUserOk = true; }
+                }
+                if (!$rawUserOk && bt_cols($this->btUsers) >= 2) {
                     $al = bt_col_len(1);
                     $a = $up + bt_col_off(1);
                 }
@@ -1669,7 +1958,7 @@ class Server {
               . ',"listeners":' . count($this->listeners)
               . ',"pending_writes":' . count($this->pending)
               . ',"pending_responses":' . count($this->out)
-              . '},"runtime":' . $rt . '}';
+              . '},"runtime":' . $rt . ',"sqlite":' . sqlite_status($this->db) . '}';
         $this->reqsBase = $this->reqs;
         $this->send_json($fd, 200, $body);
     }

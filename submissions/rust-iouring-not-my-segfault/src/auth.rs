@@ -135,8 +135,7 @@ impl Auth {
         if difference != 0 {
             return Err(AuthError::Invalid);
         }
-        decode(head, &mut scratch.header)?;
-        let fields = document(&scratch.header, &mut scratch.payload, true)?;
+        let fields = decode_document(head, &mut scratch.header, &mut scratch.payload, true)?;
         let Some(Token::String(alg)) = fields[0] else {
             return Err(AuthError::Invalid);
         };
@@ -144,9 +143,7 @@ impl Auth {
             return Err(AuthError::Invalid);
         }
         scratch.payload.clear();
-        decode(payload, &mut scratch.payload)?;
-        scratch.header.clear();
-        let fields = document(&scratch.payload, &mut scratch.header, false)?;
+        let fields = decode_document(payload, &mut scratch.payload, &mut scratch.header, false)?;
         let exp = numeric(&scratch.payload, fields[0])?;
         let now = now_s as f64;
         if exp <= now {
@@ -163,20 +160,37 @@ impl Auth {
         let Some(Token::String(name)) = fields[3] else {
             return Err(AuthError::Payload);
         };
-        let mut at = sub.start;
         let mut id = 0_i64;
-        if at == sub.end {
+        if sub.start == sub.end {
             return Err(AuthError::Payload);
         }
-        while at < sub.end {
-            let c = scalar(&scratch.payload, &mut at)?;
-            if !c.is_ascii_digit() {
-                return Err(AuthError::Payload);
+        if sub.escaped {
+            let mut at = sub.start;
+            while at < sub.end {
+                let c = scalar(&scratch.payload, &mut at)?;
+                if !c.is_ascii_digit() {
+                    return Err(AuthError::Payload);
+                }
+                id = id
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add(i64::from(u32::from(c) - u32::from('0'))))
+                    .ok_or(AuthError::Payload)?;
             }
-            id = id
-                .checked_mul(10)
-                .and_then(|n| n.checked_add(i64::from(u32::from(c) - u32::from('0'))))
-                .ok_or(AuthError::Payload)?;
+        } else {
+            // Text without escapes reads as its bytes; a non-ASCII byte is no digit either way.
+            let digits = scratch
+                .payload
+                .get(sub.start..sub.end)
+                .expect("the validator recorded the string's range within payload");
+            for &byte in digits {
+                if !byte.is_ascii_digit() {
+                    return Err(AuthError::Payload);
+                }
+                id = id
+                    .checked_mul(10)
+                    .and_then(|n| n.checked_add(i64::from(byte - b'0')))
+                    .ok_or(AuthError::Payload)?;
+            }
         }
         let id = NonZeroI64::new(id)
             .filter(|id| id.get() > 0)
@@ -254,22 +268,58 @@ fn digit(byte: u8) -> Result<u8, AuthError> {
     }
 }
 
+#[cfg(test)]
 fn decode(bytes: &[u8], out: &mut Vec<u8>) -> Result<(), AuthError> {
-    let length = decoded_len(bytes.len())?;
+    decode_scan(bytes, out, |_, _| {})
+}
+
+fn decode_scan(
+    bytes: &[u8],
+    out: &mut Vec<u8>,
+    mut scan: impl FnMut(&[u8], usize),
+) -> Result<(), AuthError> {
+    decoded_len(bytes.len())?;
     out.clear();
-    let mut accumulator = 0_u32;
-    let mut bits = 0;
-    for &byte in bytes {
-        accumulator = (accumulator << 6) | u32::from(digit(byte)?);
-        bits += 6;
-        if bits >= 8 {
-            bits -= 8;
-            out.push(u8::try_from((accumulator >> bits) & 255).expect("masked byte"));
-            accumulator &= (1 << bits) - 1;
+    // Four characters carry three bytes; a tail of two or three characters carries one or two,
+    // and its spare low bits must be zero (canonical base64url without padding).
+    let mut quads = bytes.chunks_exact(4);
+    for quad in &mut quads {
+        let &[a, b, c, d] = quad else {
+            return Err(AuthError::Invalid);
+        };
+        let bits = (u32::from(digit(a)?) << 18)
+            | (u32::from(digit(b)?) << 12)
+            | (u32::from(digit(c)?) << 6)
+            | u32::from(digit(d)?);
+        let [_, first, second, third] = bits.to_be_bytes();
+        out.extend_from_slice(&[first, second, third]);
+        for at in out.len() - 3..out.len() {
+            scan(out, at);
         }
     }
-    if accumulator != 0 || out.len() != length {
-        return Err(AuthError::Invalid);
+    match *quads.remainder() {
+        [] => {}
+        [a, b] => {
+            let bits = (u32::from(digit(a)?) << 6) | u32::from(digit(b)?);
+            if bits & 0xf != 0 {
+                return Err(AuthError::Invalid);
+            }
+            let [_, _, _, first] = (bits >> 4).to_be_bytes();
+            out.push(first);
+            scan(out, out.len() - 1);
+        }
+        [a, b, c] => {
+            let bits =
+                (u32::from(digit(a)?) << 12) | (u32::from(digit(b)?) << 6) | u32::from(digit(c)?);
+            if bits & 0x3 != 0 {
+                return Err(AuthError::Invalid);
+            }
+            let [_, _, first, second] = (bits >> 2).to_be_bytes();
+            out.extend_from_slice(&[first, second]);
+            scan(out, out.len() - 2);
+            scan(out, out.len() - 1);
+        }
+        _ => return Err(AuthError::Invalid),
     }
     Ok(())
 }
@@ -314,6 +364,179 @@ enum Token {
     String(Text),
     Number { start: usize, end: usize },
     Other,
+}
+
+// The common flat ASCII object is recognized as decoded triples arrive. Containers, escapes
+// and Unicode use the same full validator below, never a more permissive token parser.
+#[derive(Clone, Copy, PartialEq)]
+enum ScanState {
+    Open,
+    First,
+    Key,
+    KeyText,
+    Colon,
+    Value,
+    Text,
+    Atom,
+    After,
+    Done,
+    General,
+}
+
+struct Scan {
+    state: ScanState,
+    start: usize,
+    keys: u8,
+    hs256: bool,
+    key: Option<usize>,
+    seen: u8,
+    fields: [Option<Token>; 4],
+}
+
+impl Scan {
+    fn new() -> Self {
+        Self {
+            state: ScanState::Open,
+            start: 0,
+            keys: 0,
+            hs256: false,
+            key: None,
+            seen: 0,
+            fields: [None; 4],
+        }
+    }
+    fn capture(&mut self, token: Token) {
+        if let Some(key) = self.key {
+            *self.fields.get_mut(key).expect("recognized key below four") = Some(token);
+        }
+    }
+    fn byte(&mut self, bytes: &[u8], at: usize, header: bool) {
+        const KEYS: [&[u8]; 5] = [b"alg", b"exp", b"nbf", b"sub", b"username"];
+        let byte = *bytes.get(at).expect("the decoder just wrote this byte");
+        let white = matches!(byte, b' ' | b'\t' | b'\r' | b'\n');
+        let mut state = self.state;
+        if state == ScanState::Atom && (white || matches!(byte, b',' | b'}')) {
+            let atom = bytes
+                .get(self.start..at)
+                .expect("atom inside decoded prefix");
+            let token = if matches!(atom, b"true" | b"false" | b"null") {
+                Some(Token::Other)
+            } else {
+                let mut end = self.start;
+                (number(bytes, &mut end).is_ok() && end == at).then_some(Token::Number {
+                    start: self.start,
+                    end: at,
+                })
+            };
+            let Some(token) = token else {
+                self.state = ScanState::General;
+                return;
+            };
+            self.capture(token);
+            state = ScanState::After;
+        }
+        if white
+            && !matches!(
+                state,
+                ScanState::KeyText | ScanState::Text | ScanState::Atom
+            )
+        {
+            self.state = state;
+            return;
+        }
+        self.state = match state {
+            ScanState::Open if byte == b'{' => ScanState::First,
+            ScanState::First if byte == b'}' => ScanState::Done,
+            ScanState::First | ScanState::Key if byte == b'"' => {
+                self.start = at + 1;
+                self.keys = 31;
+                ScanState::KeyText
+            }
+            ScanState::KeyText if byte == b'"' => {
+                let count = at - self.start;
+                for (index, key) in KEYS.iter().enumerate() {
+                    if key.len() != count {
+                        self.keys &= !(1 << index);
+                    }
+                }
+                self.key = if header {
+                    (self.keys == 1).then_some(0)
+                } else {
+                    match self.keys {
+                        2 => Some(0),
+                        4 => Some(1),
+                        8 => Some(2),
+                        16 => Some(3),
+                        _ => None,
+                    }
+                };
+                if let Some(key) = self.key {
+                    if self.seen & (1 << key) != 0 {
+                        return self.state = ScanState::General;
+                    }
+                    self.seen |= 1 << key;
+                }
+                ScanState::Colon
+            }
+            ScanState::KeyText if (32..128).contains(&byte) && byte != b'\\' => {
+                for (index, key) in KEYS.iter().enumerate() {
+                    if key.get(at - self.start) != Some(&byte) {
+                        self.keys &= !(1 << index);
+                    }
+                }
+                ScanState::KeyText
+            }
+            ScanState::Colon if byte == b':' => ScanState::Value,
+            ScanState::Value if byte == b'"' => {
+                self.start = at + 1;
+                self.hs256 = true;
+                ScanState::Text
+            }
+            ScanState::Value if matches!(byte, b'-' | b'0'..=b'9' | b't' | b'f' | b'n') => {
+                self.start = at;
+                ScanState::Atom
+            }
+            ScanState::Text if byte == b'"' => {
+                self.capture(Token::String(Text {
+                    start: self.start,
+                    end: at,
+                    escaped: false,
+                    keys: 0,
+                    hs256: self.hs256 && at - self.start == 5,
+                }));
+                ScanState::After
+            }
+            ScanState::Text if (32..128).contains(&byte) && byte != b'\\' => {
+                self.hs256 &= b"HS256".get(at - self.start) == Some(&byte);
+                ScanState::Text
+            }
+            ScanState::Atom if byte.is_ascii() && !matches!(byte, b'{' | b'[' | b'"' | b'\\') => {
+                ScanState::Atom
+            }
+            ScanState::After if byte == b',' => ScanState::Key,
+            ScanState::After if byte == b'}' => ScanState::Done,
+            _ => ScanState::General,
+        };
+    }
+}
+
+fn decode_document(
+    bytes: &[u8],
+    out: &mut Vec<u8>,
+    stack: &mut Vec<u8>,
+    header: bool,
+) -> Result<[Option<Token>; 4], AuthError> {
+    let mut scan = Scan::new();
+    decode_scan(bytes, out, |bytes, at| {
+        if scan.state != ScanState::General {
+            scan.byte(bytes, at, header);
+        }
+    })?;
+    if scan.state == ScanState::Done {
+        Ok(scan.fields)
+    } else {
+        document(out, stack, header)
+    }
 }
 
 fn ws(bytes: &[u8], at: &mut usize) {
@@ -546,6 +769,32 @@ fn string(bytes: &[u8], at: &mut usize) -> Result<Text, AuthError> {
     }
     *at += 1;
     let start = *at;
+    // Plain ASCII text without escapes decodes to itself, so its key and HS256 tests compare its
+    // bytes; any other string takes the scalar loop below.
+    let plain = bytes.get(start..).map_or(0, |rest| {
+        rest.iter()
+            .take_while(|&&b| (0x20..0x80).contains(&b) && b != b'"' && b != b'\\')
+            .count()
+    });
+    if bytes.get(start + plain) == Some(&b'"') {
+        let text = bytes
+            .get(start..start + plain)
+            .expect("the plain run lies inside bytes");
+        let mut matches = 0_u8;
+        for (index, key) in KEYS.iter().enumerate() {
+            if text == *key {
+                matches |= 1 << index;
+            }
+        }
+        *at = start + plain + 1;
+        return Ok(Text {
+            start,
+            end: start + plain,
+            escaped: false,
+            keys: matches,
+            hs256: text == b"HS256",
+        });
+    }
     let mut escaped = false;
     let mut matches = 31_u8;
     let mut hs256 = true;
@@ -637,4 +886,78 @@ fn hex4(bytes: &[u8], at: &mut usize) -> Result<u32, AuthError> {
         *at += 1;
     }
     Ok(value)
+}
+
+#[cfg(test)]
+mod fusion_tests {
+    use super::*;
+
+    fn encoded(bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut bits = 0_u32;
+        let mut count = 0;
+        for &byte in bytes {
+            bits = (bits << 8) | u32::from(byte);
+            count += 8;
+            while count >= 6 {
+                count -= 6;
+                out.push(ALPHABET[((bits >> count) & 63) as usize]);
+            }
+            bits &= (1 << count) - 1;
+        }
+        if count != 0 {
+            out.push(ALPHABET[(bits << (6 - count)) as usize]);
+        }
+        out
+    }
+
+    fn shape(field: Option<Token>) -> Option<(u8, usize, usize, bool, bool)> {
+        field.map(|field| match field {
+            Token::String(text) => (1, text.start, text.end, text.escaped, text.hs256),
+            Token::Number { start, end } => (2, start, end, false, false),
+            Token::Other => (3, 0, 0, false, false),
+        })
+    }
+
+    /// CORE: catches a fused decoder accepting different JSON or claims from the full validator.
+    #[test]
+    fn fused_documents_match_full_validator() {
+        let fixtures = [
+            r#"{"alg":"HS256","typ":"JWT"}"#,
+            r#"{"sub":"42","username":"alice","exp":2000000000}"#,
+            r#"{"exp":2e9,"nbf":0,"sub":"00042","username":""}"#,
+            r#"{"exp":-0.5e+3,"sub":"1","username":"sub","other":true}"#,
+            r#"{"sub":"1","sub":"2","exp":2e9,"username":"x"}"#,
+            r#"{"exp":01,"sub":"1","username":"x"}"#,
+            r#"{"exp":2e,"sub":"1","username":"x"}"#,
+            r#"{"exp":2e9,"sub":"1","username":"caf\u00e9","extra":[{"x":null}]}"#,
+            r#"{"\u0061lg":"HS256"}"#,
+            r#"{"alg":"HS256",}"#,
+            r#"{}false"#,
+            r#"{"exp":2e9,"sub":"1","username":"é"}"#,
+        ];
+        for fixture in fixtures {
+            for padding in 0..=12 {
+                let bytes = format!("{}{}{}", " ".repeat(padding), fixture, "\n".repeat(padding));
+                let wire = encoded(bytes.as_bytes());
+                let mut decoded = Vec::new();
+                decode(&wire, &mut decoded).unwrap();
+                assert_eq!(decoded, bytes.as_bytes());
+                for header in [false, true] {
+                    let expected =
+                        document(&decoded, &mut Vec::new(), header).map(|v| v.map(shape));
+                    let actual = decode_document(&wire, &mut Vec::new(), &mut Vec::new(), header)
+                        .map(|v| v.map(shape));
+                    assert_eq!(actual, expected, "{bytes}");
+                }
+            }
+        }
+        for len in 0..=256 {
+            let bytes: Vec<u8> = (0..len).map(|at| u8::try_from(at % 256).unwrap()).collect();
+            let wire = encoded(&bytes);
+            let mut decoded = Vec::new();
+            decode(&wire, &mut decoded).unwrap();
+            assert_eq!(decoded, bytes);
+        }
+    }
 }

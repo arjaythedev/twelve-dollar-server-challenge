@@ -496,3 +496,170 @@ the challenge's box benchmark or a throughput result.
 The fixed `posts` SQLite record can be decoded inline in typed HolyPHP, matching the top submission's single-pass record decoder. `start.sh` enables this path; `HPHP_FEED_RAW=0` retains the generic `bt_cols` decoder. The inline path checks header and payload bounds and falls back to the generic decoder if a record does not fit.
 
 On the real seed database, same-binary A/B/B/A at 800 VUs (30% likes, 5% posts; 5 s ramp + 15 s active) had zero HTTP failures. Generic decode averaged 17,523 req/s, p95 41.64 ms, p99 57.43 ms, and 16.72 µs process CPU/request. Inline decode averaged 17,824 req/s, p95 39.73 ms, p99 52.16 ms, and 16.48 µs CPU/request. These are WSL diagnostics, not box results; run-to-run warm-up drift remains visible.
+
+#### Cache, warm-up, and author-batch experiments (WSL, 2026-11-12)
+
+These are local diagnostics, not challenge scores or user-count estimates.
+`bench/sqlite-cache-mix.js` preserves the endpoint order and 15% like / 2%
+post-write probabilities in `bench/load.js`, but removes think time to expose
+request-service cost. All runs used the real seed database, one server CPU,
+Direct-6, the same binary (`3333e4f…`), GCC 13.3, `-O3 -march=native -flto`,
+and bundled SQLite 3.46.1. k6 ran on separate CPUs; its CPU consumption was
+recorded to catch generator saturation. The earlier cache/warm numbers in
+this subsection were collected with only three client CPUs and are superseded:
+the generator was CPU-saturated, so those measurements are invalid.
+
+With 800 VUs for 15 s in A/B/B/A order, a 64 MiB cache averaged 21.91 µs
+server CPU/request; 256 MiB averaged 21.90 µs. There were zero HTTP errors.
+The SQLite status showed roughly 5.4 million cache hits, 287 misses, no spills,
+and about 5.2 MiB cache use after the 64 MiB run. The larger cache did not
+change CPU/request meaningfully. Warming the pages at startup (64 MiB fixed)
+averaged 21.82 µs/request versus 22.07 µs without warm-up, a 1.1% difference
+below the promotion threshold. Warm-up increased startup from about 150 to
+379 ms and RSS from about 46.5 to 85.5 MiB; p99 did not improve consistently.
+Keep the defaults at 64 MiB and warm-up off.
+
+The measured feed hotspot was resolving the 20 authors after collecting feed
+posts. The generic `bt_multi_seek` implementation is already enabled through
+`HPHP_FEED_BATCH_USERS=1`; turning it off restores one `bt_seek` per author.
+At 1,000 VUs for 30 s in A/B/B/A order, batched lookup averaged 22.36 µs
+CPU/request versus 23.76 µs with individual seeks (5.9% lower). Both paired
+comparisons favored batching by 4.1% and 7.8%. Mean request rate rose from
+39.8k/s to 42.4k/s, mean p95 fell 4.2%, mean p99 fell 4.1%, and all runs had
+zero HTTP failures. The server remained at one CPU; k6 used about 9.6 of its
+15 allocated CPUs. Direct and Classic challenge suites each passed 42/42
+afterward. This is a repeatable WSL signal for the already-enabled generic
+batch path, not evidence that 280k users are achieved on the challenge box.
+
+#### Five versus six rings; 280k async-client attempt (WSL, 2026-11-12)
+
+The 1,000-VU, 30-second no-think-time micro-mix compared five and six rings
+in two reversed A/B/B/A sequences. Five rings averaged 24.77 µs CPU/request
+and six averaged 24.23 µs across all eight samples (about 2.2% favoring six),
+below the promotion threshold. Same-configuration samples varied by 4–6%,
+and the reversed sequence did not reproduce a clear advantage. Keep six rings;
+five has enough theoretical slots for 280k, but this test does not establish
+that reducing the ring count improves request cost.
+
+A separate 280k-user diagnostic used 16 Python asyncio shards, 45 s ramp and
+90 s hold. It was invalid as a server-capacity result: at hold time the summed
+minimum active client tasks were only 28,529, the server reported 138,534 live
+connections, and the client run recorded 94.5% failures with p95 around 93.8 s.
+The WSL VM reached its 4 GiB memory cap and used swap while the generator was
+creating hundreds of thousands of per-user Python tasks. The temporary local
+conntrack limit was restored afterward. Do not interpret these figures as
+HolyPHP's 280k capacity or latency; a lower-overhead multi-connection generator
+or the challenge box is required for that measurement.
+
+#### Multi-ring wait and answer-batch diagnostics (WSL, 2026-11-12)
+
+Compared the current 64-CQE wait to the Rust leader's 256-CQE wait using the
+same binary, 280,000 configured clients, 16 C-generator shards, 45 s ramp,
+90 s run, Direct-6, a fresh seed DB, one pinned server CPU, and
+`HPHP_DIAG=1`. The answer budget remained 2,048. At 64 CQEs, clients completed
+662,738 requests and the server reported 251,909 accepts; at 256 CQEs, clients
+completed 798,794 requests (+20.5%) and the server reported 264,708 accepts.
+The measured server CPU time was 66.8 s and 64.4 s respectively. Per-shard p95
+ranges were 27.290–27.401 s at 64 and 27.499–28.147 s at 256; per-shard p99
+ranges were 45.148–45.925 s and 38.938–41.687 s. All shards reported zero
+HTTP errors. A reverse-order repeat completed 689,335 requests at 256 versus
+657,006 at 64, but p95 worsened from 28.563–28.816 s to 31.844–33.281 s and
+p99 worsened from 44.572–46.302 s to 48.498–49.116 s. Server accepts were
+239,109 at 256 versus 250,886 at 64. The first throughput gain did not repeat
+with acceptable tail latency, so `start.sh` retains 64; the 256-CQE value stays
+an explicit experiment. Neither run accepted all 280,000 clients within 90 s.
+
+The 4,096 answer-budget run completed 666,188 client requests and had 10,881
+receive-recovery enqueues; 8,192 completed 593,714 requests and had 134,472
+enqueues. Both were worse than the default 2,048 run, so keep that budget.
+These WSL measurements identify a promising runtime setting; they are not a
+challenge-box result or proof of 280k capacity. The large remaining p95 points
+to a deeper high-load scheduling or service-cost bottleneck.
+
+#### Busy-aware ring-0 wait (WSL, 2026-11-12)
+
+The Rust loop only performs its bounded ring-0 wait when its read and ready
+queues are empty. HolyPHP previously waited for the configured CQE count even
+when it had CQEs or deferred ready sockets to process. Added generic
+`HPHP_RING0_BUSY` (default `1`) to skip that wait while such work is pending;
+set it to `0` to retain the prior behavior.
+
+The candidate and control used the same server binary, Direct-6, 280,000
+configured clients (16 C-generator shards), a 45 s ramp, and a 90 s run in
+A/B/B/A order. Server requests / accepted connections were: old 608,486 /
+240,134; new 670,977 / 257,542; new 636,302 / 249,862; old 686,634 / 256,006.
+All runs had zero client HTTP errors. The pair means were nearly flat for
+requests (+0.9% for busy-aware) and modestly higher for accepts (+2.3%); the
+candidate used about 2.6% more server CPU. Generator 0's p95/p99 were 32.566 /
+49.588 s, 29.684 / 44.306 s, 30.355 / 44.502 s, and 27.801 / 48.355 s. These
+are one shard's values, not global percentiles; every run remained far outside
+the p95/p99 gates. This is a small, noisy scheduling signal, not evidence of
+280k capacity. No box score is claimed.
+
+#### Per-ring timing and Rust-style SQ-full flush (WSL, 2026-11-12)
+
+Added `HPHP_DIAG=1` measurements for application read/flush time, per-ring
+`io_uring_enter` and submit-only time, CQE drain time/counts, receive-CQE to
+application handoff, and response enqueue to SEND completion. The receive-age
+buffers are allocated only in diagnostic mode; ordinary response chunks keep
+their original size when diagnostics are off. The external load harness also
+samples process user/system ticks, RSS/swap, TCP socket memory, WAL size, and
+listen-backlog counters.
+
+The high-load trace showed the 250k bottleneck is real: `answerq` grew above
+100k, with several seconds of receive-to-application delay in the later rings.
+At 280k, the diagnostic run accepted all 280,000 connections by the end of its
+90-second generator run, but `answerq` reached 228,889. The final ring live
+counts were 64,511 / 64,511 / 64,511 / 64,511 / 21,956 / 0. Per-shard p95/p99
+averaged 27.0/41.0 seconds; this was not a stable 280k hold. Linux `ListenDrops`
+and `ListenOverflows` each rose by about 265k during the ramp, so connection
+setup itself also experienced substantial backlog pressure. This was WSL with
+diagnostics enabled, not a box result.
+
+Compared SQ-full `IORING_ENTER_GETEVENTS` flushing (old) against submit-only
+flushing (Rust-style) in the same binary, A/B/B/A, Direct-6, 250k configured
+clients, 16 C-generator shards, 45-second ramp and 90-second run. Every run
+reported 250,000 successful client connections and zero HTTP errors. Request
+totals were 793,693 / 931,117 / 926,628 / 857,490. The paired means were
+825,592 old versus 928,873 submit-only (+12.5%); server CPU/request was 83.5
+versus 79.0 microseconds (-5.4%). Shard-averaged p99 improved about 4.9%, while
+p95 was about 3.2% worse on average and varied widely between same-mode runs.
+All p95/p99 values remained far beyond the challenge gates, so this is a
+throughput signal rather than a capacity pass. `start.sh` now defaults to the
+submit-only flush; set `HPHP_SQ_FLUSH_GETEVENTS=1` for the previous behavior.
+
+#### Background checkpoint: restart the WAL (WSL, 2026-11-13)
+
+Under sustained write load the background PASSIVE checkpoint was almost always
+overtaken by new commits. It reported completion, but SQLite could never
+restart the WAL from frame 0, so the WAL grew until the 65,536-frame forced
+in-loop checkpoint ran on the event loop. The runtime now checks whether the
+WAL generation changed during the checkpoint. If it did not, the next commit
+restarts the log. If it did, writes are held briefly while the remaining tail
+is copied, the same approach the current leader uses. `HPHP_CKPT_RESTART=0`
+restores the previous behaviour. The runtime also drains each ring's eventfd
+with a single `read()` only when that ring produced completions, and string
+builders reuse capacity from the existing response-buffer pool (capacity only,
+never contents). All changes are generic runtime code; `server.hphp` is
+unchanged.
+
+Same-binary A/B/B/A in a Box-like harness (1 pinned server CPU, 1,800 MiB
+cgroup without swap, tcp_mem at twice the Box values, 120,000 connections,
+60 s ramp + 4 min hold, 16 load generators on separate CPUs):
+
+| | restart off | restart on |
+|---|---|---|
+| Peak WAL size | 211–260 MB | 18–19 MB |
+| Peak page cache | 254–299 MB | 54 MB |
+| Disk writes | 1.5–2.5 GB | 1.05 GB |
+| Checkpoints | ~2,100 | ~90 |
+| CPU per request | 70.96 / 70.81 µs | 70.24 / 70.00 µs |
+
+`PRAGMA integrity_check` returned `ok`. Direct and Classic suites each passed
+42/42. These are WSL diagnostics, not Box results. Above about 244k
+connections the WSL host is limited by Hyper-V interrupt overhead, and even
+the Rust leader fails there, so local runs cannot confirm 280k. The Box
+pattern so far was 257k/270k passing the 2-minute probe but failing the
+5-minute hold, and 280k failing at 76% CPU. That pattern is consistent with
+WAL growth followed by a blocking checkpoint, but it is not proven. A Box run
+is required.

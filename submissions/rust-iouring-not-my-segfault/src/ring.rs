@@ -4,7 +4,7 @@ use std::mem::ManuallyDrop;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU16, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 #[cfg(twelve_fault_inject)]
 use std::{fs::File, io::Read, path::PathBuf};
 
@@ -339,6 +339,9 @@ impl Rings {
                 .setup_single_issuer()
                 .setup_coop_taskrun()
                 .setup_defer_taskrun()
+                // IORING_SQ_TASKRUN marks a ring whose deferred completions wait for an enter, so
+                // wait() enters only rings with work.
+                .setup_taskrun_flag()
                 .build(SQ_ENTRIES)
                 .map_err(|e| contextual("setup ring", r, e))?;
             let ring = building
@@ -586,7 +589,7 @@ impl Rings {
             false
         }
     }
-    /// Pushes `entries` contiguously on ring `r`, flushing a full SQ once first.
+    /// Pushes `entries` contiguously; a full SQ waits for the next round's one enter.
     ///
     /// # Safety
     /// Every entry's parameters must stay valid for the whole kernel operation: memory an entry
@@ -597,15 +600,7 @@ impl Rings {
     unsafe fn push(&mut self, r: usize, entries: &[squeue::Entry]) -> io::Result<Submit<()>> {
         if self.room(r) < entries.len() {
             self.counts.sq_full = self.counts.sq_full.saturating_add(1);
-            let pending = self.pending(r);
-            match self.enter(r, pending, 0, 0, None, true) {
-                Ok(_) => {}
-                Err(error) if self.retry(&error) => return Ok(Submit::RetryNextTurn),
-                Err(error) => return Err(contextual("enter ring", r, error)),
-            }
-            if self.room(r) < entries.len() {
-                return Ok(Submit::RetryNextTurn);
-            }
+            return Ok(Submit::RetryNextTurn);
         }
         let ring = self.state_mut(r);
         // SAFETY: push_multiple needs every entry's parameters valid for the whole operation,
@@ -1012,55 +1007,63 @@ impl Rings {
             .saturating_sub(state.held)
             .saturating_sub(carried)
     }
+    /// Submits ring r's queued SQEs and runs its deferred completions in one enter that does not
+    /// wait; a retryable failure leaves both for the next enter.
+    fn enter_events(&mut self, r: usize) -> io::Result<()> {
+        let pending = self.pending(r);
+        match self.enter(r, pending, 0, GETEVENTS, None, false) {
+            Ok(_) => Ok(()),
+            Err(error) if self.retry(&error) => Ok(()),
+            Err(error) => Err(contextual("enter ring", r, error)),
+        }
+    }
+    /// Enters each active ring once, rings 1..7 without waiting and ring 0 last.
+    /// k0 is ring 0's share of the request-completion target; the server caps the timeout at 1 ms.
+    /// Queued CQEs do not bypass batching.
     /// # Errors
     /// Returns a fatal enter error. Timeouts and retryable errors are WaitEnd values.
     /// # Panics
     /// Panics when k0 is zero.
     pub(crate) fn wait(&mut self, k0: u32, timeout: Option<Duration>) -> io::Result<WaitEnd> {
         assert!(k0 >= 1, "k0 must be at least 1");
+        let deadline = timeout.map(|duration| Instant::now() + duration);
+        // Returned buffers reach the kernel through each ring's published tail, a plain store, so
+        // a ring this wait does not enter publishes here.
+        let kernel = &mut *self.kernel;
+        for (ring, [_, descriptors]) in kernel.rings.iter_mut().zip(kernel.mappings.iter()) {
+            publish(ring, descriptors);
+        }
         for r in 1..RINGS {
-            if self.state(r).in_flight == 0 {
-                continue;
-            }
-            let pending = self.pending(r);
-            match self.enter(r, pending, 0, GETEVENTS, None, false) {
-                Ok(_) => {}
-                Err(error) if self.retry(&error) => {}
-                Err(error) => return Err(contextual("enter ring", r, error)),
+            if self.state(r).in_flight != 0 {
+                self.enter_events(r)?;
             }
         }
-        if self
-            .kernel
-            .rings
-            .iter_mut()
-            .any(|ring| !ring.io.completion().is_empty())
-        {
-            let pending = self.pending(0);
+        let pending = self.pending(0);
+        let remaining = deadline.map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        let ts = remaining.map(types::Timespec::from);
+        let args = ts.as_ref().map(|ts| types::SubmitArgs::new().timespec(ts));
+        if timeout == Some(Duration::ZERO) {
             return match self.enter(0, pending, 0, GETEVENTS, None, true) {
+                Ok(n) if n < pending => Ok(WaitEnd::Retry),
                 Ok(_) => Ok(WaitEnd::Ready),
-                Err(error) if self.retry(&error) => Ok(WaitEnd::Retry),
+                Err(error) if self.retry(&error) => {
+                    self.enter_events(0)?;
+                    Ok(WaitEnd::Retry)
+                }
                 Err(error) => Err(contextual("enter ring", 0, error)),
             };
         }
-        let pending = self.pending(0);
-        if pending != 0 {
-            match self.enter(0, pending, 0, 0, None, false) {
-                Ok(n) if n < pending => return Ok(WaitEnd::Retry),
-                Ok(_) => {}
-                Err(error) if self.retry(&error) => return Ok(WaitEnd::Retry),
-                Err(error) => return Err(contextual("enter ring", 0, error)),
-            }
-        }
-        let ts = timeout.map(types::Timespec::from);
-        let args = ts.as_ref().map(|ts| types::SubmitArgs::new().timespec(ts));
+        // One enter submits ring 0's SQEs and then waits; a short submission returns at once, and
+        // with SQEs submitted the kernel reports their count rather than ETIME.
         match self.enter(
             0,
-            0,
+            pending,
             k0,
             GETEVENTS | if args.is_some() { EXT_ARG } else { 0 },
             args.as_ref(),
             true,
         ) {
+            Ok(n) if n < pending => Ok(WaitEnd::Retry),
             Ok(_) => {
                 let ready = self.state_mut(0).io.completion().len();
                 if ready >= k0 as usize {
@@ -1072,7 +1075,14 @@ impl Rings {
                 }
             }
             Err(error) if error.raw_os_error() == Some(libc::ETIME) => Ok(WaitEnd::Timeout),
-            Err(error) if self.retry(&error) => Ok(WaitEnd::Retry),
+            // A retryable failure of the waiting enter still runs ring 0's deferred completions with
+            // one enter that does not wait, as rings 1..7 run theirs above; retrying only the waiting
+            // form left ring 0's receives unrun while the failure lasted, so the stall sweep closed a
+            // connection whose request the kernel held (T-DEFERRED, FIX-853).
+            Err(error) if self.retry(&error) => {
+                self.enter_events(0)?;
+                Ok(WaitEnd::Retry)
+            }
             Err(error) => Err(contextual("enter ring", 0, error)),
         }
     }

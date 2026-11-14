@@ -11,10 +11,10 @@ use sys::{
     CONSTRAINT, DONE, ERROR, NOMEM, OK, ROW, sqlite3_bind_int64, sqlite3_bind_text,
     sqlite3_changes, sqlite3_clear_bindings, sqlite3_close, sqlite3_column_bytes,
     sqlite3_column_int64, sqlite3_column_text, sqlite3_column_type, sqlite3_db_readonly,
-    sqlite3_db_status64, sqlite3_errmsg, sqlite3_finalize, sqlite3_get_autocommit,
-    sqlite3_last_insert_rowid, sqlite3_open_v2, sqlite3_prepare_v3, sqlite3_reset, sqlite3_step,
-    sqlite3_wal_checkpoint_v2, sqlite3_wal_hook, twelve_feed, twelve_post, twelve_reader_reason,
-    twelve_readers_close, twelve_readers_open,
+    sqlite3_db_status64, sqlite3_errmsg, sqlite3_finalize, sqlite3_get_autocommit, sqlite3_open_v2,
+    sqlite3_prepare_v3, sqlite3_reset, sqlite3_step, sqlite3_wal_checkpoint_v2, sqlite3_wal_hook,
+    twelve_feed, twelve_post, twelve_reader_reason, twelve_readers_close, twelve_readers_end,
+    twelve_readers_open,
 };
 #[cfg(twelve_fault_inject)]
 use sys::{sqlite3_commit_hook, sqlite3_set_authorizer};
@@ -168,7 +168,6 @@ mod sys {
         pub(super) fn sqlite3_column_text(stmt: *mut sqlite3_stmt, at: c_int) -> *const u8;
         pub(super) fn sqlite3_column_bytes(stmt: *mut sqlite3_stmt, at: c_int) -> c_int;
         pub(super) fn sqlite3_get_autocommit(db: *mut sqlite3) -> c_int;
-        pub(super) fn sqlite3_last_insert_rowid(db: *mut sqlite3) -> i64;
         pub(super) fn sqlite3_changes(db: *mut sqlite3) -> c_int;
         pub(super) fn sqlite3_errmsg(db: *mut sqlite3) -> *const c_char;
         pub(super) fn sqlite3_wal_checkpoint_v2(
@@ -194,6 +193,7 @@ mod sys {
         ) -> c_int;
         pub(super) fn twelve_readers_open(db: *mut sqlite3) -> c_int;
         pub(super) fn twelve_readers_close();
+        pub(super) fn twelve_readers_end();
         pub(super) fn twelve_feed(
             db: *mut sqlite3,
             out: *mut ReaderBuffer,
@@ -225,7 +225,7 @@ mod sys {
     }
 }
 
-const SQL: [&str; 15] = [
+const SQL: [&str; 14] = [
     "SELECT posts.id, posts.body, posts.created_at, users.username, (SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) AS like_count FROM posts INNER JOIN users ON users.id = posts.user_id ORDER BY posts.created_at DESC, posts.id DESC LIMIT 20;",
     "SELECT posts.id, posts.body, posts.created_at, users.username, (SELECT COUNT(*) FROM likes WHERE likes.post_id = posts.id) AS like_count FROM posts INNER JOIN users ON users.id = posts.user_id WHERE posts.id = ?1;",
     "SELECT posts.id FROM posts ORDER BY posts.created_at DESC, posts.id DESC LIMIT 20;",
@@ -233,8 +233,7 @@ const SQL: [&str; 15] = [
     "SELECT posts.id, posts.body, posts.created_at, users.username FROM posts INNER JOIN users ON users.id = posts.user_id WHERE posts.id BETWEEN ?1 AND ?2;",
     "SELECT posts.id, posts.body, posts.created_at, users.username FROM posts INNER JOIN users ON users.id = posts.user_id WHERE posts.id BETWEEN ?1 AND ?2 ORDER BY posts.id DESC;",
     "SELECT 1;",
-    "INSERT INTO posts (user_id, body) VALUES (?1, ?2);",
-    "SELECT posts.created_at FROM posts WHERE posts.id = ?1;",
+    "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at;",
     "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE posts.id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING;",
     "SELECT 1 FROM posts WHERE posts.id = ?1;",
     "BEGIN;",
@@ -243,7 +242,7 @@ const SQL: [&str; 15] = [
     "ROLLBACK;",
 ];
 
-const SET: [&str; 7] = [
+const SET: [&str; 8] = [
     "PRAGMA journal_mode = WAL;",
     "PRAGMA synchronous = NORMAL;",
     "PRAGMA foreign_keys = ON;",
@@ -251,14 +250,16 @@ const SET: [&str; 7] = [
     "PRAGMA journal_size_limit = 41943040;",
     "PRAGMA busy_timeout = 0;",
     "PRAGMA trusted_schema = OFF;",
+    "PRAGMA temp_store = MEMORY;",
 ];
-const GET: [&str; 8] = [
+const GET: [&str; 9] = [
     "PRAGMA foreign_keys;",
     "PRAGMA synchronous;",
     "PRAGMA wal_autocheckpoint;",
     "PRAGMA journal_size_limit;",
     "PRAGMA busy_timeout;",
     "PRAGMA trusted_schema;",
+    "PRAGMA temp_store;",
     "PRAGMA cache_size;",
     "PRAGMA mmap_size;",
 ];
@@ -590,7 +591,7 @@ impl<'a> BodyWriter<'a> {
 pub(crate) struct Store {
     db: NonNull<sys::sqlite3>,
     // Drop finalizes these before it closes db, so they are dropped by hand, not as a field.
-    statements: ManuallyDrop<[Statement; 15]>,
+    statements: ManuallyDrop<[Statement; 14]>,
     hook: Box<HookState>,
     check_reads: bool,
     readers_opened: bool,
@@ -598,6 +599,8 @@ pub(crate) struct Store {
     scratch: Vec<u8>,
     comparison: Vec<u8>,
     pending_commit: Option<Commit>,
+    // The loop's clock reading for this turn (tick), taken once after its wait; a commit's start time.
+    now: Instant,
     counts: StoreCounts,
     #[cfg(twelve_fault_inject)]
     fault: fault::FaultVfs,
@@ -654,6 +657,7 @@ impl Store {
             scratch: Vec::new(),
             comparison: Vec::new(),
             pending_commit: None,
+            now: Instant::now(),
             counts: StoreCounts::default(),
             #[cfg(twelve_fault_inject)]
             fault,
@@ -722,7 +726,7 @@ impl Store {
     }
 
     // The open steps that run before Store exists: the read-write check, the settings and their
-    // readback, then the fifteen persistent statements, which become Store's array only once all
+    // readback, then the fourteen persistent statements, which become Store's array only once all
     // are prepared, so a failed prepare finalizes exactly those prepared before it.
     fn configure(
         db: NonNull<sys::sqlite3>,
@@ -730,7 +734,7 @@ impl Store {
         path: &str,
         settings: &StoreSettings,
         mmap: i64,
-    ) -> Result<[Statement; 15], String> {
+    ) -> Result<[Statement; 14], String> {
         check(code).map_err(|code| open_path_error(path, code))?;
         // SAFETY: the successful open supplies a live main-database connection.
         if unsafe { sqlite3_db_readonly(db.as_ptr(), c"main".as_ptr()) } != 0 {
@@ -768,13 +772,15 @@ impl Store {
                 })
                 .map_err(|code| open_error("pragma", code))?;
         }
-        let expected = [
+        // One expected value per GET pragma, in GET's order; the length is GET's, so zip drops none.
+        let expected: [i64; GET.len()] = [
             1,
             1,
             0,
             41_943_040,
             0,
             0,
+            2,
             -i64::from(settings.cache_kib),
             mmap,
         ];
@@ -802,13 +808,13 @@ impl Store {
                 Statement::prepare(db, sql, true).map_err(|code| open_error("prepare", code))?,
             );
         }
-        Ok(<[Statement; 15]>::try_from(prepared).expect("the catalog holds fifteen statements"))
+        Ok(<[Statement; 14]>::try_from(prepared).expect("the catalog holds fourteen statements"))
     }
 
     fn statement(&mut self, index: usize) -> &mut Statement {
         self.statements
             .get_mut(index)
-            .expect("each catalog index names one of the fifteen statements")
+            .expect("each catalog index names one of the fourteen statements")
     }
 
     fn control(&mut self, index: usize) -> Result<(), c_int> {
@@ -842,13 +848,13 @@ impl Store {
     }
 
     pub(crate) fn begin_read(&mut self) -> bool {
-        self.begin(Txn::Read, 11)
+        self.begin(Txn::Read, 10)
     }
     pub(crate) fn begin_write(&mut self) -> bool {
-        self.begin(Txn::Write, 12)
+        self.begin(Txn::Write, 11)
     }
     pub(crate) fn begin_batch(&mut self) -> bool {
-        self.begin(Txn::Batch, 11)
+        self.begin(Txn::Batch, 10)
     }
 
     pub(crate) fn txn_alive(&mut self) -> bool {
@@ -862,11 +868,28 @@ impl Store {
         false
     }
 
+    /// Records the loop's clock reading for this turn, which the turn's commits take as their start
+    /// time.
+    pub(crate) fn tick(&mut self, now: Instant) {
+        self.now = now;
+    }
+
+    /// Closes the readers' cursors, which stay open across the reader calls of one transaction; runs
+    /// before the transaction writes, commits or rolls back.
+    fn end_readers(&mut self) {
+        if self.readers_opened {
+            // SAFETY: the readers' connection is open, and twelve_readers_end only closes the cursors
+            // the readers opened inside its current transaction.
+            unsafe { twelve_readers_end() };
+        }
+    }
+
     pub(crate) fn end_read(&mut self) -> bool {
         self.commit()
     }
 
     pub(crate) fn commit(&mut self) -> bool {
+        self.end_readers();
         if !self.txn_alive() {
             self.pending_commit = None;
             if self.txn == Txn::Failed {
@@ -882,8 +905,8 @@ impl Store {
             debug_assert_eq!(busy, 0);
         }
         self.hook.wrote.set(false);
-        let started = Instant::now();
-        let result = self.control(13);
+        let started = self.now;
+        let result = self.control(12);
         if result.is_ok() && self.autocommit() {
             self.txn = Txn::Idle;
             if self.hook.wrote.get() {
@@ -903,6 +926,7 @@ impl Store {
     }
 
     pub(crate) fn rollback(&mut self) -> bool {
+        self.end_readers();
         if self.txn == Txn::Broken {
             return false;
         }
@@ -910,7 +934,7 @@ impl Store {
             return true;
         }
         if !self.autocommit() {
-            let _ = self.control(14);
+            let _ = self.control(13);
         }
         self.pending_commit = None;
         if self.autocommit() {
@@ -1268,7 +1292,7 @@ impl Store {
             let matched = self
                 .statements
                 .get_mut(4)
-                .expect("the catalog holds fifteen statements")
+                .expect("the catalog holds fourteen statements")
                 .run(|s| {
                     s.bind(1, min)?;
                     s.bind(2, max)?;
@@ -1366,7 +1390,7 @@ impl Store {
         let statement = self
             .statements
             .get_mut(6)
-            .expect("the catalog holds fifteen statements");
+            .expect("the catalog holds fourteen statements");
         let result = (|| {
             if !statement.step()?
                 // SAFETY: || reads column 0 only after step returned a row of statement 6,
@@ -1431,6 +1455,7 @@ impl Store {
     }
 
     fn before_write(&mut self) -> bool {
+        self.end_readers();
         if !matches!(self.txn, Txn::Write | Txn::Batch) || !self.txn_alive() {
             return false;
         }
@@ -1473,32 +1498,25 @@ impl Store {
         if !self.before_write() {
             return Write::Aborted;
         }
+        let base = out.len();
+        let mut writer = BodyWriter::new(out);
+        let mut inserted = false;
+        // The insert runs at the statement's first step, which returns the new row's id and
+        // created_at from the same statement.
         let result = self.statement(7).run(|s| {
             s.bind(1, user_id)?;
             // SAFETY: body is create's argument, alive for this whole call, and run's finish
             // resets the statement and clears its bindings before run returns.
             unsafe { s.text_binding(2, body) }?;
-            s.done()
-        });
-        if let Err(code) = result {
-            return self.write_error(code);
-        }
-        if !self.txn_alive() {
-            return Write::Aborted;
-        }
-        // SAFETY: the successful INSERT belongs to this connection; no intervening
-        // mutation can change its connection-local last rowid.
-        let id = unsafe { sqlite3_last_insert_rowid(self.db.as_ptr()) };
-        let base = out.len();
-        let mut writer = BodyWriter::new(out);
-        let result = self.statement(8).run(|s| {
-            s.bind(1, id)?;
             if !s.step()? {
                 return Err(ERROR);
             }
-            // SAFETY: step returned a row of statement 8, the created_at query, whose column 0 is
-            // created_at.
-            let timestamp = unsafe { s.text(0) }?;
+            inserted = true;
+            // SAFETY: step returned the row of statement 7, the insert's RETURNING id, created_at,
+            // whose column 0 is the new post's id.
+            let id = unsafe { s.integer(0) };
+            // SAFETY: the same row; column 1 is created_at.
+            let timestamp = unsafe { s.text(1) }?;
             if !valid_timestamp(timestamp) {
                 return Err(ERROR);
             }
@@ -1514,7 +1532,13 @@ impl Store {
             writer.put(b",\"like_count\":0}}");
             s.done()
         });
-        if result.is_err() || writer.finish() != Read::Ready || !self.txn_alive() {
+        let rendered = match result {
+            Ok(()) => writer.finish() == Read::Ready,
+            // A failure after the insert, like a missing or malformed created_at, fails the unit.
+            Err(_) if inserted => false,
+            Err(code) => return self.write_error(code),
+        };
+        if !rendered || !self.txn_alive() {
             out.truncate(base);
             self.txn = Txn::Failed;
             return Write::Aborted;
@@ -1537,7 +1561,7 @@ impl Store {
         if !self.before_write() {
             return Write::Aborted;
         }
-        let result = self.statement(9).run(|s| {
+        let result = self.statement(8).run(|s| {
             s.bind(1, user_id)?;
             s.bind(2, post_id)?;
             s.done()
@@ -1553,7 +1577,7 @@ impl Store {
         let already_liked = match changes {
             1 => false,
             0 => {
-                let exists = self.statement(10).run(|s| {
+                let exists = self.statement(9).run(|s| {
                     s.bind(1, post_id)?;
                     if !s.step()? {
                         return Ok(false);
@@ -1699,7 +1723,7 @@ impl Drop for Store {
             unsafe { sqlite3_set_authorizer(self.db.as_ptr(), None, ptr::null_mut()) };
         }
         if !self.autocommit() {
-            let _ = Statement::prepare(self.db, SQL[14], false)
+            let _ = Statement::prepare(self.db, SQL[13], false)
                 .and_then(|mut s| s.run(Statement::done));
         }
         // SAFETY: every owned statement, cursor and callback is gone; the fault

@@ -2,7 +2,7 @@ use crate::stats::stderr_line;
 use std::ffi::{CString, c_int};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::ptr::{self, NonNull};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use sys::{
     Checkpointer, TWELVE_CKPT_DONE, TWELVE_CKPT_WAIT_SLICE, TWELVE_CKPT_WAIT_SYNC,
@@ -145,6 +145,20 @@ enum PassRequest {
     RetryOnTurn,
 }
 
+// Why writes are held: at the gate, until a pass has copied the whole WAL, or for the tail pass that copies
+// what was committed beside a bulk pass, HOLD_MAX at most.
+#[derive(Clone, Copy)]
+enum HoldKind {
+    Gate,
+    Tail,
+}
+
+// A pass starts at every PASS_FRAMES_MAX new frames at most, 16 MiB of 4 KiB pages, whatever the gate.
+const PASS_FRAMES_MAX: u32 = 4_096;
+// The longest a tail hold keeps writes waiting: half the contest's p95 bar of 500 ms, so a write that meets a
+// capped hold and the commits queued behind it still answers inside that bar.
+const HOLD_MAX: Duration = Duration::from_millis(250);
+
 pub(crate) struct Wal {
     checkpointer: NonNull<Checkpointer>,
     gate_frames: u32,
@@ -156,6 +170,11 @@ pub(crate) struct Wal {
     pass_request: PassRequest,
     restart_ready: bool,
     gate: Gate,
+    // When the current tail hold ends at the latest; None outside a hold, during a hold at the gate and
+    // during a restart.
+    hold_deadline: Option<Instant>,
+    // The cap ended the hold the running pass began under, so commits ran beside that pass.
+    hold_broken: bool,
     fiber: Fiber,
     after_time: Option<Instant>,
     held_time: Option<Instant>,
@@ -217,7 +236,7 @@ impl Wal {
         }
         let checkpointer =
             NonNull::new(checkpointer).unwrap_or_else(|| invariant("checkpoint-state"));
-        let half = u64::from(settings.gate_frames / 2);
+        let half = u64::from((settings.gate_frames / 2).min(PASS_FRAMES_MAX));
         Ok(Self {
             checkpointer,
             gate_frames: settings.gate_frames,
@@ -229,6 +248,8 @@ impl Wal {
             pass_request: PassRequest::None,
             restart_ready: false,
             gate: Gate::Open,
+            hold_deadline: None,
+            hold_broken: false,
             fiber: Fiber::Idle,
             after_time: None,
             held_time: None,
@@ -257,13 +278,17 @@ impl Wal {
             self.pass_request = PassRequest::Ready;
         }
         if frames >= self.gate_frames {
-            self.hold(now);
+            self.hold(now, HoldKind::Gate);
         }
     }
 
-    fn hold(&mut self, now: Instant) {
+    fn hold(&mut self, now: Instant, kind: HoldKind) {
         if matches!(self.gate, Gate::Open) {
             self.gate = Gate::Holding { since: now };
+            self.hold_deadline = match kind {
+                HoldKind::Gate => None,
+                HoldKind::Tail => Some(now + HOLD_MAX),
+            };
             self.counts.gate_holds = self.counts.gate_holds.saturating_add(1);
             self.pass_request = PassRequest::Ready;
         }
@@ -300,7 +325,7 @@ impl Wal {
                 .unwrap_or_else(|| invariant("checkpoint-state"));
         }
         if frames >= self.gate_frames {
-            self.hold(now);
+            self.hold(now, HoldKind::Gate);
         }
     }
 
@@ -318,7 +343,20 @@ impl Wal {
         self.require_seed();
         observe(&mut self.held_time, now);
         self.sample_hold(now);
+        if matches!(self.gate, Gate::Holding { .. })
+            && self.hold_deadline.is_some_and(|deadline| now >= deadline)
+        {
+            // The tail pass outlasted its hold: writes go on, so that pass ends uncovered and an unheld
+            // pass follows it.
+            self.hold_broken = true;
+            self.release();
+        }
         !matches!(self.gate, Gate::Open)
+    }
+
+    // When the loop must look at the gate again: the end of a capped hold.
+    pub(crate) fn hold_deadline(&self) -> Option<Instant> {
+        self.hold_deadline
     }
 
     pub(crate) fn runnable(&self) -> bool {
@@ -350,6 +388,7 @@ impl Wal {
                     })
                 } else if self.pass_request != PassRequest::None {
                     self.pass_request = PassRequest::None;
+                    self.hold_broken = false;
                     self.counts.passes = self.counts.passes.saturating_add(1);
                     let kind = RunKind::Pass {
                         began_held: !matches!(self.gate, Gate::Open),
@@ -515,6 +554,7 @@ impl Wal {
     fn release(&mut self) {
         self.sample_hold(Instant::now());
         self.gate = Gate::Open;
+        self.hold_deadline = None;
     }
 
     fn finished(&mut self, kind: RunKind) {
@@ -541,10 +581,12 @@ impl Wal {
                     self.counts.pass_errors = self.counts.pass_errors.saturating_add(1);
                 }
                 let full = code == 0 && log >= 0 && checkpointed == log;
+                let held_through = began_held && !self.hold_broken;
                 let covers = full
-                    && (began_held || u32::try_from(log).is_ok_and(|log| log >= self.last_frames));
+                    && (held_through
+                        || u32::try_from(log).is_ok_and(|log| log >= self.last_frames));
                 if covers {
-                    if began_held {
+                    if held_through {
                         self.last_frames =
                             u32::try_from(log).unwrap_or_else(|_| invariant("checkpoint-state"));
                     }
@@ -554,7 +596,10 @@ impl Wal {
                         Gate::Open => {}
                         Gate::Holding { since } => {
                             if self.ckpt_restart {
+                                // The restart's own hold has no cap: its header write runs as a
+                                // writer, so no commit may run beside it.
                                 self.gate = Gate::Restarting { since };
+                                self.hold_deadline = None;
                             } else {
                                 self.release();
                             }
@@ -563,6 +608,15 @@ impl Wal {
                     }
                 } else if code != 0 || !matches!(self.gate, Gate::Open) {
                     self.pass_request = PassRequest::RetryOnTurn;
+                } else if full && began_held {
+                    // The cap ended this pass's hold and commits ran beside it: copy unheld next; the tail
+                    // hold follows that pass.
+                    self.pass_request = PassRequest::Ready;
+                } else if full {
+                    // A bulk pass, complete, with commits beside it: hold writes for the tail pass, which
+                    // copies only those frames. SQLite syncs the database only in a pass that reaches
+                    // the WAL's end, so the tail pass's database sync is the cycle's one.
+                    self.hold(Instant::now(), HoldKind::Tail);
                 }
             }
             RunKind::Restart { saw_wal_sync } => {

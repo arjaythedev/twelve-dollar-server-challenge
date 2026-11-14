@@ -249,9 +249,9 @@ static int ring_enter(struct ring *r, unsigned minc, struct __kernel_timespec *t
 }
 
 static struct io_uring_sqe *get_sqe(struct ring *r) {
-    if (r->sqe_tail - __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE) >= SQ_ENTRIES) {
+    if (r->sqe_tail - __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE) > r->sq_mask) { /* full: submit */
         ring_enter(r, 0, NULL);
-        while (r->sqe_tail - __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE) >= SQ_ENTRIES) ring_enter(r, 0, NULL);
+        while (r->sqe_tail - __atomic_load_n(r->sq_head, __ATOMIC_ACQUIRE) > r->sq_mask) ring_enter(r, 0, NULL);
     }
     struct io_uring_sqe *s = &r->sqes[r->sqe_tail & r->sq_mask];
     memset(s, 0, sizeof *s);
@@ -1301,19 +1301,33 @@ static int make_listener(const char *host, int port) {
 
 static void ring_init(struct ring *r, int idx, unsigned nfiles, const char *host, int port) {
     struct io_uring_params p;
-    memset(&p, 0, sizeof p);
-    p.flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
-              IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_NO_SQARRAY;
-    p.cq_entries = CQ_ENTRIES;
-    int fd = sys_setup(SQ_ENTRIES, &p);
-    if (fd < 0 && errno == EINVAL) { /* kernels before 6.6: no NO_SQARRAY */
-        memset(&p, 0, sizeof p);
-        p.flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
-                  IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_SUBMIT_ALL;
-        p.cq_entries = CQ_ENTRIES;
-        fd = sys_setup(SQ_ENTRIES, &p);
+    /* Kernels before 6.10 allocate each ring as one physically contiguous block
+     * (__get_free_pages): a 65,536-entry CQ is 1 MB, and on a machine whose memory
+     * is fragmented that fails with ENOMEM with plenty free. So halve the queues
+     * until the kernel can place them. The loop drains the CQ every pass, and the
+     * kernel keeps a burst beyond it on its overflow list (IORING_FEAT_NODROP;
+     * the loop flushes it when IORING_SQ_CQ_OVERFLOW shows), so smaller queues
+     * cost extra enters, not lost completions. */
+    unsigned sq = SQ_ENTRIES, cq = CQ_ENTRIES;
+    int fd = -1;
+    for (;;) {
+        for (int noarray = 1; noarray >= 0; noarray--) {
+            memset(&p, 0, sizeof p);
+            p.flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN |
+                      IORING_SETUP_TASKRUN_FLAG | IORING_SETUP_SUBMIT_ALL |
+                      (noarray ? IORING_SETUP_NO_SQARRAY : 0);
+            p.cq_entries = cq;
+            fd = sys_setup(sq, &p);
+            if (fd >= 0 || errno != EINVAL) break; /* EINVAL: kernels before 6.6 have no NO_SQARRAY */
+        }
+        if (fd >= 0 || errno != ENOMEM || cq <= 1024) break;
+        cq /= 2;
+        if (sq > cq / 16) sq = cq / 16;
     }
     if (fd < 0) { perror("io_uring_setup"); exit(1); }
+    if (cq != CQ_ENTRIES)
+        fprintf(stderr, "ring %d: the kernel couldn't allocate full-size queues, using %u SQ / %u CQ entries\n", idx,
+                p.sq_entries, p.cq_entries);
     if (!(p.features & IORING_FEAT_SINGLE_MMAP)) { fprintf(stderr, "kernel too old\n"); exit(1); }
     r->fd = fd;
     r->idx = idx;

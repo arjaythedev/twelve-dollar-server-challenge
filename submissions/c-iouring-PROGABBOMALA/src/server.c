@@ -25,6 +25,7 @@
 #define IDLE_NS 1000000000L
 #define READS_PER_PASS 16384        /* single reads issued per pass */
 #define CQES_PER_REAP 32768
+#define HELD_PER_PASS 256           /* parked POSTs released per pass after a hold */
 
 enum { ST_DONE = 0, ST_READ, ST_WRITE };
 
@@ -76,6 +77,7 @@ static int g_narena, g_cur_arena = -1;
 static char *g_scratch;
 static uint32_t g_scratch_off;
 static struct idlist g_ready, g_held, g_rq;
+static uint32_t g_held_off; /* parked POSTs before this index are released */
 static uint32_t g_reads;
 static struct bt_feed g_feed;
 
@@ -409,8 +411,11 @@ static void process_ready(void) {
   free(keep.v);
 }
 
+/* a few per pass, so the parked POSTs do not crowd one pass */
 static void release_held(void) {
-  for (uint32_t i = 0; i < g_held.n; i++) {
+  uint32_t end = g_held_off + HELD_PER_PASS;
+  if (end > g_held.n) end = g_held.n;
+  for (uint32_t i = g_held_off; i < end; i++) {
     struct ring_ctx *r = cid_ring(g_held.v[i]);
     uint32_t slot = g_held.v[i] & 0xffff;
     struct conn *c = &r->conns[slot];
@@ -418,7 +423,8 @@ static void release_held(void) {
     c->flags &= (uint8_t)~CF_HELD;
     conn_ready(r, slot);
   }
-  g_held.n = 0;
+  g_held_off = end;
+  if (end == g_held.n) g_held.n = g_held_off = 0;
 }
 
 static inline uint32_t ring_free(const struct ring_ctx *r) { return r->nslots - r->open - r->acc_inflight; }
@@ -991,7 +997,7 @@ int main(void) {
     /* wait */
 
     /* ring 0 sleeps first, the others are collected after it */
-    int busy = g_ready.n > 0 || g_rq.n > 0;
+    int busy = g_ready.n > 0 || g_rq.n > 0 || (g_held.n && !g_db.writes_held);
     int spread = 0; /* connections or accepts on a ring that cannot wake ring 0 */
     for (int i = 1; i < g_nrings; i++) spread |= g_rings[i].open || g_rings[i].acc_inflight;
     struct ring_ctx *r0 = &g_rings[0];
@@ -1032,7 +1038,8 @@ int main(void) {
     }
     last = g_nbatch;
 
-    if (db_tick(&g_db, g_now_ms)) release_held();
+    db_tick(&g_db, g_now_ms);
+    if (g_held.n && !g_db.writes_held) release_held();
     accept_policy();
     /* the other rings' sends go out now */
     for (int i = 1; i < g_nrings; i++) ring_submit(&g_rings[i]);

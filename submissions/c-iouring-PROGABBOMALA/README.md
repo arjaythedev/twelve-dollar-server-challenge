@@ -60,20 +60,51 @@ batch in one SQLite transaction and then sends the answers.
   once when the cursor is already on that row, so there is no search from the root again. The
   text is read where it lies in SQLite's page, every time, nothing is copied aside or kept after
   the transaction. The cursors are closed before the writes of the pass.
-- **WAL.** PASSIVE checkpoints off the request thread. When the log reaches 4096 frames a nice 19
-  thread copies it twice and syncs the database file after each copy, while writes go on. Then
-  POSTs are held for a moment (250 ms max, GETs continue) and a second thread at normal priority
-  copies the few frames left, so the next write restarts the log from the beginning. The sync
-  before the hold matters: a PASSIVE copy that doesn't reach the end of the log leaves its pages
-  unsynced, and the held copy would have to flush the whole cycle while writes wait.
+- **WAL: the request thread never syncs.** PASSIVE checkpoints run on two helper threads.
+  - Every 4096 frames (16 MiB) a nice 19 thread copies the log to the database and syncs both
+    files, while writes go on. So the disk never gets more than 16 MiB at a time.
+  - Every 32768 frames (128 MiB) the log is restarted. The same thread copies until little is
+    left, then POSTs are parked (GETs continue) and a second thread at normal priority copies
+    the rest.
+  - That second thread then makes the first commit into the restarted log itself, a one-frame
+    transaction that sets `user_version` to the value it already has. SQLite syncs the header
+    of a restarted log inside the first commit that writes to it. Before, that commit was one
+    of mine, on the request thread, and with a slow fsync it stopped every request.
+  - POSTs stay parked until that commit is done: 1 s at most, doubled after a cycle that could
+    not restart the log. Afterwards they are released 256 per pass, so they do not fill a pass.
+  - The header of the first log is written the same way at startup.
 - **File sizes stay put.** The WAL file is not truncated after a restart, the next cycle writes
-  over it. The database file grows in 64 MiB steps (`SQLITE_FCNTL_CHUNK_SIZE`, built with
+  over it (`journal_size_limit` is 512 MiB, only for a log that grew far past its normal size).
+  The database file grows in 64 MiB steps (`SQLITE_FCNTL_CHUNK_SIZE`, built with
   `HAVE_POSIX_FALLOCATE`). A file that changes size makes ext4 commit its journal at the next
   sync, and a commit on the request thread that extends the log at that moment has to wait for it.
 - No printf in the request path.
 
 `RING_SLOTS` and `CKPT_FRAMES` are env vars I use for testing with small values. `start.sh` does
 not set them.
+
+## Changes since #430 (280k)
+
+The #430 run peaked at 1,550 MB of RAM, against 677 MB for #406. I could reproduce it by slowing
+`fsync` and `fdatasync` down with an `LD_PRELOAD` shim (150 ms each), the server in a 1,750 MB
+memory cgroup, 250,000 users from the organizer's `mload`:
+
+- With a slow sync the copy made while POSTs were parked took longer than the 250 ms I allowed,
+  so the log was never restarted. It grew for the whole run (1.7 GB in two minutes) and its page
+  cache filled the cgroup up to the limit.
+- When the restart did work, the first commit after it synced the new log header on the request
+  thread: one pass of 434 ms with the sync at 400 ms, for every request, not only for POSTs.
+  The very first commit after startup did the same (814 ms).
+
+What changed: the checkpoint policy described above (copies every 16 MiB, restart every 128 MiB,
+the restarting commit on the helper thread, a hold that lasts as long as that takes, parked POSTs
+released a few per pass).
+
+Same test after the change, sync at 150 ms: the log restarts every time and stays at 160 MiB, the
+cgroup at 1,250 MB with no reclaim (#430: at the 1,750 MB limit, 534k pages reclaimed), and the
+longest commit on the request thread is under 2 ms with the sync at 400 ms. With a fast disk the
+two versions use the same CPU (40.4% against 41.2% of a core at 22k requests/s). Killed with
+SIGKILL seven times under a write-heavy load, `integrity_check` said ok each time.
 
 ## Changes since #406 (250k)
 
@@ -122,6 +153,9 @@ Code is written from scratch, but these ideas come from other submissions:
   with fallocate
 - #343 go-iouring-trungdlp: entering a ring again when one call did not bring everything
 - #326 objc-uring-delneg: B-tree cursors kept per feed position
+- #250 c-iouring-shivanshthapliyal and #404 c-iouring-jowinjestine: the first commit of a
+  restarted log made by the checkpoint thread, with `user_version`
+- #394 fsharp-uring-delneg: copies of the log more often than holds
 
 ## Build
 

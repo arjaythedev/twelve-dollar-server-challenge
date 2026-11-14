@@ -1,0 +1,81 @@
+{
+  "record_prefix": {
+    "source": "8f7dabd2c934f20abeb8739eec9852eda045e409",
+    "command": "gcc -O2 -march=native -Iruntime -Igen tests/metal/record_micro.c -o /tmp/metal-record-bench; taskset -c 0 /tmp/metal-record-bench 30000000",
+    "remote_log": "results/record-prefix-8f7dabd.txt",
+    "short_ns": {
+      "prefix3": [
+        8.565,
+        8.383,
+        8.756
+      ],
+      "prefix2": [
+        6.266,
+        6.085,
+        6.592
+      ]
+    },
+    "long_ns": {
+      "prefix3": [
+        9.329,
+        9.546,
+        9.216
+      ],
+      "prefix2": [
+        6.68,
+        7.041,
+        6.695
+      ]
+    },
+    "checksums_equal": true
+  },
+  "framing": {
+    "source": "9c2439f7d35190971a7d6e4f5a6c1b76f2af58cd",
+    "capture": "command console output",
+    "command": "gcc -O2 -march=native -Iruntime -Igen tests/metal/framing_cases.c -o /tmp/metal-framing-bench; taskset -c 0 /tmp/metal-framing-bench 20000",
+    "body_bytes": 16000,
+    "fragment_bytes": 31,
+    "stateless_ns": [
+      27014.31,
+      26157.33,
+      26449.41
+    ],
+    "incremental_ns": [
+      1351.54,
+      1378.47,
+      1380.4
+    ],
+    "checksum_each": 321560000
+  },
+  "sanitizers": [
+    {
+      "source": "9c2439f7d35190971a7d6e4f5a6c1b76f2af58cd",
+      "test": "tests/metal/transport_cases.c",
+      "compiler": "gcc -O1 -g -fsanitize=address,undefined -Iruntime -Igen",
+      "result": "passed: fragmented allocations, growth, free-on-idle, write/capacity holds and reset"
+    },
+    {
+      "source": "5a536b3728165d47e9faffdbe452eb9043ba57e9",
+      "test": "tests/metal/sqe_cases.c",
+      "compiler": "gcc -O1 -g -fsanitize=address,undefined -Iruntime -Igen",
+      "result": "passed: private construction, zeroing, tiny queues, tail wrap, EINTR, partial submits and close-pair capacity"
+    },
+    {
+      "source": "8f7dabd2c934f20abeb8739eec9852eda045e409",
+      "test": "tests/metal/batch_cases.c",
+      "command": "bash tests/metal/build.sh 8f7dabd 8f7dabd2c934f20abeb8739eec9852eda045e409 batch; python3 tests/metal/batch_run.py 8f7dabd",
+      "uid": 65534,
+      "result": "passed: read snapshot, exact queues, ordered create/like, error holes, COMMIT rollback and reuse",
+      "note": "ASAN/UBSAN. Leak detection disabled for persistent process-lifetime SQLite/pool state."
+    }
+  ],
+  "assembly": {
+    "tool": "nm -S --size-sort",
+    "control": "1ec22ff7578378e3d965660c89b306f1b7f76769",
+    "candidate": "2eae17a41220b7eb99420b62d473088b939599f1",
+    "control_app_decode_bytes": 5338,
+    "candidate_app_decode_bytes": 2816,
+    "candidate_shared_jwt_verify_bytes": 1378,
+    "candidate_standalone_authenticate": false
+  }
+}

@@ -11,6 +11,7 @@
 #define ROW_NAME_MAX 255
 #define ROW_STAMP_MAX 48
 #define LIKES_SPAN 256       /* widest id range counted with a single index scan */
+#define FEED_SLOTS 32        /* cursor pairs for the feed, picked by post id */
 
 struct bt_spill {
   uint8_t *buf;
@@ -22,6 +23,8 @@ struct btree_state {
   Pgno root_posts, root_users, root_likes_idx, root_posts_idx;
   KeyInfo *ki_likes, *ki_posts_idx;
   BtCursor *cur_posts, *cur_users, *cur_likes, *cur_posts_idx;
+  BtCursor *cur_fpost[FEED_SLOTS], *cur_fuser[FEED_SLOTS];
+  uint32_t fopen; /* slots whose cursors are open in this transaction */
   int ready; /* roots and key infos resolved */
   int open;  /* cursors open in the current transaction */
   struct bt_spill spill_post, spill_user;
@@ -64,6 +67,11 @@ static int bt_setup(struct btree_state *bs, sqlite3 *db) {
   bs->cur_likes = calloc(1, csz);
   bs->cur_posts_idx = calloc(1, csz);
   if (!bs->cur_posts || !bs->cur_users || !bs->cur_likes || !bs->cur_posts_idx) return 0;
+  for (int k = 0; k < FEED_SLOTS; k++) {
+    bs->cur_fpost[k] = calloc(1, csz);
+    bs->cur_fuser[k] = calloc(1, csz);
+    if (!bs->cur_fpost[k] || !bs->cur_fuser[k]) return 0;
+  }
   bs->ready = 1;
   return 1;
 }
@@ -80,11 +88,32 @@ static int bt_open(struct btree_state *bs) {
   if (rc == SQLITE_OK) rc = sqlite3BtreeCursor(bs->pBt, bs->root_likes_idx, 0, bs->ki_likes, bs->cur_likes);
   if (rc == SQLITE_OK) rc = sqlite3BtreeCursor(bs->pBt, bs->root_posts_idx, 0, bs->ki_posts_idx, bs->cur_posts_idx);
   bs->open = 1; /* closing a cursor that was only zeroed is harmless */
+  bs->fopen = 0;
   return rc == SQLITE_OK ? 0 : -1;
+}
+
+static int bt_slot_open(struct btree_state *bs, int k) {
+  sqlite3BtreeCursorZero(bs->cur_fpost[k]);
+  sqlite3BtreeCursorZero(bs->cur_fuser[k]);
+  bs->fopen |= 1u << k;
+  if (sqlite3BtreeCursor(bs->pBt, bs->root_posts, 0, NULL, bs->cur_fpost[k]) != SQLITE_OK) return -1;
+  if (sqlite3BtreeCursor(bs->pBt, bs->root_users, 0, NULL, bs->cur_fuser[k]) != SQLITE_OK) return -1;
+  return 0;
+}
+
+/* closed before the writes of a pass */
+static void bt_feed_close(struct btree_state *bs) {
+  for (uint32_t m = bs->fopen; m; m &= m - 1) {
+    int k = __builtin_ctz(m);
+    sqlite3BtreeCloseCursor(bs->cur_fpost[k]);
+    sqlite3BtreeCloseCursor(bs->cur_fuser[k]);
+  }
+  bs->fopen = 0;
 }
 
 static void bt_close(struct btree_state *bs) {
   if (!bs->open) return;
+  bt_feed_close(bs);
   sqlite3BtreeCloseCursor(bs->cur_posts);
   sqlite3BtreeCloseCursor(bs->cur_users);
   sqlite3BtreeCloseCursor(bs->cur_likes);
@@ -223,12 +252,12 @@ struct bt_post {
   uint32_t likes;
 };
 
-static int bt_post_seek(struct btree_state *bs, int64_t id, struct bt_post *o) {
+static int bt_post_at(BtCursor *cur, struct bt_spill *sp, int64_t id, struct bt_post *o) {
   int res = 0;
-  if (sqlite3BtreeTableMoveto(bs->cur_posts, id, 0, &res) != SQLITE_OK) return -1;
+  if (sqlite3BtreeTableMoveto(cur, id, 0, &res) != SQLITE_OK) return -1;
   if (res != 0) return 0;
   uint32_t n;
-  const uint8_t *p = bt_payload(bs->cur_posts, &n, &bs->spill_post);
+  const uint8_t *p = bt_payload(cur, &n, sp);
   struct bt_col c[4]; /* id (NULL: it is the rowid), user_id, body, created_at */
   if (!p || bt_cols(p, n, c, 4) || !bt_is_int(&c[1]) || !bt_is_text(&c[2]) || !bt_is_text(&c[3])) return -1;
   o->id = id;
@@ -240,16 +269,24 @@ static int bt_post_seek(struct btree_state *bs, int64_t id, struct bt_post *o) {
   return 1;
 }
 
-static int bt_user_seek(struct btree_state *bs, struct bt_post *o) {
+static int bt_user_at(BtCursor *cur, struct bt_spill *sp, struct bt_post *o) {
   int res = 0;
-  if (sqlite3BtreeTableMoveto(bs->cur_users, o->uid, 0, &res) != SQLITE_OK || res != 0) return -1;
+  if (sqlite3BtreeTableMoveto(cur, o->uid, 0, &res) != SQLITE_OK || res != 0) return -1;
   uint32_t n;
-  const uint8_t *p = bt_payload(bs->cur_users, &n, &bs->spill_user);
+  const uint8_t *p = bt_payload(cur, &n, sp);
   struct bt_col c[2]; /* id (NULL), username */
   if (!p || bt_cols(p, n, c, 2) || !bt_is_text(&c[1])) return -1;
   o->name = c[1].p;
   o->name_len = c[1].n;
   return 0;
+}
+
+static int bt_post_seek(struct btree_state *bs, int64_t id, struct bt_post *o) {
+  return bt_post_at(bs->cur_posts, &bs->spill_post, id, o);
+}
+
+static int bt_user_seek(struct btree_state *bs, struct bt_post *o) {
+  return bt_user_at(bs->cur_users, &bs->spill_user, o);
 }
 
 /* 1 = exists, 0 = missing, -1 = error. */
@@ -297,25 +334,33 @@ static int bt_feed(struct btree_state *bs, struct bt_feed *f) {
     if (rc != SQLITE_OK) return -1;
   }
 
-  int ord[FEED_N];
-  for (int i = 0; i < n; i++) {
-    int k = i;
-    while (k > 0 && ids[ord[k - 1]] > ids[i]) {
-      ord[k] = ord[k - 1];
-      k--;
-    }
-    ord[k] = i;
+  int64_t lo = ids[0], hi = ids[0];
+  for (int i = 1; i < n; i++) {
+    if (ids[i] < lo) lo = ids[i];
+    if (ids[i] > hi) hi = ids[i];
   }
-  int64_t lo = ids[ord[0]], hi = ids[ord[n - 1]];
 
   uint32_t cnt[LIKES_SPAN];
   int ranged = hi - lo < LIKES_SPAN;
   if (ranged && bt_likes_range(bs, lo, hi, cnt)) return -1;
 
+  /* a cursor pair per post, kept for the transaction */
   uint8_t *w = f->text;
-  for (int k = 0; k < n; k++) {
-    struct bt_post *o = &f->row[ord[k]];
-    if (bt_post_seek(bs, ids[ord[k]], o) != 1) return -1;
+  uint32_t used = 0;
+  for (int i = 0; i < n; i++) {
+    struct bt_post *o = &f->row[i];
+    int k = (int)(ids[i] & (FEED_SLOTS - 1));
+    uint32_t bit = 1u << k;
+    if (!(used & bit)) {
+      used |= bit;
+      if (!(bs->fopen & bit) && bt_slot_open(bs, k)) return -1;
+      if (bt_post_at(bs->cur_fpost[k], NULL, ids[i], o) == 1 && bt_user_at(bs->cur_fuser[k], NULL, o) == 0) {
+        o->likes = 0;
+        goto likes;
+      }
+    }
+    /* slot taken by another id: shared cursors, text copied */
+    if (bt_post_seek(bs, ids[i], o) != 1) return -1;
     if (o->body_len > ROW_BODY_MAX || o->stamp_len > ROW_STAMP_MAX) return -1;
     memcpy(w, o->body, o->body_len);
     o->body = w;
@@ -327,6 +372,7 @@ static int bt_feed(struct btree_state *bs, struct bt_feed *f) {
     memcpy(w, o->name, o->name_len);
     o->name = w;
     w += o->name_len;
+  likes:
     if (ranged) {
       o->likes = cnt[o->id - lo];
     } else {

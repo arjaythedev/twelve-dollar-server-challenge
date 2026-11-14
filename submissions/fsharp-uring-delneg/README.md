@@ -54,7 +54,11 @@
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
   (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  most 250 ms, with one exception. Late in a long run a pass can take a second or more on the disk. A hold that times out
+  lets writes in, but the next hold starts at once on the same pass, and the writes it lets in keep the WAL from
+  rewinding when that pass ends. Without the exception, no hold would complete and the WAL would grow. So the hold that
+  starts on a pass an earlier hold already timed out on waits up to 1.5 s for it (`HOLDRIDE`), and the pass after it
+  gets the usual 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
   them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
   reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
   of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes
@@ -132,7 +136,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
 line a second on stderr).
 

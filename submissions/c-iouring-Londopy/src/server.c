@@ -69,6 +69,7 @@ enum {
     F_CLOSE_DEFERRED = 32, /* close once that SHUTDOWN completes */
     F_SENDING = 64,        /* a SEND SQE is outstanding */
     F_EOF = 128,           /* the client half-closed: finish what's owed, then close */
+    F_READY = 256,         /* on the ready list: a stashed request waits its turn (see run_ready) */
 };
 
 /* An output run queued behind the connection's in-flight SEND. io_uring doesn't
@@ -87,7 +88,8 @@ struct conn {
     uint32_t qbytes; /* bytes queued plus in flight */
     uint32_t sending_len; /* length of the in-flight SEND */
     uint16_t gen;
-    uint8_t state, flags;
+    uint8_t state;
+    uint16_t flags;
 };
 
 struct ring {
@@ -374,8 +376,8 @@ static void conn_close(struct ring *r, unsigned slot) {
  * connections can hold that off indefinitely. SHUTDOWN sends the FIN now. */
 static void close_if_done(struct ring *r, unsigned slot) {
     struct conn *c = &r->conns[slot];
-    if (c->state == C_OPEN && (c->flags & F_EOF) && !(c->flags & (F_WRITE_PENDING | F_SENDING)) && !c->pq)
-        conn_shutdown(r, slot);
+    if (c->state == C_OPEN && (c->flags & F_EOF) && !(c->flags & (F_WRITE_PENDING | F_SENDING | F_READY)) && !c->pq)
+        conn_shutdown(r, slot); /* F_READY: a stashed request is still owed its answer */
 }
 
 static void flush_out(struct ring *r, unsigned slot, struct out *o) {
@@ -829,6 +831,15 @@ static long parse_request(const char *p, size_t n, struct req *q, int *expect_co
     return (long)(hlen + clen);
 }
 
+/* A first buffer is sized to what it must hold (to 64 bytes): after a stall
+ * every connection may have a request stashed, and 300k of them at 1 KiB each
+ * would be 300 MB where ~100 MB does. Growth doubles. */
+static inline size_t pbuf_cap(size_t cur, size_t need) {
+    if (!cur) return (need + 63) & ~(size_t)63;
+    while (cur < need) cur *= 2;
+    return cur;
+}
+
 static void pbuf_store(struct conn *c, const char *p, size_t n) {
     if (n == 0) { /* idle connections hold no buffer */
         g_pbuf_bytes -= c->pcap;
@@ -838,8 +849,7 @@ static void pbuf_store(struct conn *c, const char *p, size_t n) {
         return;
     }
     if (c->pcap < n) {
-        size_t cap = c->pcap ? c->pcap : 1024;
-        while (cap < n) cap *= 2;
+        size_t cap = pbuf_cap(c->pcap, n);
         char *nb = malloc(cap);
         if (!nb) abort();
         free(c->pbuf);
@@ -854,8 +864,7 @@ static void pbuf_store(struct conn *c, const char *p, size_t n) {
 static void pbuf_append(struct conn *c, const char *p, size_t n) {
     size_t need = (size_t)c->plen + n;
     if (need > c->pcap) {
-        size_t cap = c->pcap ? c->pcap : 1024;
-        while (cap < need) cap *= 2;
+        size_t cap = pbuf_cap(c->pcap, need);
         char *nb = realloc(c->pbuf, cap);
         if (!nb) abort();
         g_pbuf_bytes += cap - c->pcap;
@@ -907,7 +916,7 @@ static void process(struct ring *r, unsigned slot, const char *data, size_t n) {
             }
             break;
         }
-        c->flags &= (uint8_t)~F_CONTINUED;
+        c->flags &= (uint16_t)~F_CONTINUED;
         handle(r, slot, &o, &q);
         off += (size_t)k;
     }
@@ -924,19 +933,95 @@ static void process(struct ring *r, unsigned slot, const char *data, size_t n) {
     }
 }
 
+/* ---------- overload: drain first, answer in order ----------
+ *
+ * After a stall (a checkpoint, a noisy neighbour, a burst), every connection can
+ * have a request waiting. Left in its socket, each costs the kernel 2-4 KB of
+ * receive buffer: at 270k connections that is over 500 MB, and on the 2 GB box
+ * the kernel then prunes queues, drops connections and finally kills the
+ * server. So reading and answering are decoupled:
+ *  - a pass answers at most ANSWER_BUDGET requests. Past that, an arriving
+ *    request is copied into the connection's own buffer (a few hundred bytes)
+ *    and the connection goes on the ready list;
+ *  - each pass starts by answering from the ready list, oldest first, before
+ *    anything that arrives in that pass;
+ *  - the sockets are emptied in rounds (see the loop in main), each re-arming
+ *    only as many receives as the pool has buffers, so they don't end in
+ *    ENOBUFS over and over.
+ * While anything is listed or waiting to be re-armed, the loop neither naps
+ * nor idles. */
+#ifndef ANSWER_BUDGET /* -DANSWER_BUDGET=1 sends every request through the ready list (testing) */
+#define ANSWER_BUDGET 2048
+#endif
+#define READ_ROUNDS 8
+struct ready {
+    uint16_t ring, slot, gen;
+};
+static struct ready *g_ready; /* a ring buffer, g_ready_cap a power of two */
+static unsigned g_ready_head, g_ready_n, g_ready_cap;
+static unsigned g_budget;
+static uint64_t g_stashed; /* requests that waited on the ready list (DEBUG stats) */
+
+static void ready_push(struct ring *r, unsigned slot) {
+    struct conn *c = &r->conns[slot];
+    if (c->flags & F_READY) return;
+    if (g_ready_n == g_ready_cap) {
+        unsigned cap = g_ready_cap ? g_ready_cap * 2 : 4096;
+        struct ready *nq = malloc(cap * sizeof *nq);
+        if (!nq) abort();
+        for (unsigned i = 0; i < g_ready_n; i++) nq[i] = g_ready[(g_ready_head + i) & (g_ready_cap - 1)];
+        free(g_ready);
+        g_ready = nq;
+        g_ready_cap = cap;
+        g_ready_head = 0;
+    }
+    g_ready[(g_ready_head + g_ready_n++) & (g_ready_cap - 1)] =
+        (struct ready){(uint16_t)r->idx, (uint16_t)slot, c->gen};
+    c->flags |= F_READY;
+    g_stashed++;
+}
+
 static void on_data(struct ring *r, unsigned slot, const char *data, size_t n) {
     struct conn *c = &r->conns[slot];
     int hold = c->qbytes > OUT_LIMIT || (c->flags & F_WRITE_PENDING);
-    if (hold || c->plen) {
+    if (hold || c->plen || !g_budget) {
         if (pbuf_over(c, n)) { /* a client that sends without reading */
             pbuf_store(c, NULL, 0);
             conn_shutdown(r, slot);
             return;
         }
         pbuf_append(c, data, n);
-        if (!hold) process(r, slot, c->pbuf, c->plen);
+        if (hold) return; /* the commit or the send completion resumes it */
+        if (g_budget && !(c->flags & F_READY)) {
+            g_budget--;
+            process(r, slot, c->pbuf, c->plen);
+        } else {
+            ready_push(r, slot); /* keeps its place if it's already listed */
+        }
     } else {
+        g_budget--;
         process(r, slot, data, n);
+    }
+}
+
+/* Answers stashed requests, oldest first, within the pass's budget. */
+static void run_ready(void) {
+    while (g_budget && g_ready_n) {
+        struct ready e = g_ready[g_ready_head];
+        g_ready_head = (g_ready_head + 1) & (g_ready_cap - 1);
+        g_ready_n--;
+        struct ring *r = &g_rings[e.ring];
+        struct conn *c = &r->conns[e.slot];
+        if (c->state != C_OPEN || c->gen != e.gen || !(c->flags & F_READY)) continue; /* closed since */
+        c->flags &= (uint16_t)~F_READY;
+        /* behind a write or a client that isn't reading: the commit or the send
+         * resumes it (and closes a half-closed connection once it's answered) */
+        if ((c->flags & (F_WRITE_PENDING | F_SHUT)) || c->qbytes > OUT_LIMIT) continue;
+        if (c->plen) {
+            g_budget--;
+            process(r, e.slot, c->pbuf, c->plen);
+        }
+        close_if_done(r, e.slot); /* the client may have half-closed while this waited */
     }
 }
 
@@ -1029,7 +1114,7 @@ static void commit_writes(void) {
             body_finish(&o, 201, b, e);
         }
         flush_out(r, j->slot, &o);
-        c->flags &= (uint8_t)~F_WRITE_PENDING;
+        c->flags &= (uint16_t)~F_WRITE_PENDING;
         if (c->plen) process(r, j->slot, c->pbuf, c->plen);
         close_if_done(r, j->slot);
     }
@@ -1119,7 +1204,7 @@ static void on_cqe(struct ring *r, struct io_uring_cqe *cqe) {
         chunk_release(UD_CHUNK(u));
         struct conn *c = &r->conns[slot];
         if (c->gen != gen || c->state != C_OPEN) break; /* a closed connection's send */
-        c->flags &= (uint8_t)~F_SENDING;
+        c->flags &= (uint16_t)~F_SENDING;
         c->qbytes -= c->sending_len;
         /* MSG_WAITALL: anything short of the full length means the socket failed */
         if (res < 0 || (uint32_t)res != c->sending_len) {
@@ -1169,9 +1254,9 @@ static void on_cqe(struct ring *r, struct io_uring_cqe *cqe) {
     case OP_SHUT: {
         struct conn *c = &r->conns[slot];
         if (c->gen != gen) break; /* can't happen: the slot stays allocated until now */
-        c->flags &= (uint8_t)~F_SHUT_INFLIGHT;
+        c->flags &= (uint16_t)~F_SHUT_INFLIGHT;
         if (c->state == C_CLOSING && (c->flags & F_CLOSE_DEFERRED)) {
-            c->flags &= (uint8_t)~F_CLOSE_DEFERRED;
+            c->flags &= (uint16_t)~F_CLOSE_DEFERRED;
             submit_close(r, slot);
         } else if (c->state == C_OPEN && (c->flags & F_EOF)) {
             conn_close(r, slot); /* the recv already ended; nothing else will close it */
@@ -1223,7 +1308,9 @@ static void flush_freed(struct ring *r) {
 static void grow_bufs(struct ring *r) {
     r->bufs_short = 0;
     unsigned add = r->nbuf_live;
-    if (add > NBUF - r->nbuf_live) add = NBUF - r->nbuf_live;
+    /* a backlog bigger than the pool (after a stall): go straight to the cap,
+     * since the read rounds are sized by the pool */
+    if (add > NBUF - r->nbuf_live || r->nrearm > r->nbuf_live) add = NBUF - r->nbuf_live;
     for (unsigned i = 0; i < add; i++) {
         unsigned bid = r->nbuf_live + i;
         if (r->legacy_bufs) {
@@ -1259,10 +1346,12 @@ static unsigned drain_cq(struct ring *r) {
 
 static void do_rearms(struct ring *r) {
     unsigned n = r->nrearm, done = 0;
-    for (; done < n && done < 4096; done++) {
+    /* no more than the pool can serve: each re-armed receive finds its data
+     * waiting and takes a buffer at once */
+    for (; done < n && done < r->nbuf_live; done++) {
         unsigned slot = r->rearm[done];
         struct conn *c = &r->conns[slot];
-        c->flags &= (uint8_t)~F_REARM;
+        c->flags &= (uint16_t)~F_REARM;
         if (c->state != C_OPEN) continue;
         if (c->flags & F_SHUT) conn_close(r, slot); /* no recv left to see the shutdown */
         else arm_recv(r, slot);
@@ -1448,6 +1537,7 @@ static int64_t env_int(const char *name, int64_t def) {
 
 /* Anything for the next pass to do on any ring? */
 static int rings_pending(void) {
+    if (g_ready_n) return 1;
     for (int i = 0; i < g_nrings; i++) {
         struct ring *r = &g_rings[i];
         if (r->sqe_tail != r->submitted || r->nrearm ||
@@ -1649,11 +1739,12 @@ int main(void) {
             fprintf(stderr,
                     "stats: accepts=%lu accept_errs=%lu eofs=%lu recv_errs=%lu closes=%lu rearm_nobufs=%lu "
                     "rearm_final=%lu sends=%lu send_errs=%lu chunks=%u free=%u cur_refs=%u wal=%u taskrun_clears=%lu "
-                    "bufs=%u cache_misses=%lu busy_pct=%d napping=%d nap_us=%d batch=%d nap_backoffs=%lu\n",
+                    "bufs=%u cache_misses=%lu busy_pct=%d napping=%d nap_us=%d batch=%d nap_backoffs=%lu ready=%u stashed=%lu pbuf_mb=%lu\n",
                     st.accepts, st.accept_errs, st.eofs, st.recv_errs, st.closes, st.rearm_nobufs, st.rearm_final,
                     st.sends, st.send_errs, g_nchunks, g_nfree, g_chunks[g_cur].refs, db_wal_frames(),
                     st.taskrun_clears, g_rings[0].nbuf_live, db_cache_misses(), (int)(g_busy * 100 + 0.5), g_napping,
-                    (int)g_nap_us, (int)(g_batch_ewma + 0.5), g_nap_backoffs);
+                    (int)g_nap_us, (int)(g_batch_ewma + 0.5), g_nap_backoffs, g_ready_n, g_stashed,
+                    (unsigned long)(g_pbuf_bytes >> 20));
 #ifdef PROF
             /* cycles per call, and calls; the TSC rate turns cycles into time */
             fprintf(stderr, "prof (cycles/call x calls):");
@@ -1676,6 +1767,8 @@ int main(void) {
         st.passes++;
         unsigned events = 0;
         g_pass_data = 0;
+        g_budget = ANSWER_BUDGET;
+        run_ready();
         for (int i = 0; i < g_nrings; i++) {
             struct ring *r = &g_rings[i];
             unsigned sqf = __atomic_load_n(r->sq_flags, __ATOMIC_RELAXED);
@@ -1701,6 +1794,20 @@ int main(void) {
             events += drain_cq(r);
             PROF_T1(P_DRAIN);
         }
+        /* After a stall: empty the sockets in rounds (read, stash, re-arm), so
+         * waiting requests sit in small user buffers, not in kernel memory. */
+        for (int round = 0; round < READ_ROUNDS; round++) {
+            int any = 0;
+            for (int i = 0; i < g_nrings; i++) {
+                struct ring *r = &g_rings[i];
+                if (!r->nrearm) continue;
+                do_rearms(r);
+                ring_enter(r, 0, NULL);
+                events += drain_cq(r);
+                any = 1;
+            }
+            if (!any) break;
+        }
         PROF_T0(P_READEND);
         db_read_end();
         PROF_T1(P_READEND);
@@ -1724,7 +1831,7 @@ int main(void) {
                 idle_wait(wait_us);
                 g_win_sleep_us += mono_now_us() - t0;
             }
-        } else if ((pace = nap_length()) > 0 && g_pass_data) {
+        } else if (!g_ready_n && (pace = nap_length()) > 0 && g_pass_data) {
             /* Pacing: let completions pile up so each enter does more work. Submit
              * what this pass queued on every ring first, so no response waits out
              * the pause. Only passes that received requests pause: one that only

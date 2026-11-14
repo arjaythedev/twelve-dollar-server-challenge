@@ -710,6 +710,10 @@ the loop is behind) held **280,000** (26,722 req/s, p95 68.8 / p99 220.5 ms, 0 e
 connect p99 1,031 ms, which k6 counts outside request latency; 2026-11-14), below the merged row, so not merged:
 290,000 failed the 2-minute probe on p99 (4.11 s at 83 % CPU), 300,000 on p99 (3.24 s at 86 % CPU) and 320,000 on p99
 (8.58 s, 0.1 % timeouts, 97 % CPU). #435 stays open; whether connect-time waits should count is a question for Arjay.
+**#441** (`e3070c5`: #432's shim fix plus 4,096-frame checkpoints; PGO build worked on the second attempt) held
+**260,000** (25,001 req/s, p95 40.6 / p99 157.2 ms, 0 err, 73 % CPU, 27 µs/req, 1,432 MB, 2026-11-14), below the
+merged row, so not merged: 270,000 failed the 2-minute probe on p99 (4.19 s at 78 % CPU), 280,000 on p99 (16.2 s at
+84 % CPU) and 320,000 on p99 (11.2 s at 93 % CPU), all with 0 errors. #441 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

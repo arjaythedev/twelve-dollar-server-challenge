@@ -20,7 +20,7 @@
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
-static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
+static int ckpt_frames = 4096;   /* WAL frames (16 MB) after which the bulk thread copies the log back */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
 static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
@@ -203,14 +203,21 @@ static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
   if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
   /* A write that does not continue the buffered run (the first after open, the first after
    * another connection restarted the log, a header rewrite) starts a new run: the old one goes
-   * out first. It must not bypass the buffer, or a frame header would lose its commit flag and
-   * the page behind it would wait in user space after COMMIT returned. */
-  if (off != f->last_end || f->len + n > WAL_BUF_CAP) {
+   * out first and no commit is pending. A write that continues the run but does not fit flushes
+   * the run too, but keeps the commit flag: the flag belongs to the frame header that just went
+   * out, and the page that follows it must still go out before COMMIT returns (a commit of 32
+   * frames or more overflows the buffer; before this, such a commit left its last page in user
+   * space, and a checkpoint reading that frame copied garbage into the database). It must not
+   * bypass the buffer either, for the same reason. */
+  if (off != f->last_end) {
     WF_FLUSH(p);
     f->commit = 0;
+  } else if (f->len + n > WAL_BUF_CAP) {
+    WF_FLUSH(p);
   }
   f->last_end = off + n;
   if (n > WAL_BUF_CAP || (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))) {
+    WF_FLUSH(p); /* nothing of this transaction may stay behind a write that goes out directly */
     f->commit = 0;
     return f->real->pMethods->xWrite(f->real, b, n, off);
   }

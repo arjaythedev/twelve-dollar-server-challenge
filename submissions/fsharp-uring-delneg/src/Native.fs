@@ -53,6 +53,9 @@ extern int setpriority(int which, int who, int prio)
 [<DllImport(L)>]
 extern int gettid()
 
+[<DllImport(L)>]
+extern int usleep(uint32 usec)
+
 [<DllImport(L, SetLastError = true)>]
 extern int ``open``(byte[] path, int flags)
 

@@ -952,7 +952,12 @@ a checkpoint hold may ride up to 1.5 s, `HOLDRIDE`) held **300,000** at 81 % CPU
 764.8 ms, 0 errors, 1,480 MB; 310k failed the 2-minute probe on p99 3.40 s, 320k on p99 2.40 s), which also ties
 #398's 300,000, so #437 is not merged. Its newer head (`6a1c5fb`, 2026-11-14: `HOLDRIDE` plus no
 `TCP_DEFER_ACCEPT`) held **300,000** at 81 % CPU (28,376 req/s, p95 58.7 / p99 914.8 ms, 0 errors, 1,421 MB; 310k
-failed the 2-minute probe on p99 2.35 s, 320k on p99 4.36 s), again a tie, so #437 is still not merged.
+failed the 2-minute probe on p99 2.35 s, 320k on p99 4.36 s), again a tie, so #437 is still not merged. #437's next
+head (`10ad775`, 2026-11-14: admission at the door as in #435, no accepting while the loop is behind, plus an adaptive
+checkpoint hold and accept on handshake) held **290,000** at 79 % CPU (27,591 req/s, p95 38.3 / p99 271.7 ms, 0
+errors, 707 MB; TCP connect p99 1,052 ms, which k6 counts outside request latency; 300k failed the 2-minute probe on
+p99 2.09 s, 320k on p99 2.57 s), below #398's 300,000, so #437 is still not merged. Whether connect-time waits should
+count is the same open question for Arjay as on #435.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

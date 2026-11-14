@@ -10,7 +10,8 @@
 // Every query runs in the route, on the worker: SQLite answers from its page
 // cache, so a query is CPU work, which a lane would only move to another
 // thread on the same core. Each write commits on its own, in WAL with
-// synchronous=NORMAL, before the route answers.
+// synchronous=NORMAL, before the route answers. Copying the WAL back into the
+// database waits on fsyncs, so that runs on the checkpoint lane.
 import std;
 import os;
 import json;
@@ -21,11 +22,27 @@ import sqlite;
 
 struct St {}
 
-// The worker state: its connection, and the key tokens are signed with.
+// The worker state: its connection, the key tokens are signed with, and the
+// checkpoint lane with the writes since it was last asked.
 struct App {
     db: sqlite::Conn&,
     keys: const plod::JwtKey[:],
     started_ns: i64,
+    checkpoints: http::Lane,
+    writes: i64 = 0,
+}
+
+// A write adds about 4 pages to the WAL: the lane is asked to copy it back
+// at about 4,096.
+let CHECKPOINT_WRITES = 1024;
+
+// Counts a write that changed the database, and asks the lane for a
+// checkpoint once enough have; while its box is full, the next write asks.
+fn wrote(cx) {
+    cx.app.writes++;
+    if cx.app.writes >= CHECKPOINT_WRITES && http::lane_send(cx.app.checkpoints, 0, "") == http::SENT {
+        cx.app.writes = 0;
+    }
 }
 
 // The post object's columns, in the order post writes them.
@@ -126,6 +143,7 @@ fn create(cx, user: i64, name: const u8[:]) {
             out.append(",\"like_count\":0}}");
         };
     };
+    wrote(cx);
     plod::json_bytes(cx, 201, out);
 }
 
@@ -137,6 +155,7 @@ fn like(cx, user: i64, id: i64) {
         if added == 0 { exists = sqlite::query(cx.app.db, POST_EXISTS, id) { r => }; }
     };
     guard added > 0 || exists > 0 else { plod::fail(cx, 404, "post not found"); }
+    if added > 0 { wrote(cx); }
     var out: u8[>..] = [];
     out.append("{\"liked\":true,\"already_liked\":");
     out.append(if added > 0 { "false" } else { "true" });

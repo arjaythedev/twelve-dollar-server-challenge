@@ -345,9 +345,20 @@ static void begin_resp(int status, int close) {
   cl_pos = alen - 10; body_start = alen;
 }
 
-static void finish(void) {
+static inline void finish(void) {
   size_t n = alen - body_start; char *p = arena + cl_pos + 6;
-  do { *--p = '0' + n % 10; n /= 10; } while (n);
+  while (n >= 100) {
+    uint32_t r = (uint32_t)(n % 100);
+    n /= 100;
+    p -= 2;
+    memcpy(p, &digits[r * 2], 2);
+  }
+  if (n >= 10) {
+    p -= 2;
+    memcpy(p, &digits[n * 2], 2);
+  } else {
+    *--p = (char)('0' + n);
+  }
 }
 
 static void err(int status, const char *msg, int close) {

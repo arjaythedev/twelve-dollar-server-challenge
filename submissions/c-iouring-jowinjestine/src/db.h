@@ -20,7 +20,7 @@
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
-static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
+static int ckpt_frames = 4096;   /* WAL frames (16 MB) after which the bulk thread copies the log back */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
 static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */

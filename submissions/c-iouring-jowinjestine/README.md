@@ -131,10 +131,17 @@ mostly idle sockets under `LimitNOFILE=65535`.
   every slot). The idea is from c-iouring-pavlyhalim #245. The cache's memory comes from one arena
   handed to SQLite with `SQLITE_CONFIG_PAGECACHE`, backed by transparent huge pages where the kernel
   offers them.
+- **A short log.** At 270-300k connections the kernel holds ~4.1 KB per connection (the TCP socket
+  2.4 KB, its inode 0.8 KB, file and dentry 0.45 KB, the armed receive 0.35 KB), so free memory reaches
+  the reclaim watermark at about the end of the ramp, and from then on the kernel evicts file pages to
+  make room. With 64 MB checkpoint cycles the log grew to ~100 MB of page cache and the database's pages
+  were evicted instead; with 16 MB cycles the log stays small and the database keeps its pages. In a
+  1 vCPU / 2 GB guest at the edge (270k, CPU capped to the box's speed) the worst ramp-end window fell
+  from 3.4-3.8 s to 1.9 s in two pairs of runs.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
-  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
+  rust-iouring-kensac #264, changed for one vCPU). Past 4,096 WAL frames (16 MB) a thread at
   nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
   writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
   fully copied; so that thread runs pass after pass, each copying what the previous one missed,

@@ -48,22 +48,58 @@ no C: `app.goose` is the whole application, about 250 lines.
 - **The single post's query** reads the author with a subquery, not a join. With the
   join, SQLite's constant propagation reads the bound id while planning, and
   re-prepares the statement for every request.
-- **Pragmas**: `locking_mode = EXCLUSIVE`, as the one process holds the database
-  alone: its lock is taken once, and the WAL index lives in memory, not in a shared
-  file. `cache_size` 16 MB, which leaves page reads at 0.03 a request, and
-  `wal_autocheckpoint` 16,000 pages. No `mmap`: with it, every page read looks the
-  page up in the WAL index, which was a third of the instructions in a profile.
+- **A checkpoint lane.** Copying the WAL back into the database waits on fsyncs, and
+  on the worker that wait stalls every connection. A goose-http lane, a thread with
+  its own connection, runs a PASSIVE checkpoint every 1,024 writes, about 4,000 WAL
+  pages; PASSIVE never holds up the worker's writes. Writes keep arriving while it
+  runs, so it never empties the WAL itself: the worker's own checkpoint, at 16,000
+  pages (`wal_autocheckpoint`), copies only what is left and lets the WAL start over.
+- **The `unix-excl` VFS.** Both connections open the database as a `file:` URI on
+  SQLite's `unix-excl` VFS, as the one process holds the database alone: the file is
+  locked once, and the two connections share the WAL index in memory, with no `-shm`
+  file and no file locks per transaction.
+- **Pragmas**: `cache_size` 16 MB on the worker, which leaves page reads at 0.03 a
+  request. No `mmap`: with it, every page read looks the page up in the WAL index,
+  which was a third of the instructions in a profile.
 - **JSON strings** go through `http::json_string`, which finds what to escape with
   std's `find_any`, not a byte-at-a-time loop.
 
 ## Measured
 
-The first version, without `ring_buffers`, held 115,000 users on the board; it ran
-at half the CPU during the hold, and at 120,000 failed at 97% with timeouts. Past
-the CPU it has, connections queue, many are ready in each pass, and 64 buffers
-leave the rest re-queuing their receives. In Docker on an M1 Pro (Linux arm64),
-the server held to 0.4 CPU so that k6 saturates it (20,000 users, think times
-divided by 10, 60 s after a 15 s ramp), two alternating runs each:
+The first version, without `ring_buffers` or the lane, held 115,000 users on the
+board; it ran at half the CPU during the hold, and at 120,000 failed at 97% with
+timeouts. Past the CPU it has, connections queue, many are ready in each pass, and
+64 buffers leave the rest re-queuing their receives.
+
+On x86-64: an AMD Ryzen 7 5800X3D, Ubuntu 26.04 in WSL2 on Linux
+6.18.58.1-microsoft-standard-WSL2, Docker 29.8.2; the server in a container of 2 GB,
+k6 1.3.0 in another, `bench/load.js` with its think times divided by 20, 60 s after a
+15 s ramp, the three builds alternating, three rounds; kensac once at each load.
+With the server held to 0.4 CPU so that k6 saturates it, at 10,000 users:
+
+| Build | req/s | p95 | p99 | max | µs a request |
+|---|---:|---:|---:|---:|---:|
+| first version, 64 buffers | 9,897 to 9,931 | 529 to 551 ms | 623 to 878 ms | 853 to 2,493 ms | 35.1 to 35.2 |
+| 1,024 buffers | 10,982 to 11,181 | 413 to 432 ms | 501 to 532 ms | 585 to 765 ms | 31.2 to 31.7 |
+| 1,024 buffers and the lane (`start.sh`) | 11,274 to 11,405 | 331 to 348 ms | 366 to 475 ms | 452 to 629 ms | 30.9 to 31.4 |
+| rust-iouring-kensac | 13,454 | 184 ms | 204 ms | 286 ms | 25.6 |
+
+Below capacity, at 1 CPU and 4,000 users (6,500 requests a second):
+
+| Build | req/s | p95 | p99 | max | µs a request |
+|---|---:|---:|---:|---:|---:|
+| first version, 64 buffers | 6,557 to 6,563 | 1.7 ms | 116 to 124 ms | 218 to 237 ms | 32.3 to 32.6 |
+| 1,024 buffers | 6,544 to 6,563 | 1.7 ms | 115 to 123 ms | 237 to 254 ms | 32.3 to 32.6 |
+| 1,024 buffers and the lane (`start.sh`) | 6,586 to 6,591 | 1.6 ms | 2.5 to 2.7 ms | 58 to 82 ms | 32.5 to 32.7 |
+| rust-iouring-kensac | 6,588 | 1.4 ms | 1.8 ms | 28 ms | 27.1 |
+
+The buffers give 12% more requests a second past capacity, at 11% less CPU a
+request, and change nothing below it. The lane takes the checkpoint's wait off the
+worker: below capacity, that wait was the whole p99.
+
+In Docker on an M1 Pro (Linux arm64), the server held to 0.4 CPU so that k6
+saturates it (20,000 users, think times divided by 10, 60 s after a 15 s ramp), two
+alternating runs each, before the lane:
 
 | Build | req/s | p95 | p99 | µs a request |
 |---|---:|---:|---:|---:|
@@ -72,7 +108,8 @@ divided by 10, 60 s after a 15 s ramp), two alternating runs each:
 
 Below saturation the two are level: at 1 CPU and 8,000 requests a second, p99 11 to
 33 ms against 10 to 26 ms, and 21.5 to 21.7 µs a request against 21.3 to 23.3,
-three runs each.
+three runs each. On the Mac the lane was level with the buffers alone at both
+loads, and cut p99 in half only with fsyncs slowed to 20 ms.
 
 The measurements below are of the first version, at 4,000 users.
 

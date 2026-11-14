@@ -27,7 +27,7 @@ trap cleanup EXIT
 
 start() {
   SQLITE_PATH="$WORK/feed.db" JWT_SECRET=twelve-dollar-challenge \
-    HOST=127.0.0.1 PORT="$PORT" FEED_WORKERS=1 "$HERE/bin/feed" >>"$WORK/log" 2>&1 &
+    HOST=127.0.0.1 PORT="$PORT" FEED_WORKERS="${FEED_WORKERS:-1}" "$HERE/bin/feed" >>"$WORK/log" 2>&1 &
   SERVER=$!
   for _ in $(seq 300); do
     curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && return 0

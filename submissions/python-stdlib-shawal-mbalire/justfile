@@ -1,0 +1,56 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+set positional-arguments := true
+
+root := justfile_directory()
+repo := root / ".." / ".."
+folder := file_name(root)
+secret := "twelve-dollar-challenge"
+fastapi := repo / "submissions" / "python-fastapi-granian-shawal-mbalire"
+
+# list recipes
+default:
+    @just --list
+
+# .venv/ (no packages) on the first Python >= 3.14 on PATH; build.sh without PYTHON compiles the pinned 3.15 instead
+[group: "dev"]
+setup:
+    @PYTHON="$(just _python)" python3 {{root}}/infra/ops.py build
+
+# serve on 127.0.0.1:3000 against build/feed.db (copied from the seed on first run)
+[group: "dev"]
+run: setup
+    @mkdir -p build && { [ -f build/feed.db ] || cp {{repo}}/seed/feed.db build/feed.db; }
+    @ulimit -n 65535 2>/dev/null || true; SQLITE_PATH={{root}}/build/feed.db JWT_SECRET={{secret}} HOST=127.0.0.1 PORT=3000 exec python3 {{root}}/infra/ops.py start
+
+# unit tests (stdlib unittest)
+[group: "test"]
+test:
+    @"$(just _python)" -m unittest discover -s tests -t .
+
+# the official 42-check suite, exactly as CI runs it
+[group: "test"]
+check:
+    @cd {{repo}} && PYTHON="$(just -f {{root}}/justfile _python)" bash test/run.sh submissions/{{folder}}
+
+# load tests run from the FastAPI entry's bench (bench/linux.py there; this entry is REFS name `stdlib`), e.g. `just bench entries 40000 stdlib ours --rounds 3`
+[group: "perf"]
+bench *args:
+    @just -f {{fastapi}}/justfile bench "$@"
+
+# remove build output (DB copies, profiles)
+[group: "dev"]
+clean:
+    @rm -rf build
+
+# first python >= 3.14 on PATH (honours $PYTHON)
+[private]
+_python:
+    #!/usr/bin/env python3
+    import os, shutil, subprocess
+    candidates = [os.environ.get("PYTHON", ""), "python3.15", "python3.14", "python3"]
+    for name in filter(None, candidates):
+        path = shutil.which(name)
+        if path and subprocess.run([path, "-c", "import sys; sys.exit(sys.version_info < (3, 14))"]).returncode == 0:
+            print(path)
+            raise SystemExit(0)
+    raise SystemExit("no python >= 3.14 found; set PYTHON=/path/to/python3.14+")

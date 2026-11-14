@@ -54,6 +54,11 @@ of each post itself with `json_object` (its arguments are in the key order SPEC.
 is one row: the 20 objects joined by `group_concat`. The WAT writes the HTTP headers and copies that one
 string after them.
 
+The feed's subquery (`ORDER BY created_at DESC, id DESC LIMIT 20`) runs as a co-routine that scans
+`posts_created_at_id_idx` in that order, and `group_concat` joins the rows in the order the co-routine yields
+them (`EXPLAIN QUERY PLAN` shows no other step). An `ORDER BY` inside `group_concat` would make SQLite sort the
+20 objects again in a temporary b-tree, which cost about a quarter of the feed's CPU time.
+
 ## Design
 
 - **One thread, io_uring, direct.** The rings live in wasm memory: with `IORING_SETUP_NO_MMAP` the kernel uses
@@ -66,7 +71,8 @@ string after them.
   resumes once it is out.
 - **Writes.** Each POST is its own autocommit transaction on a WAL database with `synchronous=NORMAL`. The
   response is written only after `sqlite3_step` has returned `SQLITE_DONE`, so the row is committed when the
-  201 goes out. `locking_mode=EXCLUSIVE`, since the shell's connection is the only one.
+  201 goes out. `locking_mode=EXCLUSIVE`, since the shell's connection is the only one. Checkpoints run every
+  10,000 WAL pages (`wal_autocheckpoint`), not every 1,000, so hot pages are copied back less often.
 - **Configuration.** The WAT reads `JWT_SECRET`, `HOST` and `PORT` from `/proc/self/environ`; the shell opens
   `$SQLITE_PATH`. It raises its own soft `RLIMIT_NOFILE` to the hard limit (at most 65,536, the size of its
   per-connection tables).
@@ -89,7 +95,8 @@ string after them.
 ## Versions
 
 - SQLite 3.54.1 (amalgamation: shell and library), built with gcc from Ubuntu 24.04, `-O2 -DSQLITE_THREADSAFE=0
-  -DSQLITE_DEFAULT_MEMSTATUS=0` (compile options only; one thread uses the connection)
+  -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_LOOKASIDE=1200,1000` (compile options only: one thread uses the
+  connection, and a larger lookaside means fewer small allocations go to malloc)
 - WasmEdge 0.18.1 (AOT compiler and runtime library), wabt 1.0.39 (`wat2wasm`)
 - GNU as / ld from Ubuntu 24.04 (binutils)
 

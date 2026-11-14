@@ -403,6 +403,10 @@ Its follow-up **#285** (`f3d9412`, io_uring transport fixes on top of #282; held
 row) scored **143,000** (14,074 req/s, p95 5.0 / p99 41 ms, 0 err, 69 % CPU, 46 µs/req, 1,359 MB, 2026-11-03).
 Connection-capped, not CPU-bound: 150,000 passed the 2-minute probe but failed the 5-minute hold, and 155,000/160,000
 failed the 2-minute probe, on refused connections at ~70 % CPU.
+Its follow-up **#429** (`659f445`, bounded epoll input-buffer pool, 6 workers; held, not merged: it didn't beat the
+merged row) scored **185,000** (18,160 req/s, p95 125 / p99 335 ms, 0 err, 91 % CPU, 47 µs/req, 1,354 MB, 2026-11-14).
+CPU-bound: 195,000 passed the 2-minute probe but failed the 5-minute hold (p95 393 / p99 1,083 ms at 92 % CPU). (Its
+first run was discarded: the target's disk filled up during its holds.)
 
 ᶻ **swift-iouring-Tabonx** stays on its merged #173 row. Its follow-up **#293** (`38868fc`; held, not merged: it
 didn't beat the merged row, it tied it) also held **219,000** (21,352 req/s, p95 16.9 / p99 567 ms, 0 err, 63 % CPU,

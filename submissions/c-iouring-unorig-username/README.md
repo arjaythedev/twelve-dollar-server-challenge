@@ -110,10 +110,11 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **SQLite settings**: WAL, `synchronous=NORMAL`, no `mmap`, a 32 MB page cache (a cached page keeps its
   parsed header and needs no WAL lookup; `mmap` measured 4% more CPU per request), prepared statements built
   once with `SQLITE_PREPARE_PERSISTENT`, `SQLITE_THREADSAFE=2` with unused features left out.
-  `journal_size_limit=0` (idea from #326): after the log restarts, the first commit truncates the WAL file, so later
-  frames append to fresh pages instead of overwriting old ones, which the kernel would read back from disk first, on the
-  loop thread, once memory pressure has evicted them. Only the file's size changes; the frame counts and checkpoint
-  outcomes the hold logic reads are the same.
+  `journal_size_limit=33751040` (8,192 frames): after the log restarts, the first commit cuts the WAL file back to
+  that size and no further, so in the steady state frames overwrite blocks the file already has and the log's
+  `fdatasync` has no new extents to record. (Before this it was 0, the idea from #326: truncate to nothing so frames
+  append to fresh pages.) Only the file's size changes; the frame counts and checkpoint outcomes the hold logic
+  reads are the same.
 - **Code and read-only data are locked in RAM** (as #245, #257 and #326 do). There is no swap, so reclaim at the memory
   wall takes file-backed pages first, and the loop would stall on major faults reading its own code or libc back from
   disk. `dl_iterate_phdr` walks every loaded object and `mlock`s its non-writable `PT_LOAD` segments: 2,978 KB, within
@@ -253,7 +254,7 @@ reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint th
 `DEFER_TASKRUN` on every ring, and bounded reads and answers after a burst (#264). Checkpoint coordination and the likes count
 were rewritten for this entry, and its read bound was chosen by the sweep above. The `resv[0]` retry is also from
 rust-iouring-kensac and from c-iouring-pavlyhalim (#245). From objc-uring-delneg (#326, `1baccb2`): the newest-first order
-of the parked list with its aging bound, 128 answers per pass, and `journal_size_limit=0` (ideas, no code copied; the list
+of the parked list with its aging bound, and 128 answers per pass (ideas, no code copied; the list
 here is this entry's own queue). Locking code in RAM follows c-iouring-pavlyhalim (#245), mojo-iouring-oh-meh (#257) and
 #326; sizing the completion queue over the connection count follows #245.
 

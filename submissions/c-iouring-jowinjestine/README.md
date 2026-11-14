@@ -32,6 +32,15 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Eight listening sockets share the port (`SO_REUSEPORT`), each with its own accept queue of
   `somaxconn`, so together they hold ~32k pending connections through a ramp or a stall. Their
   multishot accepts are armed on the ring being filled and cancelled by user data when it moves on.
+- **Admission at the door** (`ADMIT`, on by default). Each listener's queue holds 64 connections, and the
+  loop stops accepting while it is behind (its batches take over 20 ms, smoothed over ~8 batches) and
+  resumes below 5 ms. While it is paused the queues fill and the kernel drops new SYNs; the client
+  retries a second later. Connections that are already open keep getting answers through a burst of new
+  arrivals, such as the end of a ramp, instead of the box paying for thousands of connection setups on
+  top of a full load. Note for scoring: k6's `http_req_duration` does not include connecting, so the
+  second a refused client waits is counted in `http_req_connecting`, not in the p95/p99 thresholds.
+  `ADMIT=0` restores 4,096-deep queues and never pauses (`ADMIT_BACKLOG`, `ADMIT_HI_US`, `ADMIT_LO_US`
+  tune it).
 - Each connection has one **multishot receive** into the ring's provided-buffer ring (1,024 × 2 KB),
   so an idle connection holds no receive buffer and no heap, only a 32-byte record, and a request
   costs one completion. Requests are parsed in place in the kernel's buffer and the buffer goes

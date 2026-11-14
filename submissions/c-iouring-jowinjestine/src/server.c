@@ -26,6 +26,12 @@
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
 static unsigned answers_per_pass = 2048, wait_min = 256;
 static uint64_t wait_ns = 1000000ULL;
+/* Admission at the door (ADMIT=0 turns it off): small listen queues, and no accepting while the
+ * loop is behind. A full queue makes the kernel drop new SYNs, and the client retries a second
+ * later, instead of the box paying for whole connection setups on top of a full load. */
+static int admit = 1, admit_paused, admit_cancel_sent;
+static unsigned admit_backlog = 64;
+static uint64_t admit_hi_ns = 20000000ULL, admit_lo_ns = 5000000ULL, admit_ewma, admit_since, admit_pauses, admit_paused_ns;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
 
@@ -369,6 +375,11 @@ static void accept_policy(void) {
   for (unsigned i = 0; i < NR; i++)
     if (R[i].open + accept_stop < ring_slots) { target = i; break; }
   if (target == NR) return; /* every ring is full: the backlog waits */
+  if (admit_paused) { /* behind: the listen queues fill, then the kernel drops new SYNs */
+    if (!admit_cancel_sent && R[acc_ring].accept_armed) { cancel_accepts(acc_ring); admit_cancel_sent = 1; }
+    return;
+  }
+  admit_cancel_sent = 0;
   if (target != acc_ring && R[acc_ring].accept_armed) cancel_accepts(acc_ring);
   acc_ring = target;
   if (R[target].accept_armed != (1u << NLISTEN) - 1) arm_accepts(target);
@@ -607,7 +618,7 @@ static void stats(uint64_t dt_ns) {
           "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
           "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
           "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu "
-          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu\n",
+          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu admit_pauses=%llu admit_paused=%.0fms\n",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
@@ -617,7 +628,9 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)wal_pwrites, (double)A.db.bulk_max_ns / 1e6, (double)A.db.hold_max_ns / 1e6,
           (double)A.db.hold_total_ns / 1e6, (unsigned long long)A.db.n_hold_timeout, (unsigned long long)A.db.tail_frames_max,
           (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max, (double)S.max_gap_ns / 1e6, ru.ru_majflt - majflt_prev,
-          (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy);
+          (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy, (unsigned long long)admit_pauses,
+          (double)admit_paused_ns / 1e6);
+  admit_pauses = admit_paused_ns = 0;
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -855,10 +868,17 @@ int main(int argc, char **argv) {
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
 
   const char *err = "";
+  admit = (int)env_long("ADMIT", 1);
+  admit_backlog = (unsigned)env_long("ADMIT_BACKLOG", 64);
+  admit_hi_ns = (uint64_t)env_long("ADMIT_HI_US", 20000) * 1000ULL;
+  admit_lo_ns = (uint64_t)env_long("ADMIT_LO_US", 5000) * 1000ULL;
   for (unsigned l = 0; l < NLISTEN; l++) {
-    LFD[l] = listen_socket(host, atoi(port), 4096, &err);
+    LFD[l] = listen_socket(host, atoi(port), admit ? (int)admit_backlog : 4096, &err);
     if (LFD[l] < 0) { fprintf(stderr, "listen %s:%s: %s: %s\n", host, port, err, strerror(errno)); return 1; }
   }
+  if (admit)
+    fprintf(stderr, "admission: listen queues of %u, accepts pause above a %.0f ms turn, resume below %.0f ms\n", admit_backlog,
+            (double)admit_hi_ns / 1e6, (double)admit_lo_ns / 1e6);
   if (ring_create(0) < 0) return 1;
   NR = 1;
   /* The rings a full load needs are made now, while the box is idle: a ring is ~1 MB of
@@ -904,6 +924,12 @@ int main(int argc, char **argv) {
     A.db.wrote = 0;
     db_tick(&A.db); /* no transaction is open: the only point where a hold starts or ends */
     for (unsigned i = 0; i < NR; i++) ring_buf_publish(&R[i].r);
+    if (admit) { /* the batch's turn, smoothed over ~8 batches, says whether the loop is behind */
+      uint64_t now = now_ns();
+      admit_ewma = admit_ewma - (admit_ewma >> 3) + ((now - t) >> 3);
+      if (!admit_paused && admit_ewma > admit_hi_ns) { admit_paused = 1; admit_since = now; admit_pauses++; }
+      else if (admit_paused && admit_ewma < admit_lo_ns) { admit_paused = 0; admit_paused_ns += now - admit_since; }
+    }
     accept_policy();
     last_cqes = ncq;
     S.batches++;

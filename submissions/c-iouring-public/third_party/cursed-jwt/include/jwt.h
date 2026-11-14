@@ -70,7 +70,8 @@ void jwt_verify_batch(const jwt_key_t *k, int n, const char *const *tok, const i
  * with: AVX-512VL, then AVX2, then scalar on x86-64; SHA2 instructions, then NEON on AArch64.  The engine-specific
  * entry points below exist for tests and benchmarks; call one only if jwt_cpu_features() has its bit. */
 enum { JWT_CPU_AVX2 = 1, JWT_CPU_AVX512VL = 2, JWT_CPU_BMI2_ADX = 4, JWT_CPU_SHANI = 8, JWT_CPU_IFMA = 16,
-       JWT_CPU_SHA2 = 32, JWT_CPU_SHA512 = 64 };
+       JWT_CPU_SHA2 = 32, JWT_CPU_SHA512 = 64,
+       JWT_CPU_FAST_ZMM = 128 /* 512-bit vectors cost no clock speed (AMD Zen 4 / 5): the 16-lane zmm engine */ };
 unsigned jwt_cpu_features(void); /* JWT_CPU_* bits; env JWT_CPU_MASK=0x.. masks them (tests, benchmarks) */
 const char *jwt_engine(void);    /* the HS256 engine jwt_verify_batch uses: "avx512vl", "avx2", "sha2", ... */
 
@@ -126,6 +127,8 @@ typedef struct jwt_pkey jwt_pkey_t;
 jwt_pkey_t *jwt_pkey_es256(const uint8_t x[32], const uint8_t y[32]);
 /* RS256: modulus and public exponent, big-endian; 2048..4096-bit odd n, odd e in [3, 2^64).  NULL otherwise. */
 jwt_pkey_t *jwt_pkey_rs256(const uint8_t *n, size_t nlen, const uint8_t *e, size_t elen);
+/* EdDSA (Ed25519, RFC 8037 "alg":"EdDSA"): the 32-byte public key.  NULL if it does not decode to a point. */
+jwt_pkey_t *jwt_pkey_ed25519(const uint8_t pub[32]);
 void jwt_pkey_free(jwt_pkey_t *k);
 void jwt_verify_batch_pk(const jwt_pkey_t *k, int n, const char *const *tok, const int *len, int64_t now_s,
                          jwt_result_t *out);

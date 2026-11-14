@@ -272,7 +272,7 @@ FP_INLINE void bp_chunk(int n, const char *const *buf, const int *len, req_t *ou
   // B. buckets: GET-shaped canonical, POST-shaped canonical, the rest (branch-free appends)
   int gl[BP_CHUNK], pl[BP_CHUNK], xl[BP_CHUNK], ng = 0, np = 0, nx = 0;
   for (int i = 0; i < n; i++) {
-    int canon = l0[i] != 0, post = fp_route_auth((int)rt[i]);
+    int canon = l0[i] != 0, post = fp_route_lines((int)rt[i]);   // routes that read header lines (POST-shaped)
     gl[ng] = i; ng += canon & !post;
     pl[np] = i; np += canon & post;
     xl[nx] = i; nx += !canon;
@@ -286,13 +286,13 @@ FP_INLINE void bp_chunk(int n, const char *const *buf, const int *len, req_t *ou
 #endif
   for (int j = 0; j < ng; j++) {
     int i = gl[j]; req_t *r = &out[i];
-    r->route = (int)rt[i]; r->id = id[i]; r->id_ok = id[i] > 0; r->auth = 0; r->tok = 0; r->tok_len = 0;
+    r->route = (int)rt[i]; r->id = id[i]; r->id_ok = id[i] > 0; r->auth = 0; r->tok = 0; r->tok_len = 0; fp_hdr_reset(r);
     int c = bp_get2(buf[i], len[i], r, (int)l0[i]);
     ret[i] = c;
   }
   for (int j = 0; j < np; j++) {
     int i = pl[j]; req_t *r = &out[i];
-    r->route = (int)rt[i]; r->id = id[i]; r->id_ok = id[i] > 0; r->auth = 0; r->tok = 0; r->tok_len = 0;
+    r->route = (int)rt[i]; r->id = id[i]; r->id_ok = id[i] > 0; r->auth = 0; r->tok = 0; r->tok_len = 0; fp_hdr_reset(r);
     int c = FP_CORE_L(buf[i], len[i], r, (int)l0[i]);   // fastparse.h's own core: POST lanes walk every line
     ret[i] = c;
   }

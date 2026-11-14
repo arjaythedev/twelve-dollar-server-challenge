@@ -13,4 +13,4 @@ if [ ! -f sqlite/sqlite3.c ]; then
   (cd sqlite && unzip -qo $SQ.zip && mv $SQ/sqlite3.c $SQ/sqlite3.h . && rm -rf $SQ $SQ.zip)
 fi
 export CGO_ENABLED=1 GOFLAGS=-trimpath GOTOOLCHAIN=local
-go build -o bin/server .
+go build -o bin/server "$@" .

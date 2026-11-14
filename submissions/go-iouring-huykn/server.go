@@ -30,7 +30,7 @@ const (
 	bufSize        = 2048 // receive buffer; a longer request is read in more than one piece
 	bufCount       = 1024 // receive buffers per ring
 	maxRings       = 16
-	waitMin        = 1       // wake on the first completion; batch only what is already ready
+	waitMin        = 4       // coalesce a small group within the bounded idle wait
 	waitNs         = 1000000 // bound idle waits before polling the other rings
 	readsPerPass   = 16384
 	answersPerPass = 2048
@@ -691,7 +691,7 @@ func (s *server) run() error {
 		for ri := len(s.rings) - 1; ri >= 0; ri-- {
 			u := s.rings[ri].u
 			if ri == 0 && !busy {
-				u.enter(enterGetEvents, waitMin, &ts)
+				u.enter(enterGetEvents, min(uint32(waitMin), max(uint32(1), s.rings[ri].open)), &ts)
 			} else {
 				u.poll()
 			}

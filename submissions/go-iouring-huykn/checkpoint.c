@@ -1,4 +1,5 @@
 #include "checkpoint.h"
+#include "diagnostics.h"
 #include <pthread.h>
 #include <stdlib.h>
 
@@ -14,6 +15,7 @@ struct hkn_checkpoint {
 
 static void *checkpoint_loop(void *argument) {
   hkn_checkpoint *worker = argument;
+  HKN_DIAG(hkn_diagnostics diagnostics = {0};)
   pthread_mutex_lock(&worker->mutex);
   for (;;) {
     while (!worker->queued && !worker->stop) pthread_cond_wait(&worker->changed, &worker->mutex);
@@ -21,13 +23,22 @@ static void *checkpoint_loop(void *argument) {
     worker->queued = 0;
     worker->running = 1;
     pthread_mutex_unlock(&worker->mutex);
-    int code = sqlite3_wal_checkpoint_v2(worker->connection, "main", SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);
+    int *log = NULL, *done = NULL;
+    HKN_DIAG(int log_frames = -1, done_frames = -1;
+             log = &log_frames; done = &done_frames;
+             hkn_diag_clock started = hkn_diag_now();)
+    int code = sqlite3_wal_checkpoint_v2(worker->connection, "main", SQLITE_CHECKPOINT_PASSIVE, log, done);
+    HKN_DIAG(hkn_diag_clock finished = hkn_diag_now();
+             hkn_diag_record(&diagnostics, HKN_PASSIVE, started, finished);
+             hkn_diag_checkpoint(&diagnostics, code, log_frames, done_frames);
+             hkn_diag_flush(&diagnostics, "worker", finished.wall, 0);)
     pthread_mutex_lock(&worker->mutex);
     if (code != SQLITE_OK && code != SQLITE_BUSY) worker->error = code;
     worker->running = 0;
     pthread_cond_broadcast(&worker->changed);
   }
   pthread_mutex_unlock(&worker->mutex);
+  HKN_DIAG(hkn_diag_flush(&diagnostics, "worker", hkn_diag_now().wall, 1);)
   return NULL;
 }
 

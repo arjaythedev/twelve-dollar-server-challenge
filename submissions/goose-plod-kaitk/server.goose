@@ -64,7 +64,10 @@ thread_fn worker(cfg: http::Config, checkpoints: http::Lane) {
     let keys = [plod::JwtKey { secret: secret }];
     var db = sqlite::Conn { db: sqlite::Db {}, .. };
     let failed = sqlite::run() {
-        db.db = sqlite::open(database(), sqlite::READ_WRITE | sqlite::NO_MUTEX | OPEN_URI);
+        // Without foreign keys: a post's author and a like's user are the
+        // token's, which SPEC.md says isn't looked up, and the like's post
+        // is checked in its INSERT, so enforcement would only add seeks.
+        db.db = sqlite::open(database(), sqlite::READ_WRITE | sqlite::NO_MUTEX | OPEN_URI, false);
         // WAL, as the seed is; NORMAL syncs at checkpoints, not at each
         // commit, which SPEC.md's rule 6 allows. The lane copies most of the
         // WAL back; at 16,000 pages this connection checkpoints the rest

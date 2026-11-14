@@ -45,6 +45,16 @@ no C: `app.goose` is the whole application, about 250 lines.
   4 MB.
 - **The connection** is opened `NO_MUTEX`, since only its worker uses it: a feed
   request reads 100 columns, and each read would otherwise take a lock.
+- **The feed in three range reads.** The plain query seeks into `posts` and into
+  `likes_post_id_idx` once for each of the twenty posts. Instead, the newest ids come
+  from `posts_created_at_id_idx` alone; posts are created in id order, so those ids
+  are one run of consecutive numbers, and one `BETWEEN` scan of `posts` joined to
+  `users` and one grouped `BETWEEN` scan of the likes index read the rest. When the ids
+  aren't one run, or the rows don't match them, the plain query answers. Both are SQL
+  through prepared statements, and the JSON is byte for byte the same.
+- **No foreign-key enforcement** on the worker's connection: a post's author and a
+  like's user come from the token, which SPEC.md says isn't looked up, and the like's
+  `INSERT` checks the post itself, so enforcement only adds seeks to each write.
 - **The single post's query** reads the author with a subquery, not a join. With the
   join, SQLite's constant propagation reads the bound id while planning, and
   re-prepares the statement for every request.
@@ -96,6 +106,19 @@ Below capacity, at 1 CPU and 4,000 users (6,500 requests a second):
 The buffers give 12% more requests a second past capacity, at 11% less CPU a
 request, and change nothing below it. The lane takes the checkpoint's wait off the
 worker: below capacity, that wait was the whole p99.
+
+The feed's range reads and no foreign keys, against the build before them, the same
+setup, three alternating rounds each:
+
+| Build | Load | req/s | p95 | p99 | µs a request | user |
+|---|---|---:|---:|---:|---:|---:|
+| buffers and the lane | 0.4 CPU, 10,000 users | 10,948 to 11,414 | 323 to 408 ms | 343 to 445 ms | 30.9 to 32.3 | 8.1 to 9.0 |
+| and the range reads (`start.sh`) | 0.4 CPU, 10,000 users | 11,670 to 12,018 | 277 to 312 ms | 297 to 341 ms | 29.1 to 30.1 | 5.4 to 6.9 |
+| buffers and the lane | 1 CPU, 4,000 users | 6,594 to 6,599 | 1.6 ms | 2.5 to 4.7 ms | 32.4 to 33.7 | 10.3 to 10.4 |
+| and the range reads (`start.sh`) | 1 CPU, 4,000 users | 6,581 to 6,588 | 1.5 ms | 2.4 to 2.5 ms | 30.6 to 30.7 | 8.4 to 8.5 |
+
+The range reads take a fifth off the user time a request; the feed is close to half
+the requests. Without foreign keys alone, the CPU a request was level with them.
 
 In Docker on an M1 Pro (Linux arm64), the server held to 0.4 CPU so that k6
 saturates it (20,000 users, think times divided by 10, 60 s after a 15 s ramp), two

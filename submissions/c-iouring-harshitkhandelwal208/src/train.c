@@ -5,7 +5,7 @@
 static void train(void) {
   const char *path = getenv("PGO_TRAIN_DB");
   static const char *tok = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI3IiwidXNlcm5hbWUiOiJ0cmFpbmVyIiwiZXhwIjo0MTAyNDQ0ODAwfQ.fmsWbbPWXeDx0P3cbcdmOTM6bC10yq05y3vDN36tSfU";
-  sqlite3 *d; pcache_install(); sqlite3_initialize(); vfs_shim_install(); unlink(path);
+  sqlite3 *d; pcache_install(); pagecache_arena(CACHE_KB); sqlite3_initialize(); vfs_shim_install(); unlink(path);
   if (sqlite3_open(path, &d) != SQLITE_OK || sqlite3_exec(d,
       "PRAGMA journal_mode=WAL;"
       "CREATE TABLE users (id INTEGER PRIMARY KEY, username TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')));"

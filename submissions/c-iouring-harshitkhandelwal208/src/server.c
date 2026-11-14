@@ -104,6 +104,21 @@ static int pcache_install(void) {
   return sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) == SQLITE_OK ? 0 : -1;
 }
 
+static void pagecache_arena(int cache_kib) {
+  int hdr = 0;
+  if (sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &hdr) != SQLITE_OK) return;
+  int sz = (4096 + hdr + 63) & ~63;
+  int n = cache_kib / 4 + 64;
+  size_t bytes = ((size_t)sz * n + 0x1fffff) & ~0x1fffff;
+  void *m = mmap(NULL, bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (m == MAP_FAILED) return;
+#ifdef MADV_HUGEPAGE
+  madvise(m, bytes, MADV_HUGEPAGE);
+#endif
+  for (size_t i = 0; i < bytes; i += 4096) ((volatile char *)m)[i] = 0;
+  if (sqlite3_config(SQLITE_CONFIG_PAGECACHE, m, sz, n) != SQLITE_OK) munmap(m, bytes);
+}
+
 // ---------- Background Checkpoint Coordination ----------
 #define CKPT_FRAMES 4096         // WAL threshold to trigger background bulk checkpoint
 #define CKPT_FORCE 65536         // Last-resort inline checkpoint threshold
@@ -419,6 +434,21 @@ static int b64dec(const char *s, size_t n, unsigned char *out) {
   return o;
 }
 
+static inline int b64dec43(const char *s, unsigned char *out) {
+  for (int i = 0; i < 10; i++, s += 4, out += 3) {
+    int v0 = b64t[(unsigned char)s[0]], v1 = b64t[(unsigned char)s[1]];
+    int v2 = b64t[(unsigned char)s[2]], v3 = b64t[(unsigned char)s[3]];
+    if ((v0 | v1 | v2 | v3) < 0) return -1;
+    uint32_t val = ((uint32_t)v0 << 18) | ((uint32_t)v1 << 12) | ((uint32_t)v2 << 6) | (uint32_t)v3;
+    out[0] = val >> 16; out[1] = val >> 8; out[2] = val;
+  }
+  int v0 = b64t[(unsigned char)s[0]], v1 = b64t[(unsigned char)s[1]], v2 = b64t[(unsigned char)s[2]];
+  if ((v0 | v1 | v2) < 0) return -1;
+  uint32_t val = ((uint32_t)v0 << 12) | ((uint32_t)v1 << 6) | (uint32_t)v2;
+  out[0] = val >> 10; out[1] = val >> 2;
+  return 32;
+}
+
 // ---------- JSON (Strict RFC 8259) ----------
 typedef struct { const char *p, *e; } js_t;
 static inline void ws(js_t *j) { while (j->p < j->e && (*j->p == ' ' || *j->p == '\t' || *j->p == '\n' || *j->p == '\r')) j->p++; }
@@ -590,7 +620,7 @@ static const char *auth(const char *h, size_t hl, int64_t *uid, char *uname, siz
   d2 = memchr(d1 + 1, '.', te - d1 - 1);
   if (!d2 || memchr(d2 + 1, '.', te - d2 - 1)) return bad;
   unsigned char sig[48], mac[32];
-  if (te - d2 - 1 != 43 || b64dec(d2 + 1, 43, sig) != 32) return bad;
+  if (te - d2 - 1 != 43 || b64dec43(d2 + 1, sig) != 32) return bad;
   hmac((const unsigned char *)t, d2 - t, mac);
   unsigned diff = 0; for (int i = 0; i < 32; i++) diff |= sig[i] ^ mac[i];
   if (diff) return bad;
@@ -1853,6 +1883,7 @@ int main(int argc, char **argv) {
   if (!path || !secret) { fprintf(stderr, "SQLITE_PATH and JWT_SECRET are required\n"); return 1; }
 
   pcache_install();
+  pagecache_arena(CACHE_KB);
   sqlite3_initialize();
   vfs_shim_install();
 
@@ -1885,7 +1916,7 @@ int main(int argc, char **argv) {
   setrlimit(RLIMIT_MEMLOCK, &ml);
   mlockall(MCL_CURRENT);
 
-#define TARGET_RINGS 7
+#define TARGET_RINGS 8
   for (int k = 0; k < TARGET_RINGS; k++) {
     if (ring_init(k) < 0) {
       if (k == 0) { fprintf(stderr, "io_uring setup failed (needs Linux 6.1+ with io_uring enabled)\n"); return 1; }

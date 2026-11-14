@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "llvm_version": "23.1.3",
+  "target": "linux/amd64",
+  "goamd64": "v3",
+  "sqlite_module": {
+    "path": "github.com/mattn/go-sqlite3",
+    "version": "v1.14.52"
+  },
+  "raw": {
+    "file": "sqlite.profraw",
+    "sha256": "8446142f0e5d1a9692f88c1ee5c6a9270532932271a8c772e45ae924359ed974",
+    "size": 406512
+  },
+  "sqlite_sources": {
+    "sqlite3-binding.c": "eb023455154c8da14a9920dbe44f4f9e732871ef8d8a058cafb84d18d6a2de00",
+    "sqlite3-binding.h": "4e7d1523cf95991f7e4c08c576e2232e063da6f10067e5c03c9bf9f904b1cf5f",
+    "sqlite3ext.h": "d807b6fabf8c0ae1a6e27b5d9c58370c3190eaf49ca5a99f8e422929afe4e266",
+    "sqlite3.go": "1e1ecd7e523bc587aa7bdc4119b470b61f51aff913e4cc4856075df0af3bd2f2",
+    "sqlite3_other.go": "ee1582442a9492d4975ca57276dd84d7dda8e6c25013d9cbc31326e8401bb748"
+  },
+  "sqlite_flags": [
+    "--no-default-config",
+    "-O2",
+    "-fPIC",
+    "-pthread",
+    "-fno-common",
+    "-Werror",
+    "-march=x86-64-v3",
+    "-std=gnu99",
+    "-DSQLITE_ENABLE_RTREE",
+    "-DSQLITE_THREADSAFE=1",
+    "-DHAVE_USLEEP=1",
+    "-DSQLITE_ENABLE_FTS3",
+    "-DSQLITE_ENABLE_FTS3_PARENTHESIS",
+    "-DSQLITE_TRACE_SIZE_LIMIT=15",
+    "-DSQLITE_OMIT_DEPRECATED",
+    "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
+    "-DSQLITE_ENABLE_UPDATE_DELETE_LIMIT",
+    "-Wno-deprecated-declarations"
+  ],
+  "generate_flags": [
+    "-fprofile-generate",
+    "-fprofile-update=atomic"
+  ],
+  "go": {
+    "pgo": "off",
+    "tags": "cgo_sqlite,libsqlite3,sqlite_serialize"
+  },
+  "provenance": {
+    "training_id": "b27484bf6221a91155cca5272d40c185",
+    "contract_sha256": "9758f18eb7e54142ffe9eb5817da30f47ff9c703b1e88004d4b14c4ff678e714",
+    "binary_sha256": "e5148f26cae3e96031ce66d3155471dd9eccfc67a610404a35416b40565234f2"
+  },
+  "source_filename": "/home/test/goal-llvm-pgo/build/llvm-training1/sqlite3.c"
+}

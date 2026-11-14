@@ -1,0 +1,693 @@
+{
+  "method": "Unmodified archived router and stock generator. Each row was independently rescored from all four generator reports and timestamps. Every post-ramp snapshot and the subset ending a complete five-second hold window are reported separately. The topology is a distinct diagnostic cohort.",
+  "private_link_counter_order": [
+    "rx_errors",
+    "rx_dropped",
+    "tx_errors",
+    "tx_dropped"
+  ],
+  "trials": [
+    {
+      "app_oom": false,
+      "dials": 310000,
+      "fails": 0,
+      "full_presence": false,
+      "historical_eligible": false,
+      "hold_s": 300,
+      "hold_server_cpu": {
+        "mean_cpu_pct": 85.64991330874996,
+        "use_usec": 256949749,
+        "wall_s": 300.000010593998
+      },
+      "infrastructure_flags": [
+        "positive private scored RX/TX drop or error delta"
+      ],
+      "input_profile": "common",
+      "p95_ms": 269.03337378555335,
+      "p99_ms": 2788.232575285989,
+      "private_hash_by_role": {
+        "client": "-524288",
+        "manager": "524288",
+        "router": "-524288",
+        "server": "-524288"
+      },
+      "qualified": false,
+      "ramp_s": 93,
+      "req_per_s": 28882.756225968977,
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "stock_pass": false,
+      "tag": "priorroute-kensac-310-h1",
+      "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+      "topology": "historical-single-middle-router-paced",
+      "users": 310000,
+      "whole_run_server_cpu": {
+        "cpu_us_per_req": 26.912297763480776,
+        "mean_cpu_pct": 77.73029747446857,
+        "use_usec": 305479931,
+        "wall_s": 392.99982236699725
+      },
+      "entry": "kensac",
+      "requests": 11350942,
+      "successes": 11350942,
+      "actual_dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "assigned_users_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "all_post_ramp_snapshots": {
+        "first_s": 95,
+        "full_ticks": 59,
+        "expected_ticks": 60
+      },
+      "complete_five_second_windows": {
+        "first_s": 100,
+        "full_ticks": 59,
+        "expected_ticks": 59
+      },
+      "lifetime": "alive_at_cutoff",
+      "scope_samples_during_scoring": 80,
+      "qdisc_states": {
+        "rclient": "clean",
+        "rserver": "clean",
+        "tclient": "clean",
+        "tserver": "clean"
+      },
+      "private_links_at_cutoff": {
+        "rclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            2091715,
+            0,
+            983
+          ]
+        },
+        "rserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            1288016,
+            0,
+            0
+          ]
+        },
+        "tclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            983,
+            0,
+            2091712
+          ]
+        },
+        "tserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            1288016
+          ]
+        }
+      },
+      "sha256": {
+        "summary.json": "e30842e1594b29e5ce8c77809b57455f2f9ad0181f7666312900f678991c9095",
+        "shape.json": "ac19178a4849fc7d81df90407c23ade57b9f6b950565d08f69d1b2d61366f5fa",
+        "scored-wire-cpu.json": "68fec7655700907e838a11f6b526b4afd3e49bd52df0412dbef0a1a31dce0ebb",
+        "synchronized-connections.json": "8ad1fade2610a699ef226062e69a699e2cd3feaf83f440e5d78a5c6ab46d8024",
+        "component-test-lock.json": "6ab28a1fb6441cbdb81c342bd9309d383041af14d5c34a35ddd5869ae06853a8",
+        "serial-lock.json": "eda173efd9a9c41a146b11750d8b958f54d44dbce7442bff87c60d312edfcf1a",
+        "raw/plan.json": "c457e261ef14cdc08c931ca6ef83578279246edbb03e737ee616d9a68d9ee8eb",
+        "raw/score.json": "d7c42c71304351f12bc6f6874f1e9f5a5e7d086cb5530e55e29b359d410f4a27",
+        "raw/shard0.json": "1d1466e16d097c48175a78089eb914a7d9f4052bc10cab39cc02a80fb6e9f684",
+        "raw/shard1.json": "b91f16967a7506bc5aea62c358e0fba7ae5ad1420445d2d8714dac6be295d607",
+        "raw/shard2.json": "460715b96029fbc55ed31376b1d9aa2c2c9316b5fe0d207e64110eb57a219a1f",
+        "raw/shard3.json": "84b9e7cf71501aec46039663e1f3486373b857b884f3283efcb472eca7f1aa7f",
+        "scored-assessment.json": "a066004b8a90c03ce288fd8baf2b38fa8562d9e3d513ed5b555f6ab30475a406"
+      }
+    },
+    {
+      "app_oom": false,
+      "dials": 280000,
+      "fails": 0,
+      "full_presence": false,
+      "historical_eligible": true,
+      "hold_s": 300,
+      "hold_server_cpu": {
+        "mean_cpu_pct": 78.56780582956489,
+        "use_usec": 235703459,
+        "wall_s": 300.0000528350065
+      },
+      "infrastructure_flags": [
+        "positive private scored RX/TX drop or error delta"
+      ],
+      "input_profile": "common",
+      "p95_ms": 23.03704833800125,
+      "p99_ms": 40.6204882459672,
+      "private_hash_by_role": {
+        "client": "-524288",
+        "manager": "524288",
+        "router": "-524288",
+        "server": "-524288"
+      },
+      "qualified": false,
+      "ramp_s": 84,
+      "req_per_s": 26757.783031003473,
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "stock_pass": true,
+      "tag": "priorroute-stock-280-h1",
+      "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+      "topology": "historical-single-middle-router-paced",
+      "users": 280000,
+      "whole_run_server_cpu": {
+        "cpu_us_per_req": 28.08966096215111,
+        "mean_cpu_pct": 75.16577303445858,
+        "use_usec": 288621772,
+        "wall_s": 383.9803149070067
+      },
+      "entry": "willwang-0142ba2",
+      "requests": 10275018,
+      "successes": 10275018,
+      "actual_dials_by_shard": [
+        70000,
+        70000,
+        70000,
+        70000
+      ],
+      "assigned_users_by_shard": [
+        70000,
+        70000,
+        70000,
+        70000
+      ],
+      "all_post_ramp_snapshots": {
+        "first_s": 85,
+        "full_ticks": 59,
+        "expected_ticks": 60
+      },
+      "complete_five_second_windows": {
+        "first_s": 90,
+        "full_ticks": 59,
+        "expected_ticks": 59
+      },
+      "lifetime": "alive_at_cutoff",
+      "scope_samples_during_scoring": 78,
+      "qdisc_states": {
+        "rclient": "clean",
+        "rserver": "clean",
+        "tclient": "clean",
+        "tserver": "clean"
+      },
+      "private_links_at_cutoff": {
+        "rclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            206582,
+            0,
+            0
+          ]
+        },
+        "rserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            342051,
+            0,
+            0
+          ]
+        },
+        "tclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            206582
+          ]
+        },
+        "tserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            342051
+          ]
+        }
+      },
+      "sha256": {
+        "summary.json": "892eacc105491d1bfc6ca151d65f470e14497da83dab573a9720ccaedf6141bc",
+        "shape.json": "c70030004564c068be40af4b3843d628f9bff1bd7e3ece275950ca58c852d4fa",
+        "scored-wire-cpu.json": "eaa3d706ba0dd6928c3d987393cf6ceea611c58aa3515356e7b9236eec69d850",
+        "synchronized-connections.json": "e97f0736e7210f7d84b326055a935c90e494523b6702f55b4027fbcf2960d1d0",
+        "component-test-lock.json": "322a5c15308990a776a065687d4792473809b7f7a1854e54370358a722ec9081",
+        "serial-lock.json": "145ab268b4f333a2e5c96e9d7d58510193bc61e83cc92574333a2adff4945a9e",
+        "raw/plan.json": "fe00df0206072e1deb8c4a6fb92f937d9134856500759646d74a5e1f2dc4e94a",
+        "raw/score.json": "d5e7cac2787eff367490ae38fcade44ed92f5cac9608121c6ed1e6ae81b662c9",
+        "raw/shard0.json": "f3c824606792b7d042b4706b3d003ec3af447b80c61aa5002b34cf01052f9dd5",
+        "raw/shard1.json": "ed0d572ea9208cd980cf6e4b2af427e2dcfeecc41153bba2e8cb4ed1455469f8",
+        "raw/shard2.json": "ec83a12f084cdd3106c58ffef49db9bba2475a2a13637538be6908e1105084ce",
+        "raw/shard3.json": "e5b9410779f5f22bff1561a6b85ec292f2b1acd80fde93590725a18e4fe1acd2",
+        "scored-assessment.json": "3b7e26a7e0d41d8e5a93786592d5b3ccc02f4edfcb8ec13132930b9ff757e17e"
+      }
+    },
+    {
+      "app_oom": false,
+      "dials": 290000,
+      "fails": 0,
+      "full_presence": false,
+      "historical_eligible": true,
+      "hold_s": 120,
+      "hold_server_cpu": {
+        "mean_cpu_pct": 80.70149204107904,
+        "use_usec": 96841788,
+        "wall_s": 119.99999696499435
+      },
+      "infrastructure_flags": [
+        "positive private scored RX/TX drop or error delta"
+      ],
+      "input_profile": "common",
+      "p95_ms": 21.487070912014765,
+      "p99_ms": 37.140930083357105,
+      "private_hash_by_role": {
+        "client": "-524288",
+        "manager": "524288",
+        "router": "-524288",
+        "server": "-524288"
+      },
+      "qualified": false,
+      "ramp_s": 87,
+      "req_per_s": 24963.19591269564,
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "stock_pass": true,
+      "tag": "priorroute-stock-290-p1",
+      "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+      "topology": "historical-single-middle-router-paced",
+      "users": 290000,
+      "whole_run_server_cpu": {
+        "cpu_us_per_req": 29.5276827426772,
+        "mean_cpu_pct": 73.71073493444965,
+        "use_usec": 152581023,
+        "wall_s": 206.99973095599853
+      },
+      "entry": "willwang-0142ba2",
+      "requests": 5167389,
+      "successes": 5167389,
+      "actual_dials_by_shard": [
+        72500,
+        72500,
+        72500,
+        72500
+      ],
+      "assigned_users_by_shard": [
+        72500,
+        72500,
+        72500,
+        72500
+      ],
+      "all_post_ramp_snapshots": {
+        "first_s": 90,
+        "full_ticks": 23,
+        "expected_ticks": 24
+      },
+      "complete_five_second_windows": {
+        "first_s": 95,
+        "full_ticks": 23,
+        "expected_ticks": 23
+      },
+      "lifetime": "alive_at_cutoff",
+      "scope_samples_during_scoring": 42,
+      "qdisc_states": {
+        "rclient": "clean",
+        "rserver": "clean",
+        "tclient": "clean",
+        "tserver": "clean"
+      },
+      "private_links_at_cutoff": {
+        "rclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            91607,
+            0,
+            514
+          ]
+        },
+        "rserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            145430,
+            0,
+            0
+          ]
+        },
+        "tclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            514,
+            0,
+            91607
+          ]
+        },
+        "tserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "scored_drop",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            145430
+          ]
+        }
+      },
+      "sha256": {
+        "summary.json": "399d26b480819b92af570d4838947e37a115b3d781e594cc65ea31200babedcb",
+        "shape.json": "4157578b0b8f3291911616543ab11c279bf401493c17fae08bdf968afbff6327",
+        "scored-wire-cpu.json": "2f800dc1de216b6db54326fffa0e885451e256ceeb584f33b783bd6650e1eb0b",
+        "synchronized-connections.json": "84da90f5ef57fd5714cc81838871ab954b525ef69e2d1f248bbc4e250c70de7a",
+        "component-test-lock.json": "4dd3c748b1b3d28f8ba6140131be80c8a1b3d7ee9d7146f6d4a1d8838b39a52b",
+        "serial-lock.json": "088c706440b127d8c87435267724a7a120e144279b72933724b752acd6005d18",
+        "raw/plan.json": "c7512deaecb794fada5a3305f0f368799bac0507cc1ce36c1619a7f2a9e13b24",
+        "raw/score.json": "5506ed3ac5f76b73d1075bbd7a9aa0bdf17bdf99dda02f0df5994b623134d763",
+        "raw/shard0.json": "c7b8f4be355c5347c8f0ec9ed200166d347ed869258a577778862b3d9e9986f2",
+        "raw/shard1.json": "a8a09d63b465a74bb889a7947493bf239259a44373deef99629dcb9da1540c74",
+        "raw/shard2.json": "67140d1269f9744a5f85a6d8aa37fd43e8e6303bb19df579bab2c7715c8a6fc4",
+        "raw/shard3.json": "21fdf6e3cf12d6a40b2abdea926f9fefc41d40d96cefd374f611e93f5d815b87",
+        "scored-assessment.json": "63eaad60c468696727b4383f2b23b659b3445644570488d67f515e53e96ab832"
+      }
+    },
+    {
+      "app_oom": false,
+      "dials": 128,
+      "fails": 0,
+      "full_presence": true,
+      "historical_eligible": true,
+      "hold_s": 45,
+      "hold_server_cpu": {
+        "mean_cpu_pct": 0.2668757086472738,
+        "use_usec": 120094,
+        "wall_s": 44.99997418600833
+      },
+      "infrastructure_flags": [
+        "service scope/state or descendant affinity"
+      ],
+      "input_profile": "common",
+      "p95_ms": 0.916857259510938,
+      "p99_ms": 2.658818688686565,
+      "private_hash_by_role": {
+        "client": "-524288",
+        "manager": "524288",
+        "router": "-524288",
+        "server": "-524288"
+      },
+      "qualified": false,
+      "ramp_s": 60,
+      "req_per_s": 10.50464608023409,
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "stock_pass": true,
+      "tag": "priorroute-stock-smoke-128",
+      "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+      "topology": "historical-single-middle-router-paced",
+      "users": 128,
+      "whole_run_server_cpu": {
+        "cpu_us_per_req": 203.86582048957388,
+        "mean_cpu_pct": 0.2141568482599696,
+        "use_usec": 224864,
+        "wall_s": 104.99967749200005
+      },
+      "entry": "willwang-0142ba2",
+      "requests": 1103,
+      "successes": 1103,
+      "actual_dials_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "assigned_users_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "all_post_ramp_snapshots": {
+        "first_s": 65,
+        "full_ticks": 8,
+        "expected_ticks": 8
+      },
+      "complete_five_second_windows": {
+        "first_s": 65,
+        "full_ticks": 8,
+        "expected_ticks": 8
+      },
+      "sha256": {
+        "summary.json": "c53d8ac3ebf7d2e9d6f32371894a00274fd39df508bb3f5ef9454305a4b8c41c",
+        "shape.json": "31a17e492895943ce91bbf2f8c83365defd50bbdc45427d4e1bb95ed061367a5",
+        "scored-wire-cpu.json": "721403b5c14ab2033f6af0cd1cd656ecff9676943068c9a6f62ffb57e14418b7",
+        "synchronized-connections.json": "36475b9a3e92ca1f29480ea8dd2d15d7e900e0a028003645769b70c49a88af08",
+        "component-test-lock.json": "bd67d88b8bbad4ace48629cf083f413a0ff40b19ec541a274f29f92b6ea0e22a",
+        "serial-lock.json": "e836de07055ca2f71dd7a2059690882ec5e7a1f2860f17f337bad2427f15c4fb",
+        "raw/plan.json": "d619673a044f173d27b1adeb1b92e0914f2e4858a04645029063fc9651298475",
+        "raw/score.json": "f44b7be31b0bc5eeec54807cf42c866d8da3d98fc4d65e63f0ee7d869f30e144",
+        "raw/shard0.json": "693823b9e8f1ef0507b3f009e686d8879e8e60b6e0cdf205ea18562454626a5b",
+        "raw/shard1.json": "43d20c542ba1f741f181bd8803763aa3ec9edb80894794ce1a7857546e4a235d",
+        "raw/shard2.json": "88416b7eac538afb0b63c7ae93a594ff062c6250494d3c0a33d656c4c6b9307f",
+        "raw/shard3.json": "97d83f330bc98d46dd0b8f3f2aab9af92a8d060c211364c8a03529f66194ae54"
+      }
+    },
+    {
+      "app_oom": false,
+      "dials": 128,
+      "fails": 0,
+      "full_presence": true,
+      "historical_eligible": true,
+      "hold_s": 45,
+      "hold_server_cpu": {
+        "mean_cpu_pct": 0.4137813698734209,
+        "use_usec": 186199,
+        "wall_s": 44.99936767500185
+      },
+      "infrastructure_flags": [],
+      "input_profile": "common",
+      "p95_ms": 2.2008103554819587,
+      "p99_ms": 9.222750194240898,
+      "private_hash_by_role": {
+        "client": "-524288",
+        "manager": "524288",
+        "router": "-524288",
+        "server": "-524288"
+      },
+      "qualified": true,
+      "ramp_s": 60,
+      "req_per_s": 10.237961341161599,
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "stock_pass": true,
+      "tag": "priorroute-stock-smoke-128-v2",
+      "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+      "topology": "historical-single-middle-router-paced",
+      "users": 128,
+      "whole_run_server_cpu": {
+        "cpu_us_per_req": 298.1106976744186,
+        "mean_cpu_pct": 0.3052079351659365,
+        "use_usec": 320469,
+        "wall_s": 105.00021889200434
+      },
+      "entry": "willwang-0142ba2",
+      "requests": 1075,
+      "successes": 1075,
+      "actual_dials_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "assigned_users_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "all_post_ramp_snapshots": {
+        "first_s": 65,
+        "full_ticks": 8,
+        "expected_ticks": 8
+      },
+      "complete_five_second_windows": {
+        "first_s": 65,
+        "full_ticks": 8,
+        "expected_ticks": 8
+      },
+      "lifetime": "alive_at_cutoff",
+      "scope_samples_during_scoring": 22,
+      "qdisc_states": {
+        "rclient": "clean",
+        "rserver": "clean",
+        "tclient": "clean",
+        "tserver": "clean"
+      },
+      "private_links_at_cutoff": {
+        "rclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "clean",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "rserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "clean",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "tclient": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "clean",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "tserver": {
+          "at_start": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "state": "clean",
+          "through_cutoff_read": [
+            0,
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "sha256": {
+        "summary.json": "e202214d840a9b40a37d867b06d0f7aca30e30f0f1523aacc30f64195ca13f34",
+        "shape.json": "0075d04e72f2c4adb670349619858630216a0c26215a891cd9120fefa5c9b6ef",
+        "scored-wire-cpu.json": "2b4efd2cf86d52e00db6fe161bc18545fd4356f1c67ff0899da73ed46f24efe6",
+        "synchronized-connections.json": "36475b9a3e92ca1f29480ea8dd2d15d7e900e0a028003645769b70c49a88af08",
+        "component-test-lock.json": "c4443df49e2629a9f647a6441d742240b89dab9f2a983f48c8da7b202b167434",
+        "serial-lock.json": "d5624a532c867ea2abae207c2b8f4f036d1577694c53c2ca8caec0b3da470e1b",
+        "raw/plan.json": "e05fe9019f4eeb2870dc2e8b6d9346c574f69ceb52c352af544a27bdf3153c6f",
+        "raw/score.json": "e2d2f2a1059dc2d0dbddf621469c8816f72a8ae22bf68fca5183f72cf6539547",
+        "raw/shard0.json": "1d5b19c7636f0540f9135ec5a73c730864fb8670387b51bcac4b9d067ab2f546",
+        "raw/shard1.json": "34707532ad5dbddf1a9cc2e5adf662e6b170075059af4974788d2f913aa7a759",
+        "raw/shard2.json": "b70df9b4c3a2cabd1bda339b7ba87b7b11287482f8382e1069696d5d6404f200",
+        "raw/shard3.json": "0db2fecf6be381d5f5e85ff901f14447e19ef02b284732ee65fae4f1f88ca986",
+        "scored-assessment.json": "9e2d097e8de953bb2c6bd618f601f9c80a7155563efe339291512cfa4885d896"
+      }
+    }
+  ]
+}

@@ -1,0 +1,219 @@
+{
+  "official_entry": {
+    "name": "c-iouring-jowinjestine",
+    "revision": "1e7fb4d",
+    "published_users": 290000
+  },
+  "ring_setup": {
+    "selected_reactor_sha256": "189ae66ae62e8889355cb076bcb9c79dcb8c16f02d060223789cbcdc886d2b14",
+    "kernel": "6.8.0-147-generic",
+    "clang_native_lto": {
+      "observations": 192,
+      "wall_ms": {
+        "max": 1.1092,
+        "median": 0.5272,
+        "min": 0.2719,
+        "n": 192,
+        "p95": 0.6555,
+        "p99": 0.779
+      },
+      "first_allocation_ms": {
+        "max": 0.779,
+        "median": 0.4118,
+        "min": 0.348,
+        "n": 24,
+        "p95": 0.5157,
+        "p99": 0.779
+      },
+      "harness_sha256": "7176a481a93b3019c195b4cd6891041f98945ebd15ac06db63511938507dc268"
+    },
+    "gcc_crosscheck_ms": {
+      "max": 10.3446,
+      "median": 0.5175,
+      "min": 0.2622,
+      "n": 192,
+      "p95": 0.7211,
+      "p99": 7.337
+    },
+    "guarded_350k_trial": "ring4096-guarded-quiet-350-p1",
+    "final_activation_bound": {
+      "existing_capacity": 327675,
+      "first_stock_tick_over_capacity_s": 105,
+      "interpolated_kernel_capacity_crossing_s": 100.806,
+      "new_bank": 6,
+      "positive_dial_tick_for_upper_s": 105,
+      "sampled_memory_headroom_mib": [
+        700.4,
+        913.4
+      ],
+      "server_curr_estab_observation_s": [
+        100.316,
+        102.319
+      ],
+      "server_curr_estab_observed": [
+        326039,
+        332731
+      ],
+      "stock_elapsed_lower_s": 95,
+      "stock_elapsed_upper_s": 109.286,
+      "stock_window_at_capacity_crossing": {
+        "p99_max_ms": 3141.85,
+        "p99_median_ms": 3141.85,
+        "p99_min_ms": 3141.85,
+        "requests": 137271,
+        "shard_windows": 4
+      },
+      "stock_windows_overlapping_possible_activation": {
+        "p99_max_ms": 3402.174,
+        "p99_median_ms": 3141.85,
+        "p99_min_ms": 1489.644,
+        "requests": 766577,
+        "shard_windows": 20
+      }
+    },
+    "stock_after_last_rollover": {
+      "at_least_1s_pct_entire_hist": 1.2481,
+      "first_included_window_start": [
+        115,
+        115,
+        115,
+        115
+      ],
+      "p99_max_ms": 1835.825,
+      "p99_median_ms": 887.914,
+      "p99_min_ms": 508.597,
+      "requests": 3591335,
+      "shard_windows": 84,
+      "threshold_1s_in_full_hist_lower": 1628413,
+      "threshold_1s_lower": 75861,
+      "threshold_500ms_lower": 172745
+    }
+  },
+  "wal_header_reuse": {
+    "scope": "single paced database workload on the scorer filesystem, no HTTP load",
+    "requests": 1041600,
+    "groups": 1200,
+    "window_s": 40.801069,
+    "sync_header_inside_issue_window": [
+      {
+        "generation": 0,
+        "elapsed_ms": 89.267431,
+        "sync_us": 6986.24,
+        "group": 0,
+        "entire_commit_us": 8753
+      },
+      {
+        "generation": 1,
+        "elapsed_ms": 4951.712981,
+        "sync_us": 1687.957,
+        "group": 133,
+        "entire_commit_us": 2140
+      },
+      {
+        "generation": 2,
+        "elapsed_ms": 11056.033586,
+        "sync_us": 2368.975,
+        "group": 318,
+        "entire_commit_us": 2680
+      },
+      {
+        "generation": 3,
+        "elapsed_ms": 17235.917438,
+        "sync_us": 1691.202,
+        "group": 504,
+        "entire_commit_us": 2353
+      },
+      {
+        "generation": 4,
+        "elapsed_ms": 23451.024812,
+        "sync_us": 1633.575,
+        "group": 688,
+        "entire_commit_us": 1977
+      },
+      {
+        "generation": 5,
+        "elapsed_ms": 29841.223872,
+        "sync_us": 1908.699,
+        "group": 876,
+        "entire_commit_us": 2496
+      },
+      {
+        "generation": 6,
+        "elapsed_ms": 35974.036749,
+        "sync_us": 2233.621,
+        "group": 1057,
+        "entire_commit_us": 2714
+      }
+    ],
+    "headerless_issuer_syncs": [
+      {
+        "type": "directory/other",
+        "elapsed_ms": 96.315854,
+        "sync_us": 1.714
+      }
+    ],
+    "worker_syncs": {
+      "wal": {
+        "n": 19,
+        "us": {
+          "50": 8226.772,
+          "95": 224000.147,
+          "99": 224000.147,
+          "100": 224000.147
+        },
+        "sum_us": 1122756.483
+      },
+      "directory/other": {
+        "n": 1,
+        "us": {
+          "50": 3.245,
+          "95": 3.245,
+          "99": 3.245,
+          "100": 3.245
+        },
+        "sum_us": 3.245
+      },
+      "main-db": {
+        "n": 13,
+        "us": {
+          "50": 32116.617,
+          "95": 87478.486,
+          "99": 87478.486,
+          "100": 87478.486
+        },
+        "sum_us": 463110.827
+      }
+    },
+    "steady_commits_us": {
+      "50": 397,
+      "95": 540,
+      "99": 740,
+      "100": 2714
+    },
+    "all_commits_us": {
+      "50": 418,
+      "95": 1129,
+      "99": 2833,
+      "100": 43973
+    },
+    "source_db_bytes": 249192448,
+    "confirmed_post_count": 509600,
+    "confirmed_like_count": 2087994,
+    "script_sha256": "68cf6fc8ffc39dc4c48d6e77b2ab1c4b1222a416034c8cc39169a09cc39d6679",
+    "header_us": {
+      "50": 1908.699,
+      "95": 6986.24,
+      "99": 6986.24,
+      "100": 6986.24
+    },
+    "restart_us": {
+      "50": 1691.202,
+      "95": 2368.975,
+      "99": 2368.975,
+      "100": 2368.975
+    },
+    "restart_total_us": 11524.029,
+    "outside_workload_syncs": 2,
+    "confirmed_pre_window_durable_seed": true
+  }
+}

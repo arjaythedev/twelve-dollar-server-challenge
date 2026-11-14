@@ -201,6 +201,35 @@ static void check_partial_import(void) {
     puts("partial import, descriptor reuse and all four readiness watches passed");
 }
 
+static void check_new_tcp_socket(void) {
+    /* Keep an ephemeral port reserved until the real SO_REUSEPORT listener
+     * binds it. The reservation never listens or receives connections. */
+    int reservation = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int one = 1;
+    assert(reservation >= 0);
+    assert(!setsockopt(reservation, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)));
+    struct sockaddr_in address = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t length = sizeof(address);
+    assert(!bind(reservation, (struct sockaddr *)&address, length));
+    assert(!getsockname(reservation, (struct sockaddr *)&address, &length));
+    char port[6];
+    snprintf(port, sizeof(port), "%u", (unsigned)ntohs(address.sin_port));
+    int listener = start_listener("127.0.0.1", port);
+    assert(listener >= 0);
+    close(reservation);
+    int client = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    assert(client >= 0 && !connect(client, (struct sockaddr *)&address, length));
+    int child = accept4(listener, NULL, NULL, SOCK_CLOEXEC);
+    int quick = -1;
+    socklen_t size = sizeof(quick);
+    assert(child >= 0 && !getsockopt(child, IPPROTO_TCP, TCP_QUICKACK, &quick, &size));
+    assert(quick == 0);
+    close(child);
+    close(client);
+    close(listener);
+    puts("new TCP sockets inherit the listener's delayed-ACK hint");
+}
+
 int main(void) {
     slots = 32;
     if (new_ring(0) < 0 || new_ring(1) < 0) {
@@ -224,6 +253,7 @@ int main(void) {
     check_secondary_notifications(&second);
     check_idle_arrivals(&first, &second);
     check_partial_import();
+    check_new_tcp_socket();
     close(first.peer);
     close(second.peer);
     puts("fixed-slot Unix reads, idle rearm, busy suppression and secondary wakes passed");

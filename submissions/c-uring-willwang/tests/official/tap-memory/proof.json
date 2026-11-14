@@ -1,0 +1,360 @@
+{
+  "fixture_base_sha256": {
+    "router/launch.py": "98c24a29eb025a06285efc35d6ef2574d684f39143ce91fcbeec496b56f9c14a",
+    "router/run.py": "11c8d5ab51f1109e2aed86b7a07de5d0feeebbd5e45130d3e2c9b525f7bc3179",
+    "tap-ring4096/run_buffered.py": "45c8b55da0976ddce1de069bd160427cfb9c4526c147e78a307202c19d1b58e6",
+    "tap-split/run_split.py": "ba90efc0e2d16d05c63b8c3fe624d77e5a846452512eb863bef6b5376945b513"
+  },
+  "pressure": {
+    "cached": {
+      "app_events_local": {
+        "high": 0,
+        "low": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "before": 28672000,
+      "cap": 28672000,
+      "count": 0,
+      "current": 28672000,
+      "cycle_ns": 275485,
+      "events": {
+        "high": 0,
+        "low": 0,
+        "max": 104,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "guest": 32227328,
+      "interval_ns": 100925908,
+      "listener_baseline": 1,
+      "manager_cpu_ns": 40549483,
+      "n": 1,
+      "original_app": 28672000,
+      "parent_events_local": {
+        "high": 0,
+        "low": 0,
+        "max": 104,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "reclaim": {
+        "anon": 114688,
+        "file": 27492352,
+        "pgscan": 6656,
+        "pgsteal": 6656,
+        "slab": 931096,
+        "sock": 0
+      },
+      "swap": 0,
+      "unix_ns": 1794492527228539922,
+      "untracked_bytes": 0,
+      "write_ns": 431
+    },
+    "caller_and_external_peers_survived": true,
+    "cleanup": true,
+    "disposable_holder_elf_sha256": "ce17f14296ac5180a350e98dbb6733cfb640a2117b937d971562497505de5e16",
+    "end": {
+      "events": {
+        "high": 0,
+        "low": 0,
+        "max": 283,
+        "oom": 1,
+        "oom_group_kill": 0,
+        "oom_kill": 1
+      },
+      "final_events_available": true,
+      "kind": "end",
+      "manager_cpu_ns": 42258413,
+      "mono_ns": 66694314878192,
+      "parent_events_local": {
+        "high": 0,
+        "low": 0,
+        "max": 283,
+        "oom": 1,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "reason": "service_exit",
+      "samples": 4,
+      "unix_ns": 1794492527513888763
+    },
+    "high": {
+      "app_events_local": {
+        "high": 0,
+        "low": 0,
+        "max": 0,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "before": 28430336,
+      "cap": 26750976,
+      "count": 2304,
+      "current": 26333184,
+      "cycle_ns": 934862,
+      "events": {
+        "high": 0,
+        "low": 0,
+        "max": 152,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "guest": 32227328,
+      "interval_ns": 100585603,
+      "listener_baseline": 1,
+      "manager_cpu_ns": 42060879,
+      "n": 3,
+      "original_app": 28672000,
+      "parent_events_local": {
+        "high": 0,
+        "low": 0,
+        "max": 152,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "reclaim": {
+        "anon": 114688,
+        "file": 25165824,
+        "pgscan": 10240,
+        "pgsteal": 10240,
+        "slab": 900416,
+        "sock": 0
+      },
+      "swap": 0,
+      "unix_ns": 1794492527429304707,
+      "untracked_bytes": 5474304,
+      "write_ns": 676041
+    },
+    "manager": {
+      "app_exited_before_cutoff": true,
+      "cutoff_unix": 1794492527.5500538,
+      "exit_reason": "service_exit",
+      "first_sample_unix": 1794492527.1275024,
+      "fixture_flags": [],
+      "identity": {
+        "app_cpu": 9,
+        "cadence_ms": 100,
+        "charge_bytes": 2376,
+        "group": "/twelvepassivetr0b53e2e.slice/twelve-revisit-tr0b53e2e.service",
+        "initial_active_opens": 0,
+        "kernel": "6.8.0-147-generic",
+        "kind": "identity",
+        "listeners": 1,
+        "manager_caps": "0",
+        "manager_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service",
+        "manager_cpu": 9,
+        "manager_no_new_privileges": true,
+        "manager_uid": 1000,
+        "mono_ns": 66693928211142,
+        "netns": 4026533604,
+        "objcg_bytes": 8,
+        "original_leaf_max": 28672000,
+        "original_leaf_swap_max": 0,
+        "outer_inode": 308893,
+        "pid": 2065707,
+        "service_inode": 308972,
+        "slice": "twelvepassivetr0b53e2e.slice",
+        "slot_bytes": 2368,
+        "uid": 1000,
+        "unit": "twelve-revisit-tr0b53e2e.service",
+        "unix_ns": 1794492527127221552,
+        "upper_envelope": 32227328
+      },
+      "last_pre_cutoff_unix": 1794492527.4293048,
+      "manager_process_cpu_s": 0.001917189,
+      "max_before_cutoff_events": {
+        "high": 0,
+        "low": 0,
+        "max": 152,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "max_sample_gap_ms": 100.925908,
+      "max_sampled_growth_bytes": 4381344,
+      "oom_kill_at_cutoff": 1,
+      "p99_cycle_ms": 0.934862,
+      "p99_sample_gap_ms": 100.925908,
+      "p99_write_ms": 0.676041,
+      "parent_resets_when_private_slice_disappears": true,
+      "profile": "single-queue-split-polling-tap-external-txring4096-private-passive-tcp-memory",
+      "records": 4,
+      "scored_min_parent_limit_bytes": 26750976,
+      "scored_peak_current_plus_modeled_bytes": 31807488,
+      "scored_peak_live_ipv4": 2304,
+      "scored_records": 3,
+      "sources": {
+        "calibration.json": "4702f5178a53aa20a808c5c53a86e175124c2ae3491f6ecdd2afc449c7f14458",
+        "monitor.py": "7e0bbb7a9727ecf8d9e4d8e24a4dc839c86cd3e2c6f7bbd2a2cebe5ecb90fd7b",
+        "run_memory.py": "f853e93803007a0ccb912d148b64c4f3e213cc99e50da5151c12a1f522d8326d"
+      }
+    }
+  },
+  "raw_proof_sha256": {
+    "pressure-final/passive-memory.jsonl": "cbe288b9b6463fac78711e2f216bf006d3356a990280fe2a6d7d92a659f14073",
+    "pressure-final/pressure-proof.json": "c8dfed2ce1fe7e46ffe6c56921af5223d39bb5e8060f89d058f5f22744f6b323",
+    "proof-final/passive-memory.jsonl": "0df846af3d30e10195e85b35ac06e3c2fc43a7664b81e5918ecc51d5ae15c8a1",
+    "proof-final/proof.json": "9918199362511645ccd3ca30a3ba3179b74c64467f881b1a93ddf8aba446af48"
+  },
+  "real_service": {
+    "elf_sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+    "fixed_schema_sha256": "7fe0ea8823a1c94b80da9f7224949b8a1e8663ed03450cdd4d0c7b3c55e77dde",
+    "manager": {
+      "app_exited_before_cutoff": false,
+      "cutoff_unix": 1794492526.340537,
+      "exit_reason": "service_exit",
+      "first_sample_unix": 1794492524.6222517,
+      "fixture_flags": [],
+      "identity": {
+        "app_cpu": 9,
+        "cadence_ms": 100,
+        "charge_bytes": 2376,
+        "group": "/twelvepassivetrb0ce98b.slice/twelve-revisit-trb0ce98b.service",
+        "initial_active_opens": 0,
+        "kernel": "6.8.0-147-generic",
+        "kind": "identity",
+        "listeners": 8,
+        "manager_caps": "0",
+        "manager_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service",
+        "manager_cpu": 9,
+        "manager_no_new_privileges": true,
+        "manager_uid": 1000,
+        "mono_ns": 66691422914730,
+        "netns": 4026533604,
+        "objcg_bytes": 8,
+        "original_leaf_max": 28672000,
+        "original_leaf_swap_max": 0,
+        "outer_inode": 308765,
+        "pid": 2065442,
+        "service_inode": 308844,
+        "slice": "twelvepassivetrb0ce98b.slice",
+        "slot_bytes": 2368,
+        "uid": 1000,
+        "unit": "twelve-revisit-trb0ce98b.service",
+        "unix_ns": 1794492524621924800,
+        "upper_envelope": 32227328
+      },
+      "last_pre_cutoff_unix": 1794492526.3231826,
+      "manager_process_cpu_s": 0.006920687,
+      "max_before_cutoff_events": {
+        "high": 0,
+        "low": 0,
+        "max": 274,
+        "oom": 0,
+        "oom_group_kill": 0,
+        "oom_kill": 0
+      },
+      "max_sample_gap_ms": 107.574546,
+      "max_sampled_growth_bytes": 734184,
+      "oom_kill_at_cutoff": 0,
+      "p99_cycle_ms": 0.345522,
+      "p99_sample_gap_ms": 107.574546,
+      "p99_write_ms": 0.016104,
+      "parent_resets_when_private_slice_disappears": true,
+      "profile": "single-queue-split-polling-tap-external-txring4096-private-passive-tcp-memory",
+      "records": 18,
+      "scored_min_parent_limit_bytes": 26750976,
+      "scored_peak_current_plus_modeled_bytes": 13027328,
+      "scored_peak_live_ipv4": 2304,
+      "scored_records": 17,
+      "sources": {
+        "calibration.json": "4702f5178a53aa20a808c5c53a86e175124c2ae3491f6ecdd2afc449c7f14458",
+        "monitor.py": "7e0bbb7a9727ecf8d9e4d8e24a4dc839c86cd3e2c6f7bbd2a2cebe5ecb90fd7b",
+        "run_memory.py": "f853e93803007a0ccb912d148b64c4f3e213cc99e50da5151c12a1f522d8326d"
+      }
+    },
+    "private_namespaces_gone": true,
+    "private_slice_gone": true,
+    "related_elf": "guarded C release",
+    "scale": "1/64 amounts; same actual 2376 B per socket",
+    "seed_bytes": 48193536,
+    "stages": [
+      {
+        "cap": 28672000,
+        "client": {
+          "checked": 128,
+          "cpu": [
+            9
+          ],
+          "op": "resize",
+          "peers": 128,
+          "pid": 2065447
+        },
+        "expected": 128,
+        "lag_ms": 88.491174,
+        "original_leaf": 28672000,
+        "stage": "low"
+      },
+      {
+        "cap": 26750976,
+        "client": {
+          "checked": 2304,
+          "cpu": [
+            9
+          ],
+          "op": "resize",
+          "peers": 2304,
+          "pid": 2065447
+        },
+        "expected": 2304,
+        "lag_ms": 64.884426,
+        "original_leaf": 28672000,
+        "stage": "high"
+      },
+      {
+        "cap": 28672000,
+        "client": {
+          "checked": 2338,
+          "cpu": [
+            9
+          ],
+          "op": "resize",
+          "peers": 128,
+          "pid": 2065447
+        },
+        "expected": 128,
+        "lag_ms": 115.443975,
+        "original_leaf": 28672000,
+        "stage": "reduced"
+      },
+      {
+        "cap": 28672000,
+        "client": {
+          "checked": 2338,
+          "cpu": [
+            9
+          ],
+          "op": "resize",
+          "peers": 0,
+          "pid": 2065447
+        },
+        "expected": 0,
+        "lag_ms": 84.578768,
+        "original_leaf": 28672000,
+        "stage": "closed"
+      }
+    ],
+    "write_readback": {
+      "checked": 2338,
+      "cpu": [
+        9
+      ],
+      "op": "write",
+      "peers": 2304,
+      "pid": 2065447
+    }
+  },
+  "validation_components": [
+    "formula and page rounding",
+    "strict private path naming",
+    "cutoff/exit/record coverage",
+    "fail-closed result persistence"
+  ]
+}

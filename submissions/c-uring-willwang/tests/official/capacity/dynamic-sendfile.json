@@ -1,0 +1,395 @@
+{
+  "source_sha256": "931abe779a84714e10123ce4d301b45a7ce8ddfade37db2c8140c275e6f771cd",
+  "executable_sha256": "76ff8477aa086a7f83331bf490e5e677b0d633cbc3b4fdcd47679c4766abda64",
+  "total_checked": 32544,
+  "total_bytes": 145691136,
+  "timed_checked": 31104,
+  "slow_reader_checked": 576,
+  "slow_reader": [
+    {
+      "block": 99,
+      "len": 5184,
+      "mode": "send",
+      "receiver_delay_us": 5000,
+      "responses": 192,
+      "server_cpu_ns": 2491622,
+      "wire_wall_ns": 38294543,
+      "output_cpu_ns": 1624405,
+      "hole_cpu_ns": 0,
+      "minor_faults": 0,
+      "major_faults": 0,
+      "output_calls": 192,
+      "shorts": 0,
+      "waits": 0,
+      "max_outq_bytes": 248832,
+      "memfd_blocks512": 768,
+      "postpunch_blocks512": 0,
+      "server_maxrss_kib": 3508,
+      "server_cpu_us": 12.977197916666666,
+      "tx_cpu_us": 8.460442708333334,
+      "hole_cpu_us": 0.0,
+      "wire_wall_us": 199.45074479166666,
+      "minor_faults_per_response": 0.0,
+      "major_faults_per_response": 0.0
+    },
+    {
+      "block": 99,
+      "len": 5184,
+      "mode": "sendfile_lease",
+      "receiver_delay_us": 5000,
+      "responses": 192,
+      "server_cpu_ns": 3404739,
+      "wire_wall_ns": 37736109,
+      "output_cpu_ns": 2074591,
+      "hole_cpu_ns": 0,
+      "minor_faults": 0,
+      "major_faults": 0,
+      "output_calls": 192,
+      "shorts": 0,
+      "waits": 0,
+      "max_outq_bytes": 248832,
+      "memfd_blocks512": 768,
+      "postpunch_blocks512": 0,
+      "server_maxrss_kib": 3508,
+      "server_cpu_us": 17.733015625,
+      "tx_cpu_us": 10.805161458333334,
+      "hole_cpu_us": 0.0,
+      "wire_wall_us": 196.542234375,
+      "minor_faults_per_response": 0.0,
+      "major_faults_per_response": 0.0
+    },
+    {
+      "block": 99,
+      "len": 5184,
+      "mode": "sendfile_punch",
+      "receiver_delay_us": 5000,
+      "responses": 192,
+      "server_cpu_ns": 5233898,
+      "wire_wall_ns": 38363947,
+      "output_cpu_ns": 2042906,
+      "hole_cpu_ns": 289860,
+      "minor_faults": 384,
+      "major_faults": 0,
+      "output_calls": 192,
+      "shorts": 0,
+      "waits": 0,
+      "max_outq_bytes": 248832,
+      "memfd_blocks512": 768,
+      "postpunch_blocks512": 0,
+      "server_maxrss_kib": 3508,
+      "server_cpu_us": 27.259885416666666,
+      "tx_cpu_us": 10.640135416666666,
+      "hole_cpu_us": 1.5096875,
+      "wire_wall_us": 199.81222395833333,
+      "minor_faults_per_response": 2.0,
+      "major_faults_per_response": 0.0
+    }
+  ],
+  "actual_device_flags": {
+    "df6c3df5es": {
+      "tx-checksumming": "on",
+      "scatter-gather": "on",
+      "tcp-segmentation-offload": "on",
+      "generic-segmentation-offload": "on"
+    },
+    "df6c3df5ec": {
+      "tx-checksumming": "on",
+      "scatter-gather": "on",
+      "tcp-segmentation-offload": "on",
+      "generic-segmentation-offload": "on"
+    }
+  },
+  "socket_errors": {
+    "df6c3df5es": {
+      "IpInHdrErrors": 0,
+      "TcpRetransSegs": 102,
+      "TcpInErrs": 0,
+      "TcpInCsumErrors": 0,
+      "TcpExtListenOverflows": 0,
+      "TcpExtListenDrops": 0
+    },
+    "df6c3df5ec": {
+      "IpInHdrErrors": 0,
+      "TcpRetransSegs": 0,
+      "TcpInErrs": 0,
+      "TcpInCsumErrors": 0,
+      "TcpExtListenOverflows": 0,
+      "TcpExtListenDrops": 0
+    }
+  },
+  "direct_io_uring_file_socket_splice_result": "EINVAL observed on established TCP/fixed output and regular memfd",
+  "bounded_file_capacity_bytes": 393216,
+  "maximum_responses_in_one_generation": 48,
+  "comparison": "Linux 6.8, ordinary local TCP over two SG/TSO/GSO-capable TAP endpoints at MTU 1500. Each response has freshly rendered dynamic content. The issuer already has an ordinary output fd. Each of six blocks uses the same number of responses per alternative. Times are issuer CPU microseconds per verified response.",
+  "source_summary_sha256": "3612c0474d7cf082045704e6b42ef128f2f9f35402a9b10ee642780735310cdf",
+  "paired": {
+    "3744": {
+      "send": {
+        "tx_cpu_us": {
+          "median": 9.313331597222223,
+          "paired_delta": 0.0,
+          "paired_pct": 0.0,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "server_cpu_us": {
+          "median": 11.983798032407407,
+          "paired_delta": 0.0,
+          "paired_pct": 0.0,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "minor_faults_per_response": {
+          "median": 0.0,
+          "paired_delta": 0.0,
+          "paired_pct": null,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "sendfile_lease": {
+        "tx_cpu_us": {
+          "median": 11.29861111111111,
+          "paired_delta": 2.024472222222223,
+          "paired_pct": 21.769775976531967,
+          "lower_pairs": 0,
+          "all_delta": [
+            2.0334317129629635,
+            2.531179398148147,
+            1.0511111111111084,
+            2.1004062500000007,
+            2.0155127314814827,
+            1.8069560185185178
+          ]
+        },
+        "server_cpu_us": {
+          "median": 19.791082754629628,
+          "paired_delta": 7.6816174768518515,
+          "paired_pct": 63.970136529436644,
+          "lower_pairs": 0,
+          "all_delta": [
+            7.9847465277777765,
+            8.540774305555557,
+            5.2397326388888885,
+            7.622343750000001,
+            7.653493055555554,
+            7.709741898148149
+          ]
+        },
+        "minor_faults_per_response": {
+          "median": 0.0,
+          "paired_delta": 0.0,
+          "paired_pct": null,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "sendfile_punch": {
+        "tx_cpu_us": {
+          "median": 11.587216435185185,
+          "paired_delta": 2.170541087962964,
+          "paired_pct": 23.742017973154752,
+          "lower_pairs": 0,
+          "all_delta": [
+            2.4120300925925946,
+            2.472944444444442,
+            1.88631134259259,
+            2.335637731481482,
+            2.0054444444444464,
+            1.90527199074074
+          ]
+        },
+        "server_cpu_us": {
+          "median": 20.402004050925925,
+          "paired_delta": 8.555681712962963,
+          "paired_pct": 72.23131834355146,
+          "lower_pairs": 0,
+          "all_delta": [
+            8.86210648148148,
+            8.697934027777778,
+            14.420307870370369,
+            8.413429398148148,
+            7.578611111111112,
+            7.75871296296296
+          ]
+        },
+        "minor_faults_per_response": {
+          "median": 0.9444444444444444,
+          "paired_delta": 0.9444444444444444,
+          "paired_pct": null,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.9444444444444444,
+            0.9444444444444444,
+            0.9444444444444444,
+            0.9444444444444444,
+            0.9444444444444444,
+            0.9444444444444444
+          ]
+        }
+      }
+    },
+    "5184": {
+      "send": {
+        "tx_cpu_us": {
+          "median": 9.035013888888889,
+          "paired_delta": 0.0,
+          "paired_pct": 0.0,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "server_cpu_us": {
+          "median": 11.777618634259259,
+          "paired_delta": 0.0,
+          "paired_pct": 0.0,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        },
+        "minor_faults_per_response": {
+          "median": 0.0,
+          "paired_delta": 0.0,
+          "paired_pct": null,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "sendfile_lease": {
+        "tx_cpu_us": {
+          "median": 10.854471064814815,
+          "paired_delta": 1.8286817129629638,
+          "paired_pct": 20.192360672059472,
+          "lower_pairs": 0,
+          "all_delta": [
+            1.8462407407407415,
+            1.6560185185185183,
+            2.1490752314814827,
+            2.4942627314814825,
+            1.7926736111111108,
+            1.811122685185186
+          ]
+        },
+        "server_cpu_us": {
+          "median": 18.656145833333333,
+          "paired_delta": 6.622311342592592,
+          "paired_pct": 55.495410261238334,
+          "lower_pairs": 0,
+          "all_delta": [
+            7.036996527777779,
+            6.603912037037034,
+            5.309287037037038,
+            7.084070601851849,
+            6.619847222222221,
+            6.624775462962964
+          ]
+        },
+        "minor_faults_per_response": {
+          "median": 0.0,
+          "paired_delta": 0.0,
+          "paired_pct": null,
+          "lower_pairs": 0,
+          "all_delta": [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "sendfile_punch": {
+        "tx_cpu_us": {
+          "median": 10.849428819444444,
+          "paired_delta": 1.8360804398148147,
+          "paired_pct": 20.322049170412093,
+          "lower_pairs": 0,
+          "all_delta": [
+            1.836297453703704,
+            1.613322916666668,
+            2.4336527777777803,
+            2.620653935185187,
+            1.8358634259259254,
+            1.6160601851851855
+          ]
+        },
+        "server_cpu_us": {
+          "median": 23.63555613425926,
+          "paired_delta": 12.000586226851851,
+          "paired_pct": 101.90138270294287,
+          "lower_pairs": 0,
+          "all_delta": [
+            12.166761574074075,
+            11.83441087962963,
+            12.291469907407407,
+            12.358184027777778,
+            11.54809722222222,
+            11.425185185185184
+          ]
+        },
+        "minor_faults_per_response": {
+          "median": 1.8888888888888888,
+          "paired_delta": 1.8888888888888888,
+          "paired_pct": null,
+          "lower_pairs": 0,
+          "all_delta": [
+            1.8888888888888888,
+            1.8888888888888888,
+            1.8888888888888888,
+            1.8888888888888888,
+            1.8888888888888888,
+            1.8888888888888888
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,147 @@
+[
+  {
+    "trial": "ring4096-guarded-quiet-300-h1",
+    "ramp_s": 90,
+    "client_cpu_groups": [
+      "0,1",
+      "3,4",
+      "6,7",
+      "11,12,13"
+    ],
+    "group_mean_cpu_busy_pct": [
+      48.98,
+      48.38,
+      47.52,
+      42.56
+    ],
+    "group_p95_sampled_cpu_busy_pct": [
+      55.84,
+      57.41,
+      56.1,
+      52.04
+    ],
+    "heaviest_common_window_end_s": 95,
+    "shard_p99_ms_in_that_window": [
+      1000.52,
+      1000.52,
+      1000.52,
+      1000.52
+    ]
+  },
+  {
+    "trial": "ring4096-direct-ingress-300-h1",
+    "ramp_s": 90,
+    "client_cpu_groups": [
+      "0,1",
+      "3,4",
+      "6,7",
+      "11,12,13"
+    ],
+    "group_mean_cpu_busy_pct": [
+      43.16,
+      43.86,
+      44.31,
+      39.26
+    ],
+    "group_p95_sampled_cpu_busy_pct": [
+      47.64,
+      48.32,
+      52.17,
+      53.34
+    ],
+    "heaviest_common_window_end_s": 95,
+    "shard_p99_ms_in_that_window": [
+      2425.66,
+      2425.66,
+      2425.66,
+      2425.66
+    ]
+  },
+  {
+    "trial": "ring4096-fresh-quiet-300-h1",
+    "ramp_s": 90,
+    "client_cpu_groups": [
+      "0,1",
+      "3,4",
+      "6,7",
+      "11,12,13"
+    ],
+    "group_mean_cpu_busy_pct": [
+      48.51,
+      47.74,
+      46.83,
+      44.23
+    ],
+    "group_p95_sampled_cpu_busy_pct": [
+      63.32,
+      63.97,
+      60.27,
+      64.96
+    ],
+    "heaviest_common_window_end_s": 95,
+    "shard_p99_ms_in_that_window": [
+      1910.37,
+      1891.45,
+      1910.37,
+      1910.37
+    ]
+  },
+  {
+    "trial": "ring4096-mojo-300-h1",
+    "ramp_s": 90,
+    "client_cpu_groups": [
+      "0,1",
+      "3,4",
+      "6,7",
+      "11,12,13"
+    ],
+    "group_mean_cpu_busy_pct": [
+      40.81,
+      40.31,
+      39.09,
+      31.45
+    ],
+    "group_p95_sampled_cpu_busy_pct": [
+      55.58,
+      51.83,
+      52.84,
+      45.7
+    ],
+    "heaviest_common_window_end_s": 100,
+    "shard_p99_ms_in_that_window": [
+      3871.99,
+      3910.71,
+      3989.32,
+      3910.71
+    ]
+  },
+  {
+    "trial": "ring4096-pavlyhalim-300-h1",
+    "ramp_s": 90,
+    "client_cpu_groups": [
+      "0,1",
+      "3,4",
+      "6,7",
+      "11,12,13"
+    ],
+    "group_mean_cpu_busy_pct": [
+      42.4,
+      39.66,
+      40.2,
+      34.14
+    ],
+    "group_p95_sampled_cpu_busy_pct": [
+      55.24,
+      53.92,
+      52.7,
+      42.95
+    ],
+    "heaviest_common_window_end_s": 100,
+    "shard_p99_ms_in_that_window": [
+      12280.43,
+      12280.43,
+      12403.24,
+      12280.43
+    ]
+  }
+]

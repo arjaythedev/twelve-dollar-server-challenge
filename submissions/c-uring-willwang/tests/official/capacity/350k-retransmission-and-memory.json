@@ -1,0 +1,1258 @@
+{
+  "scope": "First four-worker 350,000-user hold of each executable and the submitted executable\u2019s independent repeat. All times are measured from each run\u2019s stock start. A native external TX drop invalidates a ranking result. The order of first observations does not establish the root cause.",
+  "records": {
+    "named-slot-sqlite-swap": {
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-350-h1",
+      "server": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+      "score_elapsed_s": [
+        0,
+        405.0
+      ],
+      "eligible": false,
+      "stock_attempts": 17165091,
+      "stock_failures": 12411485,
+      "stock_successes": 4753606,
+      "successful_s": 11737.29314,
+      "scored_errors": {
+        "EOF": 13486,
+        "broken pipe": 352,
+        "connection refused": 12394324,
+        "connection reset by peer": 3325,
+        "timeout": 1
+      },
+      "first_observed_native_TX_drop_brackets_s": {
+        "service": [
+          200.6142,
+          208.85124
+        ],
+        "c0": [
+          176.09657,
+          184.27246
+        ],
+        "c1": [
+          176.09657,
+          184.27246
+        ],
+        "c2": [
+          192.44619,
+          200.6142
+        ],
+        "c3": [
+          176.09657,
+          184.27246
+        ]
+      },
+      "scored_native_TX_total": [
+        1192960,
+        131455,
+        408866,
+        9450,
+        138482
+      ],
+      "scored_native_time_s": 403.25918,
+      "first_leaf_event_brackets_s": {
+        "max": [
+          196.45348,
+          198.45906
+        ],
+        "oom": [
+          204.62177,
+          206.62506
+        ],
+        "oom_kill": [
+          204.62177,
+          206.62506
+        ]
+      },
+      "last_leaf_sample_s": 206.62506,
+      "first_leaf_absent_s": 208.63336,
+      "first_stock_http_error_tick": {
+        "t": 210,
+        "connections": 92831,
+        "fails": [
+          3370,
+          3435,
+          3301,
+          3669
+        ],
+        "successes": [
+          391,
+          368,
+          506,
+          450
+        ],
+        "p99_ms": [
+          20808.77436,
+          20808.77436,
+          20808.77436,
+          20808.77436
+        ]
+      },
+      "first_stock_below_target_again": {
+        "t": 210,
+        "connections": 92831,
+        "fails": [
+          3370,
+          3435,
+          3301,
+          3669
+        ],
+        "successes": [
+          391,
+          368,
+          506,
+          450
+        ],
+        "p99_ms": [
+          20808.77436,
+          20808.77436,
+          20808.77436,
+          20808.77436
+        ]
+      },
+      "first_stock_zero_after_full": {
+        "t": 270,
+        "connections": 0,
+        "fails": [
+          79390,
+          86335,
+          88208,
+          86898
+        ],
+        "successes": [
+          0,
+          0,
+          0,
+          0
+        ],
+        "p99_ms": [
+          0.01505,
+          0.01505,
+          0.01404,
+          0.01598
+        ]
+      },
+      "regular_four_core_common_deficit_screen": {
+        "max_seconds": 0.04399,
+        "max_window_s": [
+          223.02045,
+          225.02444
+        ],
+        "threshold_seconds": 0.1,
+        "over_threshold": 0
+      },
+      "guest_minus_leaf_storage_while_service_alive": {
+        "max_mib": 6.94141,
+        "max_window_s": [
+          47.39093,
+          59.55514
+        ],
+        "threshold_mib": 1024,
+        "over_threshold": 0
+      },
+      "rto_first_positive_after_t130_s": [
+        171.92482,
+        173.92876
+      ],
+      "service_TcpMemoryPressures_TcpRcvQDrop_TcpBacklogDrop_delta": [
+        0,
+        0,
+        0
+      ],
+      "icmp_s_from_stock_by_lane": [
+        {
+          "last_probe_under10_before_onset": [
+            171.87116,
+            171.87265,
+            1.49
+          ],
+          "first_probe_over100_after_lead": [
+            172.8719,
+            173.0979,
+            226.0
+          ],
+          "max_ms_before_first_native_drops": 2228.0
+        },
+        {
+          "last_probe_under10_before_onset": [
+            171.80718,
+            171.80746,
+            0.286
+          ],
+          "first_probe_over100_after_lead": [
+            172.83143,
+            173.05343,
+            222.0
+          ],
+          "max_ms_before_first_native_drops": 2224.0
+        },
+        {
+          "last_probe_under10_before_onset": [
+            171.99911,
+            171.99944,
+            0.331
+          ],
+          "first_probe_over100_after_lead": [
+            173.02412,
+            173.27612,
+            252.0
+          ],
+          "max_ms_before_first_native_drops": 1271.0
+        },
+        {
+          "last_probe_under10_before_onset": [
+            171.82638,
+            171.82662,
+            0.244
+          ],
+          "first_probe_over100_after_lead": [
+            172.83167,
+            173.05367,
+            222.0
+          ],
+          "max_ms_before_first_native_drops": 2153.0
+        }
+      ],
+      "first_observations_from_frozen_source_sha256": "0ee6f226fe0c122ce17635594d7a1a501e167099d64fa4a35f2550e49413e655",
+      "lead_in_kernel": [
+        {
+          "from_s": 163.74465,
+          "to_s": 165.74767,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 49.96255,
+          "napi_pct": 50.05193,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 3020,
+          "charged_memory_MiB": {
+            "sock": 128.31641,
+            "anon": 60.34766,
+            "slab": 523.52771
+          }
+        },
+        {
+          "from_s": 165.74767,
+          "to_s": 167.75049,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 48.81845,
+          "napi_pct": 51.14348,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2766,
+          "charged_memory_MiB": {
+            "sock": 118.31641,
+            "anon": 60.78516,
+            "slab": 523.52771
+          }
+        },
+        {
+          "from_s": 167.75049,
+          "to_s": 169.92132,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 47.69189,
+          "napi_pct": 52.24615,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1323,
+          "charged_memory_MiB": {
+            "sock": 145.5,
+            "anon": 61.22656,
+            "slab": 523.55966
+          }
+        },
+        {
+          "from_s": 169.92132,
+          "to_s": 171.92482,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 45.27493,
+          "napi_pct": 54.7072,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1506,
+          "charged_memory_MiB": {
+            "sock": 158.76562,
+            "anon": 61.62891,
+            "slab": 523.55966
+          }
+        },
+        {
+          "from_s": 171.92482,
+          "to_s": 173.92876,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 40.7038,
+          "napi_pct": 58.72397,
+          "tcp_timeouts": 12531,
+          "retransmitted_segments": 42292,
+          "charged_memory_MiB": {
+            "sock": 232.82812,
+            "anon": 61.85938,
+            "slab": 523.55966
+          }
+        },
+        {
+          "from_s": 173.92876,
+          "to_s": 175.93244,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 34.58375,
+          "napi_pct": 65.37226,
+          "tcp_timeouts": 41822,
+          "retransmitted_segments": 70543,
+          "charged_memory_MiB": {
+            "sock": 354.05859,
+            "anon": 62.07031,
+            "slab": 523.58745
+          }
+        },
+        {
+          "from_s": 175.93244,
+          "to_s": 178.10243,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 34.21321,
+          "napi_pct": 65.76691,
+          "tcp_timeouts": 91092,
+          "retransmitted_segments": 128852,
+          "charged_memory_MiB": {
+            "sock": 468.54688,
+            "anon": 62.3125,
+            "slab": 523.59219
+          }
+        },
+        {
+          "from_s": 178.10243,
+          "to_s": 180.10521,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 34.55781,
+          "napi_pct": 65.37394,
+          "tcp_timeouts": 117491,
+          "retransmitted_segments": 156800,
+          "charged_memory_MiB": {
+            "sock": 565.39062,
+            "anon": 62.57422,
+            "slab": 523.59219
+          }
+        },
+        {
+          "from_s": 180.10521,
+          "to_s": 182.10793,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 34.77075,
+          "napi_pct": 65.1305,
+          "tcp_timeouts": 150151,
+          "retransmitted_segments": 187288,
+          "charged_memory_MiB": {
+            "sock": 642.64844,
+            "anon": 62.79297,
+            "slab": 523.59219
+          }
+        },
+        {
+          "from_s": 182.10793,
+          "to_s": 184.11064,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 35.06134,
+          "napi_pct": 65.04955,
+          "tcp_timeouts": 137191,
+          "retransmitted_segments": 167463,
+          "charged_memory_MiB": {
+            "sock": 699.28516,
+            "anon": 62.98438,
+            "slab": 523.61998
+          }
+        },
+        {
+          "from_s": 184.11064,
+          "to_s": 186.27801,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 31.65816,
+          "napi_pct": 68.23309,
+          "tcp_timeouts": 156262,
+          "retransmitted_segments": 192091,
+          "charged_memory_MiB": {
+            "sock": 765.29297,
+            "anon": 63.21875,
+            "slab": 523.61742
+          }
+        },
+        {
+          "from_s": 186.27801,
+          "to_s": 188.28084,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 31.7431,
+          "napi_pct": 68.22227,
+          "tcp_timeouts": 152293,
+          "retransmitted_segments": 179848,
+          "charged_memory_MiB": {
+            "sock": 812.07422,
+            "anon": 63.41016,
+            "slab": 523.61784
+          }
+        },
+        {
+          "from_s": 188.28084,
+          "to_s": 190.28347,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 29.27974,
+          "napi_pct": 70.65048,
+          "tcp_timeouts": 112358,
+          "retransmitted_segments": 132262,
+          "charged_memory_MiB": {
+            "sock": 841.17578,
+            "anon": 63.51953,
+            "slab": 523.58292
+          }
+        },
+        {
+          "from_s": 190.28347,
+          "to_s": 192.28616,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 26.45816,
+          "napi_pct": 73.5427,
+          "tcp_timeouts": 96910,
+          "retransmitted_segments": 117186,
+          "charged_memory_MiB": {
+            "sock": 882.92969,
+            "anon": 63.61719,
+            "slab": 523.58292
+          }
+        },
+        {
+          "from_s": 192.28616,
+          "to_s": 194.45157,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 28.12419,
+          "napi_pct": 71.87534,
+          "tcp_timeouts": 94631,
+          "retransmitted_segments": 117266,
+          "charged_memory_MiB": {
+            "sock": 930.17188,
+            "anon": 63.73828,
+            "slab": 523.58292
+          }
+        },
+        {
+          "from_s": 194.45157,
+          "to_s": 196.4545,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 30.69496,
+          "napi_pct": 69.20173,
+          "tcp_timeouts": 81079,
+          "retransmitted_segments": 102707,
+          "charged_memory_MiB": {
+            "sock": 996.53906,
+            "anon": 63.85156,
+            "slab": 523.6315
+          }
+        },
+        {
+          "from_s": 196.4545,
+          "to_s": 198.45993,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 24.23746,
+          "napi_pct": 75.65198,
+          "tcp_timeouts": 89314,
+          "retransmitted_segments": 110620,
+          "charged_memory_MiB": {
+            "sock": 1039.15234,
+            "anon": 63.98828,
+            "slab": 523.27112
+          }
+        },
+        {
+          "from_s": 198.45993,
+          "to_s": 200.46284,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 23.27946,
+          "napi_pct": 76.3038,
+          "tcp_timeouts": 93650,
+          "retransmitted_segments": 114103,
+          "charged_memory_MiB": {
+            "sock": 1074.37891,
+            "anon": 64.10938,
+            "slab": 522.33961
+          }
+        },
+        {
+          "from_s": 200.46284,
+          "to_s": 202.61978,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 28.90822,
+          "napi_pct": 70.92484,
+          "tcp_timeouts": 83677,
+          "retransmitted_segments": 105392,
+          "charged_memory_MiB": {
+            "sock": 1088.44141,
+            "anon": 64.22656,
+            "slab": 521.9128
+          }
+        },
+        {
+          "from_s": 202.61978,
+          "to_s": 204.6228,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 24.55128,
+          "napi_pct": 75.01007,
+          "tcp_timeouts": 73975,
+          "retransmitted_segments": 93368,
+          "charged_memory_MiB": {
+            "sock": 1141.83203,
+            "anon": 64.34375,
+            "slab": 520.53621
+          }
+        }
+      ],
+      "lead_in_external": [
+        {
+          "from_s": 159.73323,
+          "to_s": 167.91554,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            -155795,
+            2761
+          ],
+          "native_TX_delta": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 97,
+            "rx_payload_bytes": 7636,
+            "tx_queued_sockets": 2,
+            "tx_payload_bytes": 3998
+          }
+        },
+        {
+          "from_s": 167.91554,
+          "to_s": 176.09657,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            15077,
+            210151
+          ],
+          "native_TX_delta": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 183,
+            "rx_payload_bytes": 14376,
+            "tx_queued_sockets": 53,
+            "tx_payload_bytes": 103446
+          }
+        },
+        {
+          "from_s": 176.09657,
+          "to_s": 184.27246,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            1187775,
+            1370988
+          ],
+          "native_TX_delta": [
+            0,
+            7858,
+            31473,
+            0,
+            7623
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 65,
+            "rx_payload_bytes": 5295,
+            "tx_queued_sockets": 315,
+            "tx_payload_bytes": 564277
+          }
+        },
+        {
+          "from_s": 184.27246,
+          "to_s": 192.44619,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            1950613,
+            2197573
+          ],
+          "native_TX_delta": [
+            0,
+            10424,
+            17397,
+            0,
+            10353
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 0,
+            "rx_payload_bytes": 0,
+            "tx_queued_sockets": 418,
+            "tx_payload_bytes": 946244
+          }
+        },
+        {
+          "from_s": 192.44619,
+          "to_s": 200.6142,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            2105512,
+            2351352
+          ],
+          "native_TX_delta": [
+            0,
+            1450,
+            3974,
+            4,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 0,
+            "rx_payload_bytes": 0,
+            "tx_queued_sockets": 474,
+            "tx_payload_bytes": 1064971
+          }
+        }
+      ]
+    },
+    "batch-watch": {
+      "tag": "ring4096-batch-watch-quiet-350-h1",
+      "server": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+      "score_elapsed_s": [
+        0,
+        405.0
+      ],
+      "eligible": true,
+      "stock_attempts": 12482234,
+      "stock_failures": 0,
+      "stock_successes": 12482234,
+      "successful_s": 30820.3259,
+      "scored_errors": {},
+      "first_observed_native_TX_drop_brackets_s": {
+        "service": null,
+        "c0": null,
+        "c1": null,
+        "c2": null,
+        "c3": null
+      },
+      "scored_native_TX_total": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "scored_native_time_s": 404.62628,
+      "first_leaf_event_brackets_s": {
+        "max": null,
+        "oom": null,
+        "oom_kill": null
+      },
+      "last_leaf_sample_s": 404.47235,
+      "first_leaf_absent_s": null,
+      "first_stock_http_error_tick": null,
+      "first_stock_below_target_again": null,
+      "first_stock_zero_after_full": null,
+      "regular_four_core_common_deficit_screen": {
+        "max_seconds": 0.00845,
+        "max_window_s": [
+          110.84222,
+          112.99067
+        ],
+        "threshold_seconds": 0.1,
+        "over_threshold": 0
+      },
+      "guest_minus_leaf_storage_while_service_alive": {
+        "max_mib": 48.74609,
+        "max_window_s": [
+          331.0635,
+          343.3686
+        ],
+        "threshold_mib": 1024,
+        "over_threshold": 0
+      },
+      "rto_first_positive_after_t130_s": null,
+      "service_TcpMemoryPressures_TcpRcvQDrop_TcpBacklogDrop_delta": [
+        0,
+        0,
+        0
+      ],
+      "icmp_s_from_stock_by_lane": [
+        {
+          "last_probe_under10_before_onset": [
+            173.89715,
+            173.89811,
+            0.957
+          ],
+          "first_probe_over100_after_lead": [
+            405.80534,
+            406.11934,
+            314.0
+          ],
+          "max_ms_before_first_native_drops": 2.48
+        },
+        {
+          "last_probe_under10_before_onset": [
+            173.89718,
+            173.89806,
+            0.882
+          ],
+          "first_probe_over100_after_lead": [
+            405.80514,
+            406.12614,
+            321.0
+          ],
+          "max_ms_before_first_native_drops": 2.47
+        },
+        {
+          "last_probe_under10_before_onset": [
+            173.00114,
+            173.00311,
+            1.97
+          ],
+          "first_probe_over100_after_lead": [
+            405.68255,
+            405.80055,
+            118.0
+          ],
+          "max_ms_before_first_native_drops": 2.72
+        },
+        {
+          "last_probe_under10_before_onset": [
+            173.87412,
+            173.87482,
+            0.693
+          ],
+          "first_probe_over100_after_lead": [
+            405.78807,
+            406.12007,
+            332.0
+          ],
+          "max_ms_before_first_native_drops": 3.85
+        }
+      ],
+      "first_observations_from_frozen_source_sha256": "0ee6f226fe0c122ce17635594d7a1a501e167099d64fa4a35f2550e49413e655",
+      "lead_in_kernel": [
+        {
+          "from_s": 163.92187,
+          "to_s": 165.9245,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 51.57151,
+          "napi_pct": 48.38642,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1985,
+          "charged_memory_MiB": {
+            "sock": 9.67578,
+            "anon": 60.95703,
+            "slab": 523.61341
+          }
+        },
+        {
+          "from_s": 165.9245,
+          "to_s": 167.92707,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 49.62724,
+          "napi_pct": 50.32131,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1584,
+          "charged_memory_MiB": {
+            "sock": 5.13281,
+            "anon": 61.53125,
+            "slab": 523.64913
+          }
+        },
+        {
+          "from_s": 167.92707,
+          "to_s": 170.06727,
+          "established": 350000,
+          "core_busy_pct": 99.5283,
+          "app_pct": 49.03019,
+          "napi_pct": 49.99809,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 840,
+          "charged_memory_MiB": {
+            "sock": 0.31641,
+            "anon": 62.07422,
+            "slab": 523.64913
+          }
+        },
+        {
+          "from_s": 170.06727,
+          "to_s": 172.0698,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 48.69981,
+          "napi_pct": 51.16277,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 905,
+          "charged_memory_MiB": {
+            "sock": 39.31641,
+            "anon": 62.52734,
+            "slab": 523.68108
+          }
+        },
+        {
+          "from_s": 172.0698,
+          "to_s": 174.07243,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 47.54212,
+          "napi_pct": 52.35877,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2056,
+          "charged_memory_MiB": {
+            "sock": 70.5,
+            "anon": 62.99609,
+            "slab": 523.68108
+          }
+        },
+        {
+          "from_s": 174.07243,
+          "to_s": 176.07501,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 51.35905,
+          "napi_pct": 48.66339,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2029,
+          "charged_memory_MiB": {
+            "sock": 94.10938,
+            "anon": 63.41797,
+            "slab": 523.71307
+          }
+        },
+        {
+          "from_s": 176.07501,
+          "to_s": 178.21591,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 50.69135,
+          "napi_pct": 49.23551,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2182,
+          "charged_memory_MiB": {
+            "sock": 76.90625,
+            "anon": 63.97266,
+            "slab": 523.71307
+          }
+        },
+        {
+          "from_s": 178.21591,
+          "to_s": 180.21853,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 48.69064,
+          "napi_pct": 51.26202,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2357,
+          "charged_memory_MiB": {
+            "sock": 76.91016,
+            "anon": 64.38281,
+            "slab": 523.71307
+          }
+        },
+        {
+          "from_s": 180.21853,
+          "to_s": 182.22114,
+          "established": 350000,
+          "core_busy_pct": 99.50249,
+          "app_pct": 48.20129,
+          "napi_pct": 51.67621,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1359,
+          "charged_memory_MiB": {
+            "sock": 113.61719,
+            "anon": 64.79297,
+            "slab": 523.7448
+          }
+        },
+        {
+          "from_s": 182.22114,
+          "to_s": 184.22375,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 48.92487,
+          "napi_pct": 51.05666,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2545,
+          "charged_memory_MiB": {
+            "sock": 116.67578,
+            "anon": 65.20312,
+            "slab": 523.7448
+          }
+        },
+        {
+          "from_s": 184.22375,
+          "to_s": 186.36734,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 51.52076,
+          "napi_pct": 48.47121,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1873,
+          "charged_memory_MiB": {
+            "sock": 118.36328,
+            "anon": 65.65234,
+            "slab": 523.7728
+          }
+        },
+        {
+          "from_s": 186.36734,
+          "to_s": 188.37005,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 49.59819,
+          "napi_pct": 50.44902,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1601,
+          "charged_memory_MiB": {
+            "sock": 106.01953,
+            "anon": 66.125,
+            "slab": 523.77676
+          }
+        },
+        {
+          "from_s": 188.37005,
+          "to_s": 190.37267,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 50.29739,
+          "napi_pct": 49.55017,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2240,
+          "charged_memory_MiB": {
+            "sock": 85.42969,
+            "anon": 66.64453,
+            "slab": 523.77676
+          }
+        },
+        {
+          "from_s": 190.37267,
+          "to_s": 192.37532,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 52.17832,
+          "napi_pct": 47.70286,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1816,
+          "charged_memory_MiB": {
+            "sock": 88.8125,
+            "anon": 67.10938,
+            "slab": 523.80874
+          }
+        },
+        {
+          "from_s": 192.37532,
+          "to_s": 194.51896,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 50.51666,
+          "napi_pct": 49.49761,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2227,
+          "charged_memory_MiB": {
+            "sock": 66.04297,
+            "anon": 67.67969,
+            "slab": 523.80874
+          }
+        },
+        {
+          "from_s": 194.51896,
+          "to_s": 196.52165,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 52.2087,
+          "napi_pct": 47.75527,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 1599,
+          "charged_memory_MiB": {
+            "sock": 68.91406,
+            "anon": 68.17188,
+            "slab": 523.84443
+          }
+        },
+        {
+          "from_s": 196.52165,
+          "to_s": 198.52422,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 50.60761,
+          "napi_pct": 49.32415,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2250,
+          "charged_memory_MiB": {
+            "sock": 49.90625,
+            "anon": 68.71484,
+            "slab": 523.84443
+          }
+        },
+        {
+          "from_s": 198.52422,
+          "to_s": 200.5268,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 51.07144,
+          "napi_pct": 48.85618,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2216,
+          "charged_memory_MiB": {
+            "sock": 42.32422,
+            "anon": 69.21094,
+            "slab": 523.84443
+          }
+        },
+        {
+          "from_s": 200.5268,
+          "to_s": 202.67507,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 48.73193,
+          "napi_pct": 51.18689,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 833,
+          "charged_memory_MiB": {
+            "sock": 48.99609,
+            "anon": 69.74609,
+            "slab": 523.87644
+          }
+        },
+        {
+          "from_s": 202.67507,
+          "to_s": 204.67775,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 49.76172,
+          "napi_pct": 50.20954,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2220,
+          "charged_memory_MiB": {
+            "sock": 41.51562,
+            "anon": 70.22656,
+            "slab": 523.87644
+          }
+        },
+        {
+          "from_s": 204.67775,
+          "to_s": 206.68056,
+          "established": 350000,
+          "core_busy_pct": 100.0,
+          "app_pct": 51.14935,
+          "napi_pct": 48.78334,
+          "tcp_timeouts": 0,
+          "retransmitted_segments": 2063,
+          "charged_memory_MiB": {
+            "sock": 60.53125,
+            "anon": 70.70312,
+            "slab": 523.90818
+          }
+        }
+      ],
+      "lead_in_external": [
+        {
+          "from_s": 159.91394,
+          "to_s": 168.06197,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            -175397,
+            2773
+          ],
+          "native_TX_delta": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 4,
+            "rx_payload_bytes": 264,
+            "tx_queued_sockets": 0,
+            "tx_payload_bytes": 0
+          }
+        },
+        {
+          "from_s": 168.06197,
+          "to_s": 176.21075,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            -166178,
+            2261
+          ],
+          "native_TX_delta": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 76,
+            "rx_payload_bytes": 6019,
+            "tx_queued_sockets": 1,
+            "tx_payload_bytes": 265
+          }
+        },
+        {
+          "from_s": 176.21075,
+          "to_s": 184.3619,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            -160512,
+            2738
+          ],
+          "native_TX_delta": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 82,
+            "rx_payload_bytes": 6858,
+            "tx_queued_sockets": 0,
+            "tx_payload_bytes": 0
+          }
+        },
+        {
+          "from_s": 184.3619,
+          "to_s": 192.51376,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            -167200,
+            2722
+          ],
+          "native_TX_delta": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 76,
+            "rx_payload_bytes": 5579,
+            "tx_queued_sockets": 0,
+            "tx_payload_bytes": 0
+          }
+        },
+        {
+          "from_s": 192.51376,
+          "to_s": 200.66913,
+          "native_service_RX_minus_TcpInSegs_outer_bounds": [
+            -161581,
+            2731
+          ],
+          "native_TX_delta": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "socket_inventory": {
+            "rows_seen": 1024,
+            "established": 1016,
+            "close_wait": 0,
+            "rx_queued_sockets": 46,
+            "rx_payload_bytes": 3682,
+            "tx_queued_sockets": 0,
+            "tx_payload_bytes": 0
+          }
+        }
+      ]
+    }
+  },
+  "independent_submitted_repeat": {
+    "tag": "ring4096-named-slot-sqlite-swap-quiet-350-h2",
+    "server": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+    "stock_attempts": 19667793,
+    "stock_successes": 2484150,
+    "stock_failures": 17183643,
+    "stock_errors": {
+      "EOF": 14126,
+      "broken pipe": 58,
+      "connection refused": 17166211,
+      "connection reset by peer": 3249
+    },
+    "stock_p95_ms": 1746.724569228494,
+    "stock_p99_ms": 12652.542703668965,
+    "stock_dials": 17516210,
+    "all_connections_present_ticks": 5,
+    "scheduled_hold_ticks": 59,
+    "first_scored_native_TX_drop_brackets_seconds": {
+      "service": [
+        135.214,
+        143.572
+      ],
+      "c0": [
+        110.567,
+        118.741
+      ],
+      "c1": [
+        110.567,
+        118.741
+      ],
+      "c2": [
+        126.965,
+        135.214
+      ],
+      "c3": [
+        110.567,
+        118.741
+      ]
+    },
+    "last_scored_native_TX_total": [
+      885793,
+      261884,
+      476969,
+      6862,
+      245092
+    ],
+    "first_leaf_memory_max_seconds": [
+      133.02,
+      135.028
+    ],
+    "first_leaf_oom_kill_seconds": [
+      137.281,
+      139.346
+    ],
+    "eligible": false,
+    "qualified": false,
+    "comparison_lock_runner_exit": 0
+  }
+}

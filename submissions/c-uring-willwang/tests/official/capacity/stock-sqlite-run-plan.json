@@ -1,0 +1,78 @@
+{
+  "reason": "Score the unmodified SQLite release on the identical fixture as the five previous published peer binaries. The earlier SQLite-source and cursor experiments have separate executable hashes and do not establish a passing score for this release. All successes, misses and interrupted attempts retain their original identities.",
+  "release_server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+  "controller_entry": "named-slot-watch",
+  "sqlite_source_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+  "reader_source_sha256": "c202d87d232540cf4d6381ee533bd6326699b5a59aa3af8805a25337b9d1af17",
+  "reactor_source_sha256": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+  "renderer_source_sha256": "375101deaf6bf4e5922d315532cb670968190e36195f5fbabdb65fba36d91142",
+  "stock_sqlite_reader_source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+  "peer_receipt": "large-table-high-loads.json",
+  "peer_receipt_sha256": "692bd87874cf6519a2ae20e04720e8ce7511895e865667f0261a7f793364b9b1",
+  "fixture_reference_sha256": "38ee68575fdb739e745c4f83cfa64be26dcab8f367fd8117c7d311bdac1b0b83",
+  "previous_dispatch_sha256": "934ae60adbee81dfdb08ecda0fabcdd808d18a94748a39d1ca8210ff404e482e",
+  "after": "ring4096-leaf-cursor-quiet-310-h1",
+  "trials": [
+    {
+      "tag": "large512k-quiet-stock-sqlite-345-h1",
+      "users": 345000,
+      "ramp_s": 104,
+      "hold_s": 300
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-350-h1",
+      "users": 350000,
+      "ramp_s": 105,
+      "hold_s": 300
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-330-h1",
+      "users": 330000,
+      "ramp_s": 99,
+      "hold_s": 300
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-345-p1",
+      "users": 345000,
+      "ramp_s": 104,
+      "hold_s": 120
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-350-p1",
+      "users": 350000,
+      "ramp_s": 105,
+      "hold_s": 120
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-345-h2",
+      "users": 345000,
+      "ramp_s": 104,
+      "hold_s": 300
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-350-h2",
+      "users": 350000,
+      "ramp_s": 105,
+      "hold_s": 300
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-370-h1",
+      "users": 370000,
+      "ramp_s": 111,
+      "hold_s": 300
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-400-h1",
+      "users": 400000,
+      "ramp_s": 120,
+      "hold_s": 300
+    },
+    {
+      "tag": "large512k-quiet-stock-sqlite-310-h1",
+      "users": 310000,
+      "ramp_s": 93,
+      "hold_s": 300
+    }
+  ],
+  "dispatch_sha256": "84bdd761bbf8640376506987d142a5d5aa238f322852cf5ed1483172f17b4ae5"
+}

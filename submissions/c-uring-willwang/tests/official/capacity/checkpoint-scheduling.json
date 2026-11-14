@@ -1,0 +1,95 @@
+{
+  "arms": [
+    {
+      "order": 0,
+      "arm": "selected",
+      "first_threshold_group": 121,
+      "earlier_group_ack_p99_us": 130762,
+      "worker_core_pct": 0.5766646942265621,
+      "operation_rate": 25526.318676567287
+    },
+    {
+      "order": 1,
+      "arm": "lower",
+      "first_threshold_group": 121,
+      "earlier_group_ack_p99_us": 7841,
+      "worker_core_pct": 0.44694268926709807,
+      "operation_rate": 25526.38729785034
+    },
+    {
+      "order": 2,
+      "arm": "lower",
+      "first_threshold_group": 121,
+      "earlier_group_ack_p99_us": 26376,
+      "worker_core_pct": 0.4571850573961446,
+      "operation_rate": 25526.499471214684
+    },
+    {
+      "order": 3,
+      "arm": "selected",
+      "first_threshold_group": 121,
+      "earlier_group_ack_p99_us": 28880,
+      "worker_core_pct": 0.477014457568718,
+      "operation_rate": 25526.179864464928
+    }
+  ],
+  "strictly_above_one_second_reads": {
+    "310-h1": 303938,
+    "315-h2": 192297
+  },
+  "scope": "Four order-balanced CPU9 replays of the actual SQLite implementation on tmpfs. Whole-run tail allowances are separate stock HTTP observations.",
+  "replays": [
+    {
+      "arm": "selected",
+      "order": 0,
+      "requests": 225680,
+      "posts": 2080,
+      "likes": 15598,
+      "wall_ns": 8841071165,
+      "ck_worker_cpu_ns": 50983336,
+      "observed_nice": 5,
+      "additional_ck_only_ms": 0.0,
+      "recovered_content_digest": "682de08f4b2dda6a4215f72d633a4a06c8a30ed026dfd587951f04175bca45f8",
+      "independent_checks": "posts and likes counts, logical new posts + all like identities, quick_check and foreign_key_check after abrupt process exit"
+    },
+    {
+      "arm": "lower",
+      "order": 1,
+      "requests": 225680,
+      "posts": 2080,
+      "likes": 15598,
+      "wall_ns": 8841047398,
+      "ck_worker_cpu_ns": 39514415,
+      "observed_nice": 19,
+      "additional_ck_only_ms": 0.0,
+      "recovered_content_digest": "682de08f4b2dda6a4215f72d633a4a06c8a30ed026dfd587951f04175bca45f8",
+      "independent_checks": "posts and likes counts, logical new posts + all like identities, quick_check and foreign_key_check after abrupt process exit"
+    },
+    {
+      "arm": "lower",
+      "order": 2,
+      "requests": 225680,
+      "posts": 2080,
+      "likes": 15598,
+      "wall_ns": 8841008547,
+      "ck_worker_cpu_ns": 40419770,
+      "observed_nice": 19,
+      "additional_ck_only_ms": 0.0,
+      "recovered_content_digest": "682de08f4b2dda6a4215f72d633a4a06c8a30ed026dfd587951f04175bca45f8",
+      "independent_checks": "posts and likes counts, logical new posts + all like identities, quick_check and foreign_key_check after abrupt process exit"
+    },
+    {
+      "arm": "selected",
+      "order": 3,
+      "requests": 225680,
+      "posts": 2080,
+      "likes": 15598,
+      "wall_ns": 8841119243,
+      "ck_worker_cpu_ns": 42173417,
+      "observed_nice": 5,
+      "additional_ck_only_ms": 0.0,
+      "recovered_content_digest": "682de08f4b2dda6a4215f72d633a4a06c8a30ed026dfd587951f04175bca45f8",
+      "independent_checks": "posts and likes counts, logical new posts + all like identities, quick_check and foreign_key_check after abrupt process exit"
+    }
+  ]
+}

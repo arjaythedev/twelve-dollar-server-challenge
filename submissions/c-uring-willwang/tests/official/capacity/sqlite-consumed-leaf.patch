@@ -1,0 +1,28 @@
+--- a/submissions/c-uring-willwang/reader.c
++++ b/submissions/c-uring-willwang/reader.c
+@@ -259,9 +259,10 @@
+             ++*count;
+         }
+         if (rc != SQLITE_OK || *count == FEED_SIZE) break;
+-        /* We inspected the leaf without changing SQLite's cursor. Walk it to
+-         * its predecessor through the SQLite API, including the page boundary. */
+-        for (int i = c.ix; i >= 0 && rc == SQLITE_OK; --i) rc = sqlite3BtreePrevious(&c, 0);
++        /* All cells through zero have been decoded on this pinned leaf.
++         * Previous invalidates cached cell data and walks the parent stack. */
++        c.ix = 0;
++        rc = sqlite3BtreePrevious(&c, 0);
+         if (rc == SQLITE_DONE) { rc = SQLITE_OK; break; }
+     }
+     sqlite3BtreeCloseCursor(&c);
+@@ -359,7 +360,10 @@
+                 rc = seek_like(&c, rows[i].id);
+             } else {
+                 if (page->leaf && page->pgno == rightmost) break;
+-                for (int j = start; j < stop && rc == SQLITE_OK; ++j) rc = sqlite3BtreeNext(&c, 0);
++                /* A leaf was consumed through its last cell. On an interior
++                 * page stop is start+1, so Next descends from this separator. */
++                c.ix = (u16)(stop - 1);
++                rc = sqlite3BtreeNext(&c, 0);
+             }
+         }
+         if (rc == SQLITE_DONE) rc = SQLITE_OK;

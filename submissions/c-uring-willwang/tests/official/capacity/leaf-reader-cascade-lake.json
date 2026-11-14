@@ -1,0 +1,149 @@
+{
+  "build": {
+    "actual_make_argv": [
+      "make",
+      "-j1",
+      "CC=clang-18",
+      "CFLAGS=-O3 -march=cascadelake -fno-plt -std=gnu11 -flto"
+    ],
+    "compilation_input_sha256": {
+      "Makefile": "a96d3c562bb54e4e39b97004953bc06794ff79e3ce117d414c1e055252e70b05",
+      "app.c": "08e1dea645b9ade17bad84b91f25d1bc9c19589a7eedb830e576548e8187ef53",
+      "buffer.c": "375101deaf6bf4e5922d315532cb670968190e36195f5fbabdb65fba36d91142",
+      "build.sh": "113a252867c151c95fdc2216e39c778f3ec5d7f7d621358b0611b28384fd1201",
+      "challenge.h": "21a9e3bca047f155e8eb126c74722a0bcf9138137c42285ad1940c6f1e292348",
+      "database.c": "1cc68bb29afbd487823cbde4d76611aef641bf9bedabd762a217a0688f9a0bc5",
+      "install.sh": "50ca3bfb8362958f686f3a101efe95dfff7486922002f6a5888c0b62ba47ffd5",
+      "json_input.h": "25ace3c600a1c765a9345c1da7cb35457ec408cb8ce917a5d7a32b00af610429",
+      "main.c": "8c98fd7d33fde7bbda83d612d2b29b8b527d2122820b9203c1ce60d6a8dad731",
+      "reactor.c": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+      "reader.c": "23f377cd7dc6c5ceaf1e3b13cf8bfcdfb5eb7d8a4e8fba59bbc1ea956ed867ea",
+      "sqlite-pcache-sibling-swap.patch": "36ef53b437e83c7d8631b5803f3c2e74df933c92c25654208b8efd803fee82e9",
+      "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac",
+      "vendor/sqlite3.c": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+      "vendor/sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c",
+      "wal.c": "e0af115bd229a38d2533ce0c50a9dbc9ced6d18d2c23ab315b0c1ae29fd85433"
+    },
+    "compile_commands_with_target_and_lto": 7,
+    "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+    "effective_sqlite_amalgamation_sha256": "200c362e7e677d1f81ac961a072cafdbaf341fc2612aa8b49fc8a974d8caa5ea",
+    "external_production_identity_sha256": "a57f1e8ce050cad426e5d1f30e71b55d90f031184986048fa10aba7e8cd1477d",
+    "link_commands_with_target_and_lto": 1,
+    "linker": "GNU gold (GNU Binutils for Ubuntu 2.42) 1.16",
+    "llvm_ir_target_cpu_inspected_on_every_object": true,
+    "objects": {
+      "build/app.o": {
+        "llvm_target_cpu": "cascadelake",
+        "sha256": "f3049b07a70e57b70ecf33d0f4bf96665e9de82ec8c77d7b01b1563fbe88f8fb"
+      },
+      "build/buffer.o": {
+        "llvm_target_cpu": "cascadelake",
+        "sha256": "15bb5ef7678df71a26cccb682b89317e9d7be6dd3ae3e86621ad93906340d13c"
+      },
+      "build/database.o": {
+        "llvm_target_cpu": "cascadelake",
+        "sha256": "d3138ff682b6f8bfc77d85cd24c8e73f592ae29a0220904e0664c51ec24f0f1c"
+      },
+      "build/main.o": {
+        "llvm_target_cpu": "cascadelake",
+        "sha256": "042c9903efa9cbfc4cd4cb9654cdb1e88c02a733690c6b38e46b7158e5b123f3"
+      },
+      "build/reactor.o": {
+        "llvm_target_cpu": "cascadelake",
+        "sha256": "44d21755b80e0af40d7aa2eb6d3f16250989fdd93025a85925164f97099d48af"
+      },
+      "build/reader.o": {
+        "llvm_target_cpu": "cascadelake",
+        "sha256": "036cc96dbc4959209438af73b28ce805a8117029b2712558b3708f180112aa9e"
+      },
+      "build/wal.o": {
+        "llvm_target_cpu": "cascadelake",
+        "sha256": "2ce99352f43b2eac872700b9f898012087abc8069090c8e24bd4a5a53d6de52d"
+      }
+    },
+    "pristine_sqlite_archive_sha256": "0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9",
+    "reader_dependency_confirmed": true,
+    "target_cpu": "cascadelake"
+  },
+  "intel_target_elf_sha256": "55325e76d4cc7b13a6a29717640cbd17c627b172d01032bae67adec162da31fc",
+  "local_provenance": {
+    "exclusive_stock_comparison_lock": true,
+    "finished_utc": "2026-11-13T06:54:49.741432+00:00",
+    "first_attempt": "The initial copied validation fixture omitted four reference JSON files. The unchanged executable was rerun against all golden files restored from the exact source commit.",
+    "sha256": {
+      "build-proof.json": "b01cb3bd8f5539f1d820aaa729a581780a21f1c945af221c44ccdae1c0d5cedb",
+      "build.log": "a6ef23c9ae19547b1b09e1741b283bd4eb44974d36ba170c0aa722c2eb73f29a",
+      "differential.log": "c9b01abe68559cc6f239907e102f1e8b3408f868f9deccb3345c9051be106ee8",
+      "first-incomplete-fixture.log": "289748ff12138bcf649ff85012af396608ee3839eb5ded9a4a7e96a16bbb52a9",
+      "lock-receipt.json": "73a85e90aa928073891f82b537066b98756c24e614c9abc191ea25bc482be90d",
+      "official.log": "777c304883af646bfc27ad5ad04dfe3282f33d910a7f5575795f0266a8939a6c",
+      "report.py": "0070f0311e8657e1d588f60efda699de7d43c6301a63d086106afba08350b42d",
+      "run.py": "64c9ce161a086a3841324495333a8877a69a22627f33cde5eecbe19fb806afb8",
+      "runtime.json": "0ee1cd9a2279243ea59ad314b163b47ac04ef1a83e6da1fdffbca063b5f5b3f8",
+      "runtime.py": "c445510923cb891a8b93520b93b5f35ce24769879509cfc0eb4f4585660cd3b6",
+      "server.log": "cf93609f60f673b67cd69b8648deb47cc6d3b74ee4f184e3b9e22157fc48f04a",
+      "test-fixtures.json": "d5d12c31e0b0107395c6a06abe6f51ea7bd485e40d88bad44de45355108190c1"
+    },
+    "started_utc": "2026-11-13T06:54:45.247268+00:00"
+  },
+  "native_reference_elf_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+  "purpose": "Correctness qualification of the shipping non-kernel-bypass server compiled for Intel Xeon Platinum 8260 (Cascade Lake). Execution was on the local AMD EPYC-Genoa CPU. No throughput measurements were taken.",
+  "source_commit": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+  "validation": {
+    "build_and_checker_cpu": 15,
+    "effective_capabilities_hex": "0000000000000000",
+    "http_health": 200,
+    "isolated_interfaces": [
+      "lo"
+    ],
+    "issuer_cpu": 9,
+    "kernel": "6.8.0-147-generic",
+    "live_io_uring_fds": 1,
+    "live_ordinary_tcp_listener_and_open_database": true,
+    "normal_transport": "HTTP/1.1 over Linux IPv4 TCP and io_uring",
+    "observed_running_elf_sha256": "55325e76d4cc7b13a6a29717640cbd17c627b172d01032bae67adec162da31fc",
+    "organizer_http": {
+      "failed": 0,
+      "passed": 42,
+      "run_script": "test/run.sh submissions/c-uring-willwang",
+      "stock_build_and_start_scripts": true
+    },
+    "physical_execution_cpu": "AMD EPYC-Genoa Processor",
+    "rlimit_nofile": [
+      65535,
+      65535
+    ],
+    "sql_differential": {
+      "acknowledged_writes_reopened_after_kill": true,
+      "layouts": [
+        "empty",
+        "short",
+        "dense",
+        "no-likes",
+        "no-recent-likes",
+        "partial",
+        "disorder",
+        "time-ties",
+        "sparse",
+        "sparse-ordered",
+        "small-pages",
+        "overflow",
+        "orphan"
+      ],
+      "passed": 13
+    },
+    "stock_seed_bytes_unchanged_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "suites_removed_their_temporary_databases": true,
+    "test_inputs": {
+      "schema.sql": "7fe0ea8823a1c94b80da9f7224949b8a1e8663ed03450cdd4d0c7b3c55e77dde",
+      "submissions/c-uring-willwang/tests/differential.py": "d9e674e572816890f5dad2299ccb30946bc4ae73e2bf1d27ea5d916a59a6aabe",
+      "test/golden/feed.json": "8c9b3d6cb46e650c4786ab9281bc3a72ba7bd75b7926021d2b0c431dd9bd3d68",
+      "test/golden/post-1.json": "8035350dc55714c9a673af9f441ab07d2b269047e1137612f022877b9e8f3652",
+      "test/golden/post-250000.json": "febb2506b9d4a99bc34f1f182c61ced6b3ba3b2533724485c6e5206604a65b71",
+      "test/golden/post-500000.json": "662fe8c7282dee8aab00dab6cdb15e64e953f10a2c1c923e2ea67fab1429a4de",
+      "test/run.sh": "4be46e55b8e9f96b1453eb47c6a0ec60b70df6885aac4eb4eaa5e7513e8c5536",
+      "test/test.sh": "679e722044fd1f366d85093232e7f2ec2e3398ea312032dd9eb6cbdf8b17306a"
+    },
+    "uid": 1000
+  }
+}

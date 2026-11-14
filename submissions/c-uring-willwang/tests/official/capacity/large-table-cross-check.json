@@ -1,0 +1,16 @@
+{
+  "compact_sha256": "692bd87874cf6519a2ae20e04720e8ce7511895e865667f0261a7f793364b9b1",
+  "registered": 37,
+  "states": {
+    "final": 37
+  },
+  "totals_across_recorded_arms": {
+    "all_requests": 393388644,
+    "failed_requests": 469,
+    "full_every_complete_window": 34,
+    "healthy_arms": 37,
+    "native_passes": 16,
+    "strict_passes": 15
+  },
+  "verified_tag_and_raw_receipt_sha256": "470bd7bd1fc03154a586b779caeaac0082a40bc58d4cb9938d5e5b018b5a03d7"
+}

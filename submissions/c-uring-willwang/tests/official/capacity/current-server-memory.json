@@ -1,0 +1,341 @@
+{
+  "method": "In each complete pre-cutoff telemetry sample add service memory.current and 2,376 bytes per Tcp.CurrEstab. Select the largest simultaneous sum. Count samples above the 1,967 MiB model for comparison; telemetry is approximate 2 s. All trials ran the same normal TCP executable on the 524,288-bucket fixture.",
+  "limitations": "The modeled charge uses measurements on this kernel and covers the passive TCP control block. Established counts omit some closing/handshake states. Other guest OS memory, slab fragmentation, the private hash arrays and uncharged kernel allocations are outside this sum. Service file cache can be reclaimed; crossing the model is not evidence of an OOM. This is an offline calculation and changes no stock score.",
+  "measured_per_passive_ipv4_socket_bytes": 2376,
+  "guest_model_mib": 1967,
+  "calibration_file": "passive-socket-memory.json",
+  "calibration_sha256": "f916acd84754919c6178397a6ebf6dab91c11e1bf4eb1b0e7812bb53eb3ce8b8",
+  "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+  "trials": [
+    {
+      "trial": "large512k-quiet-leaf-cursor-350-h1",
+      "target": 350000,
+      "hold_s": 300,
+      "scored_samples": 199,
+      "source_sha256": {
+        "telemetry.jsonl": "eda933437ce2bf3513a6fc0047704c3d9be2945bb6df907ed4209a8e0a668f62",
+        "timing.json": "22806affc6f826cc0d0075a6cb31c9f23fbb93cb162f917c39d88f1c931f5edf",
+        "shape.json": "7c4d006a7f55aa341a9a04d94cb3e58b92c3577c633f5954f42c98a86e05f7aa",
+        "summary.json": "02dee5eee0a0c59169d618872c65d8d936cad60f6cab6b80dc39bf915f02f1d4",
+        "component-test-lock.json": "60fe823258497967d58346bb50bf3880eef520e2ec6a139768e08105a2d0fd04"
+      },
+      "raw_manifest_sha256": "0d088b612866d7fdb5f181ad3c788eadb39632f3d920ddcc04071e34b144cb47",
+      "stock_pass": true,
+      "max_sample_gap_s": 2.443,
+      "max_synchronized_mib": 1654.07,
+      "headroom_at_sampling_peak_mib": 312.93,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 338.564,
+        "established": 350000,
+        "service_cgroup_bytes": 902815744,
+        "passive_socket_bytes": 831600000,
+        "combined_bytes": 1734415744,
+        "service_file_cache_bytes": 208343040,
+        "service_anon_bytes": 85098496,
+        "service_socket_buffers_bytes": 50008064,
+        "service_kernel_bytes": 559357952
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-330-h1",
+      "target": 330000,
+      "hold_s": 300,
+      "scored_samples": 196,
+      "source_sha256": {
+        "telemetry.jsonl": "ca778884068749aa8550d19741af80fba662b063769e67f681d2898eefc60776",
+        "timing.json": "5e179da0a0ea4c724b135bb1b070a7dde8ce329100922cb22f4873ad9da9a93b",
+        "shape.json": "3237fa49e09f1055da037e6d24545e0a86b4406dad01099426aa5b300ea637e7",
+        "summary.json": "aedf93f40c45c2b48f7247860604d51c24cd0b52f470796883c917a825fc053e",
+        "component-test-lock.json": "36a3689cce6da0a1dd5a59885d119c3bc3ed59d468dab19181fa8c7991ed3a19"
+      },
+      "raw_manifest_sha256": "ee23cdf375f7532796ac71296abf6d2e2d2d570d06e0fb7e88099f6677697d05",
+      "stock_pass": true,
+      "max_sample_gap_s": 2.18,
+      "max_synchronized_mib": 1520.32,
+      "headroom_at_sampling_peak_mib": 446.68,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 398.461,
+        "established": 330000,
+        "service_cgroup_bytes": 810090496,
+        "passive_socket_bytes": 784080000,
+        "combined_bytes": 1594170496,
+        "service_file_cache_bytes": 196214784,
+        "service_anon_bytes": 84140032,
+        "service_socket_buffers_bytes": 1318912,
+        "service_kernel_bytes": 528289792
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-350-p1",
+      "target": 350000,
+      "hold_s": 120,
+      "scored_samples": 111,
+      "source_sha256": {
+        "telemetry.jsonl": "599909826dcd6eae345072888b08f3952ef76d6bbc4239a4f61d8e8ec9004e7c",
+        "timing.json": "83141e9f15cc9bedacfa9f8c72359faeec983a510b139763b4ccbf341ca0114c",
+        "shape.json": "f8e253d35eff71d126e206ac18b133685034e1c6571b484af0d823430c0c1c8f",
+        "summary.json": "789089546fb7366c6e1de61098daa0ac675a046798854b61f3308d6b66882df1",
+        "component-test-lock.json": "792412f7b0e47e60fbd3990a7f8bb19f7529d5932f205bcaf1acb62563b8ae38"
+      },
+      "raw_manifest_sha256": "df7fef034968a7e61d59874e63a8bb819e5b4022ce4f1240fdaae4239d293ce2",
+      "stock_pass": true,
+      "max_sample_gap_s": 2.164,
+      "max_synchronized_mib": 1595.06,
+      "headroom_at_sampling_peak_mib": 371.94,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 106.667,
+        "established": 346246,
+        "service_cgroup_bytes": 849862656,
+        "passive_socket_bytes": 822680496,
+        "combined_bytes": 1672543152,
+        "service_file_cache_bytes": 117723136,
+        "service_anon_bytes": 48803840,
+        "service_socket_buffers_bytes": 132141056,
+        "service_kernel_bytes": 550825984
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-350-h2",
+      "target": 350000,
+      "hold_s": 300,
+      "scored_samples": 199,
+      "source_sha256": {
+        "telemetry.jsonl": "942ea3c74b1105606266d8616aa67d3f3ac4790894497f6e26dfffc2fbf1d25f",
+        "timing.json": "44f52aca62477223e1eb9ff21ed3fbed78937c5f168e4749fdd4602438dc32d7",
+        "shape.json": "5d7b89edc081bba9bc2ce636cc1b6a01fb6300e57071ebec3939881a6679e623",
+        "summary.json": "6a84f5528d7023c79b1fb9dc3093cd26fa79ab092012c9245b054fa0583eb717",
+        "component-test-lock.json": "e0d10d4a94b9fdf6340c8234bb5077b690f98a6ec913f79854db4f84452dbfda"
+      },
+      "raw_manifest_sha256": "84898b34ac9da521c8ce87153f2db3797a3bc50620229dc77d97b114a1120c44",
+      "stock_pass": false,
+      "max_sample_gap_s": 2.168,
+      "max_synchronized_mib": 1618.92,
+      "headroom_at_sampling_peak_mib": 348.08,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 397.88,
+        "established": 350000,
+        "service_cgroup_bytes": 865959936,
+        "passive_socket_bytes": 831600000,
+        "combined_bytes": 1697559936,
+        "service_file_cache_bytes": 208142336,
+        "service_anon_bytes": 85008384,
+        "service_socket_buffers_bytes": 13467648,
+        "service_kernel_bytes": 559353856
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-370-p1",
+      "target": 370000,
+      "hold_s": 120,
+      "scored_samples": 113,
+      "source_sha256": {
+        "telemetry.jsonl": "c58e43b631e5e61c138d9bc6c6c6b2f1ab7a7c1b446c86a500594f308139d4b4",
+        "timing.json": "540d369f7a1bf86e290ce2426e7a151071814b1332d5f6e6eea05918e42cbb4c",
+        "shape.json": "7b1a9860a4970e0c0c53ddbbe4469c82e3c4fe0d63a310085ab43f3cdfa93bfa",
+        "summary.json": "2021ae513a75f790d26fe03f83f129f416f743455c7cb8ffe8a1fb4ebc9fffcc",
+        "component-test-lock.json": "fc5d5d60644c38272e7d0f58f07b6742a384541bd50ff4a18f7ebb4135c0b7a5"
+      },
+      "raw_manifest_sha256": "2183697070c40ec3d7022c6f4946858787f3aa78f886df443a61ef5b7bf02c3b",
+      "stock_pass": false,
+      "max_sample_gap_s": 2.651,
+      "max_synchronized_mib": 1770.9,
+      "headroom_at_sampling_peak_mib": 196.1,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 112.994,
+        "established": 366979,
+        "service_cgroup_bytes": 984981504,
+        "passive_socket_bytes": 871942104,
+        "combined_bytes": 1856923608,
+        "service_file_cache_bytes": 130351104,
+        "service_anon_bytes": 50782208,
+        "service_socket_buffers_bytes": 220758016,
+        "service_kernel_bytes": 583094272
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-370-h1",
+      "target": 370000,
+      "hold_s": 300,
+      "scored_samples": 201,
+      "source_sha256": {
+        "telemetry.jsonl": "40e88cb0676b6f4f5e1c81eee72da4f28313c75cb3a099904cd5cd7e4eef7ed3",
+        "timing.json": "e5d3fa02673f086b3fa52bf325d626b5e5bb2541bda46e5e30e97623df0fdd2d",
+        "shape.json": "102eff205a0d4dfa4e6d67051913b8fb0155d51305acf3b6d6680dcbacf7bc73",
+        "summary.json": "850a00b8acaed6e7688caead2bf1fd0b7dfe048e3e2752a42e0d8a3f568ee8db",
+        "component-test-lock.json": "9d3e60784bd07eb3abd09d33256cea0d38468821288ab17c72340bea5ee84823"
+      },
+      "raw_manifest_sha256": "33870476e699abb5b7be0fcf23413f19ff22c5d1e0e3c4ed25147babe6cd4222",
+      "stock_pass": false,
+      "max_sample_gap_s": 2.79,
+      "max_synchronized_mib": 1789.69,
+      "headroom_at_sampling_peak_mib": 177.31,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 364.533,
+        "established": 370000,
+        "service_cgroup_bytes": 997502976,
+        "passive_socket_bytes": 879120000,
+        "combined_bytes": 1876622976,
+        "service_file_cache_bytes": 218562560,
+        "service_anon_bytes": 85663744,
+        "service_socket_buffers_bytes": 102588416,
+        "service_kernel_bytes": 590381056
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-400-p1",
+      "target": 400000,
+      "hold_s": 120,
+      "scored_samples": 118,
+      "source_sha256": {
+        "telemetry.jsonl": "bcbbc4b1a2b5c7f9cf728b4a3b17b9572d7f8778ed1f7e5e7f72e7748d44e09e",
+        "timing.json": "ebdf42ac7090e4666fd7d747a3a3f58a767af2a6349402d0e8a16b65bc4a4e9f",
+        "shape.json": "5874489b0f81e9a8b37e3aa953ece776f4350dcc4e7f1b3f8b5d1aa077850dd5",
+        "summary.json": "568515cddeb3ab6480f7195fbaa7bdcf2fe12abc75330e6786793d5d253a0902",
+        "component-test-lock.json": "d7248730d2624018854b2d8ccc7d58e7491ab30ad4c9ab2d0f75dbd94b75a7fc"
+      },
+      "raw_manifest_sha256": "02b826e798e18ded44829745de9c41e4d5c7b356409e273151310b0ae26c76a5",
+      "stock_pass": false,
+      "max_sample_gap_s": 2.171,
+      "max_synchronized_mib": 2023.62,
+      "headroom_at_sampling_peak_mib": -56.62,
+      "count_samples_above_guest": 4,
+      "sample_at_peak": {
+        "elapsed_s": 122.588,
+        "established": 398007,
+        "service_cgroup_bytes": 1176252416,
+        "passive_socket_bytes": 945664632,
+        "combined_bytes": 2121917048,
+        "service_file_cache_bytes": 116686848,
+        "service_anon_bytes": 54288384,
+        "service_socket_buffers_bytes": 372502528,
+        "service_kernel_bytes": 632881152
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-400-h1",
+      "target": 400000,
+      "hold_s": 300,
+      "scored_samples": 205,
+      "source_sha256": {
+        "telemetry.jsonl": "73b74a215d98ca861a788ab0eb36f83e05ff48b37e6dc51f6ee1ff4e0edcb833",
+        "timing.json": "545107bdfb12ab4eb4fa42d2ce96f847462729d8081486e6e0c3caca4df1417d",
+        "shape.json": "68b24d5e8a2b0ca47dce2ede327e13e22404d8e45ee0fb2c0e2cad27b4058f88",
+        "summary.json": "b3b7508194d8af79806b11a9e4571757013cfbfd090226c1aa849444cd1a73de",
+        "component-test-lock.json": "13cf203b05cedb2b7e760f619d19cd3833dd3717d76b6729e6d33ebcaae2bd3e"
+      },
+      "raw_manifest_sha256": "a3560da040352edc652e5fa2163a8ecbfb747abb690bdbeb81d7b8c38ba24cb3",
+      "stock_pass": false,
+      "max_sample_gap_s": 2.799,
+      "max_synchronized_mib": 2076.41,
+      "headroom_at_sampling_peak_mib": -109.41,
+      "count_samples_above_guest": 21,
+      "sample_at_peak": {
+        "elapsed_s": 122.456,
+        "established": 397819,
+        "service_cgroup_bytes": 1232052224,
+        "passive_socket_bytes": 945217944,
+        "combined_bytes": 2177270168,
+        "service_file_cache_bytes": 135229440,
+        "service_anon_bytes": 53878784,
+        "service_socket_buffers_bytes": 410083328,
+        "service_kernel_bytes": 633188352
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-345-h1",
+      "target": 345000,
+      "hold_s": 300,
+      "scored_samples": 195,
+      "source_sha256": {
+        "telemetry.jsonl": "910af79229b40bccf2815ac1cf02a45824a50233939c993f45d777c2a73005d6",
+        "timing.json": "07933c843d1501f2a4ebf82014d8beffeadcb33bb06211f1a0d8d84296d9e895",
+        "shape.json": "b034fd9917ac22190217a04c86fc7ff0785f5319e18cb21f3fca9c4d4e416501",
+        "summary.json": "95ed898090a6e38414e81bbd67d783e4b13af5ecbeea39d2d1977eaf03f8bdc8",
+        "component-test-lock.json": "ce7d33c911b4e0ea024e9469d6596d77212842a23715f252df4c6838cb947b3d"
+      },
+      "raw_manifest_sha256": "c9591ab3f1ff390078f9efe40a427d04e5b2dd567fba9fd57d255a8bb2d331f8",
+      "stock_pass": true,
+      "max_sample_gap_s": 2.88,
+      "max_synchronized_mib": 1592.3,
+      "headroom_at_sampling_peak_mib": 374.7,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 377.263,
+        "established": 345000,
+        "service_cgroup_bytes": 849932288,
+        "passive_socket_bytes": 819720000,
+        "combined_bytes": 1669652288,
+        "service_file_cache_bytes": 200622080,
+        "service_anon_bytes": 84815872,
+        "service_socket_buffers_bytes": 13123584,
+        "service_kernel_bytes": 551436288
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-345-p1",
+      "target": 345000,
+      "hold_s": 120,
+      "scored_samples": 110,
+      "source_sha256": {
+        "telemetry.jsonl": "3cd7192cc823cb999ff1b94b983038d75e404435b4e17d90f2e49e1686d72465",
+        "timing.json": "db9961693d09086fb6a4271665dbb889bc4e7477986c182bd74bc9db5185a9ed",
+        "shape.json": "06eea9c441b9bbddda650e3224f089177d9f56bd503125911c849e4089deb26d",
+        "summary.json": "0630369affd92a5564b10eec4e09469d40b1b6c60c0aa9dc5daf5cd292ce360b",
+        "component-test-lock.json": "6fb8e8f8607f203a4cc114e4f13fae0a51a4280b1b8f019e9a14fb3a4fbc59b7"
+      },
+      "raw_manifest_sha256": "ff30004429f53a61368101436cf2f1fdf290769f654ef3970a699c0d05c723b4",
+      "stock_pass": true,
+      "max_sample_gap_s": 2.166,
+      "max_synchronized_mib": 1569.9,
+      "headroom_at_sampling_peak_mib": 397.1,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 106.265,
+        "established": 342469,
+        "service_cgroup_bytes": 832454656,
+        "passive_socket_bytes": 813706344,
+        "combined_bytes": 1646161000,
+        "service_file_cache_bytes": 114388992,
+        "service_anon_bytes": 48443392,
+        "service_socket_buffers_bytes": 124088320,
+        "service_kernel_bytes": 544935936
+      }
+    },
+    {
+      "trial": "large512k-quiet-leaf-cursor-345-h2",
+      "target": 345000,
+      "hold_s": 300,
+      "scored_samples": 198,
+      "source_sha256": {
+        "telemetry.jsonl": "af784a81f44f53b2de95de78ca0420e9d67657090f11daa1251086b1925eab0f",
+        "timing.json": "93d2a13c1cf5a20e4a1210ca164a29448bf32d5dc9e2b3917645d2de074782dc",
+        "shape.json": "da06cfce0e849c9b8e4809f3f1883c9fd501990e3ee8297e70a164ec8650a78c",
+        "summary.json": "ad4e71f0b0761d0c50a2c9cd5477256aaf8b39b1b7d3421c1de392b8d8369cc6",
+        "component-test-lock.json": "2add1664ac1d13d009f82da50f3ee7805d778dbee644c844ebfcb5dda2c41aef"
+      },
+      "raw_manifest_sha256": "833632b28a9d387fc9d3623d102ed62b67a1bbc8635f3a9d6f08cf77c7799427",
+      "stock_pass": true,
+      "max_sample_gap_s": 2.682,
+      "max_synchronized_mib": 1593.87,
+      "headroom_at_sampling_peak_mib": 373.13,
+      "count_samples_above_guest": 0,
+      "sample_at_peak": {
+        "elapsed_s": 310.707,
+        "established": 345000,
+        "service_cgroup_bytes": 851570688,
+        "passive_socket_bytes": 819720000,
+        "combined_bytes": 1671290688,
+        "service_file_cache_bytes": 182272000,
+        "service_anon_bytes": 84844544,
+        "service_socket_buffers_bytes": 33431552,
+        "service_kernel_bytes": 550903808
+      }
+    }
+  ]
+}

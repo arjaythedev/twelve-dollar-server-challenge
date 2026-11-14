@@ -1,0 +1,448 @@
+{
+  "normal_tcp_profile": "single-queue-split-polling-tap-external-txring4096",
+  "linux": "6.8.0-147-generic",
+  "stock_users": 300000,
+  "stock_ramp_s": 90,
+  "stock_hold_s": 300,
+  "matched_intervals_s": [
+    [
+      100,
+      120
+    ],
+    [
+      120,
+      140
+    ],
+    [
+      140,
+      160
+    ],
+    [
+      160,
+      180
+    ],
+    [
+      180,
+      200
+    ],
+    [
+      200,
+      220
+    ],
+    [
+      220,
+      240
+    ],
+    [
+      240,
+      260
+    ],
+    [
+      260,
+      280
+    ],
+    [
+      280,
+      300
+    ],
+    [
+      300,
+      320
+    ],
+    [
+      320,
+      340
+    ],
+    [
+      340,
+      360
+    ],
+    [
+      360,
+      380
+    ]
+  ],
+  "competitors": {
+    "original": {
+      "run": "ring4096-stock-quiet-300-h1",
+      "source": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "stock_pass": true,
+      "eligible": true,
+      "qualified": true,
+      "healthy": true,
+      "flags": [],
+      "lock_inode": 1110842,
+      "lock_covers_cutoff": true,
+      "stock_cutoff_unix": 1794501530.415,
+      "stock_full_ticks": [
+        59,
+        59
+      ],
+      "stock_min_sockets": 300000,
+      "server_alive": true,
+      "native_drop_or_error": 0,
+      "relay_drops": 0,
+      "full_run": {
+        "reqs": 11064444,
+        "fails": 0,
+        "dials": 300000,
+        "req_per_s": 28370.350497,
+        "p50_ms": 1.365076,
+        "p95_ms": 184.329122,
+        "p99_ms": 879.122991,
+        "max_ms": 1534.78155,
+        "connect_p99_ms": 10.086786
+      },
+      "ramp_10_70": {
+        "http": 950737,
+        "net_estab_growth": 200064.355562,
+        "net_estab_growth_per_http": 0.210431,
+        "tap_out_per_http": 1.556098,
+        "out_control_proxy_per_http": 0.554119,
+        "tcp_original_out_per_http": 1.98313,
+        "tcp_delayed_ack_timer_sends_per_1k": 4.623994
+      },
+      "steady": {
+        "seconds": 280,
+        "http": 8868287,
+        "http_s": 31672.453571,
+        "tap_out_per_http": 1.416482,
+        "out_control_proxy_per_http": 0.408455,
+        "tcp_original_out_per_http": 1.920873,
+        "tcp_ack_paths_in_per_http": 1.007056,
+        "tcp_retrans_per_1k": 7.152674,
+        "tcp_delayed_ack_timer_sends_per_1k": 81.425349,
+        "app_us_per_http": 15.751947,
+        "app_user_us_per_http": 3.316335,
+        "app_system_us_per_http": 12.435612,
+        "napi_us_per_http": 14.810256,
+        "napi_us_per_in_seg": 6.702939,
+        "app_plus_napi_us_per_http": 30.562204,
+        "app_core_pct": 49.890282,
+        "napi_core_pct": 46.907716,
+        "mean_accounted_tcp_buffer_mib": 1.945239
+      },
+      "worst_5s_end": 95,
+      "worst_5s_median_shard_p99_ms": 1474.894903,
+      "median_shard_ticks_above_1s": {
+        "through_first_105s": 2,
+        "after_105s": 0
+      },
+      "whole_run_tails": {
+        "at_global_p99_bin_or_above": 112310,
+        "above_global_p99_bin": 109018,
+        "ge_500ms_midpoint": 282646,
+        "ge_600ms_midpoint": 252013,
+        "ge_1000ms_midpoint": 86239
+      },
+      "endpoints_full_run": {
+        "GET /feed": {
+          "p99_ms": 896.79,
+          "at_global_p99_or_slower": 55415,
+          "share_of_endpoint_tails_pct": 49.341,
+          "ge_500ms": 136326,
+          "ge_1s": 42888
+        },
+        "GET /posts/:id": {
+          "p99_ms": 853.27,
+          "at_global_p99_or_slower": 48038,
+          "share_of_endpoint_tails_pct": 42.773,
+          "ge_500ms": 124367,
+          "ge_1s": 36892
+        },
+        "POST /posts/:id/like": {
+          "p99_ms": 887.91,
+          "at_global_p99_or_slower": 7798,
+          "share_of_endpoint_tails_pct": 6.943,
+          "ge_500ms": 19337,
+          "ge_1s": 5718
+        },
+        "POST /posts": {
+          "p99_ms": 887.91,
+          "at_global_p99_or_slower": 1059,
+          "share_of_endpoint_tails_pct": 0.943,
+          "ge_500ms": 2616,
+          "ge_1s": 741
+        }
+      },
+      "definitely_subsequent_tail_share_lower_bound_pct": {
+        "global_p99": 50.659,
+        "ge_1s": 50.268
+      },
+      "first_feed_count": 300000,
+      "first_feeds_pct_of_all_http": 2.7114,
+      "ge1s_bounds_from_5s_tick_percentiles": {
+        "0_105": {
+          "bounds": [
+            9016,
+            86239
+          ],
+          "whole": 86239
+        },
+        "90_105": {
+          "bounds": [
+            9016,
+            86239
+          ],
+          "whole": 86239
+        }
+      }
+    },
+    "guard_1": {
+      "run": "ring4096-guarded-quiet-300-h1",
+      "source": "9632f45",
+      "sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+      "stock_pass": true,
+      "eligible": true,
+      "qualified": true,
+      "healthy": true,
+      "flags": [],
+      "lock_inode": 1110842,
+      "lock_covers_cutoff": true,
+      "stock_cutoff_unix": 1794494178.293,
+      "stock_full_ticks": [
+        59,
+        59
+      ],
+      "stock_min_sockets": 300000,
+      "server_alive": true,
+      "native_drop_or_error": 0,
+      "relay_drops": 0,
+      "full_run": {
+        "reqs": 11052547,
+        "fails": 0,
+        "dials": 300000,
+        "req_per_s": 28339.814342,
+        "p50_ms": 1.839916,
+        "p95_ms": 355.471367,
+        "p99_ms": 645.783658,
+        "max_ms": 1051.560747,
+        "connect_p99_ms": 6.01231
+      },
+      "ramp_10_70": {
+        "http": 950365,
+        "net_estab_growth": 200107.710205,
+        "net_estab_growth_per_http": 0.210559,
+        "tap_out_per_http": 1.33471,
+        "out_control_proxy_per_http": 0.336771,
+        "tcp_original_out_per_http": 1.984177,
+        "tcp_delayed_ack_timer_sends_per_1k": 0.086559
+      },
+      "steady": {
+        "seconds": 280,
+        "http": 8846187,
+        "http_s": 31593.525,
+        "tap_out_per_http": 1.501975,
+        "out_control_proxy_per_http": 0.4918,
+        "tcp_original_out_per_http": 1.921549,
+        "tcp_ack_paths_in_per_http": 1.008977,
+        "tcp_retrans_per_1k": 8.916296,
+        "tcp_delayed_ack_timer_sends_per_1k": 116.876533,
+        "app_us_per_http": 15.81153,
+        "app_user_us_per_http": 3.411391,
+        "app_system_us_per_http": 12.400139,
+        "napi_us_per_http": 14.982257,
+        "napi_us_per_in_seg": 6.774392,
+        "app_plus_napi_us_per_http": 30.793787,
+        "app_core_pct": 49.954197,
+        "napi_core_pct": 47.33423,
+        "mean_accounted_tcp_buffer_mib": 4.990354
+      },
+      "worst_5s_end": 95,
+      "worst_5s_median_shard_p99_ms": 1000.523969,
+      "median_shard_ticks_above_1s": {
+        "through_first_105s": 1,
+        "after_105s": 0
+      },
+      "whole_run_tails": {
+        "at_global_p99_bin_or_above": 115985,
+        "above_global_p99_bin": 110263,
+        "ge_500ms_midpoint": 271337,
+        "ge_600ms_midpoint": 159971,
+        "ge_1000ms_midpoint": 5097
+      },
+      "endpoints_full_run": {
+        "GET /feed": {
+          "p99_ms": 652.24,
+          "at_global_p99_or_slower": 54795,
+          "share_of_endpoint_tails_pct": 47.243,
+          "ge_500ms": 126519,
+          "ge_1s": 2261
+        },
+        "GET /posts/:id": {
+          "p99_ms": 639.39,
+          "at_global_p99_or_slower": 50526,
+          "share_of_endpoint_tails_pct": 43.563,
+          "ge_500ms": 121070,
+          "ge_1s": 2034
+        },
+        "POST /posts/:id/like": {
+          "p99_ms": 672.01,
+          "at_global_p99_or_slower": 9439,
+          "share_of_endpoint_tails_pct": 8.138,
+          "ge_500ms": 20984,
+          "ge_1s": 725
+        },
+        "POST /posts": {
+          "p99_ms": 665.35,
+          "at_global_p99_or_slower": 1225,
+          "share_of_endpoint_tails_pct": 1.056,
+          "ge_500ms": 2764,
+          "ge_1s": 77
+        }
+      },
+      "definitely_subsequent_tail_share_lower_bound_pct": {
+        "global_p99": 52.757,
+        "ge_1s": 55.641
+      },
+      "first_feed_count": 300000,
+      "first_feeds_pct_of_all_http": 2.7143,
+      "ge1s_bounds_from_5s_tick_percentiles": {
+        "0_105": {
+          "bounds": [
+            1596,
+            5097
+          ],
+          "whole": 5097
+        },
+        "90_105": {
+          "bounds": [
+            1596,
+            5097
+          ],
+          "whole": 5097
+        }
+      },
+      "ramp_control_gap_per_net_new_socket_vs_original": 1.032558
+    },
+    "guard_2": {
+      "run": "ring4096-guarded-quiet-300-h2",
+      "source": "9632f45",
+      "sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+      "stock_pass": true,
+      "eligible": true,
+      "qualified": true,
+      "healthy": true,
+      "flags": [],
+      "lock_inode": 1110842,
+      "lock_covers_cutoff": true,
+      "stock_cutoff_unix": 1794498501.391,
+      "stock_full_ticks": [
+        59,
+        59
+      ],
+      "stock_min_sockets": 300000,
+      "server_alive": true,
+      "native_drop_or_error": 0,
+      "relay_drops": 0,
+      "full_run": {
+        "reqs": 11071591,
+        "fails": 0,
+        "dials": 300000,
+        "req_per_s": 28388.671942,
+        "p50_ms": 1.768123,
+        "p95_ms": 173.646371,
+        "p99_ms": 596.370374,
+        "max_ms": 1051.560747,
+        "connect_p99_ms": 6.44601
+      },
+      "ramp_10_70": {
+        "http": 951301,
+        "net_estab_growth": 200050.671452,
+        "net_estab_growth_per_http": 0.210292,
+        "tap_out_per_http": 1.334728,
+        "out_control_proxy_per_http": 0.336279,
+        "tcp_original_out_per_http": 1.985471,
+        "tcp_delayed_ack_timer_sends_per_1k": 1.589014
+      },
+      "steady": {
+        "seconds": 280,
+        "http": 8866930,
+        "http_s": 31667.607143,
+        "tap_out_per_http": 1.437385,
+        "out_control_proxy_per_http": 0.428807,
+        "tcp_original_out_per_http": 1.921419,
+        "tcp_ack_paths_in_per_http": 1.007692,
+        "tcp_retrans_per_1k": 7.69072,
+        "tcp_delayed_ack_timer_sends_per_1k": 95.47566,
+        "app_us_per_http": 15.801175,
+        "app_user_us_per_http": 3.214806,
+        "app_system_us_per_http": 12.586369,
+        "napi_us_per_http": 14.917974,
+        "napi_us_per_in_seg": 6.749061,
+        "app_plus_napi_us_per_http": 30.719149,
+        "app_core_pct": 50.03854,
+        "napi_core_pct": 47.241653,
+        "mean_accounted_tcp_buffer_mib": 2.21584
+      },
+      "worst_5s_end": 95,
+      "worst_5s_median_shard_p99_ms": 1000.523969,
+      "median_shard_ticks_above_1s": {
+        "through_first_105s": 1,
+        "after_105s": 0
+      },
+      "whole_run_tails": {
+        "at_global_p99_bin_or_above": 111462,
+        "above_global_p99_bin": 108547,
+        "ge_500ms_midpoint": 155407,
+        "ge_600ms_midpoint": 108547,
+        "ge_1000ms_midpoint": 2594
+      },
+      "endpoints_full_run": {
+        "GET /feed": {
+          "p99_ms": 602.33,
+          "at_global_p99_or_slower": 54220,
+          "share_of_endpoint_tails_pct": 48.644,
+          "ge_500ms": 75402,
+          "ge_1s": 1230
+        },
+        "GET /posts/:id": {
+          "p99_ms": 584.62,
+          "at_global_p99_or_slower": 48005,
+          "share_of_endpoint_tails_pct": 43.068,
+          "ge_500ms": 68440,
+          "ge_1s": 1009
+        },
+        "POST /posts/:id/like": {
+          "p99_ms": 620.59,
+          "at_global_p99_or_slower": 8166,
+          "share_of_endpoint_tails_pct": 7.326,
+          "ge_500ms": 10231,
+          "ge_1s": 307
+        },
+        "POST /posts": {
+          "p99_ms": 620.59,
+          "at_global_p99_or_slower": 1071,
+          "share_of_endpoint_tails_pct": 0.961,
+          "ge_500ms": 1334,
+          "ge_1s": 48
+        }
+      },
+      "definitely_subsequent_tail_share_lower_bound_pct": {
+        "global_p99": 51.356,
+        "ge_1s": 52.583
+      },
+      "first_feed_count": 300000,
+      "first_feeds_pct_of_all_http": 2.7096,
+      "ge1s_bounds_from_5s_tick_percentiles": {
+        "0_105": {
+          "bounds": [
+            1584,
+            2594
+          ],
+          "whole": 2594
+        },
+        "90_105": {
+          "bounds": [
+            1584,
+            2594
+          ],
+          "whole": 2594
+        }
+      },
+      "ramp_control_gap_per_net_new_socket_vs_original": 1.035552
+    }
+  },
+  "official_original_report": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650"
+}

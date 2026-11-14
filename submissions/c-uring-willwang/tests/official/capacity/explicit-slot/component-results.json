@@ -1,0 +1,120 @@
+{
+  "baseline_source": "43adbd73ec34bba4d3b0e3ea5bfbc064865c9e6e",
+  "release_elf": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+  "candidate_elf": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+  "application_checks": {
+    "control": {
+      "official_http_passes": 42,
+      "official_http_failures": 0,
+      "sql_differential_passes": 13,
+      "transport": "io_uring on ordinary Linux TCP"
+    },
+    "candidate": {
+      "official_http_passes": 42,
+      "official_http_failures": 0,
+      "sql_differential_passes": 13,
+      "transport": "io_uring on ordinary Linux TCP"
+    }
+  },
+  "completion_model": {
+    "all_24_completion_orders": 24,
+    "valid_prefix_lengths": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "individual_watch_outcomes": 2,
+    "independent_bank_handoff_scenarios": 3,
+    "checks_passed": 195,
+    "mode": "In-memory production completion handlers. Plain Clang build and AddressSanitizer plus UndefinedBehaviorSanitizer both passed."
+  },
+  "http_validation": {
+    "max_simultaneous_connections": 512,
+    "clean_fin_count_per_arm": 768,
+    "timed_launches": 32,
+    "parity_launches": 4,
+    "verified_http_responses_including_unmeasured_384_warm_per_launch": 213028,
+    "new_likes_covered": 7748,
+    "all_clean_fins": 27648,
+    "all_remaining_tcp_zero": true,
+    "all_integrity_ok": true,
+    "sum_listen_drops": 0,
+    "sum_attempt_fails": 0,
+    "sum_estab_resets": 0,
+    "sum_tcp_retrans_segments": 0
+  },
+  "http_timing": {
+    "one-bank": {
+      "established": {
+        "server_cpu_us_per_response": {
+          "control_median": 42.84695666503906,
+          "candidate_median": 40.49769567871094,
+          "paired_delta_pct_median": -0.8655816262578941,
+          "candidate_lower_pairs": 5,
+          "n_pairs": 8
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 4120.486,
+          "candidate_median": 4089.8665,
+          "paired_delta_pct_median": -0.8695195083435525,
+          "candidate_lower_pairs": 5,
+          "n_pairs": 8
+        }
+      },
+      "reconnect_mixed": {
+        "server_cpu_us_per_response": {
+          "control_median": 31.01023373526337,
+          "candidate_median": 30.406378223183694,
+          "paired_delta_pct_median": 0.4403637736882904,
+          "candidate_lower_pairs": 3,
+          "n_pairs": 8
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 3549.45,
+          "candidate_median": 3295.2084999999997,
+          "paired_delta_pct_median": -3.228540377523248,
+          "candidate_lower_pairs": 5,
+          "n_pairs": 8
+        }
+      }
+    },
+    "multiple-banks": {
+      "established": {
+        "server_cpu_us_per_response": {
+          "control_median": 44.64983984375,
+          "candidate_median": 44.55796997070313,
+          "paired_delta_pct_median": -0.6607828406131611,
+          "candidate_lower_pairs": 7,
+          "n_pairs": 8
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 4200.904,
+          "candidate_median": 4139.794,
+          "paired_delta_pct_median": -1.2456969689961572,
+          "candidate_lower_pairs": 5,
+          "n_pairs": 8
+        }
+      },
+      "reconnect_mixed": {
+        "server_cpu_us_per_response": {
+          "control_median": 31.806824027963295,
+          "candidate_median": 31.752505910984958,
+          "paired_delta_pct_median": -0.2933343926418919,
+          "candidate_lower_pairs": 4,
+          "n_pairs": 8
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 3673.6414999999997,
+          "candidate_median": 3464.821,
+          "paired_delta_pct_median": 0.34569866630148605,
+          "candidate_lower_pairs": 4,
+          "n_pairs": 8
+        }
+      }
+    }
+  },
+  "component_summary_sha256": "ca1a9a21d111667fb48293109613ab415614340019e1906fa04a22fdd7601c45",
+  "original_measurement_patch_sha256": "3aec0f180be34a56ed55cc5e402834f2faca86b130e5ec84ec7a27460a45638e",
+  "published_patch_sha256": "ced4e9a4ca7aeb8ec65121b0717fbd860e9f5f3a4933013e71d572862160c38a"
+}

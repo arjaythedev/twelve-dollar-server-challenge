@@ -1,0 +1,834 @@
+{
+  "method": "One TCP reactor and its private NAPI worker share a CPU. A separate native client drives real HTTP and SQLite reads and durable mutations. The widths bound the number of readiness events removed from the single flat epoll queue before returning to the fixed-file rings.",
+  "below_saturation": {
+    "established": {
+      "server_cpu_us_per_response": {
+        "control": 31.54847875,
+        "candidate": 29.865732549999997,
+        "paired_pct": -5.950198545480106,
+        "lower": 4,
+        "pairs": 4
+      },
+      "napi_us_per_response": {
+        "control": 18.827545025,
+        "candidate": 17.096286,
+        "paired_pct": -11.182792262544154,
+        "lower": 4,
+        "pairs": 4
+      },
+      "application_and_napi_us_per_response": {
+        "control": 50.9620613,
+        "candidate": 46.8570416,
+        "paired_pct": -8.197511018231069,
+        "lower": 4,
+        "pairs": 4
+      },
+      "submit_p99_us": {
+        "control": 4115.473,
+        "candidate": 4030.58,
+        "paired_pct": -2.0346894338984454,
+        "lower": 3,
+        "pairs": 4
+      },
+      "schedule_to_http_p99_us": {
+        "control": 4126.9405,
+        "candidate": 4048.8540000000003,
+        "paired_pct": -1.9460241321093086,
+        "lower": 3,
+        "pairs": 4
+      },
+      "rps": {
+        "control": 17971.739093742344,
+        "candidate": 17931.11931489103,
+        "paired_pct": -0.27160817839873563,
+        "lower": 3,
+        "pairs": 4
+      },
+      "measured_whole_core_busy_us_per_response": {
+        "control": 50.0,
+        "candidate": 50.75,
+        "paired_pct": -1.4563106796116498,
+        "lower": 2,
+        "pairs": 4
+      }
+    },
+    "reconnect_mixed": {
+      "server_cpu_us_per_response": {
+        "control": 31.261686858214848,
+        "candidate": 29.556453865521327,
+        "paired_pct": -6.888040073339163,
+        "lower": 3,
+        "pairs": 4
+      },
+      "napi_us_per_response": {
+        "control": 18.609816103870457,
+        "candidate": 17.41509258984992,
+        "paired_pct": -6.0355075734927155,
+        "lower": 3,
+        "pairs": 4
+      },
+      "application_and_napi_us_per_response": {
+        "control": 50.722598168443916,
+        "candidate": 46.97689499407583,
+        "paired_pct": -7.487516303759767,
+        "lower": 3,
+        "pairs": 4
+      },
+      "submit_p99_us": {
+        "control": 4070.405,
+        "candidate": 4002.022,
+        "paired_pct": -1.5888648854620269,
+        "lower": 3,
+        "pairs": 4
+      },
+      "schedule_to_http_p99_us": {
+        "control": 4096.7665,
+        "candidate": 4026.923,
+        "paired_pct": -1.7629799561381054,
+        "lower": 3,
+        "pairs": 4
+      },
+      "rps": {
+        "control": 17957.486808340786,
+        "candidate": 17885.951571443697,
+        "paired_pct": -0.39401663709428547,
+        "lower": 3,
+        "pairs": 4
+      },
+      "measured_whole_core_busy_us_per_response": {
+        "control": 49.368088467614534,
+        "candidate": 43.44391785150079,
+        "paired_pct": -10.92574257425742,
+        "lower": 3,
+        "pairs": 4
+      }
+    }
+  },
+  "phased_timed_traffic": [
+    {
+      "block": 0,
+      "arm": "control",
+      "replies": 40256,
+      "all_tx_drops": 1281,
+      "timed_tx_drops": 0,
+      "every_phase": {
+        "fresh": 0,
+        "established": 0,
+        "ramp0": 0,
+        "ramp1": 0,
+        "ramp2": 0,
+        "ramp3": 0,
+        "silent_and_partial": 0
+      },
+      "all_outside_recorded_intervals": 1281,
+      "retransmitted": 325,
+      "likes": 2114
+    },
+    {
+      "block": 0,
+      "arm": "candidate",
+      "replies": 40256,
+      "all_tx_drops": 501,
+      "timed_tx_drops": 0,
+      "every_phase": {
+        "fresh": 0,
+        "established": 0,
+        "ramp0": 0,
+        "ramp1": 0,
+        "ramp2": 0,
+        "ramp3": 0,
+        "silent_and_partial": 0
+      },
+      "all_outside_recorded_intervals": 501,
+      "retransmitted": 246,
+      "likes": 2114
+    },
+    {
+      "block": 1,
+      "arm": "candidate",
+      "replies": 40256,
+      "all_tx_drops": 702,
+      "timed_tx_drops": 0,
+      "every_phase": {
+        "fresh": 0,
+        "established": 0,
+        "ramp0": 0,
+        "ramp1": 0,
+        "ramp2": 0,
+        "ramp3": 0,
+        "silent_and_partial": 0
+      },
+      "all_outside_recorded_intervals": 702,
+      "retransmitted": 182,
+      "likes": 2114
+    },
+    {
+      "block": 1,
+      "arm": "control",
+      "replies": 40256,
+      "all_tx_drops": 746,
+      "timed_tx_drops": 0,
+      "every_phase": {
+        "fresh": 0,
+        "established": 0,
+        "ramp0": 0,
+        "ramp1": 0,
+        "ramp2": 0,
+        "ramp3": 0,
+        "silent_and_partial": 0
+      },
+      "all_outside_recorded_intervals": 746,
+      "retransmitted": 297,
+      "likes": 2114
+    }
+  ],
+  "64": {
+    "identities": {
+      "control": {
+        "source": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+        "elf": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5"
+      },
+      "candidate": {
+        "source": "bc712ffb185f4c04a3d2b10c4f3584a4c7ce2599ded63497291d8ee545bbbe14",
+        "elf": "906bd3d64fe12b14c79f30465adacf09cc54d8404d9934b89713015027efd052"
+      },
+      "trace-control": {
+        "source": "6440ac4eae81efe0ce5f2b8758e5ab81d68aae64ba71a3ba1b061cf03bb52206",
+        "elf": "703368531d7a38ee49f8f2b5e239895aa5446c95105b0d3fd9044c72ca320155"
+      },
+      "trace-candidate": {
+        "source": "c574db067ee28799abd81e60ba22ac46a41a42511684da342fc8ab1dec02055e",
+        "elf": "f75ef24f4a2a896e2977a2dd591cee353c74c217b0a6b75227f2f5c30687087f"
+      },
+      "wide": {
+        "elf": "0aeb83aa4a1583c1c73d8a9b0c3429196129f51de755caa3458fb246c0ab9419",
+        "source": "097e90a925fd6cdfd0c1d4b0b86fad5378fa7b5f5290fd084a3be1ea71d38b1f"
+      },
+      "trace-wide": {
+        "elf": "b844bea7d1a88534124e4a0c22e4a7d1516bd39f6a70fbe2977b24a4782e5ece",
+        "source": "bff15e95451e194943e8f45fa2f709d871d71453da0ad2471048e476599f69f5"
+      }
+    },
+    "pairs": 6,
+    "checked": {
+      "responses": 461120,
+      "likes": 21622,
+      "posts": 2404,
+      "opened": 27648,
+      "retransmitted": 4855
+    },
+    "load_patterns": {
+      "uniform": {
+        "service_plus_napi_ns": {
+          "control": 34792.899999999994,
+          "candidate": 36092.275,
+          "paired_pct": 0.8056392276253543,
+          "lower": 2,
+          "pairs": 6
+        },
+        "p99": {
+          "control": 33421.765,
+          "candidate": 29215.125,
+          "paired_pct": -16.93810854314924,
+          "lower": 6,
+          "pairs": 6
+        },
+        "role0_p99": {
+          "control": 33421.8,
+          "candidate": 29215.15,
+          "paired_pct": -16.93811649895169,
+          "lower": 6,
+          "pairs": 6
+        },
+        "rps": {
+          "control": 28262.023478770807,
+          "candidate": 27405.56130018514,
+          "paired_pct": -1.0883477127556995,
+          "lower": 4,
+          "pairs": 6
+        }
+      },
+      "one_hot": {
+        "service_plus_napi_ns": {
+          "control": 35213.020000000004,
+          "candidate": 34900.655,
+          "paired_pct": -0.31448700449295264,
+          "lower": 4,
+          "pairs": 6
+        },
+        "p99": {
+          "control": 38452.100000000006,
+          "candidate": 39393.495,
+          "paired_pct": 2.449016305240681,
+          "lower": 1,
+          "pairs": 6
+        },
+        "role0_p99": {
+          "control": 33303.05,
+          "candidate": 40695.15,
+          "paired_pct": 20.08364824060873,
+          "lower": 0,
+          "pairs": 6
+        },
+        "rps": {
+          "control": 22404.29976221122,
+          "candidate": 22521.425135850623,
+          "paired_pct": -0.4038191438024641,
+          "lower": 4,
+          "pairs": 6
+        }
+      },
+      "two_hot": {
+        "service_plus_napi_ns": {
+          "control": 32616.434999999998,
+          "candidate": 33162.84,
+          "paired_pct": 1.104592103433344,
+          "lower": 2,
+          "pairs": 6
+        },
+        "p99": {
+          "control": 45178.945,
+          "candidate": 45949.81,
+          "paired_pct": 0.47402796318710694,
+          "lower": 2,
+          "pairs": 6
+        },
+        "role0_p99": {
+          "control": 38814.55,
+          "candidate": 46601.45,
+          "paired_pct": 19.261655021979365,
+          "lower": 0,
+          "pairs": 6
+        },
+        "rps": {
+          "control": 24236.998858498864,
+          "candidate": 24529.6742296501,
+          "paired_pct": 1.520852631412184,
+          "lower": 2,
+          "pairs": 6
+        }
+      },
+      "sparse": {
+        "service_plus_napi_ns": {
+          "control": 59175.435,
+          "candidate": 56701.274999999994,
+          "paired_pct": -2.483973696617958,
+          "lower": 6,
+          "pairs": 6
+        },
+        "p99": {
+          "control": 20024.85,
+          "candidate": 20543.85,
+          "paired_pct": 2.7478982916074757,
+          "lower": 2,
+          "pairs": 6
+        },
+        "role0_p99": {
+          "control": 20024.85,
+          "candidate": 20543.85,
+          "paired_pct": 2.74773035185657,
+          "lower": 2,
+          "pairs": 6
+        },
+        "rps": {
+          "control": 4366.550890043834,
+          "candidate": 4152.349513677378,
+          "paired_pct": 1.418233270564906,
+          "lower": 3,
+          "pairs": 6
+        }
+      }
+    },
+    "syscall_trace": {
+      "trace-control": {
+        "uniform": {
+          "edge_waits": 275,
+          "edge_nonempty": 206,
+          "edges": 12800,
+          "idle_epoll_waits": 4,
+          "passes": 55,
+          "uring_enters": 416,
+          "idle_wakes": 4,
+          "replies": 12800,
+          "all_epoll_waits_per_reply": 0.021796875,
+          "uring_enters_per_reply": 0.0325,
+          "credits_per_bank": [
+            2560,
+            2560,
+            2560,
+            2560,
+            2560
+          ]
+        },
+        "one_hot": {
+          "edge_waits": 1720,
+          "edge_nonempty": 431,
+          "edges": 11776,
+          "idle_epoll_waits": 119,
+          "passes": 344,
+          "uring_enters": 1026,
+          "idle_wakes": 19,
+          "replies": 11776,
+          "all_epoll_waits_per_reply": 0.15616508152173914,
+          "uring_enters_per_reply": 0.08712635869565218,
+          "credits_per_bank": [
+            5312,
+            384,
+            5312,
+            384,
+            384
+          ]
+        },
+        "two_hot": {
+          "edge_waits": 1460,
+          "edge_nonempty": 362,
+          "edges": 13488,
+          "idle_epoll_waits": 111,
+          "passes": 292,
+          "uring_enters": 871,
+          "idle_wakes": 17,
+          "replies": 13488,
+          "all_epoll_waits_per_reply": 0.11647390272835113,
+          "uring_enters_per_reply": 0.0645759193357058,
+          "credits_per_bank": [
+            4248,
+            2088,
+            4248,
+            2088,
+            816
+          ]
+        },
+        "sparse": {
+          "edge_waits": 5830,
+          "edge_nonempty": 735,
+          "edges": 960,
+          "idle_epoll_waits": 365,
+          "passes": 1166,
+          "uring_enters": 2335,
+          "idle_wakes": 263,
+          "replies": 960,
+          "all_epoll_waits_per_reply": 6.453125,
+          "uring_enters_per_reply": 2.4322916666666665,
+          "credits_per_bank": [
+            192,
+            192,
+            192,
+            192,
+            192
+          ]
+        }
+      },
+      "trace-candidate": {
+        "uniform": {
+          "edge_waits": 212,
+          "edge_nonempty": 204,
+          "edges": 12800,
+          "idle_epoll_waits": 0,
+          "passes": 212,
+          "uring_enters": 608,
+          "idle_wakes": 4,
+          "replies": 12800,
+          "all_epoll_waits_per_reply": 0.0165625,
+          "uring_enters_per_reply": 0.0475,
+          "credits_per_bank": [
+            2560,
+            2560,
+            2560,
+            2560,
+            2560
+          ]
+        },
+        "one_hot": {
+          "edge_waits": 378,
+          "edge_nonempty": 226,
+          "edges": 11776,
+          "idle_epoll_waits": 0,
+          "passes": 378,
+          "uring_enters": 1165,
+          "idle_wakes": 26,
+          "replies": 11776,
+          "all_epoll_waits_per_reply": 0.032099184782608696,
+          "uring_enters_per_reply": 0.09893002717391304,
+          "credits_per_bank": [
+            5312,
+            384,
+            5312,
+            384,
+            384
+          ]
+        },
+        "two_hot": {
+          "edge_waits": 337,
+          "edge_nonempty": 232,
+          "edges": 13488,
+          "idle_epoll_waits": 0,
+          "passes": 337,
+          "uring_enters": 1317,
+          "idle_wakes": 10,
+          "replies": 13488,
+          "all_epoll_waits_per_reply": 0.024985172004744958,
+          "uring_enters_per_reply": 0.0976423487544484,
+          "credits_per_bank": [
+            4248,
+            2088,
+            4248,
+            2088,
+            816
+          ]
+        },
+        "sparse": {
+          "edge_waits": 1328,
+          "edge_nonempty": 477,
+          "edges": 960,
+          "idle_epoll_waits": 0,
+          "passes": 1328,
+          "uring_enters": 2558,
+          "idle_wakes": 297,
+          "replies": 960,
+          "all_epoll_waits_per_reply": 1.3833333333333333,
+          "uring_enters_per_reply": 2.6645833333333333,
+          "credits_per_bank": [
+            192,
+            192,
+            192,
+            192,
+            192
+          ]
+        }
+      }
+    },
+    "qa": {
+      "official_passes": 42,
+      "differential": 13,
+      "reopened_integrity": "ok"
+    }
+  },
+  "up_to_256": {
+    "identities": {
+      "control": {
+        "source": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+        "elf": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5"
+      },
+      "candidate": {
+        "source": "bc712ffb185f4c04a3d2b10c4f3584a4c7ce2599ded63497291d8ee545bbbe14",
+        "elf": "906bd3d64fe12b14c79f30465adacf09cc54d8404d9934b89713015027efd052"
+      },
+      "trace-control": {
+        "source": "6440ac4eae81efe0ce5f2b8758e5ab81d68aae64ba71a3ba1b061cf03bb52206",
+        "elf": "703368531d7a38ee49f8f2b5e239895aa5446c95105b0d3fd9044c72ca320155"
+      },
+      "trace-candidate": {
+        "source": "c574db067ee28799abd81e60ba22ac46a41a42511684da342fc8ab1dec02055e",
+        "elf": "f75ef24f4a2a896e2977a2dd591cee353c74c217b0a6b75227f2f5c30687087f"
+      },
+      "wide": {
+        "elf": "0aeb83aa4a1583c1c73d8a9b0c3429196129f51de755caa3458fb246c0ab9419",
+        "source": "097e90a925fd6cdfd0c1d4b0b86fad5378fa7b5f5290fd084a3be1ea71d38b1f"
+      },
+      "trace-wide": {
+        "elf": "b844bea7d1a88534124e4a0c22e4a7d1516bd39f6a70fbe2977b24a4782e5ece",
+        "source": "bff15e95451e194943e8f45fa2f709d871d71453da0ad2471048e476599f69f5"
+      }
+    },
+    "pairs": 4,
+    "checked": {
+      "responses": 308608,
+      "likes": 14498,
+      "posts": 1612,
+      "opened": 18432,
+      "retransmitted": 4017
+    },
+    "load_patterns": {
+      "uniform": {
+        "service_plus_napi_ns": {
+          "control": 35268.155,
+          "candidate": 35514.71,
+          "paired_pct": 0.7226897762096562,
+          "lower": 2,
+          "pairs": 4
+        },
+        "p99": {
+          "control": 32614.495,
+          "candidate": 29100.98,
+          "paired_pct": -16.059592527967595,
+          "lower": 3,
+          "pairs": 4
+        },
+        "role0_p99": {
+          "control": 32614.5,
+          "candidate": 29101.0,
+          "paired_pct": -16.059495990118428,
+          "lower": 3,
+          "pairs": 4
+        },
+        "rps": {
+          "control": 27962.846848620997,
+          "candidate": 28128.058932290358,
+          "paired_pct": -0.4543896703589845,
+          "lower": 2,
+          "pairs": 4
+        }
+      },
+      "one_hot": {
+        "service_plus_napi_ns": {
+          "control": 34103.41,
+          "candidate": 33944.81,
+          "paired_pct": -1.859246881383897,
+          "lower": 3,
+          "pairs": 4
+        },
+        "p99": {
+          "control": 38363.375,
+          "candidate": 39872.994999999995,
+          "paired_pct": 2.3896157205444135,
+          "lower": 0,
+          "pairs": 4
+        },
+        "role0_p99": {
+          "control": 33288.8,
+          "candidate": 41340.65,
+          "paired_pct": 24.873778194446373,
+          "lower": 0,
+          "pairs": 4
+        },
+        "rps": {
+          "control": 22150.70915136778,
+          "candidate": 22354.047446237848,
+          "paired_pct": 3.525250111226852,
+          "lower": 1,
+          "pairs": 4
+        }
+      },
+      "two_hot": {
+        "service_plus_napi_ns": {
+          "control": 33032.265,
+          "candidate": 32505.545000000002,
+          "paired_pct": -2.6511207779114256,
+          "lower": 3,
+          "pairs": 4
+        },
+        "p99": {
+          "control": 46587.88,
+          "candidate": 50215.235,
+          "paired_pct": 3.9101294686720856,
+          "lower": 1,
+          "pairs": 4
+        },
+        "role0_p99": {
+          "control": 38100.05,
+          "candidate": 51256.45,
+          "paired_pct": 23.895867691062058,
+          "lower": 0,
+          "pairs": 4
+        },
+        "rps": {
+          "control": 24142.766988232346,
+          "candidate": 24421.292904715337,
+          "paired_pct": 0.17424692623575488,
+          "lower": 2,
+          "pairs": 4
+        }
+      },
+      "sparse": {
+        "service_plus_napi_ns": {
+          "control": 61490.33,
+          "candidate": 57196.675,
+          "paired_pct": -3.137508265029121,
+          "lower": 3,
+          "pairs": 4
+        },
+        "p99": {
+          "control": 30431.809999999998,
+          "candidate": 19571.86,
+          "paired_pct": -17.19842625025068,
+          "lower": 4,
+          "pairs": 4
+        },
+        "role0_p99": {
+          "control": 30431.8,
+          "candidate": 19571.9,
+          "paired_pct": -17.19869973671279,
+          "lower": 4,
+          "pairs": 4
+        },
+        "rps": {
+          "control": 3694.6384696942087,
+          "candidate": 4689.327999456047,
+          "paired_pct": 6.727608538023588,
+          "lower": 1,
+          "pairs": 4
+        }
+      }
+    },
+    "syscall_trace": {
+      "trace-control": {
+        "uniform": {
+          "edge_waits": 265,
+          "edge_nonempty": 204,
+          "edges": 12800,
+          "idle_epoll_waits": 4,
+          "passes": 53,
+          "uring_enters": 412,
+          "idle_wakes": 4,
+          "replies": 12800,
+          "all_epoll_waits_per_reply": 0.021015625,
+          "uring_enters_per_reply": 0.0321875,
+          "credits_per_bank": [
+            2560,
+            2560,
+            2560,
+            2560,
+            2560
+          ]
+        },
+        "one_hot": {
+          "edge_waits": 2715,
+          "edge_nonempty": 532,
+          "edges": 11776,
+          "idle_epoll_waits": 198,
+          "passes": 543,
+          "uring_enters": 1414,
+          "idle_wakes": 54,
+          "replies": 11776,
+          "all_epoll_waits_per_reply": 0.24736752717391305,
+          "uring_enters_per_reply": 0.12007472826086957,
+          "credits_per_bank": [
+            5312,
+            384,
+            5312,
+            384,
+            384
+          ]
+        },
+        "two_hot": {
+          "edge_waits": 1410,
+          "edge_nonempty": 353,
+          "edges": 13488,
+          "idle_epoll_waits": 109,
+          "passes": 282,
+          "uring_enters": 852,
+          "idle_wakes": 15,
+          "replies": 13488,
+          "all_epoll_waits_per_reply": 0.11261862396204034,
+          "uring_enters_per_reply": 0.06316725978647687,
+          "credits_per_bank": [
+            4248,
+            2088,
+            4248,
+            2088,
+            816
+          ]
+        },
+        "sparse": {
+          "edge_waits": 6575,
+          "edge_nonempty": 756,
+          "edges": 960,
+          "idle_epoll_waits": 418,
+          "passes": 1315,
+          "uring_enters": 2511,
+          "idle_wakes": 307,
+          "replies": 960,
+          "all_epoll_waits_per_reply": 7.284375,
+          "uring_enters_per_reply": 2.615625,
+          "credits_per_bank": [
+            192,
+            192,
+            192,
+            192,
+            192
+          ]
+        }
+      },
+      "trace-wide": {
+        "uniform": {
+          "edge_waits": 65,
+          "edge_nonempty": 57,
+          "edges": 12800,
+          "idle_epoll_waits": 0,
+          "passes": 65,
+          "uring_enters": 296,
+          "idle_wakes": 4,
+          "replies": 12800,
+          "all_epoll_waits_per_reply": 0.005078125,
+          "uring_enters_per_reply": 0.023125,
+          "credits_per_bank": [
+            2560,
+            2560,
+            2560,
+            2560,
+            2560
+          ]
+        },
+        "one_hot": {
+          "edge_waits": 268,
+          "edge_nonempty": 96,
+          "edges": 11776,
+          "idle_epoll_waits": 0,
+          "passes": 268,
+          "uring_enters": 736,
+          "idle_wakes": 20,
+          "replies": 11776,
+          "all_epoll_waits_per_reply": 0.022758152173913044,
+          "uring_enters_per_reply": 0.0625,
+          "credits_per_bank": [
+            5312,
+            384,
+            5312,
+            384,
+            384
+          ]
+        },
+        "two_hot": {
+          "edge_waits": 349,
+          "edge_nonempty": 149,
+          "edges": 13488,
+          "idle_epoll_waits": 0,
+          "passes": 349,
+          "uring_enters": 944,
+          "idle_wakes": 34,
+          "replies": 13488,
+          "all_epoll_waits_per_reply": 0.02587485172004745,
+          "uring_enters_per_reply": 0.06998813760379596,
+          "credits_per_bank": [
+            4248,
+            2088,
+            4248,
+            2088,
+            816
+          ]
+        },
+        "sparse": {
+          "edge_waits": 1333,
+          "edge_nonempty": 459,
+          "edges": 960,
+          "idle_epoll_waits": 0,
+          "passes": 1333,
+          "uring_enters": 2645,
+          "idle_wakes": 299,
+          "replies": 960,
+          "all_epoll_waits_per_reply": 1.3885416666666666,
+          "uring_enters_per_reply": 2.7552083333333335,
+          "credits_per_bank": [
+            192,
+            192,
+            192,
+            192,
+            192
+          ]
+        }
+      }
+    },
+    "qa": {
+      "official_passes": 42,
+      "differential": 13,
+      "reopened_integrity": "ok"
+    }
+  },
+  "input_sha256": {
+    "summary.json": "7b89710d04ca4cb1c3b42c665b31e47c574a4ccff8fb6eacac5290b5e9ffee6f",
+    "wide-summary.json": "de7847085a42935ad2e41c6ab36a61f703b0699e8418d7dfa0e5faa354c7bfa9",
+    "steady-summary.json": "aa8e35ca6db871749ce9cf971f2c19c81e3c0f997470cfa3e1af6586d4e3b078",
+    "phases-summary.json": "b7e3b72a2871cce74ee823b82fb75b0a14c4db099b62d1f5b2428834c3b3ec09",
+    "flat.patch": "1e271d205f7750476474b021c82b8444973813871f3dd1fcf89480b2c1748209"
+  }
+}

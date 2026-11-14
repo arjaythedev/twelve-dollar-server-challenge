@@ -1,0 +1,266 @@
+{
+  "selected_sha256": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+  "piggyback_with_unsubmitted_operations": {
+    "description": "Group two or three registrations when operations are already queued in the same bank.",
+    "mixed_trace": {
+      "imports": 1994,
+      "single": 1167,
+      "two": 455,
+      "three": 219,
+      "big": 153,
+      "small_no_space": 0,
+      "eligible_groups": 0,
+      "eligible_sockets": 0,
+      "appended_groups": 0,
+      "preceding_sqe_same_enter": 0,
+      "entire_group_same_enter": 0,
+      "mixed_enters": 0,
+      "small_only_enters": 0,
+      "mixed_small_sockets": 0,
+      "only_small_sockets": 0,
+      "watch_cqes": 850,
+      "watch_errors": 0,
+      "enter_count": 8897,
+      "entered_sqes": 47440,
+      "all_imported": 3584,
+      "distinct_before_same_enter": 0,
+      "eligible_small_groups_pct": 0.0,
+      "eligible_all_sockets_pct": 0.0
+    },
+    "comparison": {
+      "app_us_per_request": {
+        "control_median": 31.08087282078165,
+        "candidate_median": 30.458077389111644,
+        "median_paired_pct": -1.1047726642706979,
+        "median_paired_diff": -0.3179580670926523,
+        "improved": 7,
+        "n": 12,
+        "paired_median_diff_CI": [
+          -3.0854886363636282,
+          0.24239523281595865
+        ],
+        "ci_coverage": 0.96142578125
+      },
+      "fresh_p99_ms": {
+        "control_median": 2.80058,
+        "candidate_median": 2.690265,
+        "median_paired_pct": 2.4499980309766354,
+        "median_paired_diff": 0.07730499999999996,
+        "improved": 6,
+        "n": 12,
+        "paired_median_diff_CI": [
+          -1.5913100000000002,
+          3.147739999999999
+        ],
+        "ci_coverage": 0.96142578125
+      },
+      "established_p99_ms": {
+        "control_median": 4.74977,
+        "candidate_median": 4.65786,
+        "median_paired_pct": -1.341646721110007,
+        "median_paired_diff": -0.06341999999999981,
+        "improved": 7,
+        "n": 12,
+        "paired_median_diff_CI": [
+          -1.0345699999999995,
+          0.5545499999999999
+        ],
+        "ci_coverage": 0.96142578125
+      }
+    }
+  },
+  "carry_a_short_import_for_one_busy_bank_rotation": {
+    "source_sha256": "a07c80ada49e7369a9b22737d31a7f485afec6044bec148838ceaf22b0df529b",
+    "release_sha256": "f855257314414965736d8d38239bf52a9b643001a191f7611b22cd5d0703f054",
+    "trial_suites": {
+      "paired": {
+        "banks": [
+          1
+        ],
+        "table_capacity": 65535,
+        "comparison": {
+          "cpu_us_per_request": {
+            "guard": 31.0653,
+            "candidate": 30.7168,
+            "median_paired_pct": -0.2132,
+            "range_pct": [
+              -4.8847,
+              4.181
+            ],
+            "lower": 5,
+            "n": 8
+          },
+          "p99_new_ms": {
+            "guard": 2.3724,
+            "candidate": 2.4031,
+            "median_paired_pct": -21.3872,
+            "range_pct": [
+              -34.3771,
+              216.3545
+            ],
+            "lower": 5,
+            "n": 8
+          },
+          "p99_est_ms": {
+            "guard": 4.6335,
+            "candidate": 4.4813,
+            "median_paired_pct": -3.9837,
+            "range_pct": [
+              -9.5069,
+              19.6276
+            ],
+            "lower": 7,
+            "n": 8
+          }
+        }
+      },
+      "rollover": {
+        "banks": [
+          3
+        ],
+        "table_capacity": 256,
+        "comparison": {
+          "cpu_us_per_request": {
+            "guard": 31.1681,
+            "candidate": 31.0467,
+            "median_paired_pct": -0.0156,
+            "range_pct": [
+              -4.3298,
+              13.8868
+            ],
+            "lower": 4,
+            "n": 8
+          },
+          "p99_new_ms": {
+            "guard": 2.3839,
+            "candidate": 2.7293,
+            "median_paired_pct": 2.1067,
+            "range_pct": [
+              -50.4304,
+              425.9424
+            ],
+            "lower": 3,
+            "n": 8
+          },
+          "p99_est_ms": {
+            "guard": 4.6101,
+            "candidate": 4.6252,
+            "median_paired_pct": 1.9079,
+            "range_pct": [
+              -12.8546,
+              137.6102
+            ],
+            "lower": 3,
+            "n": 8
+          }
+        }
+      }
+    },
+    "coverage": [
+      {
+        "arm": "control-trace",
+        "table_capacity": 65535,
+        "target_rates": [
+          3300,
+          10000
+        ],
+        "admitted": 1408,
+        "vectored": 0,
+        "sync": 1408,
+        "carried": 0,
+        "grew_to_at_least_four": 0
+      },
+      {
+        "arm": "trace",
+        "table_capacity": 65535,
+        "target_rates": [
+          3300,
+          10000
+        ],
+        "admitted": 1408,
+        "vectored": 125,
+        "sync": 1283,
+        "carried": 465,
+        "grew_to_at_least_four": 24
+      },
+      {
+        "arm": "trace",
+        "table_capacity": 65535,
+        "target_rates": [
+          3600,
+          11500
+        ],
+        "admitted": 1408,
+        "vectored": 354,
+        "sync": 1054,
+        "carried": 366,
+        "grew_to_at_least_four": 70
+      },
+      {
+        "arm": "control-trace",
+        "table_capacity": 65535,
+        "target_rates": [
+          3600,
+          11500
+        ],
+        "admitted": 1408,
+        "vectored": 4,
+        "sync": 1404,
+        "carried": 0,
+        "grew_to_at_least_four": 0
+      },
+      {
+        "arm": "control-trace",
+        "table_capacity": 256,
+        "target_rates": [
+          3300,
+          10000
+        ],
+        "admitted": 1408,
+        "vectored": 443,
+        "sync": 965,
+        "carried": 0,
+        "grew_to_at_least_four": 0
+      },
+      {
+        "arm": "trace",
+        "table_capacity": 256,
+        "target_rates": [
+          3300,
+          10000
+        ],
+        "admitted": 1408,
+        "vectored": 326,
+        "sync": 1082,
+        "carried": 113,
+        "grew_to_at_least_four": 39
+      },
+      {
+        "arm": "trace",
+        "table_capacity": 256,
+        "target_rates": [
+          3600,
+          11500
+        ],
+        "admitted": 1408,
+        "vectored": 591,
+        "sync": 817,
+        "carried": 70,
+        "grew_to_at_least_four": 21
+      },
+      {
+        "arm": "control-trace",
+        "table_capacity": 256,
+        "target_rates": [
+          3600,
+          11500
+        ],
+        "admitted": 1408,
+        "vectored": 606,
+        "sync": 802,
+        "carried": 0,
+        "grew_to_at_least_four": 0
+      }
+    ]
+  }
+}

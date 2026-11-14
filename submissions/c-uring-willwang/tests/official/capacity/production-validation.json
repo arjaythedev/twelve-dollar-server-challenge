@@ -1,0 +1,47 @@
+{
+  "revision": "0b9d84c4cf7c7a90bdd27f26d54c0229afa64e10",
+  "elf_sha256": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+  "effective_source_manifest_sha256": "9d86faa76874f589fc5e8be8d14c9d449fd40432a7abac349b70bc0c577f3ddd",
+  "production_source_sha256": {
+    "reactor.c": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+    "reader.c": "c202d87d232540cf4d6381ee533bd6326699b5a59aa3af8805a25337b9d1af17",
+    "vendor/sqlite3.c": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+    "build/sqlite/sqlite3.c": "200c362e7e677d1f81ac961a072cafdbaf341fc2612aa8b49fc8a974d8caa5ea",
+    "sqlite-pcache-sibling-swap.patch": "36ef53b437e83c7d8631b5803f3c2e74df933c92c25654208b8efd803fee82e9",
+    "Makefile": "a96d3c562bb54e4e39b97004953bc06794ff79e3ce117d414c1e055252e70b05",
+    "build.sh": "113a252867c151c95fdc2216e39c778f3ec5d7f7d621358b0611b28384fd1201",
+    "start.sh": "8742d39196b740703d4f017f6875477f49c18f4c9fd28ecb27784170d25dc9ac"
+  },
+  "all_seven_object_files_match_scored_candidate": true,
+  "test_platform": {
+    "kernel": "6.8.0-147-generic",
+    "uid": 1000,
+    "cpu": 9,
+    "memory_mib": 1750,
+    "swap": 0,
+    "nofile": 65535
+  },
+  "transport": {
+    "status": 200,
+    "db": "ok",
+    "observed_io_uring_fds": 1,
+    "bulk_fixed_updates": true
+  },
+  "checks": {
+    "organizer_http": 42,
+    "sql_differential_layouts": 13,
+    "held_write_fifo": true,
+    "wake": true,
+    "grouped_watch": true,
+    "guarded_renderer_rows": 16384,
+    "wal_recovery": true,
+    "wal_publication_cases": 24,
+    "model_plain_cases": 195,
+    "model_asan_ubsan_cases": 195,
+    "sqlite_debug_asan_reference_databases_equal": 4,
+    "failures": 0
+  },
+  "service_invocation_id": "79fbfafbdb744aeda08adb5d825b5f55",
+  "validation_sha256": "18a73bc0a228f48bdc466266a516726f775da1a135b5dac9d1ce391fd7165726",
+  "commit_source_receipt_sha256": "055cf0a6804ddb07723f7ad7a4e1dc553b15de223a524a8429bd6ad154b148cd"
+}

@@ -1,0 +1,108 @@
+{
+  "profile": "four-router-lanes-threaded-napi placement only",
+  "application_cpu": 9,
+  "remote_sender_cpu": 15,
+  "server_ehash_entries": 16384,
+  "routed_tcp_observations": {
+    "eth1": {
+      "ifindex": 2,
+      "napi_ids": [
+        8306
+      ],
+      "observed_cpu_and_napi_id": [
+        [
+          9,
+          8306
+        ],
+        [
+          9,
+          8306
+        ],
+        [
+          9,
+          8306
+        ],
+        [
+          9,
+          8306
+        ]
+      ]
+    },
+    "eth2": {
+      "ifindex": 3,
+      "napi_ids": [
+        8310
+      ],
+      "observed_cpu_and_napi_id": [
+        [
+          9,
+          8310
+        ],
+        [
+          9,
+          8310
+        ],
+        [
+          9,
+          8310
+        ],
+        [
+          9,
+          8310
+        ]
+      ]
+    },
+    "eth3": {
+      "ifindex": 4,
+      "napi_ids": [
+        8314
+      ],
+      "observed_cpu_and_napi_id": [
+        [
+          9,
+          8314
+        ],
+        [
+          9,
+          8314
+        ],
+        [
+          9,
+          8314
+        ],
+        [
+          9,
+          8314
+        ]
+      ]
+    },
+    "eth4": {
+      "ifindex": 5,
+      "napi_ids": [
+        8318
+      ],
+      "observed_cpu_and_napi_id": [
+        [
+          9,
+          8318
+        ],
+        [
+          9,
+          8318
+        ],
+        [
+          9,
+          8318
+        ],
+        [
+          9,
+          8318
+        ]
+      ]
+    }
+  },
+  "cleanup": {
+    "created_threads": 4,
+    "unreclaimed_threads": []
+  }
+}

@@ -1,0 +1,3675 @@
+{
+  "counts": {
+    "allocated": 22,
+    "final_eligible": 22,
+    "final_healthy": 22,
+    "states": {
+      "final": 22
+    }
+  },
+  "experimental_entries": [
+    "leaf-cursor",
+    "submitted"
+  ],
+  "fixture": {
+    "app_memory_bytes": 1835008000,
+    "client_cpus": [
+      "0,1",
+      "3,4",
+      "6,7",
+      "11,12,13"
+    ],
+    "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "router_cpus": [
+      2,
+      5,
+      8,
+      14
+    ],
+    "server_cpu": 10,
+    "service_fd_limit": 65535,
+    "signed_tcp_tables": [
+      524288,
+      -524288,
+      -524288,
+      -524288,
+      -524288,
+      -524288
+    ],
+    "topology": "single-queue-split-polling-tap-external-txring4096"
+  },
+  "matched_310k": [
+    {
+      "entry": "mojo",
+      "exact_organizer_310k_full_hold": null,
+      "first_tag": "large512k-quiet-mojo-310-h1",
+      "local_comparison": {
+        "both_eligible": true,
+        "p95_reverse_over_forward": 1.347848915332906,
+        "p99_reverse_over_forward": 1.2697346485319145,
+        "state": "final",
+        "stock_passes": 2,
+        "strict_passes": 2,
+        "throughput_pct_change": -0.030864889909287818
+      },
+      "reverse_tag": "large512k-quiet-mojo-310-h2"
+    },
+    {
+      "entry": "submitted",
+      "exact_organizer_310k_full_hold": null,
+      "first_tag": "large512k-quiet-submitted-310-h1",
+      "local_comparison": {
+        "both_eligible": true,
+        "p95_reverse_over_forward": 0.8613494748283789,
+        "p99_reverse_over_forward": 0.22036934714138218,
+        "state": "final",
+        "stock_passes": 2,
+        "strict_passes": 2,
+        "throughput_pct_change": 0.14689009682413712
+      },
+      "reverse_tag": "large512k-quiet-submitted-310-h2"
+    },
+    {
+      "entry": "rkkautsar",
+      "exact_organizer_310k_full_hold": null,
+      "first_tag": "large512k-quiet-rkkautsar-310-h1",
+      "local_comparison": {
+        "both_eligible": true,
+        "p95_reverse_over_forward": 0.7797684429937833,
+        "p99_reverse_over_forward": 0.9327180547071352,
+        "state": "final",
+        "stock_passes": 0,
+        "strict_passes": 0,
+        "throughput_pct_change": 0.4686778007532366
+      },
+      "reverse_tag": "large512k-quiet-rkkautsar-310-h2"
+    },
+    {
+      "entry": "pavlyhalim",
+      "exact_organizer_310k_full_hold": {
+        "hold_s": 300,
+        "p99_ms": 1850,
+        "pass": false,
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245#issuecomment-6557252428",
+        "users": 310000
+      },
+      "first_tag": "large512k-quiet-pavlyhalim-310-h1",
+      "local_comparison": {
+        "both_eligible": true,
+        "p95_reverse_over_forward": 1.0510100501000001,
+        "p99_reverse_over_forward": 1.0510100501000001,
+        "state": "final",
+        "stock_passes": 2,
+        "strict_passes": 2,
+        "throughput_pct_change": 0.0018447662682330446
+      },
+      "reverse_tag": "large512k-quiet-pavlyhalim-310-h2"
+    },
+    {
+      "entry": "kensac",
+      "exact_organizer_310k_full_hold": {
+        "hold_s": 300,
+        "p99_ms": 189.9,
+        "pass": true,
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264#issuecomment-6566431071",
+        "users": 310000
+      },
+      "first_tag": "large512k-quiet-kensac-310-h1",
+      "local_comparison": {
+        "both_eligible": true,
+        "p95_reverse_over_forward": 0.8195444703372953,
+        "p99_reverse_over_forward": 0.042247706473324806,
+        "state": "final",
+        "stock_passes": 1,
+        "strict_passes": 1,
+        "throughput_pct_change": 0.919936297716939
+      },
+      "reverse_tag": "large512k-quiet-kensac-310-h2"
+    },
+    {
+      "entry": "leaf-cursor",
+      "exact_organizer_310k_full_hold": null,
+      "first_tag": "large512k-quiet-leaf-cursor-310-h1",
+      "local_comparison": {
+        "both_eligible": true,
+        "p95_reverse_over_forward": 1.3886900853164086,
+        "p99_reverse_over_forward": 7.922198989348813,
+        "state": "final",
+        "stock_passes": 2,
+        "strict_passes": 2,
+        "throughput_pct_change": -0.09210134759382038
+      },
+      "reverse_tag": "large512k-quiet-leaf-cursor-310-h2"
+    },
+    {
+      "entry": "swift",
+      "exact_organizer_310k_full_hold": null,
+      "first_tag": "large512k-quiet-swift-310-h1",
+      "local_comparison": {
+        "both_eligible": true,
+        "p95_reverse_over_forward": 0.1860749156244508,
+        "p99_reverse_over_forward": 1.030301,
+        "state": "final",
+        "stock_passes": 0,
+        "strict_passes": 0,
+        "throughput_pct_change": 0.7264157637638435
+      },
+      "reverse_tag": "large512k-quiet-swift-310-h2"
+    }
+  ],
+  "official_anchors": [
+    {
+      "entry": "kensac",
+      "local_to_official_p99": 0.923553631845271,
+      "official": {
+        "hold_s": 300,
+        "p95_ms": 61.7,
+        "p99_ms": 189.9,
+        "pass": true,
+        "req_per_s": 29284,
+        "source_commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264#issuecomment-6566431071",
+        "users": 310000
+      },
+      "stock_matches_official": true,
+      "strict_matches_official": true,
+      "tag": "hash512k-quiet-kensac-310-h1"
+    },
+    {
+      "entry": "mojo",
+      "local_to_official_p99": 0.2913243895772378,
+      "official": {
+        "hold_s": 300,
+        "p95_ms": 159,
+        "p99_ms": 545,
+        "pass": true,
+        "req_per_s": 28705,
+        "source_commit": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/257#issuecomment-6564516869",
+        "users": 304000
+      },
+      "stock_matches_official": true,
+      "strict_matches_official": true,
+      "tag": "hash512k-quiet-mojo-304-h1"
+    },
+    {
+      "entry": "rkkautsar",
+      "local_to_official_p99": 5.996097529638516,
+      "official": {
+        "hold_s": 300,
+        "p95_ms": 107.7,
+        "p99_ms": 345,
+        "pass": true,
+        "req_per_s": 28417,
+        "source_commit": "2daf23833a6653b5cc747b009d94705c009f5812",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/355#issuecomment-6732991635",
+        "users": 300000
+      },
+      "stock_matches_official": false,
+      "strict_matches_official": false,
+      "tag": "hash512k-quiet-rkkautsar-300-h1"
+    },
+    {
+      "entry": "swift",
+      "local_to_official_p99": 3.7563029273273103,
+      "official": {
+        "hold_s": 300,
+        "p95_ms": 112.1,
+        "p99_ms": 942.5,
+        "pass": true,
+        "req_per_s": 28183,
+        "source_commit": "77d91a746b2905d06e0e70726d6407a45a040c7b",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/376#issuecomment-6752201104",
+        "users": 300000
+      },
+      "stock_matches_official": false,
+      "strict_matches_official": false,
+      "tag": "hash512k-quiet-swift-300-h1"
+    },
+    {
+      "entry": "pavlyhalim",
+      "local_to_official_p99": 0.26538855226364705,
+      "official": {
+        "hold_s": 300,
+        "p95_ms": 28,
+        "p99_ms": 117,
+        "pass": true,
+        "req_per_s": 28013,
+        "source_commit": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245#issuecomment-6557252428",
+        "users": 295000
+      },
+      "stock_matches_official": true,
+      "strict_matches_official": true,
+      "tag": "hash512k-quiet-pavlyhalim-295-h1"
+    },
+    {
+      "entry": "stock",
+      "local_to_official_p99": 0.22260809117624913,
+      "official": {
+        "hold_s": 300,
+        "p95_ms": 33,
+        "p99_ms": 146.6,
+        "pass": true,
+        "req_per_s": 26747,
+        "source_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650",
+        "users": 280000
+      },
+      "stock_matches_official": true,
+      "strict_matches_official": true,
+      "tag": "hash512k-quiet-stock-280-h1"
+    },
+    {
+      "entry": "stock",
+      "local_to_official_p99": 0.011025116948120986,
+      "official": {
+        "hold_s": 120,
+        "p95_ms": null,
+        "p99_ms": 2960,
+        "pass": false,
+        "req_per_s": null,
+        "source_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650",
+        "users": 290000
+      },
+      "stock_matches_official": false,
+      "strict_matches_official": false,
+      "tag": "hash512k-quiet-stock-290-p1"
+    },
+    {
+      "entry": "stock",
+      "local_to_official_p99": 0.04391055708822242,
+      "official": {
+        "hold_s": 120,
+        "p95_ms": null,
+        "p99_ms": 3580,
+        "pass": false,
+        "req_per_s": null,
+        "source_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+        "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650",
+        "users": 300000
+      },
+      "stock_matches_official": false,
+      "strict_matches_official": false,
+      "tag": "hash512k-quiet-stock-300-p1"
+    }
+  ],
+  "order": {
+    "anchors": [
+      "hash512k-quiet-kensac-310-h1",
+      "hash512k-quiet-mojo-304-h1",
+      "hash512k-quiet-rkkautsar-300-h1",
+      "hash512k-quiet-swift-300-h1",
+      "hash512k-quiet-pavlyhalim-295-h1",
+      "hash512k-quiet-stock-280-h1",
+      "hash512k-quiet-stock-290-p1",
+      "hash512k-quiet-stock-300-p1"
+    ],
+    "forward": [
+      "large512k-quiet-mojo-310-h1",
+      "large512k-quiet-submitted-310-h1",
+      "large512k-quiet-rkkautsar-310-h1",
+      "large512k-quiet-pavlyhalim-310-h1",
+      "large512k-quiet-kensac-310-h1",
+      "large512k-quiet-leaf-cursor-310-h1",
+      "large512k-quiet-swift-310-h1"
+    ],
+    "reverse": [
+      "large512k-quiet-swift-310-h2",
+      "large512k-quiet-leaf-cursor-310-h2",
+      "large512k-quiet-kensac-310-h2",
+      "large512k-quiet-pavlyhalim-310-h2",
+      "large512k-quiet-rkkautsar-310-h2",
+      "large512k-quiet-submitted-310-h2",
+      "large512k-quiet-mojo-310-h2"
+    ]
+  },
+  "protocol": "Two 310,000-user seven-entry full holds in reverse entry orders, plus eight standalone published-capacity controls.",
+  "sources": {
+    "cohort.py": "8d75f60ec9fac10d998db345b2b41c333a44a95b7d6cc06457222e47f49f6847",
+    "controller-plan-9.txt": "934ae60adbee81dfdb08ecda0fabcdd808d18a94748a39d1ca8210ff404e482e",
+    "export.py": "9d10c66eb8377bd92afac9c9dca6839b794825c5366421e4dd47a5fb5ffae633",
+    "large-block1-summary.json": "f50fbdb370d1b10123cd229d86dc5dda9fce533b981f8d58461a3da45855786b",
+    "leaderboard_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4416a6ee45bbd75dd843a1c8b4ab5d4b3f88c6f6/LEADERBOARD.md",
+    "observed_dispatch_sha256": "bafeeeaeb5ef98212144b0b2d902d1c6637c08c43a23df891bd65338c76320b0",
+    "official_excerpts_sha256": "281c4f9ab14fc01f8912660371db4d2b515e11de0bc1a8a2c15415d5de658cc8",
+    "organizer.json": "3b3927502d65e17186f80570653d3d54a8f010bad237cbed17f9375dbbc7dcfb",
+    "organizer_sqlite_policy_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/4416a6ee45bbd75dd843a1c8b4ab5d4b3f88c6f6/LEADERBOARD.md#L998-L999",
+    "reference.json": "38ee68575fdb739e745c4f83cfa64be26dcab8f367fd8117c7d311bdac1b0b83",
+    "schedule-9.json": "2b271ef6dde02065f4590c03c415557365e282c57fc2c88826ff626afc4b3eae",
+    "selected_dispatch_lines_sha256": "dc3bbdbe09c6cd2a14c4566a4bb20901c0799bbe25363863bcdabe14d01e4de0",
+    "verifier_sha256": "0481dd8cdc748e987c9fc670a670bc92b84e7c96c1dac417612fab6a89bfdc37"
+  },
+  "sources_and_published_results": {
+    "kensac": {
+      "hold_s": 300,
+      "p95_ms": 61.7,
+      "p99_ms": 189.9,
+      "pass": true,
+      "quoted_report": "Benchmarked on the 1 vCPU / 2 GB box at `4298101` (direct HTTP): **310,000 users held 5 min** 🎉 — that's #1 on the leaderboard, up from #248's 270,000.  | | | |---|---| | Users held 5 min | **310,000** | | req/s | 29,284 | | p95 / p99 | 61.7 / 189.9 ms | | Errors | 0.00 % | | App CPU | 82 % (25 µs/request) | | RAM peak | 1,114 MB | | Tests | 42/42 |  The search: 320k failed the 2-minute probe on latency (p99 23 s, 65 % CPU), 310k passed both the 2-minute probe and the 5-minute hold.  I can't merge it yet: the branch is stacked on the pre-rebase",
+      "req_per_s": 29284,
+      "revision": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+      "source_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264#issuecomment-6566431071",
+      "users": 310000
+    },
+    "mojo": {
+      "hold_s": 300,
+      "p95_ms": 159,
+      "p99_ms": 545,
+      "pass": true,
+      "quoted_report": "Benchmarked on the 1 vCPU / 2 GB box at `a9df151`: **304,000 users held for 5 minutes**, new #1 🎉  - 28,705 req/s, p95 159 ms / p99 545 ms, 0 errors - app CPU 82 % (26 µs/request), RAM peak 726 MB - 42/42 tests passed, CI green  That beats the 280,000 of your merged #224 code (`ef45beb`), so this is merged and the row on [LEADERBOARD.md](../blob/main/LEADERBOARD.md) now shows #257 at the top. The 320,000 2-minute probe passed but the 5-minute hold at 320k went to connection refused, and so did everything from 330k up; the step-down to 304k held",
+      "req_per_s": 28705,
+      "revision": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+      "source_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/257#issuecomment-6564516869",
+      "users": 304000
+    },
+    "pavlyhalim": {
+      "hold_s": 300,
+      "p95_ms": 28,
+      "p99_ms": 117,
+      "pass": true,
+      "published_310k_full": {
+        "hold_s": 300,
+        "p95_ms": null,
+        "p99_ms": 1850,
+        "pass": false,
+        "users": 310000
+      },
+      "quoted_report": "Benchmarked on the 1 vCPU / 2 GB Synteq box at `7387a31` (direct): **295,000 users held 5 min**, a new #1 on the leaderboard.  - 28,013 req/s, p95 28 ms / p99 117 ms, 0 errors, 81 % app CPU (26 µs/request), 1,536 MB peak RAM - 42/42 tests, CI green - 310k passed the 2-minute probe but failed the 5-minute hold on p99 (1.85 s, 0 errors, 87 % CPU)  That beats #233's 270,000 (`3f5c305`), so I merged it and the row moved to this PR. Nice work!  — benchmark agent",
+      "req_per_s": 28013,
+      "revision": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+      "source_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245#issuecomment-6557252428",
+      "users": 295000
+    },
+    "rkkautsar": {
+      "additional_same_source_score": {
+        "hold_s": 300,
+        "p95_ms": 189.9,
+        "p99_ms": 961.5,
+        "pass": true,
+        "quoted_report": "Re-run at `2daf238` (one B-tree read transaction reused across passes), on the same 1 vCPU / 2 GB box:  **300,000 users held for 5 minutes**: 28,343 req/s, p95 189.9 ms / p99 961.5 ms, 0 errors, app CPU 97 % (31 µs/request), 778 MB peak. 42/42 tests passed, CI green.  - 310,000 failed the 2-minute probe on p95/p99 (1.09 / 3.17 s at 98 % CPU, 0 errors); 320,000 failed on p95/p99 (1.34 / 4.23 s). - That beats the merged #353 row (260,000), so the leaderboard row now shows #355 at 300,000 (rank 3), with a footnote that names `2daf238`.  I can't me",
+        "req_per_s": 28343,
+        "source_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/355#issuecomment-6726240668",
+        "users": 300000
+      },
+      "hold_s": 300,
+      "p95_ms": 107.7,
+      "p99_ms": 345,
+      "pass": true,
+      "published_310k_probe": {
+        "hold_s": 120,
+        "p95_ms": 393,
+        "p99_ms": 1030,
+        "pass": false,
+        "users": 310000
+      },
+      "quoted_report": "Re-ran **#355** at `2daf238` (your revert) on the 1 vCPU / 2 GB box: **300,000 users held 5 min** again 🎉  - 28,417 req/s, p95 107.7 ms / p99 345.0 ms, 0 errors - app CPU 96 %, 30 µs/request, 1,159 MB peak RAM - 42/42 tests, CI green - 310,000 failed the 2-minute probe on p95/p99 (393 ms / 1.03 s at 97 % CPU); 320,000 on 679 ms / 1.60 s  That beats the merged #353 row (260,000) and the head didn't move this time, so it's **merged**. The leaderboard row stays #3 at 300,000, now with this run's numbers; the footnote keeps the history of the other",
+      "req_per_s": 28417,
+      "revision": "2daf23833a6653b5cc747b009d94705c009f5812",
+      "source_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/355#issuecomment-6732991635",
+      "users": 300000
+    },
+    "stock": {
+      "hold_s": 300,
+      "p95_ms": 33,
+      "p99_ms": 146.6,
+      "pass": true,
+      "probes": [
+        {
+          "hold_s": 120,
+          "p95_ms": null,
+          "p99_ms": 2960,
+          "pass": false,
+          "req_per_s": null,
+          "users": 290000
+        },
+        {
+          "hold_s": 120,
+          "p95_ms": null,
+          "p99_ms": 3580,
+          "pass": false,
+          "req_per_s": null,
+          "users": 300000
+        }
+      ],
+      "quoted_report": "Benchmarked on the 1 vCPU / 2 GB box (direct, no Nginx) at `0142ba2`: **280,000 users held for 5 minutes** 🎉  - 26,747 req/s, p95 33.0 ms / p99 146.6 ms, 0 % errors - 82 % CPU, 28 µs/req, 1,485 MB peak - 42/42 tests passed - 290,000 and 300,000 failed the 2-minute probe on p99 (2.96 s / 3.58 s at 85–87 % CPU, 0 errors); 320,000 collapsed on refused connections  That puts it tied #9 on the [leaderboard](https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/main/LEADERBOARD.md). Clean review (stock SQLite 3.54.1, B-tree cursor reads,",
+      "req_per_s": 26747,
+      "revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "source_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/403#issuecomment-6816178650",
+      "users": 280000
+    },
+    "swift": {
+      "hold_s": 300,
+      "p95_ms": 112.1,
+      "p99_ms": 942.5,
+      "pass": true,
+      "published_310k_probe": {
+        "hold_s": 120,
+        "p95_ms": null,
+        "p99_ms": 19400,
+        "pass": false,
+        "users": 310000
+      },
+      "quoted_report": "Thanks for the follow-up! Ran **`77d91a7`** on the Synteq 1 vCPU / 2 GB box: **300,000 users held 5 min**.  - 28,183 req/s, p95 112.1 ms / p99 942.5 ms, 0 errors, 92 % CPU (29 µs/req), 1,240 MB peak - 42/42 tests pass; 310,000 failed the 2-minute probe on p99 (19.4 s at 98 % CPU)  The p99 in the 5-minute hold is close to the 1 s line (the 2-minute probe at 300k had p99 291 ms), so there isn't much headroom left at this level. 300,000 beats #371's 270,000, so this is **merged** and the swift-iouring-akbashev row moves to #376 at 300,000 (tied fo",
+      "req_per_s": 28183,
+      "revision": "77d91a746b2905d06e0e70726d6407a45a040c7b",
+      "source_url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/376#issuecomment-6752201104",
+      "users": 300000
+    }
+  },
+  "trials": [
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794537622.846965,
+        "device": 64769,
+        "finished_unix": 1794538155.3397217,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "mojo",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 832688128,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.8175,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 32633,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533603]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 60.042629,
+          "app_us_per_completion": 18.327408,
+          "completed_requests": 9500723,
+          "completions_per_s": 32761.113793,
+          "napi_cpu_pct": 33.351196,
+          "napi_us_per_completion": 10.180117,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 28.788991
+        },
+        "ramp": {
+          "app_cpu_pct": 42.529605,
+          "app_us_per_completion": 22.999477,
+          "completed_requests": 1571782,
+          "completions_per_s": 18491.552941,
+          "napi_cpu_pct": 28.965622,
+          "napi_us_per_completion": 15.664245,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 39.790261
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "d4fb47b357dbdc73a98b7b7fd8256e4943ff53def25701a9ca60228011d7694c",
+      "raw_sha256": {
+        "app-start.json": "9be2f49257da3f6b15a1f4283fcdcde9a6f95e3b3a43d0b215d4747c8ed93a3b",
+        "component-test-lock.json": "f233947da119d43b3819a5b394243cf34687a495ae56b77ae7fa4cc80afd4dfd",
+        "merged.json": "436f2c141dfa7391deebcf47d0a05b2e954b693bb8a185f79290b8c76c426680",
+        "network-samples.jsonl": "c91e4972b99b3ad9962a3f8a9c931e07d60fcc5732c700069de4bec07343dfce",
+        "samples.jsonl": "9b26493742da10f44b427ecc5e7cb23754607738bf203265f458ea2ecf2b7638",
+        "shape.json": "b2276cb489d10df931ab104e70cdf248ffe771bed4ad6d6e78fbcef62b7d50ae",
+        "shard-0.json": "1f86ee6489d2f084dcecbcbe1a5435f9b81f153c527a78d959e7cbac8ad0257c",
+        "shard-1.json": "babc4bc1d6167f9631fe53823bdb933343534460d2cd6c1177a48da7fb25a28b",
+        "shard-2.json": "be6bfb0ef96e2d9663e5af07ec72d639ca11277cb7cf45966f9b4e456b51add5",
+        "shard-3.json": "3ea5ff27eb9a1b109b3feaf621399e040beb57838f98651466717ce1ddc16c15",
+        "summary.json": "87bb44a955580baed1e6cc0bf010703abd5192b7a327cdb901cc54ffab83cc41",
+        "telemetry.jsonl": "313909885a5a4a58f22be8832053abf3dbfcf74289706352ddeec46c5f9caae0",
+        "timing.json": "b5f9b673d05f1ca35d29d2a858dc2e7c965c1aaf49ef828a654b30b1182ea694"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr3c9502b.service",
+      "source_commit": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794538028.574,
+        "hold_starts_unix": 1794537728.574,
+        "stock_start_unix": 1794537635.574
+      },
+      "stock_score": {
+        "duration_s": 393.000867137,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11514427,
+        "over_1s": {
+          "over_threshold_lower": 2182,
+          "over_threshold_upper": 2362,
+          "stock_bucket_count_at_or_above": 2362,
+          "stock_quantile_allowance": 115144,
+          "stock_remaining": 112782,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 19777,
+          "over_threshold_upper": 20329,
+          "stock_bucket_count_at_or_above": 19777,
+          "stock_quantile_allowance": 575721,
+          "stock_remaining": 555944,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 54.75028102261996,
+        "p99_ms": 177.13666303429113,
+        "pass": true,
+        "req_per_s": 29298.731791311988,
+        "requests": 11514427
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-mojo-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794538155.428757,
+        "device": 64769,
+        "finished_unix": 1794538575.7659535,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "submitted",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 766431232,
+        "oom_kills": 0,
+        "sampled_network_end_s": 392.4894,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 16039,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533673]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.245582,
+          "app_us_per_completion": 15.634749,
+          "completed_requests": 9505249,
+          "completions_per_s": 32776.72069,
+          "napi_cpu_pct": 44.420037,
+          "napi_us_per_completion": 13.552313,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 29.351709
+        },
+        "ramp": {
+          "app_cpu_pct": 41.414344,
+          "app_us_per_completion": 21.554787,
+          "completed_requests": 1537082,
+          "completions_per_s": 19213.525,
+          "napi_cpu_pct": 36.173235,
+          "napi_us_per_completion": 18.826964,
+          "scored_clock_s": [
+            10,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 41.25628
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "157d0bdcc53a71c87373a35a35880a6b8301a979f781db8ac2e6075e68973709",
+      "raw_sha256": {
+        "app-start.json": "c203d1d7377410ceec1855a3fb51d81f5621860802c1e949e0ed6f0df216d5cb",
+        "component-test-lock.json": "b23da6fa89f48533e48c6de42a4b5790cfcf53029830820f4a4086313ec4309a",
+        "merged.json": "30cdcef1338ed28ea13a1103d07e5025bccbb5bfb891b194ef0365fe349c8833",
+        "network-samples.jsonl": "e664fe32fd37ce7937b6464217f05b705b7978af6098fc750699ff62ae9f01a9",
+        "samples.jsonl": "ff5920c6d4b128b7c833dc1c06e171687c6b475f2a31474ff70d8df77b1fea94",
+        "shape.json": "acb13b4ec1b156484316cb3ae941c0c83fc074438154de21c46eb3bd50f2c17b",
+        "shard-0.json": "5dfc04104e4e24dfc835cdc084ea6736150dcae68963fad9f4263c18b7d0b81c",
+        "shard-1.json": "bb6609b781c340178ceb63821d3c2988f6bd48e30acc8568ec78fab2e1c31e6f",
+        "shard-2.json": "1b55a2e285dde5bdbd97e625dcf321371e5414943ca866b7aba9c76880aeb5d8",
+        "shard-3.json": "fb2b18951de8ed09a3f906215e445e0649f09ca1185d949f89ccffd4cbf67c3e",
+        "summary.json": "9e8af11d803c764225221df69994dc10f9c0b68ae79a209e10f83abd133f31c8",
+        "telemetry.jsonl": "92489f0952310e58db22713245ec14853beeec1844e80539eb2cb948581caeb4",
+        "timing.json": "a3cb228344c2a26a5918f9ec9cdf8656b3b1293c1fcab2b66b828ac2d3e4d994"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr7a7bbd1.service",
+      "source_commit": "0b9d84c4cf7c7a90bdd27f26d54c0229afa64e10",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794538561.91,
+        "hold_starts_unix": 1794538261.91,
+        "stock_start_unix": 1794538168.91
+      },
+      "stock_score": {
+        "duration_s": 393.000744691,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11507983,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115079,
+          "stock_remaining": 115079,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 191695,
+          "over_threshold_upper": 193698,
+          "stock_bucket_count_at_or_above": 191695,
+          "stock_quantile_allowance": 575399,
+          "stock_remaining": 383704,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 28.96132522244034,
+        "p99_ms": 685.5123659961642,
+        "pass": true,
+        "req_per_s": 29282.34654885513,
+        "requests": 11507984
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-submitted-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794538575.8571267,
+        "device": 64769,
+        "finished_unix": 1794539109.4471264,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "rkkautsar",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1341087744,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.9145,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 89540,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533603]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 59.246994,
+          "app_us_per_completion": 19.633918,
+          "completed_requests": 8750993,
+          "completions_per_s": 30175.837931,
+          "napi_cpu_pct": 40.732837,
+          "napi_us_per_completion": 13.498494,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 33.139096
+        },
+        "ramp": {
+          "app_cpu_pct": 48.891152,
+          "app_us_per_completion": 28.011224,
+          "completed_requests": 1483601,
+          "completions_per_s": 17454.129412,
+          "napi_cpu_pct": 34.200225,
+          "napi_us_per_completion": 19.594346,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 48.486793
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "a02bb25a11b5dbfb9b93c2b1f659739c4a26fe23d95a3eb490042f65ae21c542",
+      "raw_sha256": {
+        "app-start.json": "d8b7a50f52e11c87fcbcae1d8f8fb3e110b655702c66589b89f3c04d54bff526",
+        "component-test-lock.json": "614c563df0ca4892436d025bf006921667da08893004604b772472d4086daf87",
+        "merged.json": "36ae6b6cf842cd05609ce639718d209c3ad7e8c38ceeb586f8c8d5c330fa75a8",
+        "network-samples.jsonl": "f7d9a6974f7bfd1b8d93927c3f137cc409dc220916c2010a1bf4b10bc51f0e64",
+        "samples.jsonl": "38d7d2a6509b01552d8d51fe0b1ec7ab3636eefbad15a304634b769c5ed1f6bc",
+        "shape.json": "034e37884a92e87c6de64269b9976bff55e32f4ee425a0898288f20c9948ff5d",
+        "shard-0.json": "c1e34946e4fcad9d4f717975b3e645bb92e4989922213fd85f5528e35229d394",
+        "shard-1.json": "ee85069ed55bc9d940ab7a49046f3a864e202b7038632df14a2c31881f1b2ea5",
+        "shard-2.json": "0ddf4e0d065c06e77f8b9beedea454a86afb267dcb6bf4425f8510f17e294b51",
+        "shard-3.json": "1ebe3e789ca2e8251b61590d0a6a4f4ed1df32b806f4f60f197dbd1798625ec4",
+        "summary.json": "7932ad24492de4b11c337aeb95888ed89c7dc731450d9a9b8beb8fe283b7be74",
+        "telemetry.jsonl": "f8d13031cb3f3e65778a950729ba21dee824f729378e3ae0cf337856a5dc094b",
+        "timing.json": "467140224b01d4fe883f7deadd0df53b237ec60ea6c9d7d81b1873d643afe1a2"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "615b36997cd8429bc31c183d567e8a156c4b1b4daa3ff3bc425873795ea63e63",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr8522d06.service",
+      "source_commit": "2daf23833a6653b5cc747b009d94705c009f5812",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794538980.582,
+        "hold_starts_unix": 1794538680.582,
+        "stock_start_unix": 1794538587.582
+      },
+      "stock_score": {
+        "duration_s": 393.000310471,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 10602912,
+        "over_1s": {
+          "over_threshold_lower": 3047518,
+          "over_threshold_upper": 3142910,
+          "stock_bucket_count_at_or_above": 3142910,
+          "stock_quantile_allowance": 106029,
+          "stock_remaining": -3036881,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 6915430,
+          "over_threshold_upper": 6946738,
+          "stock_bucket_count_at_or_above": 6915430,
+          "stock_quantile_allowance": 530145,
+          "stock_remaining": -6385285,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 2089.340184202541,
+        "p99_ms": 3611.4758507370116,
+        "pass": false,
+        "req_per_s": 26979.398533534753,
+        "requests": 10602912
+      },
+      "strict_pass": false,
+      "tag": "large512k-quiet-rkkautsar-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794539109.5351517,
+        "device": 64769,
+        "finished_unix": 1794539530.3676665,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "pavlyhalim",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 930238464,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.8605,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 46476,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533603]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 56.442575,
+          "app_us_per_completion": 17.221817,
+          "completed_requests": 9504425,
+          "completions_per_s": 32773.87931,
+          "napi_cpu_pct": 31.698465,
+          "napi_us_per_completion": 9.671869,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 27.193999
+        },
+        "ramp": {
+          "app_cpu_pct": 39.818584,
+          "app_us_per_completion": 21.50526,
+          "completed_requests": 1573838,
+          "completions_per_s": 18515.741176,
+          "napi_cpu_pct": 23.642951,
+          "napi_us_per_completion": 12.769109,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 35.471122
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "639b40a6bdf1f468e4d397f1451759302d7c5fb3084e449c4d1a8a9b8b8a64ab",
+      "raw_sha256": {
+        "app-start.json": "bf257e50402744de675517748e1a36bf0b25154e7e915223f2ef8b98ad073c8d",
+        "component-test-lock.json": "8f32c0adf27cf4043509e17153622290c9164e3bb16599d640e6d7fa8466ec3c",
+        "merged.json": "cee8e19e750af780541fcbe82a806d3ee3d97525bdce8427cda61789cbcef819",
+        "network-samples.jsonl": "d072f5cd787e020eb801bbcb975c797c3aa9df7fca0929b0f187da0d11a7dbc8",
+        "samples.jsonl": "061e248a3597e825c81d043ac3c083455dbea311f88e3deaee24efe13525ebe6",
+        "shape.json": "2ec39b9285a6d0f82eaf937272068de4a3b698325c23cd6529dafdcdf67b6b8e",
+        "shard-0.json": "b715ab47e59cd9dbaa30bd1ea53c3b4f221928cc43185793299c6fcc7c0295e1",
+        "shard-1.json": "de6145c878f338e497fc858f093587e24b813e8097b54185bdf12e1adc1b904d",
+        "shard-2.json": "9864e0828947a5a11fd4491f1567e54169ff836a9b542ea439107088eba78817",
+        "shard-3.json": "dbd12ccc1aeb200fd8700ff4fcaf019156dafcf49386080a46eac408df34160b",
+        "summary.json": "ed23d2c26f86f2405dedf0e316b2db8319e1b1a8aa4afef1fdd57986af619e13",
+        "telemetry.jsonl": "6e099c80ea801d2c601f5d4db85742a81435751aed0823d43b04fddd728adf2f",
+        "timing.json": "03cb22904e9cc48dcda2c0270974814b8f3ab4267bea53c087cf5c39da1dbd0a"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+      "service_cgroup": "0::/system.slice/twelve-revisit-trb311b6e.service",
+      "source_commit": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794539514.124,
+        "hold_starts_unix": 1794539214.124,
+        "stock_start_unix": 1794539121.124
+      },
+      "stock_score": {
+        "duration_s": 393.001057058,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11520004,
+        "over_1s": {
+          "over_threshold_lower": 794,
+          "over_threshold_upper": 920,
+          "stock_bucket_count_at_or_above": 920,
+          "stock_quantile_allowance": 115200,
+          "stock_remaining": 114280,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 8716,
+          "over_threshold_upper": 8879,
+          "stock_bucket_count_at_or_above": 8716,
+          "stock_quantile_allowance": 576000,
+          "stock_remaining": 567284,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 22.138150647719726,
+        "p99_ms": 90.04405442469601,
+        "pass": true,
+        "req_per_s": 29312.910978506225,
+        "requests": 11520005
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-pavlyhalim-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794539530.5250835,
+        "device": 64769,
+        "finished_unix": 1794540062.5081956,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "kensac",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1435484160,
+        "oom_kills": 0,
+        "sampled_network_end_s": 392.4122,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 73501,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533603]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 54.75325,
+          "app_us_per_completion": 16.918926,
+          "completed_requests": 9385018,
+          "completions_per_s": 32362.131034,
+          "napi_cpu_pct": 40.79518,
+          "napi_us_per_completion": 12.605839,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 29.625251
+        },
+        "ramp": {
+          "app_cpu_pct": 38.111276,
+          "app_us_per_completion": 20.803659,
+          "completed_requests": 1557158,
+          "completions_per_s": 18319.505882,
+          "napi_cpu_pct": 23.527613,
+          "napi_us_per_completion": 12.84293,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 35.586276
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "98bb55027f82858cda251b0be20b37d1954a31b7bbd0dc0714f4f8e147411a52",
+      "raw_sha256": {
+        "app-start.json": "18d216639475f1c876bef9d9dec08133edb26bfd8221180412771306b0bb61f0",
+        "component-test-lock.json": "0487adadcd7f3318d47dd57be9b0039c4023d5d72b269fd70f966afa10e2980a",
+        "merged.json": "bc30a4fe3e107f5bc564fa05a6f25ac0ce5f6f123f9947160c767b47b0b93759",
+        "network-samples.jsonl": "adc3d1a6e34b4bbf97bde46640f6871727748f5894a39ba49f96829ac9246f4b",
+        "samples.jsonl": "4b7485976ca2d269163a4b7a1e9174391f88a6c0b943f930ddd0ba1032081347",
+        "shape.json": "6ea1cd08632a33c7968fe05f0e219bf242ec17dbfb1586437776f060fcef9d11",
+        "shard-0.json": "25649b1bef9da797f5365c4ba196658d2cf00399c7bdb58bcd92cfb868bc6d48",
+        "shard-1.json": "3aa282f6cb4760693e800d2878eeb62cf54aa76f54842a6e479187559c8a0bb9",
+        "shard-2.json": "19af63cbca255cfd16170029071c2bdd1d23b5075afefce5199bf59c23665229",
+        "shard-3.json": "7ba92732905c63e68aa795422b425d528a8101d57e2ad104e4a8c7c2810e2445",
+        "summary.json": "9d82d2c419955cf201c9d108c7f0abb848c168f883f5aac8b7abda3a3c84c4e6",
+        "telemetry.jsonl": "572427ae89dd4e8e09ea941d03ec08df72595824e2aebfa71904d0505440c146",
+        "timing.json": "e983037ae6f68f423e3fe7e6261a84ce719e575c51cedbf19bd8793d938c0ef1"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr5be5c58.service",
+      "source_commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794539935.263,
+        "hold_starts_unix": 1794539635.263,
+        "stock_start_unix": 1794539542.263
+      },
+      "stock_score": {
+        "duration_s": 393.001167082,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11361969,
+        "over_1s": {
+          "over_threshold_lower": 223439,
+          "over_threshold_upper": 223726,
+          "stock_bucket_count_at_or_above": 223726,
+          "stock_quantile_allowance": 113619,
+          "stock_remaining": -110107,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 248554,
+          "over_threshold_upper": 248745,
+          "stock_bucket_count_at_or_above": 248554,
+          "stock_quantile_allowance": 568098,
+          "stock_remaining": 319544,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 120.16413969158782,
+        "p99_ms": 4277.086853824184,
+        "pass": false,
+        "req_per_s": 28910.77673982916,
+        "requests": 11361969
+      },
+      "strict_pass": false,
+      "tag": "large512k-quiet-kensac-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794540125.9183402,
+        "device": 64769,
+        "finished_unix": 1794540550.117179,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "leaf-cursor",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 771104768,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.2364,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 13277,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533603]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.197607,
+          "app_us_per_completion": 15.612449,
+          "completed_requests": 9509915,
+          "completions_per_s": 32792.810345,
+          "napi_cpu_pct": 44.429359,
+          "napi_us_per_completion": 13.548506,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 29.324544
+        },
+        "ramp": {
+          "app_cpu_pct": 40.925382,
+          "app_us_per_completion": 21.14186,
+          "completed_requests": 1548601,
+          "completions_per_s": 19357.5125,
+          "napi_cpu_pct": 36.402778,
+          "napi_us_per_completion": 18.805504,
+          "scored_clock_s": [
+            10,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 40.820735
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "69df4dbf555b999d30ed8499425ccaa59499d62bf00ba12d99fedb56d0b7b9bc",
+      "raw_sha256": {
+        "app-start.json": "22ae70bacafc2363d9cc707f54863238de3e8c390d43b4bef625783a23d626d4",
+        "component-test-lock.json": "bf616761bb5d5f602d3564ee54eb40bd479431698c77f5368f2d6cba5897e8bb",
+        "merged.json": "636eb8e00be44e3089f980f2299b7a40a10e23b58548418627afa54f7967cce0",
+        "network-samples.jsonl": "9a93752984d522e7d01becdf57848f311d9bfe5ff18ce3b300df338c878c2761",
+        "samples.jsonl": "1f8226c7d40f9bcc8dd61e94a932e1acf867000f6cc0f97946cb116a8a5bbd33",
+        "shape.json": "6d7c7b9b1dc935ded4c63d915dfbf2d1b38d384cfd92126d5a971727fb614d0e",
+        "shard-0.json": "e19b76b66204561d0a0ee96472b3ed030656a2d8b5cff87fbfaeda463b8f5d60",
+        "shard-1.json": "8df61935353aeebccf4a736794726f9ba7c3f62b14b392eddf6e8f8823a5525d",
+        "shard-2.json": "e2dfa924db2575bae8db987f6d6eab40b05f2458754f66f946984cb751281887",
+        "shard-3.json": "0f757565d9669f1ec97736c9bc2c465d409cd2b7e839cf820ba695ea3cc3b73e",
+        "summary.json": "90959fb4ac5157e42ae6515672a61c977fec50d902ee6c61f5748cd7acc21867",
+        "telemetry.jsonl": "ac6e8581cacdec10f57dd3f67581b12902c9dc5665e58653cea43bc6fdbc6fef",
+        "timing.json": "1e0855326b69bce29ab9dc92f89c454063e61bb120fb06654462b0c0d786a51f"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr7eca005.service",
+      "source_commit": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794540535.894,
+        "hold_starts_unix": 1794540235.894,
+        "stock_start_unix": 1794540142.894
+      },
+      "stock_score": {
+        "duration_s": 393.000305695,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11528412,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115284,
+          "stock_remaining": 115284,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 576420,
+          "stock_remaining": 576420,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 19.068684434084922,
+        "p99_ms": 33.95943148452363,
+        "pass": true,
+        "req_per_s": 29334.361406189288,
+        "requests": 11528413
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-leaf-cursor-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794540550.2251077,
+        "device": 64769,
+        "finished_unix": 1794541084.2799258,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "swift",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1031041024,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.5264,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 79243,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533603]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 57.128797,
+          "app_us_per_completion": 18.212877,
+          "completed_requests": 9096504,
+          "completions_per_s": 31367.255172,
+          "napi_cpu_pct": 42.666382,
+          "napi_us_per_completion": 13.602204,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 31.832008
+        },
+        "ramp": {
+          "app_cpu_pct": 38.384293,
+          "app_us_per_completion": 21.197588,
+          "completed_requests": 1539168,
+          "completions_per_s": 18107.858824,
+          "napi_cpu_pct": 24.761009,
+          "napi_us_per_completion": 13.674179,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 36.484908
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "93e9f345bbdedd29af1ee83c2b3f77d8d161e440a5f402b8a9f14749a875d606",
+      "raw_sha256": {
+        "app-start.json": "caf6c0cd53e697078a7f128a56bb0a41226dfa5aac1a78151b0eefe5b51996e4",
+        "component-test-lock.json": "ebf468bd6ced8a62ef197820db18dc1c4f7d1e24185905f4e62eb2b09cb42d7c",
+        "merged.json": "27727331743200b86fa25d912bda20948d65ff14cc64d8fc473e45dc273e04a6",
+        "network-samples.jsonl": "965f1ea067f67d01bc67305cfabc09726ada120b15bb8359da5b6bc603c7e037",
+        "samples.jsonl": "18f19bc7102544afadab6ffdeb4ca1cfdb9803e998178df106a437a104441974",
+        "shape.json": "f6e9f9753cda4973cdc9f993b6415f7bd46e539238d21822b77d77c2780401a3",
+        "shard-0.json": "4877db5f272426b28136bbfad66fac71c2fa0376041b7f4fc3a929ea8dcfb6d4",
+        "shard-1.json": "ace2ddf6b4b55929e9f746c4361d14af92cbb8c98c84bfff7c1f92bd38ec3545",
+        "shard-2.json": "33df6a38cf77f1bb2ce88e437f64e7f3f413851431f267b8ee7c44c55fcf1337",
+        "shard-3.json": "834d0547b9e2bbd80d49690f7f60b162f89256b8a1e29d2126041cf521ed36d1",
+        "summary.json": "17485ab85190205e47af5d28fa2e7829866d5d64d5b5d74bd1eea7c752c5cac4",
+        "telemetry.jsonl": "596322f24ff8e6aee77020fbbf688666d0883ec6161e3f0ae26ead856c6cee62",
+        "timing.json": "c3bdc8a7dde282a910586381ede9d124347b033215232b93b6b955e438ae2e78"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "3640c15706243a4fa39a7643914a7ac57860fa6140051f942633262be8f8cb4f",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr0c3fda9.service",
+      "source_commit": "77d91a746b2905d06e0e70726d6407a45a040c7b",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794540955.045,
+        "hold_starts_unix": 1794540655.045,
+        "stock_start_unix": 1794540562.045
+      },
+      "stock_score": {
+        "duration_s": 393.000943026,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11039372,
+        "over_1s": {
+          "over_threshold_lower": 560099,
+          "over_threshold_upper": 560373,
+          "stock_bucket_count_at_or_above": 560373,
+          "stock_quantile_allowance": 110393,
+          "stock_remaining": -449980,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 572593,
+          "over_threshold_upper": 572644,
+          "stock_bucket_count_at_or_above": 572593,
+          "stock_quantile_allowance": 551968,
+          "stock_remaining": -20625,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 1348.5551462240494,
+        "p99_ms": 8330.673484447596,
+        "pass": false,
+        "req_per_s": 28089.937685644843,
+        "requests": 11039372
+      },
+      "strict_pass": false,
+      "tag": "large512k-quiet-swift-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794571033.4079726,
+        "device": 64769,
+        "finished_unix": 1794571570.9443858,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "swift",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1047453696,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.8909,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 81949,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533927]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 57.289078,
+          "app_us_per_completion": 18.139269,
+          "completed_requests": 9159042,
+          "completions_per_s": 31582.903448,
+          "napi_cpu_pct": 42.32864,
+          "napi_us_per_completion": 13.40239,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 31.558776
+        },
+        "ramp": {
+          "app_cpu_pct": 38.788099,
+          "app_us_per_completion": 21.260962,
+          "completed_requests": 1550724,
+          "completions_per_s": 18243.811765,
+          "napi_cpu_pct": 24.305931,
+          "napi_us_per_completion": 13.322836,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 35.713258
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "584a338d0111e134c7d4a6eb1d0df810977fb5f41b17a9ef8fa0f03811baee05",
+      "raw_sha256": {
+        "app-start.json": "c0d6625ba0b26c6f5785271c58b3040e47463a643dbd0fa81e68469b0681a39c",
+        "component-test-lock.json": "dbb74c3b15dc1a7c3b1409bb3e67c1af79e05cd45cde5d91f9c39ae94ffa4ef5",
+        "merged.json": "f20176d200c8c795e5b8ce74355c2e48108744fb58aa20ef29038d0f818efb92",
+        "network-samples.jsonl": "c115bb365c3e2fdd301423b265e45dfd3882d75ca12058ac6fa1456703cb1c88",
+        "samples.jsonl": "0d079c13475877d8cb06a69129abd1a286e4697cb6c02afedcda022a68991910",
+        "shape.json": "1b0052aff2bc3d48a215fd0646f384c14983febc0167dcf2dfcbaf0b9bb81082",
+        "shard-0.json": "026322b8656be955e7d0d0ab35ad9f66557a5f6c39a8ca7a91514485b49d4f0a",
+        "shard-1.json": "146d39e94f6f46ab8692ea272977dcd4a7acf7c3cb327623e4d0a1e85d3b24b5",
+        "shard-2.json": "dd373c032f06c3d9ef4c77f0c727300159e9f892c51715cbd0e085993477c4c1",
+        "shard-3.json": "15e3f09388ede5bdfa3360c1c63b0d2a379215d3e47fc2459b26d77e751bbcde",
+        "summary.json": "f5fe551c02d975bf6841d10368f1b5659dffaf974a0253bc7be65f7295a365ea",
+        "telemetry.jsonl": "017096826fc381ccf1c2ce5755fcffbed9ced1d9dfae70b0d5344cb5002d73eb",
+        "timing.json": "2d8313760b9e4ac21a2b5bd9cae6ee49cd9fbea25e29ed608ddfd994f6b669c9"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "3640c15706243a4fa39a7643914a7ac57860fa6140051f942633262be8f8cb4f",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr6cf4afe.service",
+      "source_commit": "77d91a746b2905d06e0e70726d6407a45a040c7b",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794571441.352,
+        "hold_starts_unix": 1794571141.352,
+        "stock_start_unix": 1794571048.352
+      },
+      "stock_score": {
+        "duration_s": 393.000457466,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11119548,
+        "over_1s": {
+          "over_threshold_lower": 511943,
+          "over_threshold_upper": 512878,
+          "stock_bucket_count_at_or_above": 512878,
+          "stock_quantile_allowance": 111195,
+          "stock_remaining": -401683,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 544671,
+          "over_threshold_upper": 544864,
+          "stock_bucket_count_at_or_above": 544671,
+          "stock_quantile_allowance": 555977,
+          "stock_remaining": 11306,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 250.9322850485589,
+        "p99_ms": 8583.101221699842,
+        "pass": false,
+        "req_per_s": 28293.98742102481,
+        "requests": 11119550
+      },
+      "strict_pass": false,
+      "tag": "large512k-quiet-swift-310-h2",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794571585.7237566,
+        "device": 64769,
+        "finished_unix": 1794572013.7354786,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "leaf-cursor",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 778592256,
+        "oom_kills": 0,
+        "sampled_network_end_s": 392.5592,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 16433,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.555833,
+          "app_us_per_completion": 15.725513,
+          "completed_requests": 9507602,
+          "completions_per_s": 32784.834483,
+          "napi_cpu_pct": 44.391236,
+          "napi_us_per_completion": 13.540174,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 29.41728
+        },
+        "ramp": {
+          "app_cpu_pct": 41.478898,
+          "app_us_per_completion": 21.484797,
+          "completed_requests": 1544493,
+          "completions_per_s": 19306.1625,
+          "napi_cpu_pct": 35.425796,
+          "napi_us_per_completion": 18.349476,
+          "scored_clock_s": [
+            10,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 40.682972
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "c7cf24c92482fe0691c48e4e22ba71810c839d0afbd8510c3b07bcf64c26e1d4",
+      "raw_sha256": {
+        "app-start.json": "bc91f244ee132a132e256b2e49f22c9e598369d49263719e53265ad320699c3f",
+        "component-test-lock.json": "39798c3b5fe3006f255e2025e727afac27696123951a199164149f5538bb6f03",
+        "merged.json": "f86a878a5856e4327d7e53e0cd3034fc79642e35e201c89e9ca603fe3630d355",
+        "network-samples.jsonl": "4720895f707ce589cfecac5834921d388ef5595b5464555d7cf068fded2978c7",
+        "samples.jsonl": "b4576d1ace79b9e19c072121bf17b2a109cc8f472a8ea08cb31f53f443c793cc",
+        "shape.json": "9fa3717263a52211139731ee253728375167caed80d806841e0954fd31909388",
+        "shard-0.json": "22cc7cfb7ba595fd57251afbbea5dc6d4df882387d44a2ee230e4de7145dc540",
+        "shard-1.json": "9c96c0b15cb2a84cd3714edd8567fae51edb47d87d7a5f9a3663345c9bbf7a0e",
+        "shard-2.json": "368e597bc04012cf2373df87ae495e5599775b14ca1c89e7537d2a9a5c7c88a7",
+        "shard-3.json": "aae44f2757c9e892284b520b8ae39fb8c068626fb5eb8a76e3ccf45c5c6cd9e2",
+        "summary.json": "98c51a19d91f60b5398fb2aa4609d6103943edc5aec0d20f565754447b05da42",
+        "telemetry.jsonl": "b5d1a14d13c08b5e1e733fa5988474ccde114b3cb1a1c54a51f847b0bd4d511c",
+        "timing.json": "6b354a2fbb36f29c5ddf7fb23eab6b5837b5953e54cd7c7809fd48a1c74c37b4"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "service_cgroup": "0::/system.slice/twelve-revisit-trbdcb7e5.service",
+      "source_commit": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794571992.3,
+        "hold_starts_unix": 1794571692.3,
+        "stock_start_unix": 1794571599.3
+      },
+      "stock_score": {
+        "duration_s": 393.000436165,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11517796,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115177,
+          "stock_remaining": 115177,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 575889,
+          "stock_remaining": 575889,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 26.480493013641063,
+        "p99_ms": 269.03337378555335,
+        "pass": true,
+        "req_per_s": 29307.344064026147,
+        "requests": 11517799
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-leaf-cursor-310-h2",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794572027.6405227,
+        "device": 64769,
+        "finished_unix": 1794572563.587139,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "kensac",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1246167040,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.9899,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 58463,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 56.657685,
+          "app_us_per_completion": 17.322883,
+          "completed_requests": 9484985,
+          "completions_per_s": 32706.844828,
+          "napi_cpu_pct": 32.244747,
+          "napi_us_per_completion": 9.858715,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 27.337266
+        },
+        "ramp": {
+          "app_cpu_pct": 38.393524,
+          "app_us_per_completion": 20.982145,
+          "completed_requests": 1555346,
+          "completions_per_s": 18298.188235,
+          "napi_cpu_pct": 23.262632,
+          "napi_us_per_completion": 12.713079,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 34.869781
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "ad3b23324d5352bb35086d0363ff84241058673f040076ea9ba07c27561d4320",
+      "raw_sha256": {
+        "app-start.json": "255b0dc367b6767694de21f531800c27c570dd6ba80eea811344e1fe86b8c401",
+        "component-test-lock.json": "2874f3095fc107e222f734fc2ead175c93d125172bfeeb7ed52a0fb2207a9d66",
+        "merged.json": "645ab5aae9ce1638d922322cf69ec3a88b43bcb741eea2d26a82679645ae6a10",
+        "network-samples.jsonl": "99a2844d50da849b6e10dca49703c5243a1464cb1533f82f9d5c024a30fb5c3c",
+        "samples.jsonl": "a796ec65eeb2eb493892d62547d5169331d454e9dd0ad9a7a5f256af3d1bda84",
+        "shape.json": "cd3d3f7c1363e5a7e4230221ac9472f8a9cfeab0347f8c058f50238f901b19cc",
+        "shard-0.json": "1344706d9d38a213d13752e1f312c83c1b7c4c26892e0f661e50ae7412b42c4c",
+        "shard-1.json": "4eab3179145c14d1425bfe05311d06c302eb221025ea2b51390621b62bf626f3",
+        "shard-2.json": "c2ca8da8b0cabcfeb9ce7904637e55b7be6fa7e7e4220537e212ebb4a1e3ee38",
+        "shard-3.json": "3e04d55d594478c33fef62f5f60f2f6da4570aa66bd8fa50ae3dda9b17d4d3bb",
+        "summary.json": "2b339cba41642260d9bb4a1a68e970ba2f820c48568537564d52e3ab979fb19b",
+        "telemetry.jsonl": "904ab9492090484f093eb881d3c9168f0466915bf7331da5eb86a11b83d1d346",
+        "timing.json": "0e497f8cd99bba7355e59d03dee7bfdf7af7aed789f3dca4782f681ae92d96f9"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "service_cgroup": "0::/system.slice/twelve-revisit-trf96bfda.service",
+      "source_commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794572436.298,
+        "hold_starts_unix": 1794572136.298,
+        "stock_start_unix": 1794572043.298
+      },
+      "stock_score": {
+        "duration_s": 393.000554369,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11466474,
+        "over_1s": {
+          "over_threshold_lower": 57732,
+          "over_threshold_upper": 57891,
+          "stock_bucket_count_at_or_above": 57891,
+          "stock_quantile_allowance": 114664,
+          "stock_remaining": 56773,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 63268,
+          "over_threshold_upper": 63298,
+          "stock_bucket_count_at_or_above": 63268,
+          "stock_quantile_allowance": 573323,
+          "stock_remaining": 510055,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 98.4798562170791,
+        "p99_ms": 180.6971099612804,
+        "pass": true,
+        "req_per_s": 29176.737469010754,
+        "requests": 11466474
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-kensac-310-h2",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794572578.7089875,
+        "device": 64769,
+        "finished_unix": 1794573003.6158643,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "pavlyhalim",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 962215936,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.9862,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 45734,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 56.009929,
+          "app_us_per_completion": 17.092068,
+          "completed_requests": 9503168,
+          "completions_per_s": 32769.544828,
+          "napi_cpu_pct": 30.86032,
+          "napi_us_per_completion": 9.417378,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 26.839088
+        },
+        "ramp": {
+          "app_cpu_pct": 39.885846,
+          "app_us_per_completion": 21.538727,
+          "completed_requests": 1574047,
+          "completions_per_s": 18518.2,
+          "napi_cpu_pct": 24.233361,
+          "napi_us_per_completion": 13.08624,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 35.72678
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "ded0534608157e2d954cde2c0720f77529386ae52b4c53633ab04024395213bb",
+      "raw_sha256": {
+        "app-start.json": "b59c4c6c5fca4d582cea052f6969c0b9a5701bdb42de069b2d9f1d14d9136b3f",
+        "component-test-lock.json": "0fc5d6ed7e16a2aa4ebef52b919f6195182919eff20ef35c3946cd1044911f8a",
+        "merged.json": "4b8b4d57ee38b5fca2b875bceb04c3e1cbf882e44a174e683dca9ba0d763640f",
+        "network-samples.jsonl": "1a10c9a9bbb8f0f6fe39ad24c2a72e75e92afb066027f36539d669f43637897a",
+        "samples.jsonl": "f73d511f7d8421f4d8e67e83d4fe466289050a1787eba381ca554b31029159c8",
+        "shape.json": "d873292d16a19471093a1fd83ca8c032a310d1b77ff1642e37c6a678994e349a",
+        "shard-0.json": "b3c3c0df6aef370ac093cd1d976c045428c866b028357df7d237a3108f7608f5",
+        "shard-1.json": "83ca946fcb55c2eca3913e2b908213db21efcdf3d965292842069bbc3d11555c",
+        "shard-2.json": "3a06d10b0318e6b3d22f8d086cc561912cf1c914eedf33c87e4340b48c2573e0",
+        "shard-3.json": "e819f84f381159f7ef9b5e1bab455d2662dd8108e5d1d8606c72c2e11cacd7b8",
+        "summary.json": "44aaf1ab4f92de6c65b2fda07280d26053b42e9f1a2ef6d637cf253d32c46373",
+        "telemetry.jsonl": "4dd4af16c6c602e313bae1e07f064f1c641e1d911f961353f15fe7876075e1b3",
+        "timing.json": "e3fb41a2e8b5729a4c82d5584c4381c16f4d4a5853a88983c80b35bdcc33b5ca"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr30806f5.service",
+      "source_commit": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794572987.309,
+        "hold_starts_unix": 1794572687.309,
+        "stock_start_unix": 1794572594.309
+      },
+      "stock_score": {
+        "duration_s": 393.000630047,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11520202,
+        "over_1s": {
+          "over_threshold_lower": 2377,
+          "over_threshold_upper": 2478,
+          "stock_bucket_count_at_or_above": 2478,
+          "stock_quantile_allowance": 115202,
+          "stock_remaining": 112724,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 16992,
+          "over_threshold_upper": 17193,
+          "stock_bucket_count_at_or_above": 16992,
+          "stock_quantile_allowance": 576010,
+          "stock_remaining": 559018,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 23.26741882138126,
+        "p99_ms": 94.6372061521069,
+        "pass": true,
+        "req_per_s": 29313.451733200192,
+        "requests": 11520205
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-pavlyhalim-310-h2",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794573018.205284,
+        "device": 64769,
+        "finished_unix": 1794573552.2100542,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "rkkautsar",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1463513088,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.948,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 85428,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 59.448685,
+          "app_us_per_completion": 19.621089,
+          "completed_requests": 8786525,
+          "completions_per_s": 30298.362069,
+          "napi_cpu_pct": 40.531246,
+          "napi_us_per_completion": 13.377372,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 33.005084
+        },
+        "ramp": {
+          "app_cpu_pct": 47.356206,
+          "app_us_per_completion": 26.8125,
+          "completed_requests": 1501269,
+          "completions_per_s": 17661.988235,
+          "napi_cpu_pct": 33.658324,
+          "napi_us_per_completion": 19.056928,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 46.724811
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "600d78f980c6266575cd4298b3c8f42c383e0e0bc09abae50128a3923f147fe6",
+      "raw_sha256": {
+        "app-start.json": "c075a3e5ceff6ef792980371773cf9c2e28bfd641bab8fecf8ad654995c4bd71",
+        "component-test-lock.json": "bbb14cfa758364544bbd914b39484bea6eb10459cfffa37dfcc4b0022e3347bd",
+        "merged.json": "ac4afec80118f439901090f932654ab934406547a536a7dd61712ed2c7955bf5",
+        "network-samples.jsonl": "204ec2168aa715d271137c06e4c045794e2e520576fc9ce6d220297f15ed906d",
+        "samples.jsonl": "a7a684f5c19ec4f5911b739853d6cb051ccc2a11b84ce53e26ad30e70ddf667d",
+        "shape.json": "a0da6655250a59811fec044d863a460a22370ae1bbb398fd09c5062ec8174bb2",
+        "shard-0.json": "4accc201df00bcff78680837ff041ac9665e8d95949d00e49472634b9aa4b782",
+        "shard-1.json": "2f3df0969c4d4d41426cb42d8048f3adcba3e660f2efcf4c7ef319f45701e241",
+        "shard-2.json": "b56b89456138eb7c34e3868ab204bb41103803af4f0375a104b198fc16983cb9",
+        "shard-3.json": "6b29ea56ea1f42b5849e9d0680d1d57ce49c2fe13dc2acd5a52ebfb3a108e011",
+        "summary.json": "73a8e6049711b0b4bdc655073b800816202f01e1d805475934f1ae607aee5593",
+        "telemetry.jsonl": "e6d1cb73b57759ad6b246b5fe8f0556ef9184df3941b3013fbad17258248419f",
+        "timing.json": "7ac7595554e4151b41385418604f8b2b568d658c1cdb06be85263e6f92319ebf"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "615b36997cd8429bc31c183d567e8a156c4b1b4daa3ff3bc425873795ea63e63",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr2662ba0.service",
+      "source_commit": "2daf23833a6653b5cc747b009d94705c009f5812",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794573422.905,
+        "hold_starts_unix": 1794573122.905,
+        "stock_start_unix": 1794573029.905
+      },
+      "stock_score": {
+        "duration_s": 393.000698034,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 10652614,
+        "over_1s": {
+          "over_threshold_lower": 3498982,
+          "over_threshold_upper": 3600021,
+          "stock_bucket_count_at_or_above": 3600021,
+          "stock_quantile_allowance": 106526,
+          "stock_remaining": -3493495,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 6175356,
+          "over_threshold_upper": 6209705,
+          "stock_bucket_count_at_or_above": 6175356,
+          "stock_quantile_allowance": 532630,
+          "stock_remaining": -5642726,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 1629.2015423199598,
+        "p99_ms": 3368.4887301212216,
+        "pass": false,
+        "req_per_s": 27105.844985238175,
+        "requests": 10652616
+      },
+      "strict_pass": false,
+      "tag": "large512k-quiet-rkkautsar-310-h2",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794573566.7720904,
+        "device": 64769,
+        "finished_unix": 1794573990.6211722,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "submitted",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 766054400,
+        "oom_kills": 0,
+        "sampled_network_end_s": 392.541,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 14672,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 50.564598,
+          "app_us_per_completion": 15.420624,
+          "completed_requests": 9509170,
+          "completions_per_s": 32790.241379,
+          "napi_cpu_pct": 45.179576,
+          "napi_us_per_completion": 13.77836,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 29.370075
+        },
+        "ramp": {
+          "app_cpu_pct": 39.340559,
+          "app_us_per_completion": 21.281786,
+          "completed_requests": 1571272,
+          "completions_per_s": 18485.552941,
+          "napi_cpu_pct": 35.087364,
+          "napi_us_per_completion": 18.980965,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 41.074754
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "e0f85b612e2ba433ab929a00f29f062db461b5847805c06eff8896ad1c392556",
+      "raw_sha256": {
+        "app-start.json": "6de511572c31922dcfd14294c71d9e0cd50c51d4827b06b148ee3bcb5493bffc",
+        "component-test-lock.json": "afd56fe896c8b581250c33d559358a15a0e617ba16100958b7cbd58cbe243625",
+        "merged.json": "87ad9d25d208e1dd5d63988652de41e2f71b0c54d226720daddb2b36202a3119",
+        "network-samples.jsonl": "890d56560e5481f03b563c978fe3122535844a85791af5c4429f2bda74eae559",
+        "samples.jsonl": "06d3f2f3f0d29c17e07394382aaff99c9a2eee0da1e1b912c1bff6edecb4837b",
+        "shape.json": "def05706f4d107c7b32f24eafe8b2e5a6d35daf752c1262e745a11183282af87",
+        "shard-0.json": "a58483a230fd6212d1e2deebfc1398de03ab43512fb364fcf15ef38fb8420a80",
+        "shard-1.json": "f910c914ccadd49012b5c33e24d984c9d87327fdbc5a7baa9d02d718fccd5d17",
+        "shard-2.json": "be6f765388732dd789a876cacb6730db18600e339b563b4540afebd7b6420b10",
+        "shard-3.json": "20026a712b7f99d393e090c5b0a159b61ad6d23ec2f1f7629bb6d5a0009e1185",
+        "summary.json": "b8fcbf5614a3f72ecb78f1a77d43d41b4c2691d4a0ded94b7bf46921235e27bf",
+        "telemetry.jsonl": "2f77384da785c707364db77786819051b7dce90a18ed543a6c6570c497f27965",
+        "timing.json": "1eee6af64e5f712444fd62de2260fe9e8bdce5d41ba1f60d7a1c4f5e34e51bfa"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr60084bd.service",
+      "source_commit": "0b9d84c4cf7c7a90bdd27f26d54c0229afa64e10",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794573976.548,
+        "hold_starts_unix": 1794573676.548,
+        "stock_start_unix": 1794573583.548
+      },
+      "stock_score": {
+        "duration_s": 393.000639361,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11524885,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115248,
+          "stock_remaining": 115248,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 30,
+          "over_threshold_upper": 39,
+          "stock_bucket_count_at_or_above": 30,
+          "stock_quantile_allowance": 576244,
+          "stock_remaining": 576214,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 24.94582227068287,
+        "p99_ms": 151.06591255191896,
+        "pass": true,
+        "req_per_s": 29325.359416053125,
+        "requests": 11524885
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-submitted-310-h2",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794574005.091872,
+        "device": 64769,
+        "finished_unix": 1794574540.6601412,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "mojo",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 859484160,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.9219,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 38154,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 58.76626,
+          "app_us_per_completion": 17.948269,
+          "completed_requests": 9495186,
+          "completions_per_s": 32742.02069,
+          "napi_cpu_pct": 35.194915,
+          "napi_us_per_completion": 10.749158,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 28.993412
+        },
+        "ramp": {
+          "app_cpu_pct": 42.178523,
+          "app_us_per_completion": 22.832568,
+          "completed_requests": 1570202,
+          "completions_per_s": 18472.964706,
+          "napi_cpu_pct": 28.719917,
+          "napi_us_per_completion": 15.546999,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 39.658456
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "c22fe4026aadd72ed1702659311199aa309aa64ab3867ddfda509dbd2f5f24a3",
+      "raw_sha256": {
+        "app-start.json": "99d2458d4346c3a07dda934aea6305844345153608fb891f3434cfa9d583d395",
+        "component-test-lock.json": "a49d90c0e3f001d37ea041e3844d1fba331689c619446fd4fc2889f818c8123f",
+        "merged.json": "cbc705fda437880c7a6f537649d7fdcacae121bc6d3ebb39c87449ca016920da",
+        "network-samples.jsonl": "db3d8ff046ff3a9360820c05c446f1eb92b56fb49b95e5cf074f6009f70d3c4e",
+        "samples.jsonl": "ddc1584c39a361b0d672479f5107c9ca254fe60f7a49864ab2e788d34f20947b",
+        "shape.json": "dd4afae8d83c49771f0c080319f42bc9c0a3bf1c3ba6bf13f77debc0c6603c60",
+        "shard-0.json": "c03cf6bd60e680a9bf6ae71c7c8e83c468b1660867dfa937d14be8b12922d85c",
+        "shard-1.json": "520098efff900a4fe4fd3ef3f8bb619a8fab3fdd06b93f5cdf00e5626fa0dbc6",
+        "shard-2.json": "4a089584a8779e6336ec6f5083a9cbe08de47c9a773f52540383c48b5cd4e6c6",
+        "shard-3.json": "52cc6ce9de63814bf4f771fe62823a581b2bb3f2ad77b004f6c80d4548775e79",
+        "summary.json": "cdfeadbe8e7dea3597abc591d77c0727fadb7476c7d3680195735f32c2012523",
+        "telemetry.jsonl": "4bce53762807a39a0c5b0f13b34397f652ae44e1d8851dc13704f09ac2a52f2c",
+        "timing.json": "4989370b0265177d9d3b2c91314a7411b513cb41c2e89618c5968344da3275b4"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+      "service_cgroup": "0::/system.slice/twelve-revisit-trb8e2ffb.service",
+      "source_commit": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794574413.724,
+        "hold_starts_unix": 1794574113.724,
+        "stock_start_unix": 1794574020.724
+      },
+      "stock_score": {
+        "duration_s": 393.000556967,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11510858,
+        "over_1s": {
+          "over_threshold_lower": 4808,
+          "over_threshold_upper": 5214,
+          "stock_bucket_count_at_or_above": 5214,
+          "stock_quantile_allowance": 115108,
+          "stock_remaining": 109894,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 29758,
+          "over_threshold_upper": 29993,
+          "stock_bucket_count_at_or_above": 29758,
+          "stock_quantile_allowance": 575542,
+          "stock_remaining": 545784,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 73.7951068905101,
+        "p99_ms": 224.91655857996184,
+        "pass": true,
+        "req_per_s": 29289.688769999782,
+        "requests": 11510864
+      },
+      "strict_pass": true,
+      "tag": "large512k-quiet-mojo-310-h2",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794535860.0676422,
+        "device": 64769,
+        "finished_unix": 1794536276.6230876,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible": true,
+      "entry": "kensac",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1210572800,
+        "oom_kills": 0,
+        "sampled_network_end_s": 391.7755,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 58516,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533603]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 56.196483,
+          "app_us_per_completion": 17.192971,
+          "completed_requests": 9478862,
+          "completions_per_s": 32685.731034,
+          "napi_cpu_pct": 31.153657,
+          "napi_us_per_completion": 9.531271,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "whole_core_busy_us_per_completion": 26.907873
+        },
+        "ramp": {
+          "app_cpu_pct": 37.465006,
+          "app_us_per_completion": 20.453076,
+          "completed_requests": 1556991,
+          "completions_per_s": 18317.541176,
+          "napi_cpu_pct": 22.958611,
+          "napi_us_per_completion": 12.533675,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 34.442176
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "9f12a01f244f6967b016b1fa60ae1814b7dc09260c31ff29471d11da51cef286",
+      "raw_sha256": {
+        "app-start.json": "0a511a0a4afb08a0d37735a2602d216bb2cf31979ad28cb8c18c8bf7ab0492ab",
+        "component-test-lock.json": "58a60dda2c5c29fa40272d80e7c348199df3f4ee1535a70f46ff5b8e9e6f97a7",
+        "merged.json": "f98c91bd344eb0bfb7880f78c262568de41e9d29d84a3cfa059ff7a62c17c225",
+        "network-samples.jsonl": "621956bc68d2e047200d43da18f03dc3c6044d3732e10639ba5aff953e11799c",
+        "samples.jsonl": "5df3141bbfd1995b6e28aa3d94a05d3f3b52731a7aa4ffc701d199b5d06b9f27",
+        "shape.json": "b72478544e8368e76bc12ea46e1d12f15491ec8809f81cd01ddc4e64ee744eed",
+        "shard-0.json": "fe3ce5a967db47a2960e37babaee9d194f1366dba338a80a9c8a462a04c89a86",
+        "shard-1.json": "ca57391513451d3418af6223cf7564fdea265d5c6152fad3863600107c5fc929",
+        "shard-2.json": "f7c275497a828f6c316a2ff37e8b4c8d9bb12927e8dd3994fe412334f5f9d0a5",
+        "shard-3.json": "0941d2d3d582d578317495e4ba4decfef35038e485e255aa5f8e68acdd437216",
+        "summary.json": "ab5ad77a20793000f7e43809cf327b0f3c9b574b8a3a9eec54ce266e1913ab48",
+        "telemetry.jsonl": "06339cf571951ea6a2de70fcb0b101e32033925966b62d44b369ca86aecf48b0",
+        "timing.json": "b904aab6b7d40cdae0d292b0dc709160846a9c1ea59f9aec5602ea1ccc10b767"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr90a9cf0.service",
+      "source_commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794536264.746,
+        "hold_starts_unix": 1794535964.746,
+        "stock_start_unix": 1794535871.746
+      },
+      "stock_score": {
+        "duration_s": 393.000110418,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11477276,
+        "over_1s": {
+          "over_threshold_lower": 56075,
+          "over_threshold_upper": 56076,
+          "stock_bucket_count_at_or_above": 56076,
+          "stock_quantile_allowance": 114772,
+          "stock_remaining": 58696,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 59450,
+          "over_threshold_upper": 59576,
+          "stock_bucket_count_at_or_above": 59450,
+          "stock_quantile_allowance": 573863,
+          "stock_remaining": 514413,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 96.53941399576425,
+        "p99_ms": 175.38283468741696,
+        "pass": true,
+        "req_per_s": 29204.256425761865,
+        "requests": 11477276
+      },
+      "strict_pass": true,
+      "tag": "hash512k-quiet-kensac-310-h1",
+      "users": 310000
+    },
+    {
+      "assigned_by_shard": [
+        76000,
+        76000,
+        76000,
+        76000
+      ],
+      "component_lock": {
+        "acquired_unix": 1794575069.7216868,
+        "device": 64769,
+        "finished_unix": 1794575604.6222417,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        76000,
+        76000,
+        76000,
+        76000
+      ],
+      "eligible": true,
+      "entry": "mojo",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 827330560,
+        "oom_kills": 0,
+        "sampled_network_end_s": 389.8629,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 31617,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 60.155204,
+          "app_us_per_completion": 18.722797,
+          "completed_requests": 9156876,
+          "completions_per_s": 32129.389474,
+          "napi_cpu_pct": 32.684815,
+          "napi_us_per_completion": 10.172872,
+          "scored_clock_s": [
+            100,
+            385
+          ],
+          "whole_core_busy_us_per_completion": 29.195041
+        },
+        "ramp": {
+          "app_cpu_pct": 42.230472,
+          "app_us_per_completion": 23.028941,
+          "completed_requests": 1558730,
+          "completions_per_s": 18338.0,
+          "napi_cpu_pct": 28.950506,
+          "napi_us_per_completion": 15.787167,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 39.925105
+        }
+      },
+      "ramp_s": 92,
+      "raw_manifest_sha256": "b67284b1a26ef01d7ac083067de1a548734b1d7f3a05bfeebca75faebe4ef791",
+      "raw_sha256": {
+        "app-start.json": "587f3d97ab5f1fa13381f70ab60d5017a8d95b660276e14ad554a890741f8394",
+        "component-test-lock.json": "836476ccf48fb807e0a0c49d4b4fa74eba3568eb26766b874866254aa2487bfc",
+        "merged.json": "236e05d69d37500fb83c1f327819f4a70313019218d8c426753a4a9de1792451",
+        "network-samples.jsonl": "2c12be3e9783de468fb6386a166e7a21444ee882274a275d9cb9337084bc5f9f",
+        "samples.jsonl": "66a4740f2125c8a1fcc280571eda42bee90cb4912ac7380bf7bc1449ec11738b",
+        "shape.json": "a0f1253b80eca8834cf397c6d3bbe03960558a53cd7200c598fc93451584f4c9",
+        "shard-0.json": "7d34e3a7f9607008b501231e6c38f2c75dff224a28faea709e2e97aaecc619d0",
+        "shard-1.json": "06a9c4efcf61e61cc6a60d75b280cea44fbbb445f7f059ffdedc657b4a8efd3b",
+        "shard-2.json": "a53d06eadb756c65f6124aff3c5decd990e7f3806feca3049d9037a6549be0fe",
+        "shard-3.json": "21d9113f234a0fd9b3f7e40aae6ed4f7466d892f272a38618617e8f9dd4a6634",
+        "summary.json": "6840b991531c609f66e921efedf4b12d86533ab9f63272111b21824fb72892d0",
+        "telemetry.jsonl": "0e2bb92706caf9f37b66dd680fbe665ec038a42968acc6445e2c35b8c881c15e",
+        "timing.json": "fee82a6f3e09186d48be167dd9b2dfe033c59ce7d7a3caa23698badb8865ba68"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr36eb5fd.service",
+      "source_commit": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794575477.685,
+        "hold_starts_unix": 1794575177.685,
+        "stock_start_unix": 1794575085.685
+      },
+      "stock_score": {
+        "duration_s": 392.000754386,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11277079,
+        "over_1s": {
+          "over_threshold_lower": 1094,
+          "over_threshold_upper": 1176,
+          "stock_bucket_count_at_or_above": 1176,
+          "stock_quantile_allowance": 112770,
+          "stock_remaining": 111594,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 14479,
+          "over_threshold_upper": 14687,
+          "stock_bucket_count_at_or_above": 14479,
+          "stock_quantile_allowance": 563853,
+          "stock_remaining": 549374,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 52.61394391764832,
+        "p99_ms": 158.7717923195946,
+        "pass": true,
+        "req_per_s": 28768.01861686099,
+        "requests": 11277085
+      },
+      "strict_pass": true,
+      "tag": "hash512k-quiet-mojo-304-h1",
+      "users": 304000
+    },
+    {
+      "assigned_by_shard": [
+        75000,
+        75000,
+        75000,
+        75000
+      ],
+      "component_lock": {
+        "acquired_unix": 1794575619.4154809,
+        "device": 64769,
+        "finished_unix": 1794576153.0767846,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        75000,
+        75000,
+        75000,
+        75000
+      ],
+      "eligible": true,
+      "entry": "rkkautsar",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1271435264,
+        "oom_kills": 0,
+        "sampled_network_end_s": 387.7448,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 78486,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 95,
+        "last_end_s": 385,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 59.597319,
+          "app_us_per_completion": 19.596723,
+          "completed_requests": 8819445,
+          "completions_per_s": 30411.87931,
+          "napi_cpu_pct": 40.381738,
+          "napi_us_per_completion": 13.278278,
+          "scored_clock_s": [
+            95,
+            385
+          ],
+          "whole_core_busy_us_per_completion": 32.880754
+        },
+        "ramp": {
+          "app_cpu_pct": 48.109379,
+          "app_us_per_completion": 27.264671,
+          "completed_requests": 1499852,
+          "completions_per_s": 17645.317647,
+          "napi_cpu_pct": 33.749819,
+          "napi_us_per_completion": 19.126785,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 47.117965
+        }
+      },
+      "ramp_s": 90,
+      "raw_manifest_sha256": "9f4fdf2c391bb1c732b172debede2f44335952522ef2fa7cb7c8d03267de5600",
+      "raw_sha256": {
+        "app-start.json": "2418247d92bf38c6bdf85e901bcb5e8781c5552e1790c0555941bbd054aa5fe0",
+        "component-test-lock.json": "3d12aa0a85f2aca05bbbe58b3bcb9f2f921661054b351a29824977358f5e7f71",
+        "merged.json": "0f1b36529e8762c48413c4047c1505b9f6d9bce10e0a5c7726b4a51c5ee3646a",
+        "network-samples.jsonl": "50e023f6f92edd1c58859f95824e6abd14a22009f1e2773ab24facefe3835cd9",
+        "samples.jsonl": "8b90238b3df92d0ebf0aaebb13a3fec7c0f7c3054e08f1447867927eefba77ea",
+        "shape.json": "9f6827aa9992d89eea1c52638d479224384a1ad59faeded9330ece6792826458",
+        "shard-0.json": "8e6b8b3a4fb54a2d18983d09e7547ba735a71f28517959452bbb90e079ec3f61",
+        "shard-1.json": "ac79f8e95f690cdda721edea3f4bb9376a35692269f1137f505f33a6e655cbbb",
+        "shard-2.json": "fd55911f93714f2b1e9a5da05e06319ef2f10e15fae10dce06d76daac2c84c69",
+        "shard-3.json": "94577650234cbc4fa93109ac36907430a9f1695397a42f8c8ce04754dfdaa360",
+        "summary.json": "5a5595f18b660c15b826d3b54dd27c85f39912a77d454e53567c85149a9fcd6b",
+        "telemetry.jsonl": "f2e43b8102b7d1c6c084aeeb70232d55e68dcb5955001e6a8ad42f6fcb78220d",
+        "timing.json": "6c77efc1b75f0800591db51cc81a71e287f9145c9fbde2d7e73b7d0797448c3e"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "615b36997cd8429bc31c183d567e8a156c4b1b4daa3ff3bc425873795ea63e63",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr8c73e32.service",
+      "source_commit": "2daf23833a6653b5cc747b009d94705c009f5812",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794576024.214,
+        "hold_starts_unix": 1794575724.214,
+        "stock_start_unix": 1794575634.214
+      },
+      "stock_score": {
+        "duration_s": 390.000114544,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 10621125,
+        "over_1s": {
+          "over_threshold_lower": 597308,
+          "over_threshold_upper": 622428,
+          "stock_bucket_count_at_or_above": 622428,
+          "stock_quantile_allowance": 106211,
+          "stock_remaining": -516217,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 3503808,
+          "over_threshold_upper": 3549308,
+          "stock_bucket_count_at_or_above": 3503808,
+          "stock_quantile_allowance": 531056,
+          "stock_remaining": -2972752,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 1030.840845664524,
+        "p99_ms": 2068.653647725288,
+        "pass": false,
+        "req_per_s": 27233.648411664042,
+        "requests": 10621126
+      },
+      "strict_pass": false,
+      "tag": "hash512k-quiet-rkkautsar-300-h1",
+      "users": 300000
+    },
+    {
+      "assigned_by_shard": [
+        75000,
+        75000,
+        75000,
+        75000
+      ],
+      "component_lock": {
+        "acquired_unix": 1794576168.0460882,
+        "device": 64769,
+        "finished_unix": 1794576698.874073,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        75000,
+        75000,
+        75000,
+        75000
+      ],
+      "eligible": true,
+      "entry": "swift",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 1012637696,
+        "oom_kills": 0,
+        "sampled_network_end_s": 388.0493,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 66726,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 95,
+        "last_end_s": 385,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 57.398848,
+          "app_us_per_completion": 18.278332,
+          "completed_requests": 9106775,
+          "completions_per_s": 31402.672414,
+          "napi_cpu_pct": 35.954307,
+          "napi_us_per_completion": 11.449442,
+          "scored_clock_s": [
+            95,
+            385
+          ],
+          "whole_core_busy_us_per_completion": 29.824717
+        },
+        "ramp": {
+          "app_cpu_pct": 38.691439,
+          "app_us_per_completion": 21.228172,
+          "completed_requests": 1549249,
+          "completions_per_s": 18226.458824,
+          "napi_cpu_pct": 23.513756,
+          "napi_us_per_completion": 12.900891,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 35.312665
+        }
+      },
+      "ramp_s": 90,
+      "raw_manifest_sha256": "ab46b5f58217db115b8db55bc773c87d490db395732258d1bba4c7a801cdab34",
+      "raw_sha256": {
+        "app-start.json": "64b8e1530a975e139af7003b6bf855119a08f5ba25562a49ea9b7ea2dd4e0b2f",
+        "component-test-lock.json": "e465506e5dc92554abb65d0ad933ef7c59392d44d3deec3b7cbd8b8aff51b6d4",
+        "merged.json": "bf7e90009b5e23773d9106ceb296b55c7775d09202fde76193cced7e7b6d11b4",
+        "network-samples.jsonl": "51661a399033b361f256d10a65dcb507cb899835294e5457db3224e9457c554f",
+        "samples.jsonl": "40de7782b2fe44f0046e3ca7b8ccd35310e2ab19221ec1dbbba2d335e850eb71",
+        "shape.json": "6da012069bfeda9285de7113f44a2f84e23a546b4e96d8ed67a9f216cf0137d8",
+        "shard-0.json": "7c8bd44d7ae754c589e2d26c8235b21b2780fa0ee48fc352633f5900077c13d8",
+        "shard-1.json": "850794c9ebc31805324d3b297a14079597d8007338b1c9f6fc1bd5a5a6a63786",
+        "shard-2.json": "b5a696322ccbb8acc02121a951b66b9afcc7399e6837e89fe57a6703212340b1",
+        "shard-3.json": "5dad134950e5b657114ca10a7bcf49674cfd112ab5fd1752b139ea1929621b80",
+        "summary.json": "4b697db6bc2cf0baa349ef30cc85b292dc0f76348d792f734b583a03d733e082",
+        "telemetry.jsonl": "a24f562c259d2812929bfb21f562dc772547b248d339189a9c8aad23a66b32c7",
+        "timing.json": "eebb5c96b0f4b744ef294bde2a29d52f9b0abdc72cd3d0a4a61290cee4ff912f"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "3640c15706243a4fa39a7643914a7ac57860fa6140051f942633262be8f8cb4f",
+      "service_cgroup": "0::/system.slice/twelve-revisit-trb75bd31.service",
+      "source_commit": "77d91a746b2905d06e0e70726d6407a45a040c7b",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794576569.91,
+        "hold_starts_unix": 1794576269.91,
+        "stock_start_unix": 1794576179.91
+      },
+      "stock_score": {
+        "duration_s": 390.001092932,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 10975965,
+        "over_1s": {
+          "over_threshold_lower": 166066,
+          "over_threshold_upper": 166583,
+          "stock_bucket_count_at_or_above": 166583,
+          "stock_quantile_allowance": 109759,
+          "stock_remaining": -56824,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 198327,
+          "over_threshold_upper": 198671,
+          "stock_bucket_count_at_or_above": 198327,
+          "stock_quantile_allowance": 548798,
+          "stock_remaining": 350471,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 127.55665566225392,
+        "p99_ms": 3540.31550900599,
+        "pass": false,
+        "req_per_s": 28143.421131165273,
+        "requests": 10975965
+      },
+      "strict_pass": false,
+      "tag": "hash512k-quiet-swift-300-h1",
+      "users": 300000
+    },
+    {
+      "assigned_by_shard": [
+        73750,
+        73750,
+        73750,
+        73750
+      ],
+      "component_lock": {
+        "acquired_unix": 1794576713.7532022,
+        "device": 64769,
+        "finished_unix": 1794577213.5689723,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        73750,
+        73750,
+        73750,
+        73750
+      ],
+      "eligible": true,
+      "entry": "pavlyhalim",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 881332224,
+        "oom_kills": 0,
+        "sampled_network_end_s": 387.7231,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 36813,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 95,
+        "last_end_s": 385,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 54.825954,
+          "app_us_per_completion": 17.57422,
+          "completed_requests": 9047074,
+          "completions_per_s": 31196.806897,
+          "napi_cpu_pct": 26.993316,
+          "napi_us_per_completion": 8.65259,
+          "scored_clock_s": [
+            95,
+            385
+          ],
+          "whole_core_busy_us_per_completion": 26.642864
+        },
+        "ramp": {
+          "app_cpu_pct": 38.753094,
+          "app_us_per_completion": 22.094896,
+          "completed_requests": 1403151,
+          "completions_per_s": 17539.3875,
+          "napi_cpu_pct": 22.686942,
+          "napi_us_per_completion": 12.934854,
+          "scored_clock_s": [
+            5,
+            85
+          ],
+          "whole_core_busy_us_per_completion": 36.241577
+        }
+      },
+      "ramp_s": 89,
+      "raw_manifest_sha256": "c08df19f145269738934c4910387d7651be19160781a76e241aec66f0118eb05",
+      "raw_sha256": {
+        "app-start.json": "7739abd7f6ac2676eff4a00302b1d6c6a3fc99895d52ff8975e9b3c8aa7587a5",
+        "component-test-lock.json": "122190315736ae116ae970c917ef56ee945756f78c1f24996fa2b05f04596db0",
+        "merged.json": "061902257165e026bf813e5c48af43ee21cf2aec52f2fa8d8ecbb886c27ad375",
+        "network-samples.jsonl": "9e17be7b242886c42bd0e3bd6e39cf23288cfdef5c4f2f3001f5d7aa2cd1431e",
+        "samples.jsonl": "743f8255791ad044d18dcaec6075cf2b9498198cec9c4d834931e369f03d02a7",
+        "shape.json": "2881100c422e85ca39bbf95708e7aa55e26c9490cb8c7fe69f9567f4b83ba9c6",
+        "shard-0.json": "560e73e3b351caf8bdfee35de4fceaf5749ee6786cfa426b47c57e8edb3dc54f",
+        "shard-1.json": "ead445796fca863660b8534492181ebb734edc0811cd6a46177edff89f05115c",
+        "shard-2.json": "946152e7964311f782075f77a32f705cc7335c5a269a74bdaab27fc4ddb3aa29",
+        "shard-3.json": "ddcb2a0abc56a12c368b9f3927151385452689678e6609967e8dfa7670ed2268",
+        "summary.json": "a6a2249e96966099e4347e9f95cda7069b02094cfe16a4d8832c9253de782352",
+        "telemetry.jsonl": "e035abe480aa34a5a292ac9a0e7f687b1ebc36229ea2b4c78cbe0ce3700a3439",
+        "timing.json": "430820dc42d491b8bab7d1d7bf384343835528abfc0c6bfe310694fd075c7697"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+      "service_cgroup": "0::/system.slice/twelve-revisit-trdc71eda.service",
+      "source_commit": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794577117.168,
+        "hold_starts_unix": 1794576817.168,
+        "stock_start_unix": 1794576728.168
+      },
+      "stock_score": {
+        "duration_s": 389.000914115,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 10904215,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 109042,
+          "stock_remaining": 109042,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 545210,
+          "stock_remaining": 545210,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 12.935617171633234,
+        "p99_ms": 31.050460614846706,
+        "pass": true,
+        "req_per_s": 28031.335157162117,
+        "requests": 10904215
+      },
+      "strict_pass": true,
+      "tag": "hash512k-quiet-pavlyhalim-295-h1",
+      "users": 295000
+    },
+    {
+      "assigned_by_shard": [
+        70000,
+        70000,
+        70000,
+        70000
+      ],
+      "component_lock": {
+        "acquired_unix": 1794577228.986431,
+        "device": 64769,
+        "finished_unix": 1794577641.9769778,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        70000,
+        70000,
+        70000,
+        70000
+      ],
+      "eligible": true,
+      "entry": "stock",
+      "exclusions": [],
+      "hold_s": 300,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 709316608,
+        "oom_kills": 0,
+        "sampled_network_end_s": 383.5544,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 8623,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 90,
+        "last_end_s": 380,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 50.381342,
+          "app_us_per_completion": 17.010631,
+          "completed_requests": 8589093,
+          "completions_per_s": 29617.562069,
+          "napi_cpu_pct": 41.617785,
+          "napi_us_per_completion": 14.051725,
+          "scored_clock_s": [
+            90,
+            380
+          ],
+          "whole_core_busy_us_per_completion": 31.329672
+        },
+        "ramp": {
+          "app_cpu_pct": 39.353866,
+          "app_us_per_completion": 23.451461,
+          "completed_requests": 1258574,
+          "completions_per_s": 16780.986667,
+          "napi_cpu_pct": 32.567899,
+          "napi_us_per_completion": 19.407619,
+          "scored_clock_s": [
+            5,
+            80
+          ],
+          "whole_core_busy_us_per_completion": 43.912379
+        }
+      },
+      "ramp_s": 84,
+      "raw_manifest_sha256": "fb7f553e6a898998ad27061b9eca8fe30da5532f8c464d5892a7821735be89f3",
+      "raw_sha256": {
+        "app-start.json": "a903c7236a44eefa7195798ac17909354f2648e325e8e514277062a769c3747a",
+        "component-test-lock.json": "31659d591e7f357d3ab4e4099bdc62581ae09d78847487345e1f299ae0435dd6",
+        "merged.json": "0581c34372a83aed11e7b542304b236452c99132c1f11cd0da350ac6987057b3",
+        "network-samples.jsonl": "be3acfe24292d3645c219da6d456a46b4ecfc2250ccb76d7adef3270629cd0df",
+        "samples.jsonl": "5dd7ccd621901d901550b250764ef41eebdb69f851b587aeb6ffaf5fd4e32a53",
+        "shape.json": "f86ea35f380281c81b7899b32764132232cd4f92111a2fad44b09658e14cef01",
+        "shard-0.json": "e889ad02236fe73609c4ddbb51614f477f94a596e09917c6cf4475bea6059bfc",
+        "shard-1.json": "898829f256e6e8fba2814a620771d5d98723bfdda4e6380a57ad90f53069b07a",
+        "shard-2.json": "a2fdb35624ba59a8f51f0a86563be364e6d07b0aef169dc7e878fbd357e0ddfd",
+        "shard-3.json": "0d7d70ab1d0413025dc38ff9909b01bbcde480d85fe20a1678d8a13806a7dcbe",
+        "summary.json": "7be2142b17cdf157b159964a3c4bf9bc59b9d027e6339365fead731c44a14407",
+        "telemetry.jsonl": "530b4b039b635b04833f6b9c8de35fa9a3dc7f7ac36442f63027601edd188f33",
+        "timing.json": "91f120b168d36562ddac36cc08a99d73a5ad3ad148984e84db9b4a2dbc455f5a"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr45ce4eb.service",
+      "source_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794577628.443,
+        "hold_starts_unix": 1794577328.443,
+        "stock_start_unix": 1794577244.443
+      },
+      "stock_score": {
+        "duration_s": 384.00022691,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 10279537,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 102795,
+          "stock_remaining": 102795,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 513976,
+          "stock_remaining": 513976,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 15.941750345740836,
+        "p99_ms": 32.63434616643812,
+        "pass": true,
+        "req_per_s": 26769.61178569633,
+        "requests": 10279537
+      },
+      "strict_pass": true,
+      "tag": "hash512k-quiet-stock-280-h1",
+      "users": 280000
+    },
+    {
+      "assigned_by_shard": [
+        72500,
+        72500,
+        72500,
+        72500
+      ],
+      "component_lock": {
+        "acquired_unix": 1794577657.3745766,
+        "device": 64769,
+        "finished_unix": 1794577891.6512847,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        72500,
+        72500,
+        72500,
+        72500
+      ],
+      "eligible": true,
+      "entry": "stock",
+      "exclusions": [],
+      "hold_s": 120,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 665874432,
+        "oom_kills": 0,
+        "sampled_network_end_s": 205.0721,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 4616,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 23,
+        "each_shard_scheduled": 23,
+        "expected": 23,
+        "first_end_s": 95,
+        "last_end_s": 205,
+        "missing_full": [],
+        "synchronized": 23
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 50.498072,
+          "app_us_per_completion": 16.469172,
+          "completed_requests": 3219529,
+          "completions_per_s": 30662.180952,
+          "napi_cpu_pct": 42.970131,
+          "napi_us_per_completion": 14.014049,
+          "scored_clock_s": [
+            95,
+            200
+          ],
+          "whole_core_busy_us_per_completion": 30.726077
+        },
+        "ramp": {
+          "app_cpu_pct": 41.317598,
+          "app_us_per_completion": 22.345577,
+          "completed_requests": 1386771,
+          "completions_per_s": 18490.28,
+          "napi_cpu_pct": 34.977848,
+          "napi_us_per_completion": 18.916884,
+          "scored_clock_s": [
+            10,
+            85
+          ],
+          "whole_core_busy_us_per_completion": 42.041914
+        }
+      },
+      "ramp_s": 87,
+      "raw_manifest_sha256": "b1b88fc280e018fec7db6b961e3649fe2832cffc41b7a7dcf5aad87228360333",
+      "raw_sha256": {
+        "app-start.json": "7d1d9501c931541f17a40289afb800b0c399596bf06ae08538876243f8021adb",
+        "component-test-lock.json": "2bf1a4d5ed88264bbb019688677fb00f326523c81bdcfbf24db40f2f3d793054",
+        "merged.json": "3eff63650c216366ec9941daa29b2a523f2fcbc39983b1556162f87e1bb1ceb5",
+        "network-samples.jsonl": "8e970fef109cb182b8cafb3123470a57da5b04dc7d7f522101fd1107423a3e32",
+        "samples.jsonl": "da9697cc2e462928bcd785d56cca75569a1cd5426da3029a5798d349a383bb1e",
+        "shape.json": "fcd5890c164d42f8a3af11725acd1cd47f220798f5175b8640ea1393e9964fa9",
+        "shard-0.json": "e6377288bd2ee543c4296805d8ba18c3f4a6f939c64977c41a23ecf9c00e3f53",
+        "shard-1.json": "7d208fb1849e871276c337a27b8bcc9f8648c79466f5f28e68408a6166d2631f",
+        "shard-2.json": "e81cca5886c71b45d5064c448de0b815a1b01d2615c8836b31d573f6655c552d",
+        "shard-3.json": "3cba27ab2d52e3981823731adff6bb57ac2792223bbdc8a43193f7c224636f00",
+        "summary.json": "b5ea92b28b372a1fe4d0148c79c60e95d163689a4219cd785d5e6d829fad69e4",
+        "telemetry.jsonl": "a548265b8d73d929e42b8a30876fadf6577a2f14f2f2c371826016be5248e70a",
+        "timing.json": "d3aee34bfb4a1dfe9110c813b704b548606f262fbc09ec3bdb011c5dead9b2d0"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tr2089cec.service",
+      "source_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794577877.901,
+        "hold_starts_unix": 1794577757.901,
+        "stock_start_unix": 1794577670.901
+      },
+      "stock_score": {
+        "duration_s": 207.000068834,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 5167951,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 51679,
+          "stock_remaining": 51679,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 258397,
+          "stock_remaining": 258397,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 16.424801322967127,
+        "p99_ms": 32.63434616643812,
+        "pass": true,
+        "req_per_s": 24965.943388861127,
+        "requests": 5167952
+      },
+      "strict_pass": true,
+      "tag": "hash512k-quiet-stock-290-p1",
+      "users": 290000
+    },
+    {
+      "assigned_by_shard": [
+        75000,
+        75000,
+        75000,
+        75000
+      ],
+      "component_lock": {
+        "acquired_unix": 1794577907.1209502,
+        "device": 64769,
+        "finished_unix": 1794578146.1136131,
+        "inode": 1110842,
+        "lock_file": "cpu9-bench.lock",
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        75000,
+        75000,
+        75000,
+        75000
+      ],
+      "eligible": true,
+      "entry": "stock",
+      "exclusions": [],
+      "hold_s": 120,
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "native_healthy": true,
+      "network_and_memory": {
+        "external_softnet_drops_by_cpu": {},
+        "link_drops_or_errors": {},
+        "listen_drops": 0,
+        "max_sampled_swap_bytes": 0,
+        "memory_full_psi_us": 0,
+        "memory_limit_events": 0,
+        "memory_peak_bytes": 689549312,
+        "oom_kills": 0,
+        "sampled_network_end_s": 208.3866,
+        "signed_tcp_tables": [
+          524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288,
+          -524288
+        ],
+        "tcp_retransmitted_segments": 7129,
+        "tcp_timeouts": 0
+      },
+      "network_namespace": "net:[4026533862]",
+      "occupancy": {
+        "each_shard_connected": 23,
+        "each_shard_scheduled": 23,
+        "expected": 23,
+        "first_end_s": 95,
+        "last_end_s": 205,
+        "missing_full": [],
+        "synchronized": 23
+      },
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.227479,
+          "app_us_per_completion": 16.159017,
+          "completed_requests": 3487231,
+          "completions_per_s": 31702.1,
+          "napi_cpu_pct": 43.448739,
+          "napi_us_per_completion": 13.705319,
+          "scored_clock_s": [
+            95,
+            205
+          ],
+          "whole_core_busy_us_per_completion": 30.058247
+        },
+        "ramp": {
+          "app_cpu_pct": 40.837194,
+          "app_us_per_completion": 22.100469,
+          "completed_requests": 1570628,
+          "completions_per_s": 18477.976471,
+          "napi_cpu_pct": 34.666617,
+          "napi_us_per_completion": 18.761046,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "whole_core_busy_us_per_completion": 41.68917
+        }
+      },
+      "ramp_s": 90,
+      "raw_manifest_sha256": "7c900f883837b74dc5457a0c917f6eb48df86f333a04c1628f39160a83ae60f4",
+      "raw_sha256": {
+        "app-start.json": "c8526fda55df4ff33c0988c624ea1f9dd7e52acbf72bc9761b40fe307d2da5ea",
+        "component-test-lock.json": "4acade320119aeb8ab603cc575dc5755b5bfa5ea9dc4a3eef0fe01bb4cc09223",
+        "merged.json": "b324e31042f7f7dfc6685c51ba0d4c6802011b21d8c580a6c25ee7219bd83729",
+        "network-samples.jsonl": "63352c5379324e6585acb264ad063664d480d9fb0515231b7c1818112f30ca94",
+        "samples.jsonl": "4959921f818629f92365625bfc50da1741981020b45cef5c1373aec779af444b",
+        "shape.json": "71786d70b91cec863d1f0eb651826856d71e1523fdbea9b4939a985507ad0e32",
+        "shard-0.json": "bbfaa51d7f5fbd1ed663107ccec6a4529455e58b9f27140b18ef3e749c62bb57",
+        "shard-1.json": "cc5794e1c86c234e8188c6012d86201532ce8a338209da19191d8eab792f4844",
+        "shard-2.json": "fc644dc8aca48ad0075ea3b216916987776cfbe676ef9fae4ab26be825fcbde7",
+        "shard-3.json": "4c95caf41a0bada76ffcfcddce90697cae6920545196efd26e1f5bb06d7fb93e",
+        "summary.json": "629e3016e652378db826e7f6baf04e1ae0752ea70e38a6f1c8af3afdf095132d",
+        "telemetry.jsonl": "9498ba6143a6cfcbd7df58135a021a8350fd60febbe41c6d4d76c7fa266775af",
+        "timing.json": "4bc829407f5f1dde2e7ce84ffeaca8c77c1c015d7d5af9614fc8d7769fb0eaad"
+      },
+      "resource_flags": [],
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "service_cgroup": "0::/system.slice/twelve-revisit-tra74593b.service",
+      "source_commit": "0142ba23cd06969938941dac17e424ca7f3357cd",
+      "state": "final",
+      "stock_epoch": {
+        "cutoff_unix": 1794578132.499,
+        "hold_starts_unix": 1794578012.499,
+        "stock_start_unix": 1794577922.499
+      },
+      "stock_score": {
+        "duration_s": 210.000811631,
+        "error_classes": {},
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 5391380,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 53913,
+          "stock_remaining": 53913,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 269569,
+          "stock_remaining": 269569,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 27.2828784324474,
+        "p99_ms": 157.19979437583626,
+        "pass": true,
+        "req_per_s": 25673.138870879167,
+        "requests": 5391380
+      },
+      "strict_pass": true,
+      "tag": "hash512k-quiet-stock-300-p1",
+      "users": 300000
+    }
+  ]
+}

@@ -1,0 +1,1572 @@
+{
+  "elf_sha256": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+  "input_hashes": {
+    "trials.jsonl": "e64a404b16daa20212f278150bf5106180c18a8be6d9a2f0e838ee2e769672d2",
+    "wire": "449cd60f0f57d9736dc1d995753b6700430dba1e74536039b1552b818701a432",
+    "shape.json": "d88947cb9e1d6242d0a201204c135fe4baecc9a2cc2b1eda5c9a20b041014007",
+    "slice.txt": "29f759fec14f972ef212a91dbef84cef803d3b6f5eb35d47b538ece8ffd26a29"
+  },
+  "design": {
+    "orders": [
+      [
+        0,
+        1,
+        3
+      ],
+      [
+        1,
+        3,
+        0
+      ],
+      [
+        3,
+        0,
+        1
+      ]
+    ],
+    "offered_steady": 24000,
+    "offered_joining": 3500,
+    "service_cpu": 9,
+    "client_cpu": 15
+  },
+  "phases": {
+    "steady": {
+      "arm_medians": {
+        "0": {
+          "response_count": 24000,
+          "observed_rps": 23918.9567,
+          "stack_us_per_request": 36.8525,
+          "whole_cpu9_us_per_request": 37.2052,
+          "app_us_per_request": 25.3006,
+          "user_us_per_request": 3.75,
+          "system_us_per_request": 21.25,
+          "napi_us_per_request": 11.5519,
+          "in_segs_per_request": 1.48,
+          "out_segs_per_request": 2.44,
+          "napi_us_per_in_segment": 7.8053,
+          "app_us_per_in_segment": 17.095,
+          "cpu9_us_per_in_segment": 25.1386,
+          "stack_util_pct": 88.3233,
+          "whole_cpu9_util_pct": 89.1685,
+          "app_share_of_stack_pct": 68.6537,
+          "app_util_pct": 60.6372,
+          "napi_util_pct": 27.6861,
+          "client_util_pct": 74.07,
+          "app_runqueue_wait_pct": 21.5133,
+          "napi_runqueue_wait_pct": 16.9063,
+          "app_slices_per_1000": 466.25,
+          "napi_slices_per_1000": 492.5833,
+          "app_us_per_slice": 54.2823,
+          "napi_us_per_slice": 23.4516,
+          "retrans": 0,
+          "established_p95_us": 2147.75,
+          "established_p99_us": 4469.76,
+          "established_scheduled_p99_us": 6019.8
+        },
+        "1": {
+          "response_count": 24000,
+          "observed_rps": 23942.4879,
+          "stack_us_per_request": 37.3935,
+          "whole_cpu9_us_per_request": 37.7298,
+          "app_us_per_request": 25.3903,
+          "user_us_per_request": 3.75,
+          "system_us_per_request": 21.6667,
+          "napi_us_per_request": 12.0032,
+          "in_segs_per_request": 1.48,
+          "out_segs_per_request": 2.44,
+          "napi_us_per_in_segment": 8.1103,
+          "app_us_per_in_segment": 17.1556,
+          "cpu9_us_per_in_segment": 25.4931,
+          "stack_util_pct": 89.5294,
+          "whole_cpu9_util_pct": 90.3345,
+          "app_share_of_stack_pct": 67.9002,
+          "app_util_pct": 60.7907,
+          "napi_util_pct": 28.7387,
+          "client_util_pct": 74.8968,
+          "app_runqueue_wait_pct": 22.4614,
+          "napi_runqueue_wait_pct": 16.5956,
+          "app_slices_per_1000": 472.5417,
+          "napi_slices_per_1000": 503.0833,
+          "app_us_per_slice": 53.6569,
+          "napi_us_per_slice": 23.8593,
+          "retrans": 0,
+          "established_p95_us": 2005.47,
+          "established_p99_us": 4364.43,
+          "established_scheduled_p99_us": 4980.58
+        },
+        "3": {
+          "response_count": 24000,
+          "observed_rps": 23894.2928,
+          "stack_us_per_request": 35.5851,
+          "whole_cpu9_us_per_request": 35.9704,
+          "app_us_per_request": 25.0082,
+          "user_us_per_request": 4.1667,
+          "system_us_per_request": 20.8333,
+          "napi_us_per_request": 10.4211,
+          "in_segs_per_request": 1.48,
+          "out_segs_per_request": 2.44,
+          "napi_us_per_in_segment": 7.0413,
+          "app_us_per_in_segment": 16.8975,
+          "cpu9_us_per_in_segment": 24.3044,
+          "stack_util_pct": 85.2011,
+          "whole_cpu9_util_pct": 86.1237,
+          "app_share_of_stack_pct": 70.715,
+          "app_util_pct": 59.6858,
+          "napi_util_pct": 24.9511,
+          "client_util_pct": 74.5636,
+          "app_runqueue_wait_pct": 18.4837,
+          "napi_runqueue_wait_pct": 15.8394,
+          "app_slices_per_1000": 497.125,
+          "napi_slices_per_1000": 526.4167,
+          "app_us_per_slice": 50.6191,
+          "napi_us_per_slice": 19.7963,
+          "retrans": 0,
+          "established_p95_us": 1317.73,
+          "established_p99_us": 4319.28,
+          "established_scheduled_p99_us": 4648.77
+        }
+      },
+      "vs_default_paired": {
+        "1": {
+          "response_count": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "observed_rps": {
+            "median_pct": 0.098,
+            "all_pct": [
+              0.457,
+              0.098,
+              -0.409
+            ]
+          },
+          "stack_us_per_request": {
+            "median_pct": 1.461,
+            "all_pct": [
+              1.461,
+              9.333,
+              -3.577
+            ]
+          },
+          "whole_cpu9_us_per_request": {
+            "median_pct": 1.501,
+            "all_pct": [
+              1.501,
+              9.168,
+              -3.615
+            ]
+          },
+          "app_us_per_request": {
+            "median_pct": 0.216,
+            "all_pct": [
+              0.076,
+              1.285,
+              0.216
+            ]
+          },
+          "user_us_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              25.0,
+              -27.273,
+              0.0
+            ]
+          },
+          "system_us_per_request": {
+            "median_pct": 1.961,
+            "all_pct": [
+              -3.774,
+              8.163,
+              1.961
+            ]
+          },
+          "napi_us_per_request": {
+            "median_pct": 4.493,
+            "all_pct": [
+              4.493,
+              31.424,
+              -11.884
+            ]
+          },
+          "in_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "out_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "napi_us_per_in_segment": {
+            "median_pct": 4.493,
+            "all_pct": [
+              4.493,
+              31.424,
+              -11.884
+            ]
+          },
+          "app_us_per_in_segment": {
+            "median_pct": 0.216,
+            "all_pct": [
+              0.076,
+              1.285,
+              0.216
+            ]
+          },
+          "cpu9_us_per_in_segment": {
+            "median_pct": 1.501,
+            "all_pct": [
+              1.501,
+              9.168,
+              -3.615
+            ]
+          },
+          "stack_util_pct": {
+            "median_pct": 1.925,
+            "all_pct": [
+              1.925,
+              9.441,
+              -3.971
+            ]
+          },
+          "whole_cpu9_util_pct": {
+            "median_pct": 1.965,
+            "all_pct": [
+              1.965,
+              9.275,
+              -4.009
+            ]
+          },
+          "app_share_of_stack_pct": {
+            "median_pct": -1.365,
+            "all_pct": [
+              -1.365,
+              -7.361,
+              3.933
+            ]
+          },
+          "app_util_pct": {
+            "median_pct": 0.534,
+            "all_pct": [
+              0.534,
+              1.384,
+              -0.194
+            ]
+          },
+          "napi_util_pct": {
+            "median_pct": 4.971,
+            "all_pct": [
+              4.971,
+              31.553,
+              -12.244
+            ]
+          },
+          "client_util_pct": {
+            "median_pct": 1.116,
+            "all_pct": [
+              0.533,
+              2.139,
+              1.116
+            ]
+          },
+          "app_runqueue_wait_pct": {
+            "median_pct": 6.495,
+            "all_pct": [
+              6.495,
+              43.226,
+              -14.602
+            ]
+          },
+          "napi_runqueue_wait_pct": {
+            "median_pct": -1.838,
+            "all_pct": [
+              -1.838,
+              5.793,
+              -3.682
+            ]
+          },
+          "app_slices_per_1000": {
+            "median_pct": 1.349,
+            "all_pct": [
+              2.74,
+              -2.802,
+              1.349
+            ]
+          },
+          "napi_slices_per_1000": {
+            "median_pct": 1.772,
+            "all_pct": [
+              1.772,
+              -5.391,
+              3.35
+            ]
+          },
+          "app_us_per_slice": {
+            "median_pct": -1.152,
+            "all_pct": [
+              -2.593,
+              4.174,
+              -1.152
+            ]
+          },
+          "napi_us_per_slice": {
+            "median_pct": 2.674,
+            "all_pct": [
+              2.674,
+              38.912,
+              -14.74
+            ]
+          },
+          "established_p95_us": {
+            "median_pct": -6.27,
+            "all_pct": [
+              -6.27,
+              76.932,
+              -6.625
+            ]
+          },
+          "established_p99_us": {
+            "median_pct": -2.357,
+            "all_pct": [
+              -3.526,
+              1.8,
+              -2.357
+            ]
+          },
+          "established_scheduled_p99_us": {
+            "median_pct": -17.252,
+            "all_pct": [
+              -24.782,
+              1.393,
+              -17.252
+            ]
+          }
+        },
+        "3": {
+          "response_count": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "observed_rps": {
+            "median_pct": -0.099,
+            "all_pct": [
+              -0.068,
+              -0.103,
+              -0.099
+            ]
+          },
+          "stack_us_per_request": {
+            "median_pct": -3.439,
+            "all_pct": [
+              0.34,
+              -4.669,
+              -3.439
+            ]
+          },
+          "whole_cpu9_us_per_request": {
+            "median_pct": -3.319,
+            "all_pct": [
+              0.517,
+              -4.487,
+              -3.319
+            ]
+          },
+          "app_us_per_request": {
+            "median_pct": -1.836,
+            "all_pct": [
+              -1.836,
+              -4.276,
+              -0.54
+            ]
+          },
+          "user_us_per_request": {
+            "median_pct": 11.111,
+            "all_pct": [
+              25.0,
+              -9.091,
+              11.111
+            ]
+          },
+          "system_us_per_request": {
+            "median_pct": -5.66,
+            "all_pct": [
+              -5.66,
+              -6.122,
+              -1.961
+            ]
+          },
+          "napi_us_per_request": {
+            "median_pct": -5.747,
+            "all_pct": [
+              5.105,
+              -5.747,
+              -9.789
+            ]
+          },
+          "in_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.028,
+              0.0
+            ]
+          },
+          "out_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "napi_us_per_in_segment": {
+            "median_pct": -5.773,
+            "all_pct": [
+              5.105,
+              -5.773,
+              -9.789
+            ]
+          },
+          "app_us_per_in_segment": {
+            "median_pct": -1.836,
+            "all_pct": [
+              -1.836,
+              -4.303,
+              -0.54
+            ]
+          },
+          "cpu9_us_per_in_segment": {
+            "median_pct": -3.319,
+            "all_pct": [
+              0.517,
+              -4.514,
+              -3.319
+            ]
+          },
+          "stack_util_pct": {
+            "median_pct": -3.535,
+            "all_pct": [
+              0.272,
+              -4.767,
+              -3.535
+            ]
+          },
+          "whole_cpu9_util_pct": {
+            "median_pct": -3.415,
+            "all_pct": [
+              0.449,
+              -4.586,
+              -3.415
+            ]
+          },
+          "app_share_of_stack_pct": {
+            "median_pct": 0.412,
+            "all_pct": [
+              -2.169,
+              0.412,
+              3.002
+            ]
+          },
+          "app_util_pct": {
+            "median_pct": -1.903,
+            "all_pct": [
+              -1.903,
+              -4.375,
+              -0.639
+            ]
+          },
+          "napi_util_pct": {
+            "median_pct": -5.844,
+            "all_pct": [
+              5.034,
+              -5.844,
+              -9.878
+            ]
+          },
+          "client_util_pct": {
+            "median_pct": 0.448,
+            "all_pct": [
+              0.448,
+              -3.231,
+              0.666
+            ]
+          },
+          "app_runqueue_wait_pct": {
+            "median_pct": -11.149,
+            "all_pct": [
+              6.698,
+              -11.149,
+              -14.083
+            ]
+          },
+          "napi_runqueue_wait_pct": {
+            "median_pct": -3.137,
+            "all_pct": [
+              -9.203,
+              0.082,
+              -3.137
+            ]
+          },
+          "app_slices_per_1000": {
+            "median_pct": 3.842,
+            "all_pct": [
+              3.842,
+              3.156,
+              6.622
+            ]
+          },
+          "napi_slices_per_1000": {
+            "median_pct": 3.51,
+            "all_pct": [
+              2.68,
+              3.51,
+              6.869
+            ]
+          },
+          "app_us_per_slice": {
+            "median_pct": -6.748,
+            "all_pct": [
+              -5.468,
+              -7.21,
+              -6.748
+            ]
+          },
+          "napi_us_per_slice": {
+            "median_pct": -8.943,
+            "all_pct": [
+              2.362,
+              -8.943,
+              -15.587
+            ]
+          },
+          "established_p95_us": {
+            "median_pct": -13.961,
+            "all_pct": [
+              -13.961,
+              104.753,
+              -64.706
+            ]
+          },
+          "established_p99_us": {
+            "median_pct": -3.983,
+            "all_pct": [
+              -3.983,
+              2.706,
+              -4.495
+            ]
+          },
+          "established_scheduled_p99_us": {
+            "median_pct": -28.113,
+            "all_pct": [
+              -28.414,
+              8.902,
+              -28.113
+            ]
+          }
+        }
+      },
+      "process_minus_issuer_cpu_pct_range": [
+        -0.0337,
+        0.0
+      ]
+    },
+    "mixed": {
+      "arm_medians": {
+        "0": {
+          "response_count": 7040,
+          "observed_rps": 25386.9073,
+          "stack_us_per_request": 37.0957,
+          "whole_cpu9_us_per_request": 37.8333,
+          "app_us_per_request": 21.5122,
+          "user_us_per_request": 2.8409,
+          "system_us_per_request": 19.8864,
+          "napi_us_per_request": 15.4758,
+          "in_segs_per_request": 1.8006,
+          "out_segs_per_request": 2.7653,
+          "napi_us_per_in_segment": 8.5949,
+          "app_us_per_in_segment": 11.9371,
+          "cpu9_us_per_in_segment": 21.0119,
+          "stack_util_pct": 93.9707,
+          "whole_cpu9_util_pct": 96.4384,
+          "app_share_of_stack_pct": 57.7518,
+          "app_util_pct": 54.1793,
+          "napi_util_pct": 39.6348,
+          "client_util_pct": 94.9053,
+          "app_runqueue_wait_pct": 41.1883,
+          "napi_runqueue_wait_pct": 22.08,
+          "app_slices_per_1000": 351.7045,
+          "napi_slices_per_1000": 351.4205,
+          "app_us_per_slice": 61.614,
+          "napi_us_per_slice": 44.0377,
+          "retrans": 0,
+          "established_p95_us": 2689.68,
+          "established_p99_us": 5236.1,
+          "established_scheduled_p99_us": 6316.72,
+          "fresh_p95_us": 3643.22,
+          "fresh_p99_us": 4906.97,
+          "fresh_scheduled_p99_us": 5855.01
+        },
+        "1": {
+          "response_count": 7040,
+          "observed_rps": 25679.0199,
+          "stack_us_per_request": 37.099,
+          "whole_cpu9_us_per_request": 37.8425,
+          "app_us_per_request": 21.3507,
+          "user_us_per_request": 1.4205,
+          "system_us_per_request": 18.4659,
+          "napi_us_per_request": 15.7483,
+          "in_segs_per_request": 1.8006,
+          "out_segs_per_request": 2.7653,
+          "napi_us_per_in_segment": 8.7463,
+          "app_us_per_in_segment": 11.8578,
+          "cpu9_us_per_in_segment": 21.017,
+          "stack_util_pct": 95.2913,
+          "whole_cpu9_util_pct": 97.6145,
+          "app_share_of_stack_pct": 57.5507,
+          "app_util_pct": 54.8687,
+          "napi_util_pct": 41.0842,
+          "client_util_pct": 96.1098,
+          "app_runqueue_wait_pct": 43.5854,
+          "napi_runqueue_wait_pct": 21.153,
+          "app_slices_per_1000": 358.3807,
+          "napi_slices_per_1000": 359.8011,
+          "app_us_per_slice": 59.8888,
+          "napi_us_per_slice": 44.0745,
+          "retrans": 0,
+          "established_p95_us": 2966.19,
+          "established_p99_us": 5268.68,
+          "established_scheduled_p99_us": 6626.56,
+          "fresh_p95_us": 4107.5,
+          "fresh_p99_us": 5885.84,
+          "fresh_scheduled_p99_us": 7098.64
+        },
+        "3": {
+          "response_count": 7040,
+          "observed_rps": 25762.4499,
+          "stack_us_per_request": 37.1258,
+          "whole_cpu9_us_per_request": 37.9798,
+          "app_us_per_request": 21.0993,
+          "user_us_per_request": 1.4205,
+          "system_us_per_request": 19.8864,
+          "napi_us_per_request": 16.0265,
+          "in_segs_per_request": 1.8006,
+          "out_segs_per_request": 2.7653,
+          "napi_us_per_in_segment": 8.9008,
+          "app_us_per_in_segment": 11.7181,
+          "cpu9_us_per_in_segment": 21.0932,
+          "stack_util_pct": 95.6451,
+          "whole_cpu9_util_pct": 98.1128,
+          "app_share_of_stack_pct": 56.832,
+          "app_util_pct": 54.357,
+          "napi_util_pct": 41.386,
+          "client_util_pct": 95.2281,
+          "app_runqueue_wait_pct": 42.7345,
+          "napi_runqueue_wait_pct": 19.1011,
+          "app_slices_per_1000": 364.4886,
+          "napi_slices_per_1000": 364.4886,
+          "app_us_per_slice": 58.2788,
+          "napi_us_per_slice": 43.9697,
+          "retrans": 0,
+          "established_p95_us": 2783.28,
+          "established_p99_us": 5280.06,
+          "established_scheduled_p99_us": 6341.02,
+          "fresh_p95_us": 3842.05,
+          "fresh_p99_us": 4497.08,
+          "fresh_scheduled_p99_us": 6253.84
+        }
+      },
+      "vs_default_paired": {
+        "1": {
+          "response_count": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "observed_rps": {
+            "median_pct": 1.151,
+            "all_pct": [
+              1.774,
+              0.934,
+              1.151
+            ]
+          },
+          "stack_us_per_request": {
+            "median_pct": -0.362,
+            "all_pct": [
+              -0.362,
+              2.211,
+              -0.374
+            ]
+          },
+          "whole_cpu9_us_per_request": {
+            "median_pct": -0.087,
+            "all_pct": [
+              -1.138,
+              1.422,
+              -0.087
+            ]
+          },
+          "app_us_per_request": {
+            "median_pct": -1.169,
+            "all_pct": [
+              -1.452,
+              1.855,
+              -1.169
+            ]
+          },
+          "user_us_per_request": {
+            "median_pct": -50.0,
+            "all_pct": [
+              0.0,
+              -100.0,
+              -50.0
+            ]
+          },
+          "system_us_per_request": {
+            "median_pct": -7.143,
+            "all_pct": [
+              -7.143,
+              -7.143,
+              7.143
+            ]
+          },
+          "napi_us_per_request": {
+            "median_pct": 1.057,
+            "all_pct": [
+              1.057,
+              2.698,
+              0.738
+            ]
+          },
+          "in_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              -0.087,
+              0.0,
+              0.0
+            ]
+          },
+          "out_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "napi_us_per_in_segment": {
+            "median_pct": 1.145,
+            "all_pct": [
+              1.145,
+              2.698,
+              0.738
+            ]
+          },
+          "app_us_per_in_segment": {
+            "median_pct": -1.169,
+            "all_pct": [
+              -1.366,
+              1.855,
+              -1.169
+            ]
+          },
+          "cpu9_us_per_in_segment": {
+            "median_pct": -0.087,
+            "all_pct": [
+              -1.052,
+              1.422,
+              -0.087
+            ]
+          },
+          "stack_util_pct": {
+            "median_pct": 1.405,
+            "all_pct": [
+              1.405,
+              3.166,
+              0.772
+            ]
+          },
+          "whole_cpu9_util_pct": {
+            "median_pct": 1.063,
+            "all_pct": [
+              0.616,
+              2.37,
+              1.063
+            ]
+          },
+          "app_share_of_stack_pct": {
+            "median_pct": -0.799,
+            "all_pct": [
+              -1.094,
+              -0.348,
+              -0.799
+            ]
+          },
+          "app_util_pct": {
+            "median_pct": 0.296,
+            "all_pct": [
+              0.296,
+              2.807,
+              -0.032
+            ]
+          },
+          "napi_util_pct": {
+            "median_pct": 2.85,
+            "all_pct": [
+              2.85,
+              3.657,
+              1.897
+            ]
+          },
+          "client_util_pct": {
+            "median_pct": 1.969,
+            "all_pct": [
+              3.462,
+              1.969,
+              1.269
+            ]
+          },
+          "app_runqueue_wait_pct": {
+            "median_pct": 2.568,
+            "all_pct": [
+              2.277,
+              6.066,
+              2.568
+            ]
+          },
+          "napi_runqueue_wait_pct": {
+            "median_pct": -4.198,
+            "all_pct": [
+              -36.043,
+              56.608,
+              -4.198
+            ]
+          },
+          "app_slices_per_1000": {
+            "median_pct": 1.898,
+            "all_pct": [
+              18.895,
+              -15.033,
+              1.898
+            ]
+          },
+          "napi_slices_per_1000": {
+            "median_pct": 2.385,
+            "all_pct": [
+              17.712,
+              -15.304,
+              2.385
+            ]
+          },
+          "app_us_per_slice": {
+            "median_pct": -2.8,
+            "all_pct": [
+              -17.096,
+              19.865,
+              -2.8
+            ]
+          },
+          "napi_us_per_slice": {
+            "median_pct": -1.609,
+            "all_pct": [
+              -14.149,
+              21.254,
+              -1.609
+            ]
+          },
+          "established_p95_us": {
+            "median_pct": 3.619,
+            "all_pct": [
+              -30.219,
+              13.39,
+              3.619
+            ]
+          },
+          "established_p99_us": {
+            "median_pct": -0.123,
+            "all_pct": [
+              -52.534,
+              -0.123,
+              0.622
+            ]
+          },
+          "established_scheduled_p99_us": {
+            "median_pct": 3.808,
+            "all_pct": [
+              -51.112,
+              15.124,
+              3.808
+            ]
+          },
+          "fresh_p95_us": {
+            "median_pct": 12.744,
+            "all_pct": [
+              -27.477,
+              12.744,
+              16.065
+            ]
+          },
+          "fresh_p99_us": {
+            "median_pct": 19.477,
+            "all_pct": [
+              -19.299,
+              19.949,
+              19.477
+            ]
+          },
+          "fresh_scheduled_p99_us": {
+            "median_pct": 10.829,
+            "all_pct": [
+              -34.502,
+              21.24,
+              10.829
+            ]
+          }
+        },
+        "3": {
+          "response_count": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "observed_rps": {
+            "median_pct": 2.693,
+            "all_pct": [
+              3.327,
+              2.693,
+              1.479
+            ]
+          },
+          "stack_us_per_request": {
+            "median_pct": -1.115,
+            "all_pct": [
+              -1.115,
+              -1.316,
+              0.081
+            ]
+          },
+          "whole_cpu9_us_per_request": {
+            "median_pct": -0.932,
+            "all_pct": [
+              -1.887,
+              -0.932,
+              0.387
+            ]
+          },
+          "app_us_per_request": {
+            "median_pct": -2.408,
+            "all_pct": [
+              -0.559,
+              -4.139,
+              -2.408
+            ]
+          },
+          "user_us_per_request": {
+            "median_pct": -50.0,
+            "all_pct": [
+              -100.0,
+              -50.0,
+              -50.0
+            ]
+          },
+          "system_us_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              7.143,
+              0.0,
+              -7.143
+            ]
+          },
+          "napi_us_per_request": {
+            "median_pct": 2.541,
+            "all_pct": [
+              -1.839,
+              2.541,
+              3.558
+            ]
+          },
+          "in_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              -0.087,
+              0.0,
+              0.0
+            ]
+          },
+          "out_segs_per_request": {
+            "median_pct": 0.0,
+            "all_pct": [
+              0.0,
+              0.0,
+              0.0
+            ]
+          },
+          "napi_us_per_in_segment": {
+            "median_pct": 2.541,
+            "all_pct": [
+              -1.754,
+              2.541,
+              3.558
+            ]
+          },
+          "app_us_per_in_segment": {
+            "median_pct": -2.408,
+            "all_pct": [
+              -0.473,
+              -4.139,
+              -2.408
+            ]
+          },
+          "cpu9_us_per_in_segment": {
+            "median_pct": -0.932,
+            "all_pct": [
+              -1.802,
+              -0.932,
+              0.387
+            ]
+          },
+          "stack_util_pct": {
+            "median_pct": 1.561,
+            "all_pct": [
+              2.175,
+              1.341,
+              1.561
+            ]
+          },
+          "whole_cpu9_util_pct": {
+            "median_pct": 1.736,
+            "all_pct": [
+              1.377,
+              1.736,
+              1.872
+            ]
+          },
+          "app_share_of_stack_pct": {
+            "median_pct": -2.487,
+            "all_pct": [
+              0.562,
+              -2.86,
+              -2.487
+            ]
+          },
+          "app_util_pct": {
+            "median_pct": -0.965,
+            "all_pct": [
+              2.75,
+              -1.557,
+              -0.965
+            ]
+          },
+          "napi_util_pct": {
+            "median_pct": 5.09,
+            "all_pct": [
+              1.427,
+              5.303,
+              5.09
+            ]
+          },
+          "client_util_pct": {
+            "median_pct": 1.579,
+            "all_pct": [
+              5.275,
+              -1.845,
+              1.579
+            ]
+          },
+          "app_runqueue_wait_pct": {
+            "median_pct": 5.685,
+            "all_pct": [
+              0.281,
+              6.684,
+              5.685
+            ]
+          },
+          "napi_runqueue_wait_pct": {
+            "median_pct": -11.685,
+            "all_pct": [
+              -21.74,
+              -7.602,
+              -11.685
+            ]
+          },
+          "app_slices_per_1000": {
+            "median_pct": 3.635,
+            "all_pct": [
+              13.859,
+              2.88,
+              3.635
+            ]
+          },
+          "napi_slices_per_1000": {
+            "median_pct": 3.719,
+            "all_pct": [
+              13.03,
+              2.446,
+              3.719
+            ]
+          },
+          "app_us_per_slice": {
+            "median_pct": -6.638,
+            "all_pct": [
+              -12.434,
+              -6.638,
+              -5.413
+            ]
+          },
+          "napi_us_per_slice": {
+            "median_pct": -0.154,
+            "all_pct": [
+              -13.155,
+              0.093,
+              -0.154
+            ]
+          },
+          "established_p95_us": {
+            "median_pct": -24.218,
+            "all_pct": [
+              -36.414,
+              -24.218,
+              3.48
+            ]
+          },
+          "established_p99_us": {
+            "median_pct": -4.828,
+            "all_pct": [
+              -52.646,
+              -4.828,
+              0.84
+            ]
+          },
+          "established_scheduled_p99_us": {
+            "median_pct": -11.1,
+            "all_pct": [
+              -36.833,
+              -11.1,
+              0.385
+            ]
+          },
+          "fresh_p95_us": {
+            "median_pct": -21.201,
+            "all_pct": [
+              -24.334,
+              -21.201,
+              31.036
+            ]
+          },
+          "fresh_p99_us": {
+            "median_pct": -20.382,
+            "all_pct": [
+              -20.382,
+              -31.528,
+              24.03
+            ]
+          },
+          "fresh_scheduled_p99_us": {
+            "median_pct": -32.412,
+            "all_pct": [
+              -37.761,
+              -32.412,
+              20.131
+            ]
+          }
+        }
+      },
+      "process_minus_issuer_cpu_pct_range": [
+        -0.6761,
+        -0.231
+      ]
+    }
+  },
+  "validation": {
+    "checked_responses": 288486,
+    "durable_new_likes": 11124,
+    "clean_eof": 12672,
+    "connections_per_arm": 1408,
+    "simultaneously_registered": 672,
+    "banks": 6,
+    "tcp": {
+      "PassiveOpens": 12672,
+      "InSegs": 483645,
+      "OutSegs": 747296,
+      "RetransSegs": 15,
+      "TCPPureAcks": 37527,
+      "TCPHPAcks": 248158
+    },
+    "counters_by_arm": {
+      "0": {
+        "full_protocol_retrans": 4,
+        "mixed_stage_retrans": 4,
+        "steady_stage_retrans": 0
+      },
+      "1": {
+        "full_protocol_retrans": 0,
+        "mixed_stage_retrans": 0,
+        "steady_stage_retrans": 0
+      },
+      "3": {
+        "full_protocol_retrans": 11,
+        "mixed_stage_retrans": 0,
+        "steady_stage_retrans": 11
+      }
+    },
+    "all_interface_drop_error_counts": 0,
+    "qdisc_drops": 0
+  },
+  "scheduler": {
+    "task_settings": [
+      {
+        "kind": "issuer",
+        "arm": 0,
+        "affinity": "9",
+        "weight": 1048576,
+        "nice": 0,
+        "policy": 0,
+        "cpu_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service"
+      },
+      {
+        "kind": "worker",
+        "arm": 0,
+        "affinity": "9",
+        "weight": 343040,
+        "nice": 5,
+        "policy": 0,
+        "cpu_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service"
+      },
+      {
+        "kind": "issuer",
+        "arm": 1,
+        "affinity": "9",
+        "weight": 839680,
+        "nice": 1,
+        "policy": 0,
+        "cpu_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service"
+      },
+      {
+        "kind": "worker",
+        "arm": 1,
+        "affinity": "9",
+        "weight": 343040,
+        "nice": 5,
+        "policy": 0,
+        "cpu_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service"
+      },
+      {
+        "kind": "issuer",
+        "arm": 3,
+        "affinity": "9",
+        "weight": 538624,
+        "nice": 3,
+        "policy": 0,
+        "cpu_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service"
+      },
+      {
+        "kind": "worker",
+        "arm": 3,
+        "affinity": "9",
+        "weight": 343040,
+        "nice": 5,
+        "policy": 0,
+        "cpu_cgroup": "0::/system.slice/applied-devbox-codex-exec-server.service"
+      }
+    ],
+    "private_rx": {
+      "cpus": "9",
+      "nice": 0,
+      "policy": 0,
+      "weight": 1048576,
+      "cgroup": "0::/",
+      "autogroup": ""
+    },
+    "raw_snapshots": "trials.jsonl includes the four complete scheduler readbacks per arm",
+    "worker_snapshots": {
+      "before": [
+        {
+          "block": 0,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 0,
+          "nice": 1,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 0,
+          "nice": 3,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 1,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 3,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 3,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 1,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        }
+      ],
+      "after_priority": [
+        {
+          "block": 0,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 0,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 0,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        }
+      ],
+      "mid": [
+        {
+          "block": 0,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 0,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 0,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 1,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        },
+        {
+          "block": 2,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 0,
+          "io_wq_nice": null
+        }
+      ],
+      "after_traffic": [
+        {
+          "block": 0,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 8,
+          "io_wq_nice": 0
+        },
+        {
+          "block": 0,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 8,
+          "io_wq_nice": 1
+        },
+        {
+          "block": 0,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 3,
+          "io_wq_nice": 3
+        },
+        {
+          "block": 1,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 8,
+          "io_wq_nice": 1
+        },
+        {
+          "block": 1,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 8,
+          "io_wq_nice": 3
+        },
+        {
+          "block": 1,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 9,
+          "io_wq_nice": 0
+        },
+        {
+          "block": 2,
+          "nice": 3,
+          "issuer_nice": 3,
+          "io_wq_workers": 6,
+          "io_wq_nice": 3
+        },
+        {
+          "block": 2,
+          "nice": 0,
+          "issuer_nice": 0,
+          "io_wq_workers": 8,
+          "io_wq_nice": 0
+        },
+        {
+          "block": 2,
+          "nice": 1,
+          "issuer_nice": 1,
+          "io_wq_workers": 9,
+          "io_wq_nice": 1
+        }
+      ]
+    }
+  },
+  "decision": {
+    "release_priority": "retain nice 0",
+    "schedule_score": false,
+    "reason": "No repeatable core CPU or RX scheduling improvement on both traffic phases. The separate-cgroup RX scheduler is not controlled by the issuer task weight. Later io-wq workers inherit the new static nice.",
+    "calibration": "Local warm 672 registered peers in 8192 buckets. Scored five-worker 350k had 21.36 steady sockets per bucket and 99.94% busy. Private component mid-mix dispatch is heavily busy on both the server and client CPU.",
+    "close_note": "After the fresh TID snapshots, there were 3 to 9 io-wq workers at teardown, all at the issuer nice. Four snapshot times cannot timestamp creation; process clock and wider issuer samples cannot strictly bound each worker, despite <0.69% differences."
+  }
+}

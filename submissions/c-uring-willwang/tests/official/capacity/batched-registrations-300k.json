@@ -1,0 +1,96 @@
+{
+  "ring4096-guarded-quiet-300-h2": {
+    "users": 300000,
+    "p95_ms": 173.64637097764057,
+    "p99_ms": 596.370373603547,
+    "reqs": 11071591,
+    "dials": 300000,
+    "fails": 0,
+    "app_peak_mib": 768.9,
+    "qualified": true,
+    "stock_pass": true,
+    "scored_healthy_environment": true,
+    "infrastructure_flags": [],
+    "target_network_flags": [],
+    "population": {
+      "min_established": 300000,
+      "max_established": 300000,
+      "expected_5s_ticks": 59,
+      "full_ticks": 59,
+      "all_expected_full": true
+    },
+    "windows": {
+      "75-90": {
+        "requests": 442284,
+        "median_shard_p99_ms": 191.814,
+        "max_shard_p99_ms": 620.585,
+        "peak_socket_mib_observed": 19.06,
+        "median_cgroup_mib": 568.74
+      },
+      "90-105": {
+        "requests": 480668,
+        "median_shard_p99_ms": 706.284,
+        "max_shard_p99_ms": 1000.524,
+        "peak_socket_mib_observed": 83.92,
+        "median_cgroup_mib": 657.62
+      },
+      "150-385": {
+        "requests": 7447741,
+        "median_shard_p99_ms": 39.035,
+        "max_shard_p99_ms": 328.272,
+        "peak_socket_mib_observed": 31.06,
+        "median_cgroup_mib": 713.39
+      }
+    },
+    "ramp_seconds": 90,
+    "hold_seconds": 300,
+    "binary": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f"
+  },
+  "ring4096-batch-watch-quiet-300-h1": {
+    "users": 300000,
+    "p95_ms": 55.29778383284616,
+    "p99_ms": 178.90802966463406,
+    "reqs": 11095646,
+    "dials": 300000,
+    "fails": 0,
+    "app_peak_mib": 781.0,
+    "qualified": true,
+    "stock_pass": true,
+    "scored_healthy_environment": true,
+    "infrastructure_flags": [],
+    "target_network_flags": [],
+    "population": {
+      "min_established": 300000,
+      "max_established": 300000,
+      "expected_5s_ticks": 59,
+      "full_ticks": 59,
+      "all_expected_full": true
+    },
+    "windows": {
+      "75-90": {
+        "requests": 454344,
+        "median_shard_p99_ms": 197.626,
+        "max_shard_p99_ms": 238.753,
+        "peak_socket_mib_observed": 15.88,
+        "median_cgroup_mib": 549.8
+      },
+      "90-105": {
+        "requests": 476744,
+        "median_shard_p99_ms": 36.049,
+        "max_shard_p99_ms": 189.914,
+        "peak_socket_mib_observed": 20.46,
+        "median_cgroup_mib": 613.78
+      },
+      "150-385": {
+        "requests": 7456209,
+        "median_shard_p99_ms": 35.692,
+        "max_shard_p99_ms": 312.339,
+        "peak_socket_mib_observed": 31.27,
+        "median_cgroup_mib": 709.73
+      }
+    },
+    "ramp_seconds": 90,
+    "hold_seconds": 300,
+    "binary": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a"
+  }
+}

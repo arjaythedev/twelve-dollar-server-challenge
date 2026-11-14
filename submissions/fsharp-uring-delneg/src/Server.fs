@@ -45,12 +45,6 @@ let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frame
 let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
 // A hold that starts while the pass a timed-out hold waited on is still running waits up to this long for it (0: off)
 let private holdRideMs = int64 (env "HOLDRIDE" 1500)
-// Admission at the door (ADMITQ; 0: off): listen queues of ADMITQ connections each, and no accepting while the oldest
-// waiting request is ADMITHI ms old or more (again below ADMITLO ms). New SYNs then wait in the kernel or are dropped
-// (the client retries), and the connections already open get the CPU through a burst of arrivals.
-let private admitQ = env "ADMITQ" 64
-let private admitHi = uint32 (env "ADMITHI" 25)
-let private admitLo = uint32 (env "ADMITLO" 5)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
@@ -318,7 +312,6 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable ckBusy = false
     let mutable ckHold = false
     let mutable ckRide = false // a hold timed out during the pass that is still running
-    let mutable admitPaused = false
     let mutable ckRewind = false
     let mutable ckFrom = 0
     let mutable ckBackfilled = 0
@@ -1081,8 +1074,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                     rs.Full <- true
                     if rs.AcceptArmed = 0 then
                         let q = acceptTarget ()
-                        if q >= 0 && R.[q].AcceptArmed = 0 && not admitPaused then armAccept q
-                elif res <> -ECANCELED && not rs.Full && not rs.High && not admitPaused then
+                        if q >= 0 && R.[q].AcceptArmed = 0 then armAccept q
+                elif res <> -ECANCELED && not rs.Full && not rs.High then
                     // one listener's multishot ended for another reason: armed again on this ring
                     rs.Ring.AcceptMulti(listenFds.[int (udGen u)], u)
                     rs.AcceptArmed <- rs.AcceptArmed + 1
@@ -1104,7 +1097,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                     let q = acceptTarget ()
                     if q >= 0 && not R.[q].High && rs.AcceptArmed > 0 then
                         cancelAccept k
-                        if R.[q].AcceptArmed = 0 && not admitPaused then armAccept q
+                        if R.[q].AcceptArmed = 0 then armAccept q
         | 4UL -> // close
             if udGen u <> NoGen then
                 let rs = R.[k]
@@ -1216,14 +1209,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                         if conns.[cid].Fl &&& (LIVE ||| RECV) = LIVE then armRecv cid
                     rs.RqLen <- rs.RqLen - n
                     nrearm <- nrearm - n
-            if admitQ > 0 then
-                let age = if nreq > reqHead then passMs - reqs.[reqHead].Ms else 0u
-                if not admitPaused && age >= admitHi then
-                    admitPaused <- true
-                    for k in 0 .. nrings - 1 do
-                        if R.[k].AcceptArmed > 0 then cancelAccept k
-                elif admitPaused && age < admitLo then admitPaused <- false
-            if not admitPaused && not (acceptArmedAnywhere ()) then
+            if not (acceptArmedAnywhere ()) then
                 let q = acceptTarget ()
                 if q >= 0 then armAccept q
             if statsOn && now <> lastStats then
@@ -1252,5 +1238,5 @@ let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) =
                wr8 (sa + 4n + nativeint i) a.[i]
            if Native.bind (fd, sa, 16) < 0 then failwithf "bind %O:%d: errno %d" ip port (Native.errno ())
            Marshal.FreeHGlobal sa
-           if Native.listen (fd, (if admitQ > 0 then admitQ else 65535)) < 0 then failwithf "listen: errno %d" (Native.errno ())
+           if Native.listen (fd, 65535) < 0 then failwithf "listen: errno %d" (Native.errno ())
            yield fd |]

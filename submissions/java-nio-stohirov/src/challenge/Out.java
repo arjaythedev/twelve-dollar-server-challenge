@@ -15,13 +15,19 @@ final class Out {
 
     final ByteBuffer buf;
     final MemorySegment seg;
+    private final long base;
     int pos;
     boolean close;
 
     Out(int capacity) {
         buf = ByteBuffer.allocateDirect(capacity);
         seg = MemorySegment.ofBuffer(buf);
+        base = seg.address();
     }
+
+    int capacity() { return buf.capacity(); }
+
+    long address(int at) { return base + at; }
 
     static byte[] ascii(String s) { return s.getBytes(StandardCharsets.US_ASCII); }
 
@@ -37,6 +43,36 @@ final class Out {
         put(LENGTH);
         putLong(bodyLength);
         put(END);
+    }
+
+    /**
+     * Writes a head whose body is about to be written by native code, with room for a length of the given
+     * number of digits, and returns where the body goes. {@link #endBody} fills the length in.
+     */
+    int headForBody(byte[] status, int digits) {
+        put(status);
+        if (close) put(CLOSE);
+        put(LENGTH);
+        pos += digits;
+        put(END);
+        return pos;
+    }
+
+    /**
+     * Fills in the length of a body of n bytes at bodyAt and returns its digit count, the best guess for the
+     * next one. A wrong guess moves the body. A feed's length rarely changes digit count, so this is rare.
+     */
+    int endBody(int bodyAt, int n, int guessed) {
+        int digits = digits(n);
+        int lengthAt = bodyAt - END.length - guessed;
+        if (digits != guessed) {
+            MemorySegment.copy(seg, bodyAt, seg, lengthAt + digits + END.length, n);
+            buf.put(lengthAt + digits, END);
+        }
+        pos = lengthAt;
+        putLong(n);
+        pos = lengthAt + digits + END.length + n;
+        return digits;
     }
 
     void respond(byte[] status, byte[] body) {

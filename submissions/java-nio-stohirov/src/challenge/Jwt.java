@@ -44,7 +44,7 @@ final class Jwt {
             if (!(payload instanceof java.util.Map)) return INVALID;
             long now = System.currentTimeMillis() / 1000;
             Object exp = Json.get(payload, "exp");
-            if (exp != null && exp != Json.NULL && !(exp instanceof Double e && now < e)) return INVALID;
+            if (!(exp instanceof Double e && now < e)) return INVALID;
             Object nbf = Json.get(payload, "nbf");
             if (nbf != null && nbf != Json.NULL && !(nbf instanceof Double n && now >= n)) return INVALID;
             Object sub = Json.get(payload, "sub");

@@ -12,7 +12,7 @@ public final class Main {
         int port = Integer.parseInt(System.getenv().getOrDefault("PORT", "3000"));
 
         Db db = new Db(path);
-        Server server = new Server(db, new Jwt(secret), host, port, maxFileDescriptors());
+        Server server = new Server(db, new Jwt(secret), host, port, ringSlots());
         System.err.println("listening on " + host + ":" + port);
         server.run();
     }
@@ -23,13 +23,18 @@ public final class Main {
         return v;
     }
 
-    private static long maxFileDescriptors() {
+    /**
+     * A ring's table of direct descriptors can be no larger than RLIMIT_NOFILE. The JVM has already raised
+     * its soft limit to the hard one (-XX:+MaxFDLimit). Direct descriptors don't use up that limit.
+     */
+    private static int ringSlots() {
+        long limit = 65535;
         try {
             if (ManagementFactory.getOperatingSystemMXBean() instanceof com.sun.management.UnixOperatingSystemMXBean os) {
-                return os.getMaxFileDescriptorCount();
+                limit = os.getMaxFileDescriptorCount();
             }
         } catch (RuntimeException | LinkageError ignored) {
         }
-        return 65535;
+        return (int) Math.clamp(limit, 1024L, 65535L);
     }
 }

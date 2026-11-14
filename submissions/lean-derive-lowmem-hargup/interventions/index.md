@@ -1,6 +1,10 @@
 # Metal optimization interventions
 
-Completed 2026-10-27. Branch: `lean-derive-metal-hargup`. Baseline: `100234f` (includes WAL bound).
+Interventions 0–8 were completed 2026-10-27 on branch `lean-derive-metal-hargup` (baseline
+`100234f`, includes WAL bound); 9 followed on 2026-10-29. Intervention 10 (2026-11-14) is the
+submission's current change set, on branch `lean-lowmem-submit-hargup`; its evidence is in
+[10-current-leaders.md](10-current-leaders.md) and the sections below marked as earlier phases
+describe those phases' sources, not the submitted one.
 One unified source tree. Git commits identify experiments; no source-variant directories.
 The remote tree is a mirror of the committed source. Executables and logs may be retained
 by SHA for interleaved comparisons without maintaining divergent source implementations.
@@ -22,6 +26,7 @@ not a claimed speedup. Design the shared type system before optimizing individua
 | 7 | [Incremental framing](07-incremental-framing.md) | Avoid repeated header work on fragments | H1 retained: ~19x targeted parsing improvement |
 | 8 | [SQE publication](08-sqe-publication.md) | Publish fully constructed entries by batch | Q1 retained: ~99.2% fewer tail publications |
 | 9 | [Ideas from PR #158](09-pr158-ideas.md) | General techniques from another entry, profiled first | W1 WAL write buffer (−87% `pwrite`) and A1 AVX2 escaping (−2.5% feed CPU) retained; page-cache reads and larger checkpoints rejected |
+| 10 | [Ideas from the current leaders](10-current-leaders.md) | Correctness and portability from #264/#257, then measured | B1 bounded single-shot accepts and U1 buffer-ring registration retry retained; no speed gain claimed; five techniques not adopted |
 
 ## Experiment discipline
 
@@ -43,7 +48,7 @@ not a claimed speedup. Design the shared type system before optimizing individua
   appropriate to its purpose. Record noisy or negative results honestly. No official-score
   or maximum-capacity claims from short local tests.
 
-## Final candidate and scope of results
+## Earlier phase: final candidate and scope of results (2026-10-27)
 
 Production candidate: `2eae17a41220b7eb99420b62d473088b939599f1`.
 Documentation/test commits through `6051565ccba5bbee82c250ce2d50ce3adf183570` have
@@ -71,7 +76,7 @@ to fall: the reported byte reductions apply to specific jobs/response allocation
 Raw mixed result directory suffixes: `1793084845183037776`, `1793084886892260156`,
 `1793084928662931461`, `1793084970645549010` under the remote `metal/results` tree.
 
-## Validation
+## Earlier phase: validation (2026-10-27)
 
 All 26 Lean build targets and generated application/header checks pass locally.
 The candidate passes all 42 official API cases, 20,000 random/deterministic SQL post
@@ -92,7 +97,7 @@ then built/started/tested as UID 10001: **42 passed, 0 failed**. Source:
 candidate. [Complete CI log](results/ci-6051565.log). The container used an explicit
 seccomp exception for io_uring, without privileged mode or host namespaces.
 
-## High-connection smoke test
+## Earlier phase: high-connection smoke test (2026-10-27)
 
 One baseline/final pair used 300,000 VUs, 20-second ramp, 30-second hold, 5-second
 ramp-down and 10-second drain, with the same server restrictions. Both actually
@@ -113,6 +118,11 @@ capacity study. Stop-time cancellations are reported separately by the generator
 and are not included in its completed-request error count.
 
 ## Reviewable evidence
+
+- [Intervention 10: commits, binary hashes, validation and every interleaved run](results/current-leaders.json)
+- [Clean Ubuntu build/test log for the submitted source (`d04e091`)](results/ci-d04e091.log)
+
+Earlier phases:
 
 - [Collected measurements, full source SHAs, binary hashes, compiler modes and load metadata](results/measurements.json)
 - [Full commit mapping](results/source-map.json)

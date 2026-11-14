@@ -27,6 +27,8 @@ Entries below record the candidate/control commits, checks, measurements and dis
 `Feed.Sqe.ReadyPlan op` contains typed references into the exact opcode argument context
 and proof that all required dynamic fields are assigned. It emits six specialized
 constructors: accept, recv, send, shutdown, fixed-file close and accept cancellation.
+(Intervention [10](10-current-leaders.md) later made accepts single-shot and removed the
+cancellation constructor; five remain.)
 The shared `Wire.Ref` system now includes signed fd, u32 and u64 machine domains.
 Constructors reserve/zero a slot, initialize constants and typed arguments, and only
 then commit to the private tail. Full 64-byte zeroing remains; removing it is not

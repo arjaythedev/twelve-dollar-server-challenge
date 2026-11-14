@@ -1,8 +1,10 @@
 # Lean → C: a derived feed server (lower-memory variant)
 
-This variant keeps the proved read plans and derives concrete C representations from typed
-endpoint demand, wire shapes, parser phases and kernel-operation descriptions. The current
-optimization experiments and decisions are in [interventions/index.md](interventions/index.md).
+This variant of [`lean-derive-hargup`](../lean-derive-hargup) (#153) keeps the proved read
+plans and derives concrete C representations from typed endpoint demand, wire shapes, parser
+phases and kernel-operation descriptions. It is a separate entry: #153's score (280,000 users)
+is not a score for this code. The optimization experiments and decisions are in
+[interventions/index.md](interventions/index.md).
 
 * **Exact jobs.** A 32-byte transport envelope replaces the 72-byte all-endpoint job. Feed and
   health have no payload; post, like and create carry only their consumed fields. Construction
@@ -15,10 +17,14 @@ optimization experiments and decisions are in [interventions/index.md](intervent
   offsets in their fragment allocation. Idle connections gain no fields or retained buffers.
 * **Ready SQEs.** Typed opcode constructors initialize entries before advancing a private tail;
   the shared tail is published at kernel entry. Linked shutdown/close pairs reserve room together.
-* **Rings on demand.** io_uring rings are opened on demand behind one shared listener: one ring
-  accepts at a time and hands over before its table of direct descriptors fills. 300k
-  connections need 5 rings instead of 10, so there are fewer ring buffers and fewer
-  `io_uring_enter` calls per loop.
+* **Rings on demand.** io_uring rings are opened on demand behind one shared listener, and a
+  new one only when every open ring is nearly full. 300k connections need 5 rings instead of
+  10, so there are fewer ring buffers and fewer `io_uring_enter` calls per loop.
+* **Bounded accepts.** Accepts are single-shot, and each one reserves a free direct-descriptor
+  slot until its completion is handled, so the server never accepts a connection it cannot
+  install (a full table would make the kernel drop it). At most 512 are in flight on the
+  accepting ring; at total capacity new connections wait in the listen queue. See
+  [interventions/10](interventions/10-current-leaders.md).
 * **Receive buffers.** 512 per ring instead of 1,024.
 * **Partial requests.** A connection's input buffer is released once its buffered requests
   have been parsed, rather than retained for the rest of an idle keep-alive connection.
@@ -60,6 +66,7 @@ serialization and even query execution are specialized to it.
 | Framework | none: the application layer is generated |
 | Database | SQLite 3.54.1 amalgamation, compiled into the binary (`THREADSAFE=2`) |
 | Transport | io_uring (Linux ≥ 6.1), one request thread plus a checkpoint thread, HTTP/1.1 keep-alive |
+| Kernel note | Ubuntu 6.8 kernels with the inverted buffer-ring check ([Launchpad #2162843](https://bugs.launchpad.net/ubuntu/+source/linux/+bug/2162843)) refuse a registration whose reserved words are zero; on `EINVAL` it is retried once with `resv[0]=1`, as #264 does |
 | **Nginx** | **no: serves the internet directly** on `HOST:PORT` (`0.0.0.0:80`) |
 | Dependencies | Lean toolchain and SQLite, pinned by version and SHA-256; nothing else |
 
@@ -135,9 +142,11 @@ results): feed 16.7 µs with the reference SQL → 5.4 µs.
 
 * **Transport.** io_uring instances open on demand, sharing one listener; each has its own
   table of direct descriptors:
-  * multishot accept/receive, provided receive buffers, `DEFER_TASKRUN`;
+  * bounded single-shot accepts that reserve their slots; multishot receive into provided
+    buffers; `DEFER_TASKRUN`;
   * direct descriptors do not use the process file table, so under `LimitNOFILE=65535` the
-    server holds up to 10 × 65,471 connections;
+    server holds up to 16 × 65,471 connections (the kernel's socket memory runs out first on a
+    2 GB box);
   * idle keep-alive connections are never closed.
 * **Batches.** All requests from one round of completions form one batch, which is one SQLite
   transaction:
@@ -198,6 +207,12 @@ limit.
   reads, long strings, JSON escaping, and UTF-8. Reads `HOST`, `PORT`, and `JWT_SECRET`; it
   creates test posts, so use a disposable database copy.
 * Native plans vs SQL: the feed and 20,000 random posts are byte-identical on the seed.
+* `tests/metal/accept_cases.c` (ASan/UBSan): the transport's accept accounting, ring opening and
+  handover against a mocked kernel, including full tables, slot reuse in a non-accepting ring,
+  random churn and the buffer-ring registration retry.
+* `python3 tests/metal/accept_live.py <server> <seed.db>` (Linux, in a private network
+  namespace): 16 rings × 256 slots filled with 4,096 live connections; one more stays queued
+  until a slot frees, then everything is served.
 * `python3 tests/crash_durability.py <server> <seed.db> [rounds]`: pipelined writes, then
   kill -9 at a random moment. Every acknowledged post and like must be in the recovered
   database, and `integrity_check` must pass. Built with `-DDB_CACHE_KIB=64`, batches spill pages
@@ -217,9 +232,25 @@ The harness is the same as for `lean-derive-hargup`, on a shared machine (Xeon E
   limit, on a fresh copy of the seed.
 * **Load:** a native generator replaying `bench/load.js` on the other cores, over loopback in a
   private network namespace.
-* **Run:** 300,000 users, 60 s ramp, 90 s hold, 30 s ramp-down as in `load.js`.
+* **Run:** 300,000 users, 60 s ramp as in `load.js`, then a hold.
 
-Memory is the server cgroup's: its peak, and its value mid-hold.
+### Current source
+
+Production C of this submission (`dc6bab8`), 2026-11-14. The caveats below apply.
+
+| Run | Requests | Errors | Hold CPU per request | Hold p95 / p99 | Peak memory |
+|---|---:|---:|---:|---:|---:|
+| 300,000 users, 300 s hold | 10,809,960 | 0 | 15.25 µs | 2.17 / 9.04 ms | 580 MiB |
+| 300,000 users, 90 s hold, 2 runs | 4,143,400; 4,143,439 | 0; 0 | 14.28; 14.61 µs | 2.08 / 9.84; 1.86 / 7.14 ms | 532; 535 MiB |
+
+Interleaved with the previous source (`d7db355`, multishot accept: 14.01 and 15.09 µs, 532 and
+530 MiB, 0 errors), the bounded accepts change nothing measurable; they are a correctness
+change ([interventions/10](interventions/10-current-leaders.md)).
+
+### Earlier comparison (source `100234f`, 2026-10-24)
+
+Before interventions 0–10; 90 s hold, 30 s ramp-down. Memory is the server cgroup's: its peak,
+and its value mid-hold.
 
 | Server | Runs | CPU per request | Peak | Mid-hold total (process / kernel) | Errors |
 |---|---:|---|---|---|---:|
@@ -240,6 +271,17 @@ Caveats:
   and 151 ms, and the WAL stayed under 15 MB.
 * **Not a capacity search.** This is a same-harness comparison, not a search for the maximum
   number of users and not an official score.
+
+## Credits
+
+Ideas from other entries, re-implemented in this code base:
+
+* [`c-iouring-public`](../c-iouring-public) #158: writing a commit's WAL frames together, and
+  wider SIMD for JSON escaping ([interventions/09](interventions/09-pr158-ideas.md)).
+* [`rust-iouring-kensac`](../rust-iouring-kensac) #264 and
+  [`mojo-iouring-oh-meh`](../mojo-iouring-oh-meh) #257: single-shot accepts bounded by free
+  direct-descriptor slots, and #264's 512 accepts in flight and its `resv[0]=1` retry for
+  Ubuntu's inverted buffer-ring check ([interventions/10](interventions/10-current-leaders.md)).
 
 ## Layout
 

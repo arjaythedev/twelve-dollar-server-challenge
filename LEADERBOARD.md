@@ -980,7 +980,10 @@ p99 2.20 s, 320k on p99 3.14 s), the same as #398's 300,000 and not above it, so
 latest head (`d0cf229`, 2026-11-14: admission at the door removed again; the loop yields 200 µs per pass while a hold
 waits on a checkpoint pass, `HOLDYIELD`) held **300,000** at 81 % CPU (28,397 req/s, p95 38.6 / p99 400.6 ms, 0
 errors, 1,540 MB; 310k failed the 2-minute probe on p99 1.42 s, 320k on p99 3.76 s), once more a tie with #398's
-300,000 and not above it, so #437 is still not merged.
+300,000 and not above it, so #437 is still not merged. #427's latest head (`045b645`, 2026-11-14: `d0cf229` without
+`HOLDYIELD`, checkpoint thread at nice 10 instead of 19, `CKNICE`) held **290,000** at 78 % CPU (27,593 req/s, p95
+27.6 / p99 220.5 ms, 0 errors, 695 MB; 300k failed the 2-minute probe on p99 1.40 s, 320k on p99 3.40 s), below #398's
+300,000, so #427 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

@@ -61,6 +61,7 @@ function record(out, rc, csv_path)
         "vus" => E("VUS"), "ramp" => gen == "blast" ? "" : E("RAMP"), "duration" => E("DUR"), "notes" => E("NOTES")))
     ok = false
     failed = String[]
+    connect_errs = 0                          # wrk: failed connects (users that never got in)
 
     if gen == "k6"
         m = try
@@ -95,6 +96,7 @@ function record(out, rc, csv_path)
             errkeys = ("err_status", "err_connect", "err_read", "err_write", "err_timeout")
             reqs = sum(b["requests"] for (b, _) in shards)
             errs = sum(b[k] for (b, _) in shards for k in errkeys)
+            connect_errs = sum(b["err_connect"] for (b, _) in shards)
             rps = sum(b["requests"] / (b["duration_us"] / 1e6) for (b, _) in shards if b["duration_us"] > 0; init = 0.0)
             function pct(p)               # merged quantile: each shard's 200 quantiles weighted by its request count
                 samples = sort([(Float64(v), b["requests"] / 200) for (b, q) in shards if q !== nothing for v in q])
@@ -185,6 +187,12 @@ function record(out, rc, csv_path)
     if gen == "users" && conns !== nothing && nv !== nothing && nv > 0 && conns < 0.99 * nv
         ok = false; row["pass"] = "0"
         row["failed_on"] = strip(row["failed_on"] * " only $(max(conns, 0)) of $nv users connected")
+    end
+    # Without the server-side count (no --debug, or another entry in calibration): users whose connect failed
+    # send no requests, so they barely dent the error rate; k6 would count all their requests as failed.
+    if gen == "users" && conns === nothing && nv !== nothing && nv > 0 && connect_errs > 0.001 * nv
+        ok = false; row["pass"] = "0"
+        row["failed_on"] = strip(row["failed_on"] * " $connect_errs connect errors (> 0.1% of $nv users)")
     end
 
     rows = read_csv(csv_path)

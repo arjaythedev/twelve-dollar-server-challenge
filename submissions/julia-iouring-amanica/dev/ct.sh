@@ -26,6 +26,7 @@
 #      GROUP (off: one commit per write, for A/B; default: one commit per event-loop pass),
 #      FEED (plain: GET /feed as one query, for A/B; default: range scans when the newest ids are contiguous),
 #      PROFILE ("<start s>,<seconds>": sample the event loop then, table in server.log; src/prof.jl),
+#      ENTRY (another submission folder, run with this harness to calibrate against the leaderboard; rows go to calibration.csv),
 #      DATA (volume: the DB copy on a per-run podman volume on the host's disk; overlay: on the container's
 #      fuse-overlayfs, as before 2026-11-08, which blocks the loop on every write),
 #      LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
@@ -36,6 +37,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 CSV="$HERE/stress-results.csv"
+# ENTRY: another submission folder, run through the same harness to calibrate this host against the
+# leaderboard (their install.sh needs must already be in the dev image). Its rows go to a separate CSV.
+ENTRY="${ENTRY:-}"
+if [ -n "$ENTRY" ]; then
+  [ -f "$ROOT/submissions/$ENTRY/start.sh" ] || { echo "ENTRY: no submissions/$ENTRY/start.sh" >&2; exit 2; }
+  CSV="$HERE/calibration.csv"
+fi
 IMAGE=localhost/julia-iouring-amanica-dev
 WRK_IMAGE=localhost/julia-iouring-amanica-wrk
 K6_IMAGE="${K6_IMAGE:-docker.io/grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8}"
@@ -104,6 +112,14 @@ sampler() { # sampler <server> <generator>
 
 secs() { case "$1" in *m) echo $(( ${1%m} * 60 ));; *s) echo "${1%s}";; *) echo "$1";; esac; }
 
+run_k6() { # run_k6 <server> <name> <n> <dur> <out>   (bench/load.js, the scoring's own script)
+  podman run --rm --name "$2" --user 0 --network "container:$1" \
+    --ulimit nofile="$(ulimit -Hn)":"$(ulimit -Hn)" \
+    -v "$ROOT/bench:/bench:ro" -v "$ROOT/seed/tokens.json:/seed/tokens.json:ro" -v "$5:/out" \
+    "$K6_IMAGE" run -q --no-color -e VUS="$3" -e DURATION="$4" -e RAMP_UP="$RAMP_UP" \
+    -e TOKENS=/seed/tokens.json --summary-export /out/summary.json /bench/load.js > "$5/k6.txt" 2>&1
+}
+
 # Runs N connections as parallel wrk processes ("shards") inside one generator container. Each shard
 # targets its own 127.0.0.x (the server binds 0.0.0.0), so no (src, dst) pair runs out of ephemeral ports.
 # users: shard start times are spread over RAMP_UP (wrk opens all its connections at once), and all
@@ -148,7 +164,7 @@ stress_run() { # stress_run <n> <duration>
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1 || true" EXIT
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1; exit 130" INT TERM HUP PIPE
   BOX_RM=()    # keep the server container until we have its log, also when it dies at startup
-  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" -e JR_PROFILE="${PROFILE:-}" -e JR_FEED="${FEED:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" -e JR_PROFILE="${PROFILE:-}" -e JR_FEED="${FEED:-}" -e JR_ENTRY="$ENTRY" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
@@ -172,7 +188,7 @@ stress_run() { # stress_run <n> <duration>
   commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
   RUN_PASS=0
-  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}${PROFILE:+; PROFILE=$PROFILE}${FEED:+; FEED=$FEED}"
+  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}${PROFILE:+; PROFILE=$PROFILE}${FEED:+; FEED=$FEED}${ENTRY:+; ENTRY=$ENTRY}"
   DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${notes//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
     DUR="$dur" COMMIT="$commit" tools record "$out" "$rc" "$CSV" && RUN_PASS=1
   true
@@ -196,7 +212,7 @@ ladder() { # ladder <start> <max> <dur>
   echo "== highest passing: $lo (lowest failing: $hi)"
 }
 
-report() { tools report "$CSV" "$HERE/README.md"; }
+report() { tools report "$HERE/stress-results.csv" "$HERE/README.md"; }   # always our own runs, also with ENTRY=
 
 DEBUG="${DEBUG:-0}"
 [ "${1:-}" = --debug ] && { DEBUG=1; shift; }

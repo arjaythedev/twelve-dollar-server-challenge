@@ -27,6 +27,29 @@ Work in progress.
   one range scan instead of 20 lookups; otherwise the plain query. Same JSON, live data on every request.
   Blast ~+12% req/s; at 200k users p95 fell from 12–43 ms to 4–18 ms.
 
+## Credits
+
+The code is our own, in Julia, but most of the design follows what other entries found and wrote up. Thanks to:
+
+- **The video walkthrough of the top 10** ("218 Developers COMPETE to max out a $12 server") and its
+  maintainer: the overall lessons (io_uring direct descriptors over several rings to get past the 65k fd
+  limit, serving directly without Nginx, bounded loop passes, group commit, checkpoints off the event loop,
+  no allocation on the request path).
+- **[fsharp-kestrel-delneg](../fsharp-kestrel-delneg/)**: checkpoints on their own thread and connection,
+  holding writes (reads go on) once the WAL reaches 15,000 frames, letting that thread restart the WAL so
+  the header `fsync` stays off the loop, and the Ubuntu 6.8.0-147 workaround for
+  `IORING_REGISTER_PBUF_RING` (retry with `resv[0]=1`).
+- **[rust-epoll-scooter1337](../rust-epoll-scooter1337/)**: the feed range scan: find the 20 newest ids,
+  fetch rows and like counts with range scans when they are close together, and fall back to the plain
+  query otherwise. Ours is a narrower variant (only consecutive ids; the counts come from one scan).
+- **[crystal-epoll-faustinoaq](../crystal-epoll-faustinoaq/)**: no garbage collection on the request path,
+  multishot receives into a provided-buffer ring (an idle connection holds no buffer), and responses sent
+  from arenas that stay pinned until the kernel has finished sending.
+- **[asm-epoll-umitaltintas](../asm-epoll-umitaltintas/)**: single-shot accepts kept in flight instead of
+  one multishot accept, which stalled under bursts.
+- **[c-iouring-meros](../c-iouring-meros/)** and **[c-iouring-pavlyhalim](../c-iouring-pavlyhalim/)**:
+  not borrowed from, but run through our local harness to compare this machine with the leaderboard.
+
 ## Files
 
 | File | |
@@ -166,4 +189,5 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P5.7: hold_pages 4000 | – | 150,000 (418 MB) | 40,831 (-12%), n=3 |
 | P5.5: feed plain | – | 200,000 (453 MB) | 43,079 (+6%), n=6 |
 | P5.5: feed range | – | 200,000 (442 MB) | 50,609 (+17%), n=5 |
+| P7: 5 min hold | 15,000 | 175,000 (442 MB) | – |
 <!-- results:end -->

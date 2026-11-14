@@ -217,10 +217,8 @@ enum { T_SEND, T_ACCEPT, T_RECV, T_NOP, T_READ };
 #define RECV_UD(k, slot, gen) (T_RECV | (uint64_t)(k) << 3 | (uint64_t)(slot) << 8 | (uint64_t)(gen) << 32)
 
 static inline void clamp_socket(int fd) {
-  int clamp = 2048;
-  setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &clamp, sizeof(clamp));
-  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &clamp, sizeof(clamp));
-  setsockopt(fd, IPPROTO_TCP, TCP_WINDOW_CLAMP, &clamp, sizeof(clamp));
+  int snd = 16384;
+  setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &snd, sizeof(snd));
   int one = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
   setsockopt(fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &one, sizeof(one));
@@ -550,6 +548,26 @@ static int jdoc(const char *s, size_t n, want_t *w, int nw) {
   return j.p == j.e;
 }
 
+static inline int parse_jwt_num(const char *p, const char *e, double *out) {
+  if (p >= e) return 0;
+  int neg = 0;
+  if (*p == '-') { neg = 1; p++; }
+  if (p >= e || *p < '0' || *p > '9') return 0;
+  int64_t v = 0;
+  while (p < e && *p >= '0' && *p <= '9') v = v * 10 + (*p++ - '0');
+  double d = (double)v;
+  if (p < e && *p == '.') {
+    p++;
+    double frac = 0.1;
+    while (p < e && *p >= '0' && *p <= '9') {
+      d += (*p++ - '0') * frac;
+      frac *= 0.1;
+    }
+  }
+  *out = neg ? -d : d;
+  return p == e;
+}
+
 // ---------- Auth ----------
 static const char *auth(const char *h, size_t hl, int64_t *uid, char *uname, size_t *unl) {
   static const char *bad = "invalid or expired token", *payload = "invalid token payload";
@@ -584,9 +602,8 @@ static const char *auth(const char *h, size_t hl, int64_t *uid, char *uname, siz
   want_t pw[4] = {{"exp"}, {"nbf"}, {"sub"}, {"username"}};
   if (!jdoc((char *)pl, pn, pw, 4) || !pw[0].v) return bad;
   for (int i = 0; i < 2; i++) if (pw[i].v) {
-    if (*pw[i].v != '-' && (*pw[i].v < '0' || *pw[i].v > '9')) return bad;
-    char nb[64]; size_t l = pw[i].ve - pw[i].v; if (l >= sizeof nb) return bad;
-    memcpy(nb, pw[i].v, l); nb[l] = 0; double v = strtod(nb, NULL);
+    double v;
+    if (!parse_jwt_num(pw[i].v, pw[i].ve, &v)) return bad;
     if (i == 0 ? (double)now_s >= v : (double)now_s < v) return bad;
   }
   if (!pw[2].v || *pw[2].v != '"' || !pw[3].v || *pw[3].v != '"') return payload;
@@ -700,12 +717,13 @@ static int tally_cells(MemPage *pg, int first, int last, int64_t lo, int64_t hi,
   return 1;
 }
 
+static Mem lk_key;
+static UnpackedRecord lk_want;
+
 static int likes_from(int64_t lo) {
-  Mem key; UnpackedRecord want; int cmp = 0;
-  memset(&key, 0, sizeof key); key.flags = MEM_Int; key.u.i = lo;
-  memset(&want, 0, sizeof want); want.pKeyInfo = cur_likes->pKeyInfo; want.aMem = &key; want.nField = 1;
-  want.default_rc = 1;
-  if (sqlite3BtreeIndexMoveto(cur_likes, &want, &cmp) != SQLITE_OK) return -1;
+  int cmp = 0;
+  lk_key.u.i = lo;
+  if (sqlite3BtreeIndexMoveto(cur_likes, &lk_want, &cmp) != SQLITE_OK) return -1;
   if (sqlite3BtreeEof(cur_likes)) return 0;
   if (cmp >= 0) return 1;
   int rc = sqlite3BtreeNext(cur_likes, 0);
@@ -1060,6 +1078,29 @@ static void handle(const char *m, size_t ml, const char *path, size_t pl, const 
 static uint8_t no_conn, *sent100 = &no_conn;
 static int hdr_is(const char *p, size_t n, const char *name, size_t nl) { return n == nl && !strncasecmp(p, name, nl); }
 
+static inline char *find_crlfcrlf(const char *p, size_t n) {
+  if (n < 4) return NULL;
+  const char *e = p + n - 3;
+#if defined(__AVX2__)
+  const __m256i cr = _mm256_set1_epi8('\r');
+  while (p + 32 <= e) {
+    __m256i v = _mm256_loadu_si256((const __m256i *)p);
+    uint32_t mask = (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v, cr));
+    while (mask) {
+      int idx = __builtin_ctz(mask);
+      if (*(const uint32_t *)(p + idx) == 0x0a0d0a0du) return (char *)(p + idx);
+      mask &= mask - 1;
+    }
+    p += 32;
+  }
+#endif
+  while (p < e) {
+    if (*(const uint32_t *)p == 0x0a0d0a0du) return (char *)p;
+    p++;
+  }
+  return NULL;
+}
+
 static long serve(char *buf, size_t n, int *closing, conn_t *c, uint64_t who) {
   size_t used = 0;
   while (used < n && !*closing) {
@@ -1073,7 +1114,7 @@ static long serve(char *buf, size_t n, int *closing, conn_t *c, uint64_t who) {
       }
       break;
     }
-    char *he = memmem(p, e - p, "\r\n\r\n", 4);
+    char *he = find_crlfcrlf(p, e - p);
     if (!he) { if ((size_t)(e - p) > MAXREQ) return -1; break; }
     char *le = memchr(p, '\r', he + 2 - p);
     char *m = p, *sp1 = memchr(m, ' ', le - m); if (!sp1) return -1;
@@ -1088,11 +1129,17 @@ static long serve(char *buf, size_t n, int *closing, conn_t *c, uint64_t who) {
         char *v = c2 + 1; while (v < hl && (*v == ' ' || *v == '\t')) v++;
         char *ve = hl; while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--;
         size_t kn = c2 - h;
-        if (hdr_is(h, kn, "content-length", 14)) { clen = 0; for (char *d = v; d < ve; d++) { if (*d < '0' || *d > '9') return -1; clen = clen * 10 + *d - '0'; if (clen > MAXREQ) return -1; } }
-        else if (hdr_is(h, kn, "authorization", 13)) { authh = v; al = ve - v; }
-        else if (hdr_is(h, kn, "connection", 10)) { if (ve - v == 5 && !strncasecmp(v, "close", 5)) close = 1; else if (ve - v == 10 && !strncasecmp(v, "keep-alive", 10)) close = 0; }
-        else if (hdr_is(h, kn, "expect", 6)) expect = ve - v == 12 && !strncasecmp(v, "100-continue", 12);
-        else if (hdr_is(h, kn, "transfer-encoding", 17)) return -1;
+        char c0 = h[0] | 0x20;
+        if (c0 == 'c') {
+          if (hdr_is(h, kn, "content-length", 14)) { clen = 0; for (char *d = v; d < ve; d++) { if (*d < '0' || *d > '9') return -1; clen = clen * 10 + *d - '0'; if (clen > MAXREQ) return -1; } }
+          else if (hdr_is(h, kn, "connection", 10)) { if (ve - v == 5 && !strncasecmp(v, "close", 5)) close = 1; else if (ve - v == 10 && !strncasecmp(v, "keep-alive", 10)) close = 0; }
+        } else if (c0 == 'a') {
+          if (hdr_is(h, kn, "authorization", 13)) { authh = v; al = ve - v; }
+        } else if (c0 == 'e') {
+          if (hdr_is(h, kn, "expect", 6)) expect = ve - v == 12 && !strncasecmp(v, "100-continue", 12);
+        } else if (c0 == 't') {
+          if (hdr_is(h, kn, "transfer-encoding", 17)) return -1;
+        }
       }
       h = hl + 2;
     }
@@ -1416,6 +1463,7 @@ static void release_held(void) {
 }
 
 static void run(void) {
+  uint32_t loop_tick = 0;
   for (;;) {
     arm_accepts();
     int busy = (readq.n > 0 || readyq.n > 0);
@@ -1423,14 +1471,14 @@ static void run(void) {
       if (k == 0 && !busy) {
         struct __kernel_timespec ts = {.tv_sec = 0, .tv_nsec = 1000000}; // 1 ms wait
         struct io_uring_cqe *cq = NULL;
-        io_uring_submit_and_wait_timeout(&R[0].r, &cq, 256, &ts, NULL);
+        io_uring_submit_and_wait_timeout(&R[0].r, &cq, 1, &ts, NULL);
       } else {
         io_uring_submit_and_get_events(&R[k].r);
       }
     }
     for (int i = 0; i < nlimbo; i++) sop_free((sop_t *)(uintptr_t)limbo[i]);
     nlimbo = 0;
-    now_s = time(NULL);
+    if ((loop_tick++ & 63) == 0) now_s = time(NULL);
     answers_left = ANSWERS;
     for (int k = 0; k < nrings; k++) drain(k);
     run_ready();
@@ -1492,6 +1540,14 @@ static void btree_setup(void) {
   ki_likes = sqlite3KeyInfoAlloc(db, 1, 1);
   ki_likes->aColl[0] = db->pDfltColl; ki_likes->aSortFlags[0] = 0;
   ki_likes->aColl[1] = db->pDfltColl;
+
+  memset(&lk_key, 0, sizeof lk_key);
+  lk_key.flags = MEM_Int;
+  memset(&lk_want, 0, sizeof lk_want);
+  lk_want.pKeyInfo = ki_likes;
+  lk_want.aMem = &lk_key;
+  lk_want.nField = 1;
+  lk_want.default_rc = 1;
   bt_ok = 1;
 }
 

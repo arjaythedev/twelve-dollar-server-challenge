@@ -8,7 +8,8 @@ finally a rewrite around io_uring.
 The implementation uses **Ada 2022**, with no web framework: HTTP, JSON,
 routing and the event loop are written in Ada. io_uring and sockets are called
 through the Linux ABI directly (no liburing), SQLite is compiled into the
-binary from the official amalgamation, and OpenSSL computes the HS256 HMAC. It
+binary from the official amalgamation (the two hot read routes use its B-tree
+layer directly), and OpenSSL computes the HS256 HMAC. It
 targets Ubuntu 24.04 x86_64 and **serves directly on `0.0.0.0:80`** (no Nginx).
 
 ## Design
@@ -118,6 +119,25 @@ lives until its send completes. JSON escaping first counts escapable bytes in a
 branch-free loop that GCC vectorizes, so ordinary text is copied with one
 `memcpy`.
 
+**The hot reads skip SQL.** `GET /feed` and `GET /posts/:id` are 92% of the
+load. They read their rows through SQLite's own B-tree cursors instead of
+prepared statements: the same pages, page cache and WAL snapshot, inside the
+same batch transaction, just without the bytecode interpreter in between.
+SQLite's cursor functions are internal to the amalgamation, so
+`src/sqlite_btree.c` compiles the amalgamation together with ten small
+read-only wrappers (open the cursors, seek a rowid, seek an index key, step,
+fetch the current record); the Ada side decodes the records (`Database`,
+"Direct B-tree reads"). It only ever reads, and anything it does not expect, such
+as a missing author, a value of another type, or a record that spills onto
+an overflow page, sends that request through the SQL statements instead, which
+remain the reference. At startup the server checks that the tables and
+indexes are exactly the challenge's before it enables this. Without the
+network, CPU per request in the load test's mix went from 3.8 to 2.9 µs
+(`bench/request_cost.adb`). `tests/btree_reads.py` compares both routes byte
+for byte with the reference SQL under a random mix of likes and new posts, and
+on rows that must fall back. (Reading SQLite's B-tree directly was ruled
+allowed for lean-derive-hargup, #153.)
+
 **SQLite built for this job.** SQLite 3.54.1 is downloaded by `build.sh`
 (SHA-256 pinned; it matches sqlite.org's published SHA3-256) and compiled with
 `SQLITE_THREADSAFE=0` and the recommended omissions. The page cache is 16 MiB
@@ -154,8 +174,9 @@ closed within a second or two and memory goes straight down.)
 - Held writes are answered only after they have run and committed, like any
   other write.
 - No response, query result or token verification is cached. Every request
-  reads SQLite while it is served; a batch's transaction starts after all of
-  its requests have arrived and ends before any of its responses leave.
+  reads SQLite while it is served, through SQL or SQLite's B-tree cursors; a
+  batch's transaction starts after all of its requests have arrived and ends
+  before any of its responses leave.
 - Writes commit before their success responses are sent.
 - Every JWT is fully verified on every authenticated request: HS256 signature
   (constant-time compare), `alg`, `exp` and `nbf`.
@@ -172,7 +193,48 @@ from 64 source addresses over a virtual network card. Every run starts from a
 fresh copy of the seed. The CPU is faster than the benchmark's vCPU, so CPU
 numbers only compare versions.
 
-### The memory the benchmark box does not have
+### Less CPU per request (this version)
+
+On the box, #216 held 270,000 users at 86% CPU and failed 280,000 on CPU
+(p99 7.7 s at 97%), so this version goes after CPU per request. Reading the two
+hot routes through SQLite's B-tree cursors does most of it; building with
+GNAT's default validity checks instead of `-gnatVa` (every check on) does the
+rest.
+
+The request path without the network (`bench/request_cost.adb`, the load
+test's mix, alternating runs):
+
+| Version | CPU per request |
+| --- | ---: |
+| #216 | 3.76–3.88 µs |
+| + B-tree reads | 2.88–2.94 µs |
+| + default validity checks | about 4% less again |
+
+The whole server at 280,000 users, 2-minute holds, alternating runs:
+
+| Version | VM CPU per request | Server process alone |
+| --- | ---: | ---: |
+| #216 | 16.5–17.4 µs | 10.2–11.0 µs |
+| this version | 15.2–15.9 µs | 8.9–9.6 µs |
+
+To see what that buys on a box short of both memory and CPU, we also ran
+with 480 MB locked (see below) and a CPU spinner sharing the vCPU equally with
+the server:
+
+| Version | Users, 2-minute hold | Result |
+| --- | --- | --- |
+| #216 | 270,000 | 0 errors, p99 10 ms |
+| #216 | 280,000 | latency spike at the end of the ramp, killed for memory: 71% errors |
+| this version | 280,000 | **0 errors, p95 6.4 ms, p99 11.8 ms** |
+| this version | 290,000 | latency spike at the end of the ramp, killed for memory: 71% errors |
+
+#216 behaves here as it did on the box (270,000 passes, 280,000 fails), and
+this version moves that edge up one step. Going back to a parked multishot
+receive for idle sockets, as in #211, measured the same CPU as the poll watch
+in six alternating runs (17.0–17.6 against 16.8–18.7 µs), so idle sockets keep
+the poll and its smaller memory footprint.
+
+### The memory the benchmark box does not have (#216)
 
 The VM has about 450–500 MB more room than the benchmark box under the same
 load: our #211 code held 320,000 users here but stopped at 270,000 there,
@@ -190,17 +252,17 @@ connections); with 450 MB it just passes (0 errors, p99 302 ms, 50 MB free).
 | #211 as benchmarked | 500 MB | 280,000, 2 min | killed for memory, 3.2% errors |
 | + 16 MiB SQLite cache | 500 MB | 280,000, 2 min | **0 errors, p99 33 ms** |
 | + 40-byte records, 1,024 buffers, bounded re-arm | 500 MB | 290,000, 5 min | killed at the end of the ramp, 4.4% errors |
-| + idle sockets watched by poll (this version) | 500 MB | 290,000, 5 min | clean for 4 minutes, then killed: 1.0% errors |
-| this version | 480 MB | 290,000, 5 min | killed after 2 minutes, 14.5% errors |
+| + idle sockets watched by poll (#216) | 500 MB | 290,000, 5 min | clean for 4 minutes, then killed: 1.0% errors |
+| #216 | 480 MB | 290,000, 5 min | killed after 2 minutes, 14.5% errors |
 
-So this version moves the edge from about 275,000 to about 285,000 users here;
+So #216 moved the edge from about 275,000 to about 285,000 users here;
 290,000 sits right on it, and runs there end either way. What tips it is the
 database growing during the hold (about 50 MB of new posts and likes in five
 minutes): once the hot pages no longer fit, SQLite's reads go to disk, the
 event loop slows, and the requests waiting in the kernel (2.9 KB each) take
 the rest.
 
-Without locked memory, this version held 280,000 users for five minutes with
+Without locked memory, #216 held 280,000 users for five minutes with
 the server paused for 3 seconds in the middle (`SIGSTOP`/`SIGCONT`): 0 errors,
 p95 5.0 ms, back to normal latency about a second after the pause, and no
 receive failed for want of a buffer (20,000 sockets per ring waited their
@@ -217,6 +279,9 @@ What did not work:
 - An 8 MiB cache and 512 buffers per ring saved another 10 MB but did worse at
   the edge (4.4% errors at 290,000 with 500 MB locked).
 - A 64 MiB cache, as before: the same CPU, 32 MB more anonymous memory.
+
+On the box, #216 scored 270,000 again: its memory held at 280,000, but the CPU
+ran out there (above).
 
 Most of the CPU at this scale is the kernel's: in a profile at 300,000
 connections, about 28% of the busy time went to finding each packet's socket. A
@@ -307,6 +372,8 @@ restarts, durability) and Nginx integration. All of them pass on x86_64 (epoll,
 under Rosetta). The io_uring path (which a container cannot use) is checked in
 the server VM: the official suite and the 139 focused checks pass there too.
 
+`tests/btree_reads.py` (also run by `validate-container.sh`) compares the
+B-tree read path byte for byte with the reference SQL.
 `bench/request_cost.adb` measures CPU per request without the network, in the
 load test's request mix. `bash local.sh up` starts a local preview at
 `http://127.0.0.1:3001`; the other tools in `bench/` run the unchanged k6

@@ -4,6 +4,14 @@ const dbm = @import("db.zig");
 const http = @import("http.zig");
 const jwt = @import("jwt.zig");
 const bufm = @import("buf.zig");
+const jp = @import("jp.zig");
+
+test {
+    std.testing.refAllDecls(http);
+    std.testing.refAllDecls(jwt);
+    std.testing.refAllDecls(bufm);
+    std.testing.refAllDecls(jp);
+}
 
 test "generation tag 24-bit wraparound" {
     const gen_mask = server.gen_mask;
@@ -164,4 +172,83 @@ test "b-tree count likes boundary validation" {
     // hi - lo > 1000 must return fallback 1
     const r2 = td_count_likes(null, 100, 1200, &counts);
     try std.testing.expectEqual(@as(c_int, 1), r2);
+}
+
+test "parseId validation" {
+    // Valid IDs
+    try std.testing.expectEqual(@as(?i64, 1), server.Server.parseId("1"));
+    try std.testing.expectEqual(@as(?i64, 42), server.Server.parseId("42"));
+    try std.testing.expectEqual(@as(?i64, 250000), server.Server.parseId("250000"));
+    try std.testing.expectEqual(@as(?i64, 999999999), server.Server.parseId("999999999"));
+
+    // Invalid IDs
+    try std.testing.expectEqual(@as(?i64, null), server.Server.parseId(""));
+    try std.testing.expectEqual(@as(?i64, null), server.Server.parseId("0"));
+    try std.testing.expectEqual(@as(?i64, null), server.Server.parseId("-1"));
+    try std.testing.expectEqual(@as(?i64, null), server.Server.parseId("abc"));
+    try std.testing.expectEqual(@as(?i64, null), server.Server.parseId("1.5"));
+    try std.testing.expectEqual(@as(?i64, null), server.Server.parseId("123a"));
+    try std.testing.expectEqual(@as(?i64, null), server.Server.parseId("12345678901234567890")); // > 18 chars
+}
+
+test "trimJs whitespace handling" {
+    // Standard spaces and tabs
+    try std.testing.expectEqualStrings("hello", server.Server.trimJs("   hello   "));
+    try std.testing.expectEqualStrings("world", server.Server.trimJs("\t\r\n world \n\t"));
+
+    // Non-breaking space (0xC2, 0xA0)
+    const nbsp_str = "\xc2\xa0post content\xc2\xa0";
+    try std.testing.expectEqualStrings("post content", server.Server.trimJs(nbsp_str));
+
+    // Zero-width / Unicode spaces and BOM (0xEF, 0xBB, 0xBF)
+    const bom_str = "\xef\xbb\xbfspecial\xef\xbb\xbf";
+    try std.testing.expectEqualStrings("special", server.Server.trimJs(bom_str));
+
+    // All whitespace string results in empty
+    try std.testing.expectEqualStrings("", server.Server.trimJs("   \r\n\t \xc2\xa0 "));
+}
+
+test "writeHeaderDirect formatting" {
+    var buf: [128]u8 = undefined;
+
+    // 200 OK with keep-alive
+    const len200 = server.Server.writeHeaderDirect(&buf, 200, 42, true);
+    const s200 = buf[0..len200];
+    try std.testing.expect(std.mem.startsWith(u8, s200, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 42\r\n\r\n"));
+
+    // 201 Created with Connection: close
+    const len201 = server.Server.writeHeaderDirect(&buf, 201, 100, false);
+    const s201 = buf[0..len201];
+    try std.testing.expect(std.mem.startsWith(u8, s201, "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 100\r\n\r\n"));
+
+    // 404 Not Found
+    const len404 = server.Server.writeHeaderDirect(&buf, 404, 0, true);
+    const s404 = buf[0..len404];
+    try std.testing.expect(std.mem.startsWith(u8, s404, "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n"));
+
+    // 500 Internal Server Error
+    const len500 = server.Server.writeHeaderDirect(&buf, 500, 15, false);
+    const s500 = buf[0..len500];
+    try std.testing.expect(std.mem.startsWith(u8, s500, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 15\r\n\r\n"));
+}
+
+extern "c" fn access(path: [*c]const u8, mode: c_int) c_int;
+
+test "differential: direct b-tree feed vs prepared sql feed" {
+    if (access("../../seed/feed.db", 0) != 0) return;
+
+    var db = dbm.Db.init("../../seed/feed.db") catch return;
+    defer db.deinit();
+
+    var out_btree = try bufm.Buf.init(65536);
+    defer out_btree.deinit();
+
+    var out_sql = try bufm.Buf.init(65536);
+    defer out_sql.deinit();
+
+    try db.feed(&out_btree);
+    try db.feedSql(&out_sql);
+
+    try std.testing.expect(out_btree.len > 0);
+    try std.testing.expectEqualStrings(out_sql.slice(), out_btree.slice());
 }

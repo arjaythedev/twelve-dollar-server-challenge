@@ -136,7 +136,7 @@ passed=42 failed=0
 cd submissions/zig-iouring-harshitkhandelwal208
 zig build test --summary all
 ```
-All 19 unit tests pass, validating generation-tag wraparound, pending buffer bounds, varint decoders, B-tree boundary checks, and HTTP framing.
+All 24 unit tests pass, validating generation-tag wraparound, pending buffer bounds, varint decoders, B-tree boundary checks, HTTP parsing & framing, and differential B-tree vs SQL query equivalence.
 
 ---
 

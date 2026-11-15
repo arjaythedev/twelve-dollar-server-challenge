@@ -785,7 +785,7 @@ pub const Server = struct {
         return null;
     }
 
-    fn trimJs(s: []const u8) []const u8 {
+    pub fn trimJs(s: []const u8) []const u8 {
         var start: usize = 0;
         while (start < s.len) {
             if (isJsWhitespace(s[start..])) |len| {
@@ -807,7 +807,7 @@ pub const Server = struct {
         return s[start..end];
     }
 
-    fn parseId(s: []const u8) ?i64 {
+    pub fn parseId(s: []const u8) ?i64 {
         if (s.len == 0 or s.len > 18) return null;
         var v: i64 = 0;
         for (s) |ch| {
@@ -992,7 +992,7 @@ pub const Server = struct {
         self.sendResponse(w, slot, c, status, self.resp_buf.slice(), keep_alive);
     }
 
-    inline fn writeHeaderDirect(buf: *[128]u8, status: u16, body_len: usize, keep_alive: bool) usize {
+    pub inline fn writeHeaderDirect(buf: *[128]u8, status: u16, body_len: usize, keep_alive: bool) usize {
         var off: usize = 0;
         if (status == 200) {
             const s = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n";

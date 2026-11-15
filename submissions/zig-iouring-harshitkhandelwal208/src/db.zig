@@ -331,7 +331,7 @@ pub const Db = struct {
         out.writeAll("]}");
     }
 
-    fn feedSql(self: *Db, out: *Buf) !void {
+    pub fn feedSql(self: *Db, out: *Buf) !void {
         _ = self;
         td_feed_sql_reset();
         out.writeAll("{\"posts\":[");

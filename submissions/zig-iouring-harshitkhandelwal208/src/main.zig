@@ -32,12 +32,24 @@ fn crashHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) 
     if (sig == .TERM or sig == .INT) {
         linux.exit(0);
     }
-    const msg = "FATAL: server process caught crash signal\n";
-    _ = linux.write(2, msg.ptr, msg.len);
+    const name: []const u8 = switch (sig) {
+        .SEGV => "SIGSEGV (segmentation fault)\n",
+        .BUS => "SIGBUS (bus error)\n",
+        .ILL => "SIGILL (illegal instruction)\n",
+        .FPE => "SIGFPE (floating point exception)\n",
+        .ABRT => "SIGABRT (aborted)\n",
+        else => "UNKNOWN SIGNAL\n",
+    };
+    const prefix = "FATAL CRASH: caught ";
+    _ = linux.write(2, prefix.ptr, prefix.len);
+    _ = linux.write(2, name.ptr, name.len);
     linux.exit(128 + @as(u8, @intCast(@intFromEnum(sig) & 0x7f)));
 }
 
 pub fn main(init: std.process.Init) !void {
+    const m0 = "LOG: [1] main entered\n";
+    _ = linux.write(2, m0.ptr, m0.len);
+
     // Install signal crash handler
     const sa: linux.Sigaction = .{
         .handler = .{ .sigaction = crashHandler },
@@ -62,6 +74,8 @@ pub fn main(init: std.process.Init) !void {
 
     // Lock memory into RAM to eliminate page faults during benchmark
     sys.lockMemory();
+    const m1 = "LOG: [2] lockMemory done\n";
+    _ = linux.write(2, m1.ptr, m1.len);
 
     // Bump RLIMIT_NOFILE
     var rl: linux.rlimit = undefined;
@@ -78,11 +92,19 @@ pub fn main(init: std.process.Init) !void {
 
     // Initialize database and JWT key
     const db = try dbm.Db.init(sqlite_path);
+    const m2 = "LOG: [3] db init done\n";
+    _ = linux.write(2, m2.ptr, m2.len);
+
     const jwt_key = jwt.Key.init(jwt_secret);
 
-    // Initialize multi-ring server (up to 10 rings, 654,720 direct descriptors)
+    // Initialize multi-ring server (up to 16 rings, 1,047,552 direct descriptors)
     const s = try server.Server.init(db, jwt_key);
+    const m3 = "LOG: [4] server init done\n";
+    _ = linux.write(2, m3.ptr, m3.len);
+
     try s.makeListeners(host, port);
+    const m4 = "LOG: [5] makeListeners done\n";
+    _ = linux.write(2, m4.ptr, m4.len);
 
     std.log.info("Server listening on {d}.{d}.{d}.{d}:{d} with {d} rings x {d} slots = {d} direct descriptors", .{
         host[0], host[1], host[2], host[3], port, s.active_rings, server.slots_per_ring, s.active_rings * server.slots_per_ring,

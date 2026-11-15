@@ -374,6 +374,9 @@ pub const Server = struct {
     }
 
     pub fn run(self: *Server) !void {
+        const mr0 = "LOG: [6] run loop entered\n";
+        _ = linux.write(2, mr0.ptr, mr0.len);
+
         var ep_events: [32]linux.epoll_event = undefined;
 
         while (true) {

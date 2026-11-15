@@ -737,6 +737,11 @@ receive buffers; PGO build worked) held **280,000** (26,698 req/s, p95 60.5 / p9
 25 µs/req, 1,256 MB, 2026-11-15), below the merged row, so not merged: 290,000 failed the 2-minute probe on p99
 (1.55 s at 80 % CPU, 0 errors), 300,000 on p95/p99 (3.24 / 4.41 s at 84 % CPU, 0 errors) and 320,000 collapsed (73 %
 errors, nearly all `connection refused`). #450 stays open.
+**#452** (`8193037`: #450's code plus own `mmap` arenas, a smaller buffer pool and freed wait buffers) held
+**280,000** (26,710 req/s, p95 120.2 / p99 341.6 ms, 0 err, 77 % CPU, 26 µs/req, 810 MB, 2026-11-15), below the
+merged row, so not merged: 290,000 failed the 2-minute probe on p99 (2.22 s at 78 % CPU), 300,000 on p95/p99
+(1.07 / 2.93 s at 83 % CPU) and 320,000 on p95/p99 (2.15 / 2.71 s at 94 % CPU), all with 0 errors and no refused
+connections. #452 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

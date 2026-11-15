@@ -15,11 +15,11 @@ High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/t
 
 ## Key Optimizations & Engineering Design
 
-### 1. Multi-Ring Architecture with 1,047,552 Direct Descriptors
-- Pre-allocates **16 independent `io_uring` instances**, each configured with 65,472 direct file slots registered via `IORING_REGISTER_FILES_SPARSE`, providing **1,047,552 total connection capacity**.
-- Each ring binds an independent listener socket on port 3000 configured with `SO_REUSEPORT`, allowing the Linux kernel to distribute incoming connections across all 16 rings via 4-tuple TCP hash.
+### 1. Multi-Ring Architecture with 523,776 Direct Descriptors
+- Pre-allocates **8 independent `io_uring` instances**, each configured with 65,472 direct file slots registered via `IORING_REGISTER_FILES_SPARSE`, providing **523,776 total connection capacity** (exceeding the 500,000 concurrent user objective while bounding kernel locked memory and CQ drain overhead for a single vCPU).
+- Each ring binds an independent listener socket on port 3000 configured with `SO_REUSEPORT`, allowing the Linux kernel to distribute incoming connections across all 8 rings via 4-tuple TCP hash.
 - Zero mid-ramp ring or table allocations: eliminates page compaction latency stalls.
-- Connections are tracked via an ultra-compact **32-byte packed `Conn` struct** fitting two descriptors per 64-byte L1 cache line.
+- Connections are tracked via an ultra-compact **32-byte packed `Conn` struct** fitting two descriptors per 64-byte L1 cache line, keeping connection state memory across all 523k descriptors under 17 MB.
 
 ### 2. Direct SQLite B-Tree Integration & Varint Record Decoding
 - Completely bypasses SQLite's SQL parser and VDBE bytecode engine for read queries.
@@ -35,7 +35,7 @@ High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/t
 
 ### 4. Right-Sized Kernel Buffer Rings & ENOBUFS Burst Queue
 - Provisions 2,048 buffers per ring (2 KB per buffer) using `IORING_REGISTER_PBUF_RING` with fallback for Linux 6.8+ kernels (`resv[0] = 1`).
-- Incremental replenishment returns reaped buffers every 64 CQEs, bounding peak receive buffer memory under 68 MB across all 16 rings.
+- Incremental replenishment returns reaped buffers every 64 CQEs, bounding peak receive buffer memory under 34 MB across all 8 rings.
 - An in-memory rearm queue buffers connections during transient ENOBUFS bursts, ensuring 0% packet loss during sudden connection ramp spikes.
 
 ### 5. Socket Memory Clamping & TCP Optimizations
@@ -44,7 +44,6 @@ High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/t
   - `SO_SNDBUF` clamped to 16,384 bytes.
   - `TCP_WINDOW_CLAMP` clamped to 4,096 bytes.
   - `TCP_NODELAY` enabled to disable Nagle's algorithm and ensure immediate packet transmission.
-  - `TCP_DEFER_ACCEPT` set to 1 second to eliminate kernel wakeups for empty SYN connections.
   - Memory pinning via `mlockall(MCL_CURRENT)` and `RLIMIT_MEMLOCK` maxing to eliminate page faults.
 
 ### 6. Transparent Huge Pages SQLite Page Cache

@@ -1,6 +1,7 @@
 -- The whole server. Runs inside Neovim: nvim --headless --clean -l server.lua
 local ffi, uv, api = require("ffi"), vim.loop, vim.api
 local find, sub, match, lower, gsub, byte = string.find, string.sub, string.match, string.lower, string.gsub, string.byte
+local bor, bxor = bit.bor, bit.bxor
 
 ffi.cdef [[
 typedef struct sqlite3 sqlite3; typedef struct sqlite3_stmt sqlite3_stmt;
@@ -19,27 +20,35 @@ const void* EVP_sha256(void);
 void* HMAC(const void*, const char*, int, const char*, size_t, uint8_t*, unsigned*);
 int EVP_DecodeBlock(uint8_t*, const char*, int);
 ]]
-local S, K = ffi.load("libsqlite3.so.0"), ffi.load("libcrypto.so.3")
+-- install.sh unpacks the pinned libsqlite3 here, apart from the system's copy
+local S, K = ffi.load("/opt/lua-neovim-unorig-username/libsqlite3.so.0"), ffi.load("libcrypto.so.3")
 local ROW, DONE = 100, 101
 
-local dbp = ffi.new("sqlite3*[1]")
-assert(S.sqlite3_open_v2(os.getenv("SQLITE_PATH"), dbp, 2, nil) == 0, "cannot open SQLITE_PATH")
-local db = dbp[0]
+-- Two connections: db writes (inside the loop tick's open transaction), rd reads. A read never runs inside that
+-- transaction, so it sees only committed rows, even in a tick that has already written.
+local function open()
+  local p = ffi.new("sqlite3*[1]")
+  assert(S.sqlite3_open_v2(os.getenv("SQLITE_PATH"), p, 2, nil) == 0, "cannot open SQLITE_PATH")
+  assert(S.sqlite3_exec(p[0], "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=1073741824;"
+    .. " PRAGMA cache_size=-16000; PRAGMA busy_timeout=5000", nil, nil, nil) == 0)
+  return p[0]
+end
+local db, rd = open(), open()
 local function exec(sql) return S.sqlite3_exec(db, sql, nil, nil, nil) end
-assert(exec("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=1073741824; PRAGMA cache_size=-16000; PRAGMA busy_timeout=5000") == 0)
-local function prep(sql)
+local function prep(sql, c)
+  c = c or db
   local p = ffi.new("sqlite3_stmt*[1]")
-  assert(S.sqlite3_prepare_v2(db, sql, -1, p, nil) == 0, ffi.string(S.sqlite3_errmsg(db)))
+  assert(S.sqlite3_prepare_v2(c, sql, -1, p, nil) == 0, ffi.string(S.sqlite3_errmsg(c)))
   return p[0]
 end
 local POST = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
   .. " FROM posts p JOIN users u ON u.id = p.user_id "
-local q_feed = prep(POST .. "ORDER BY p.created_at DESC, p.id DESC LIMIT 20")
-local q_post = prep(POST .. "WHERE p.id = ?")
+local q_feed = prep(POST .. "ORDER BY p.created_at DESC, p.id DESC LIMIT 20", rd)
+local q_post = prep(POST .. "WHERE p.id = ?", rd)
 local q_ins = prep("INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at")
 local q_like = prep("INSERT INTO likes (user_id, post_id) SELECT ?1, id FROM posts WHERE id = ?2"
   .. " ON CONFLICT (user_id, post_id) DO NOTHING")
-local q_exists, q_one = prep("SELECT 1 FROM posts WHERE id = ?"), prep("SELECT 1")
+local q_exists, q_one = prep("SELECT 1 FROM posts WHERE id = ?"), prep("SELECT 1", rd)
 local q_begin, q_commit = prep("BEGIN IMMEDIATE"), prep("COMMIT")
 local function run(q) -- steps a statement that returns no rows we keep
   local rc = S.sqlite3_step(q)
@@ -129,7 +138,7 @@ local function get(buf, pos)
     return send(H200)
   end
   lit('{"status":"degraded","db":"unreachable","error":"')
-  local e = ffi.string(S.sqlite3_errmsg(db))
+  local e = ffi.string(S.sqlite3_errmsg(rd))
   esc(ffi.cast(u8p, e), #e)
   lit('"}')
   send(head("503 Service Unavailable"))
@@ -147,13 +156,19 @@ local function json(s) -- decoded value, or nil
   local ok, v = pcall(vim.json.decode, s or "")
   if ok then return v end
 end
+local function same(s) -- the decoded signature equals md, in time that does not depend on where they differ
+  if not s or #s ~= 32 then return false end
+  local x = 0
+  for i = 0, 31 do x = bor(x, bxor(byte(s, i + 1), md[i])) end
+  return x == 0
+end
 local function auth(tok) -- user id and username, or nil and the error response
   if not tok then return nil, E_BEARER end
   local h, p, s = match(tok, "^([^.]+)%.([^.]+)%.([^.]+)$")
   local hd = h and json(unb64(h))
   if type(hd) ~= "table" or hd.alg ~= "HS256" then return nil, E_TOKEN end
   K.HMAC(sha, secret, #secret, tok, #h + 1 + #p, md, nil)
-  local pl = unb64(s) == ffi.string(md, 32) and json(unb64(p))
+  local pl = same(unb64(s)) and json(unb64(p))
   if type(pl) ~= "table" or type(pl.exp) ~= "number" or pl.exp <= os.time() then return nil, E_TOKEN end
   if pl.nbf ~= nil and (type(pl.nbf) ~= "number" or pl.nbf > os.time()) then return nil, E_TOKEN end
   local uid = type(pl.sub) == "string" and #pl.sub < 19 and post_id(pl.sub)
@@ -177,7 +192,7 @@ local function strict(s)
   return true
 end
 
-local dirty = false -- a write transaction is open; committed before anything from this tick is sent
+local dirty = false -- a write transaction is open on db; committed before anything from this tick is sent
 local function write(buf, pos, h, body)
   local id
   if not find(buf, "^POST /posts[ ?]", pos) then

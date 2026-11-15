@@ -4,6 +4,7 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
     const use_pgo = b.option(bool, "pgo", "Link PGO optimized SQLite shim") orelse false;
+    const strip = b.option(bool, "strip", "Strip binary") orelse (optimize != .debug);
 
     const translate = b.addTranslateC(.{
         .root_source_file = b.path("deps/sqlite-amalgamation-3540100/sqlite3.h"),
@@ -19,7 +20,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .single_threaded = false,
-            .strip = (optimize != .debug),
+            .strip = strip,
         }),
     });
 

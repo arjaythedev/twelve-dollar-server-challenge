@@ -145,13 +145,13 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 68 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
 | 68 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
 | 68 | lean-derive-lowmem-hargup | #434 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **200,000** | 19,673 | 55.3 | 189.9 | 0.00 | 72 | 34 | 1,222 | 2026-11-14 |
-| 71 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
-| 72 | sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN | #243 | SQL (one SELECT over a virtual table, C io_uring) | **190,000** | 18,653 | 129 | 573 | 0.00 | 94 | 47 | 1,205 | 2026-11-02 |
-| 73 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
-| 73 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
-| 75 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
-| 75 | c-modular-ascendnoosphere | #333 | C (io_uring, SQLite B-tree reads) | **185,000** | 18,127 | 178.9 | 294.2 | 0.00 | 79 | 41 | 397 | 2026-11-06 |
-| 75 | goose-plod-kaitk | #440 | Goose (Plod, io_uring) | **185,000** | 18,127 | 253.4 | 614.4 | 0.00 | 71 | 36 | 898 | 2026-11-14 |
+| 68 | goose-plod-kaitk | #448 | Goose (Plod, io_uring) | **200,000** | 19,664 | 25.7 | 246.0 | 0.00 | 74 | 35 | 755 | 2026-11-15 |
+| 72 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
+| 73 | sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN | #243 | SQL (one SELECT over a virtual table, C io_uring) | **190,000** | 18,653 | 129 | 573 | 0.00 | 94 | 47 | 1,205 | 2026-11-02 |
+| 74 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
+| 74 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
+| 76 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
+| 76 | c-modular-ascendnoosphere | #333 | C (io_uring, SQLite B-tree reads) | **185,000** | 18,127 | 178.9 | 294.2 | 0.00 | 79 | 41 | 397 | 2026-11-06 |
 | 78 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
 | 79 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
 | 80 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |

@@ -956,21 +956,23 @@ pub const Server = struct {
 
     fn pushHeldWrite(self: *Server, w: *RingWorker, slot: u32, gen: u32, c: *Conn) void {
         if (c.isHeldWrite()) return;
-        c.setHeldWrite(true);
 
         if (self.n_held_writes < self.held_writes.len) {
+            c.setHeldWrite(true);
             self.held_writes[self.n_held_writes] = .{ .w = w, .slot = slot, .gen = gen };
             self.n_held_writes += 1;
             return;
         }
 
         // Explicit backpressure: if the 65,536-entry hold queue is full,
-        // synchronously advance the checkpoint until the hold releases (bounded by HOLD_MAX_MS = 100ms in shim.c)
+        // synchronously advance the checkpoint until the hold releases (bounded by HOLD_MAX_MS = 250ms in shim.c)
         while (self.db.writesHeld()) {
             self.db.tick();
             std.atomic.spinLoopHint();
         }
+        c.setHeldWrite(false);
         self.drainHeldWrites();
+        self.handleData(w, slot, c, &.{});
     }
 
     fn drainHeldWrites(self: *Server) void {

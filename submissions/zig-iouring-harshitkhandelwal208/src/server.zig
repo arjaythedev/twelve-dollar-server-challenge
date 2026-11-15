@@ -30,9 +30,9 @@ pub const n_bufs_per_ring: u16 = 1024;
 pub const bgid: u16 = 1;
 
 pub const pool_buf_size: usize = 16384;
-pub const pool_count: usize = 4096;
+pub const pool_count: usize = 2048;
 
-pub const k_ring_count: usize = 10;
+pub const k_ring_count: usize = 8;
 pub const k_listener_count: usize = 8;
 pub const slots_per_ring: u32 = 65472;
 pub const max_pending_size: usize = 65535;

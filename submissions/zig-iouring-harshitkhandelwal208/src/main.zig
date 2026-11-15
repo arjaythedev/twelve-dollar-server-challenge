@@ -85,11 +85,17 @@ pub fn main(init: std.process.Init) !void {
     };
     _ = linux.sigaction(.PIPE, &ignore, null);
 
-    // Bump RLIMIT_NOFILE
+    // Bump RLIMIT_NOFILE and RLIMIT_MEMLOCK early before any ring or descriptor allocations
     var rl: linux.rlimit = undefined;
     _ = linux.getrlimit(.NOFILE, &rl);
     rl.cur = rl.max;
     _ = linux.setrlimit(.NOFILE, &rl);
+
+    var rl_mem: linux.rlimit = undefined;
+    if (linux.getrlimit(.MEMLOCK, &rl_mem) == 0) {
+        rl_mem.cur = rl_mem.max;
+        _ = linux.setrlimit(.MEMLOCK, &rl_mem);
+    }
 
     // Environment configuration
     const sqlite_path = init.environ_map.get("SQLITE_PATH") orelse "seed/feed.db";
@@ -98,7 +104,7 @@ pub fn main(init: std.process.Init) !void {
     const host = try parseHost(host_str);
     const port: u16 = @intCast(envInt(init, "PORT", 3000));
 
-    // Initialize JWT key and multi-ring server (10 rings x 65,472 = 654,720 direct descriptors)
+    // Initialize JWT key and multi-ring server (8 rings x 65,472 = 523,776 direct descriptors)
     const jwt_key = jwt.Key.init(jwt_secret);
     const s = try server.Server.init(sqlite_path, jwt_key);
     try s.makeListeners(host, port);

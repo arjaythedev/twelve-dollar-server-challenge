@@ -60,7 +60,9 @@
   lets writes in, but the next hold starts at once on the same pass, and the writes it lets in keep the WAL from
   rewinding when that pass ends. Without the exception, no hold would complete and the WAL would grow. So the hold that
   starts on a pass an earlier hold already timed out on waits up to 1.5 s for it (`HOLDRIDE`), and the pass after it
-  gets the usual 250 ms. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  gets the usual 250 ms. A hold pass needs more CPU than that share
+  gives it at once, so once a hold has waited 20 ms for a running pass, the loop also sleeps 200 µs per pass until it
+  ends (`HOLDYIELD`). After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
   them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
   reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
   of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes

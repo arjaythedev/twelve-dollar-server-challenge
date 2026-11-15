@@ -45,6 +45,11 @@ let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frame
 let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
 // A hold that starts while the pass a timed-out hold waited on is still running waits up to this long for it (0: off)
 let private holdRideMs = int64 (env "HOLDRIDE" 1500)
+// A hold that has waited HOLDYIELDAFTER ms for a running checkpoint pass, while requests are queued (so the loop never
+// waits in the kernel), sleeps HOLDYIELD us each pass: the checkpoint thread runs at low priority (CKNICE) and gets a
+// small share of the CPU, so at saturation the 15-30 ms of CPU its pass needs would take long (0: off)
+let private holdYieldUs = uint32 (env "HOLDYIELD" 200)
+let private holdYieldAfter = int64 (env "HOLDYIELDAFTER" 20)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
@@ -326,6 +331,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable maxBatch = 0
     let mutable stPasses = 0L
     let mutable stAns = 0L
+    let mutable stYields = 0L
     let mutable stWalk = 0L
     let mutable stCommitUs = 0L
     let mutable stCommitMax = 0L
@@ -1121,10 +1127,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         for k in 0 .. nrings - 1 do
             live <- live + R.[k].Live
             ovf <- ovf + R.[k].Ring.CqOverflow
-        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d"
+        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d yields=%d"
             (now - started) live accErr lastAccErr ovf nobufs nrearm maxBatch pool.Count (Db.cacheKB ()) stPasses stAns
             Db.walFrames (GC.CollectionCount 0) (GC.CollectionCount 2) (GC.GetTotalMemory false >>> 20) stWalk wqLen
-            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked
+            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked stYields
         stCommits <- 0L
         stCommitUs <- 0L
         stCommitMax <- 0L
@@ -1132,6 +1138,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         maxBatch <- 0
         stPasses <- 0L
         stAns <- 0L
+        stYields <- 0L
 
     member _.Run() =
         for k in 0 .. nringsWanted - 1 do
@@ -1184,6 +1191,9 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             lastReq <- nreq - reqHead
             if lastReq > maxBatch then maxBatch <- lastReq
             idlePasses <- if lastReq > 0 then 0 else idlePasses + 1
+            if holdYieldUs > 0u && ckHold && ckBusy && nreq > reqHead && ckClock.ElapsedMilliseconds >= holdYieldAfter then
+                Native.usleep holdYieldUs |> ignore
+                stYields <- stYields + 1L
             if ckHold && ckClock.ElapsedMilliseconds > (if ckRide then holdRideMs else holdMs) then
                 // the checkpoint pass is slow: let writes in. The next hold starts at once on the same pass (the
                 // writes it holds can't rewind the WAL before that pass ends), so that one waits for the pass.

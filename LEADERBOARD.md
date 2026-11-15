@@ -956,7 +956,10 @@ still had 37,218 HTTP 500s (0.48 %, under the 1 % line). **The row is now scored
 COMMIT retry on BUSY, RESTART checkpoints through `sqlite3_wal_checkpoint_v2` that keep the WAL small): it held
 **220,000** (21,320 req/s, p95 341.6 / p99 465.0 ms, 0 errors, 71 % CPU, 31 µs/req, 777 MB, 2026-11-15), so the HTTP
 500s are gone. 230,000 and 240,000 failed the 2-minute probe on p99 (1.91 s and 2.40 s, 0 errors); 320,000 failed on
-`connection refused` (79.4 %). Held, not merged yet: one review question for Arjay.
+`connection refused` (79.4 %). A newer head, `3651f8f` (WAL write-coalescing shim VFS, PASSIVE checkpoints with
+POSTs held while the WAL is long), held **200,000** (19,691 req/s, p95 7.1 / p99 36.8 ms, 0 errors, 69 % CPU,
+33 µs/req, 1,021 MB, 2026-11-15); its 5-minute hold at 210,000 failed on latency (p95 513.7 ms / p99 1.84 s, 0 errors,
+75 % CPU), so the row stays at `0d958c4`. Held, not merged yet: one review question for Arjay.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

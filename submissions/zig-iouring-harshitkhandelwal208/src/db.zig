@@ -64,7 +64,7 @@ pub inline fn varint(p: []const u8, i: *usize) !u64 {
     return varintLong(p, i);
 }
 
-pub fn varintLong(p: []const u8, i: *usize) !u64 {
+pub inline fn varintLong(p: []const u8, i: *usize) !u64 {
     const b0 = p[i.*];
     if (i.* + 1 < p.len) {
         const b1 = p[i.* + 1];
@@ -446,29 +446,10 @@ pub const Db = struct {
         if (seek_res < 0) return .err;
 
         const p = getPayload(cp) catch return .err;
-        const cols = columns(3, p) catch return .err;
+        const cols = columns(4, p) catch return .err;
         const uid = intOf(cols[1].t, cols[1].b) catch return .err;
         const body = text(cols[2]) catch return .err;
-        const created = blk: {
-            // Check if 4th column exists in record
-            var i: usize = 0;
-            const hsize = varint(p, &i) catch return .err;
-            var b_idx = hsize;
-            var t_ca: u64 = 0;
-            for (0..4) |k| {
-                if (i >= hsize) return .err;
-                const t = varint(p[0..hsize], &i) catch return .err;
-                const len = serialLen(t);
-                if (k == 3) {
-                    t_ca = t;
-                    break;
-                }
-                b_idx += len;
-            }
-            const len = serialLen(t_ca);
-            if (b_idx + len > p.len) return .err;
-            break :blk text(.{ .t = t_ca, .b = p[b_idx .. b_idx + len] }) catch return .err;
-        };
+        const created = text(cols[3]) catch return .err;
 
         if (td_seek(cu, uid) != 1) return .not_found;
         const up = getPayload(cu) catch return .err;
@@ -520,28 +501,10 @@ pub const Db = struct {
         if (seek_res < 0) return .err;
 
         const p = getPayload(cp) catch return .err;
-        const cols = columns(3, p) catch return .err;
+        const cols = columns(4, p) catch return .err;
         const uid = intOf(cols[1].t, cols[1].b) catch return .err;
         const body = text(cols[2]) catch return .err;
-        const created = blk: {
-            var i: usize = 0;
-            const hsize = varint(p, &i) catch return .err;
-            var b_idx = hsize;
-            var t_ca: u64 = 0;
-            for (0..4) |k| {
-                if (i >= hsize) return .err;
-                const t = varint(p[0..hsize], &i) catch return .err;
-                const len = serialLen(t);
-                if (k == 3) {
-                    t_ca = t;
-                    break;
-                }
-                b_idx += len;
-            }
-            const len = serialLen(t_ca);
-            if (b_idx + len > p.len) return .err;
-            break :blk text(.{ .t = t_ca, .b = p[b_idx .. b_idx + len] }) catch return .err;
-        };
+        const created = text(cols[3]) catch return .err;
 
         if (td_seek(cu, uid) != 1) return .not_found;
         const up = getPayload(cu) catch return .err;

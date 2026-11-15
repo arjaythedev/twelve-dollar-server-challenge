@@ -535,9 +535,23 @@ static unsigned read_rounds(void) {
   return n;
 }
 
+/* Answers the requests earlier batches left waiting, oldest first. A long pass (a backlog: up to
+ * answers_per_pass, ~0.4 s) reaps every reap_every answers, so what arrives meanwhile moves out of
+ * the sockets into pend (behind the requests already waiting) and the receive buffers go back
+ * before they run out. Without it the buffers ran dry mid-pass, requests sat in their sockets, and
+ * each socket holding one counted a page against tcp_mem: past ~30k of them TCP went into memory
+ * pressure and pruned queues (CPU, drops, retransmits) until the OOM killer ended it at 285k. */
+static unsigned reap_every = 512;
 static void run_ready(void) {
-  unsigned n = nready, i = 0;
+  unsigned n = nready, i = 0, since = 0;
   for (; i < n && answers_left; i++) {
+    if (reap_every && ++since >= reap_every) {
+      since = 0;
+      unsigned keep = answers_left;
+      answers_left = 0;
+      reap_all();
+      answers_left = keep;
+    }
     uint64_t ref = ready[i];
     struct conn *c = ref_conn(ref);
     if (c->gen != UD_GEN(ref)) continue;
@@ -852,6 +866,7 @@ int main(int argc, char **argv) {
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 16384);
+  reap_every = (unsigned)env_long("REAP_EVERY", 512);
   /* 1 ms batches. Longer ones (4 ms) would cut the WAL ~40 % (one set of hot-page frames per
    * commit), but measured under a CPU quota they add 25-50 ms to p95 at high load: bigger
    * service bursts, more queueing variance. The tail is what the score is made of. */

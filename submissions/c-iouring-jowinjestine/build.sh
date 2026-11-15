@@ -40,7 +40,9 @@ $CC -std=gnu11 -O2 -I src -o bin/train src/train.c
 if [ "${PGO:-1}" = 1 ]; then
   echo "== instrumented build"
   rm -rf pgo && mkdir -p pgo
-  $CC $CFLAGS -fprofile-generate -fprofile-update=single -fprofile-dir=pgo -c src/server.c -o bin/server.o
+  # prefer-atomic: the checkpoint thread runs SQLite during training too, and racing counters can
+  # leave a profile the optimized build rejects ("corrupted value profile")
+  $CC $CFLAGS -fprofile-generate -fprofile-update=prefer-atomic -fprofile-dir=pgo -c src/server.c -o bin/server.o
   $CC -fprofile-generate -o bin/server.inst bin/server.o $LDFLAGS
   echo "== training"
   if bash src/train.sh bin/server.inst bin/train; then

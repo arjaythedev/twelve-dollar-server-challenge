@@ -57,6 +57,14 @@ mostly idle sockets under `LimitNOFILE=65535`.
   wait in the connection's own buffer (a copy the size of the request) on a ready list that the
   next pass answers before it reaps anything new, oldest first. A request left in its socket
   costs a 3–4 KB kernel buffer, and a backlog of those is what runs a 2 GB box out of memory.
+- **Reaped during a long pass.** Answering 16,384 waiting requests takes ~0.4 s, and nothing was
+  reaped meanwhile: the receive buffers ran dry, new requests stayed in their sockets, and each
+  socket holding one counts at least a page against `tcp_mem` (~116 MB to pressure on 2 GB). Past
+  ~30k of them TCP went into memory pressure and pruned queues (CPU, drops, client retransmits)
+  until the OOM killer ended the run. Now the pass reaps every 512 answers (`REAP_EVERY`); what
+  arrived goes into the connections' buffers behind the requests already waiting, and the receive
+  buffers go back. Measured at 285k users in a 1 vCPU / 2 GB guest: no `ENOBUFS`, TCP memory
+  stayed under 31 MB, no OOM kill, longest loop turn 0.65 s (was 1.9 s).
 - **A backlog leaves no memory behind.** A connection's buffer is freed as soon as nothing waits
   in it, and at the first stats tick after a backlog has cleared, `malloc_trim` hands the freed
   heap back to the kernel. (Before, every connection a backlog touched kept its buffer for good:
@@ -209,7 +217,9 @@ mostly idle sockets under `LimitNOFILE=65535`.
 amalgamation, builds an instrumented binary, generates a synthetic database (5,000 users, 40,000
 posts, 160,000 likes of random words, no seed data) and drives the load test's request mix plus the
 test suite's error paths through it with `src/train.c` over 48 keep-alive connections, then builds
-the final binary with the profile. `PGO=0 bash build.sh` skips that. No 512-bit vectors: on Cascade
+the final binary with the profile. The instrumented build counts with `-fprofile-update=prefer-atomic`:
+the checkpoint thread runs SQLite during training too, and racing counters once left a profile the
+optimized build rejected. `PGO=0 bash build.sh` skips that. No 512-bit vectors: on Cascade
 Lake one would lower the core's clock for a while after each use.
 
 ## Rules

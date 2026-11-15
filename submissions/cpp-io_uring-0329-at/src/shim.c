@@ -5,6 +5,7 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 struct dbx {
   sqlite3 *db;
@@ -18,7 +19,8 @@ struct dbx {
   int in_tx;
   int broken;
   _Atomic int wal_frames;
-  _Atomic int ckpt_done;
+  _Atomic int gate_held;
+  _Atomic long long gate_since;
   unsigned char *rec;
   unsigned rec_cap;
 };
@@ -28,10 +30,21 @@ static int fail(sqlite3 *db, char *err, int n, const char *what) {
   return -1;
 }
 
+static long long mono_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+
 static int wal_cb(void *p, sqlite3 *db, const char *name, int frames) {
   (void)db;
   (void)name;
-  atomic_store_explicit(&((struct dbx *)p)->wal_frames, frames, memory_order_relaxed);
+  struct dbx *h = (struct dbx *)p;
+  atomic_store_explicit(&h->wal_frames, frames, memory_order_relaxed);
+  if (frames >= 4096 && !atomic_load_explicit(&h->gate_held, memory_order_relaxed)) {
+    atomic_store_explicit(&h->gate_since, mono_ns(), memory_order_relaxed);
+    atomic_store_explicit(&h->gate_held, 1, memory_order_relaxed);
+  }
   return SQLITE_OK;
 }
 
@@ -275,15 +288,6 @@ dbx *dbx_open(const char *path, char *err, int n) {
 
 int dbx_begin(dbx *h) {
   if (h->broken) return -1;
-  int frames = atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
-  if (frames >= 8192) {
-    for (int i = 0; i < 10000; i++) {
-      if (atomic_load_explicit(&h->ckpt_done, memory_order_relaxed)) break;
-      usleep(100);
-    }
-  } else {
-    atomic_store_explicit(&h->ckpt_done, 0, memory_order_relaxed);
-  }
   if (h->in_tx) {
     if (!sqlite3_get_autocommit(h->db)) return 0;
     h->in_tx = 0;
@@ -344,16 +348,33 @@ int dbx_commit(dbx *h) {
   return 0;
 }
 
+/* PASSIVE: copies frames to the database without ever waiting for readers, so this can run on a
+ * thread next to the loop.  When every frame is copied the gate opens and the next write restarts
+ * the log at frame 1, which is what keeps the file bounded (no truncate needed). */
 int dbx_checkpoint(dbx *h) {
   int nlog = 0, ndone = 0;
-  int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_RESTART, &nlog, &ndone);
+  int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
   if (rc != SQLITE_OK) {
     fprintf(stderr, "checkpoint failed: %s (%d)\n", sqlite3_errmsg(h->ckdb), rc);
     return -1;
   }
   int done = (nlog == 0 || ndone >= nlog);
-  atomic_store_explicit(&h->ckpt_done, done ? 1 : 0, memory_order_relaxed);
+  if (done && atomic_load_explicit(&h->wal_frames, memory_order_relaxed) <= nlog)
+    atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
   return done ? 0 : 1;
+}
+
+/* Non-blocking: true while the WAL is over the gate and the checkpoint thread has not caught up.
+ * Writes are held, reads keep going; the hold expires after 400 ms so a checkpoint that cannot
+ * finish (a long-lived reader) never stalls writes indefinitely. */
+int dbx_writes_held(dbx *h) {
+  if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
+  long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);
+  if (mono_ns() - since > 400000000LL) {
+    atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+    return 0;
+  }
+  return 1;
 }
 
 int dbx_wal_frames(dbx *h) {

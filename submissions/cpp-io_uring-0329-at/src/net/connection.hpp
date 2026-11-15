@@ -29,6 +29,7 @@ struct Connection {
   bool close_after = false;
   bool in_batch = false;
   bool answered = false;
+  bool held = false;
   uint32_t sent = 0;
   uint32_t last_active = 0;
   app::ByteBuf* out = nullptr;

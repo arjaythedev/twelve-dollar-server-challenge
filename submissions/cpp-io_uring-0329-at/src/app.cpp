@@ -186,7 +186,7 @@ App::App(Db&& db, const uint8_t* secret, size_t secret_len)
   body_.reserve(2048);
 }
 
-void App::handle(const http::Request& req, ByteBuf& out) {
+bool App::handle(const http::Request& req, ByteBuf& out, bool writes_ok) {
   const uint32_t mark = out.len;
   const uint8_t* p = req.path;
   const uint32_t pl = req.path_len;
@@ -201,12 +201,12 @@ void App::handle(const http::Request& req, ByteBuf& out) {
         const uint32_t rl = pl - 7;
         if (std::memchr(rest, '/', rl)) {
           error(out, 404, "not found");
-          return;
+          return false;
         }
         int64_t id = 0;
         if (!post_id(rest, rl, id)) {
           error(out, 400, "invalid post id");
-          return;
+          return false;
         }
         const uint32_t m = out.len;
         const size_t b = start(out, 200);
@@ -223,6 +223,7 @@ void App::handle(const http::Request& req, ByteBuf& out) {
       }
     } else if (method_is(req, "POST")) {
       if (path_is(req, "/posts")) {
+        if (!writes_ok) return true;
         create(req, out);
       } else if (pl >= 7 && std::memcmp(p, "/posts/", 7) == 0) {
         const uint8_t* rest = p + 7;
@@ -232,8 +233,9 @@ void App::handle(const http::Request& req, ByteBuf& out) {
           const uint32_t idl = rl - 5;
           if (std::memchr(rest, '/', idl)) {
             error(out, 404, "not found");
-            return;
+            return false;
           }
+          if (!writes_ok) return true;
           like(req, rest, idl, out);
         } else {
           error(out, 404, "not found");
@@ -248,6 +250,7 @@ void App::handle(const http::Request& req, ByteBuf& out) {
     out.len = mark;
     error(out, 500, "internal server error");
   }
+  return false;
 }
 
 void App::health(ByteBuf& out) {

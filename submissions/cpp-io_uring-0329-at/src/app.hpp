@@ -17,7 +17,9 @@ class App {
  public:
   App(Db&& db, const uint8_t* secret, size_t secret_len);
 
-  void handle(const http::Request& req, ByteBuf& out);
+  /* Returns true when the request is a write that must not run now (the WAL gate is closed):
+   * nothing has been written to `out` and the caller keeps the request for a later pass. */
+  bool handle(const http::Request& req, ByteBuf& out, bool writes_ok);
 
   Db db;
 

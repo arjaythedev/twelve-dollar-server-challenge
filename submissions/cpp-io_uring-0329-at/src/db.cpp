@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
+#include <sys/resource.h>
 #include <thread>
 
 #include "json.hpp"
@@ -17,13 +18,25 @@ namespace app {
 
 namespace {
 
+/* The checkpoint thread runs at nice 19: on one vCPU a pass at the loop's priority takes the
+ * CPU for its whole length, and that steal is visible as p95 (c-iouring-public #158 measured
+ * 2 of 3 holds dying at nice 0 against 3 of 3 at 19). */
 void checkpoint_loop(dbx* h, CkState* st) {
+  setpriority(PRIO_PROCESS, 0, 19);
   std::unique_lock<std::mutex> lk(st->mu);
   while (!st->stop.load()) {
-    st->cv.wait_for(lk, std::chrono::milliseconds(10), [st] { return st->stop.load(); });
+    st->cv.wait_for(lk, std::chrono::milliseconds(4), [st] { return st->stop.load(); });
     if (st->stop.load()) break;
     lk.unlock();
-    if (dbx_wal_frames(h) >= 8192) dbx_checkpoint(h);
+    /* PASSIVE, so it never waits for the loop's readers: copy what it can, and once every frame
+     * is copied the gate opens and the next write restarts the log at frame 1 (no truncate).
+     * While the gate is closed, keep passing: each pass can copy up to where the loop's last
+     * reader stopped, so a few passes converge and the hold ends in milliseconds instead of
+     * waiting for the next wake-up. */
+    if (dbx_wal_frames(h) >= 1024) {
+      int r = dbx_checkpoint(h);
+      for (int k = 0; r == 1 && k < 256 && dbx_writes_held(h); k++) r = dbx_checkpoint(h);
+    }
     lk.lock();
   }
 }
@@ -156,7 +169,7 @@ bool Db::commit() { return dbx_commit(h_) == 0; }
 
 void Db::tick() {}
 
-bool Db::writes_held() const { return false; }
+bool Db::writes_held() const { return dbx_writes_held(h_) != 0; }
 
 bool Db::health(std::string& err) {
   try {

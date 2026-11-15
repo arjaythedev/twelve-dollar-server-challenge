@@ -26,7 +26,8 @@
 namespace {
 
 constexpr uint32_t kRingCount = 6;
-constexpr uint32_t kAcceptDepth = 512;
+constexpr uint32_t kAcceptDepth = 2048;
+constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 4096;
 constexpr unsigned kCqEntries = 65536;
 constexpr size_t kBufSize = 2048;
@@ -73,6 +74,7 @@ class Worker {
   net::SlotTable& table() { return table_; }
   std::vector<uint32_t>& dirty() { return dirty_; }
   std::deque<uint32_t>& pending() { return pending_; }
+  std::deque<uint32_t>& held() { return held_; }
   int listener() const { return listener_; }
   uint32_t& accepts() { return accepts_; }
   int& efd() { return efd_; }
@@ -96,6 +98,7 @@ class Worker {
   net::SlotTable table_;
   std::vector<uint32_t> dirty_;
   std::deque<uint32_t> pending_;
+  std::deque<uint32_t> held_;
   int listener_ = -1;
   int efd_ = -1;
   uint32_t accepts_ = 0;
@@ -147,15 +150,51 @@ class Server {
     return static_cast<uint32_t>(ts.tv_sec);
   }
 
-  void sweep_idle() {
-    for (uint32_t wi = 0; wi < workers_.size(); wi++) {
+  static uint64_t now_ns() {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
+  }
+
+  /* Idle-connection sweep, a slice at a time: walking all 6 rings' slot tables costs 25-70 ms
+   * on the loop (measured), which is a p99 cliff on a 1 vCPU box. 1/32 of one ring per pass. */
+  void sweep_slice() {
+    if (workers_.empty() || sweep_ring_ >= workers_.size()) return;
+    Worker& w = *workers_[sweep_ring_];
+    auto& tbl = w.table();
+    const size_t total = tbl.size();
+    const size_t step = (total + 31) / 32;
+    size_t end = sweep_off_ + step;
+    if (end > total) end = total;
+    for (size_t i = sweep_off_; i < end; i++) {
+      net::Connection& c = tbl.at(i);
+      if (c.open && !c.closing && now_sec_ - c.last_active > kIdleSeconds) {
+        arm_close(w, sweep_ring_, static_cast<uint32_t>(i), c);
+      }
+    }
+    sweep_off_ = end;
+    if (end >= total) {
+      sweep_off_ = 0;
+      sweep_ring_ = (sweep_ring_ + 1) % static_cast<uint32_t>(workers_.size());
+    }
+  }
+
+  /* Answer the requests the WAL gate held, once the checkpoint thread has caught up. A pass
+   * takes at most kHeldPerPass so a long hold cannot turn one pass into a long stall. */
+  void retry_held() {
+    size_t budget = kHeldPerPass;
+    for (uint32_t wi = 0; wi < workers_.size() && budget; wi++) {
       Worker& w = *workers_[wi];
-      auto& tbl = w.table();
-      for (size_t i = 0; i < tbl.size(); i++) {
-        net::Connection& c = tbl.at(i);
-        if (c.open && !c.closing && now_sec_ - c.last_active > kIdleSeconds) {
-          arm_close(w, wi, static_cast<uint32_t>(i), c);
-        }
+      size_t n = w.held().size();
+      while (n-- > 0 && budget) {
+        const uint32_t idx = w.held().front();
+        w.held().pop_front();
+        net::Connection& c = w.table().at(idx);
+        if (!c.held) continue;
+        c.held = false;
+        if (!c.open || c.closing) continue;
+        budget--;
+        serve(w, wi, idx, nullptr, 0);
       }
     }
   }
@@ -163,24 +202,93 @@ class Server {
   [[noreturn]] void run() {
     size_t last_cqes = 0;
     uint64_t pass = 0;
+    const bool stats = std::getenv("STATS") != nullptr;
+    uint64_t t_wait = 0, t_drain = 0, t_read = 0, t_commit = 0, t_sweep = 0;
+    uint64_t stat_at = now_ns(), slow_total = 0, held_gate = 0;
+    uint64_t cqes_sum = 0, requests_sum = 0, prev_responded = 0, reqs = 0, last_reqs = 1;
+    uint64_t last_sweep = now_ns();
+    now_sec_ = now_sec();
     for (;;) {
+      const uint64_t p0 = now_ns();
+      writes_ok_ = !app_->db.writes_held();
+      if (!writes_ok_) held_gate++;
+      /* The gate can open between two passes: the requests it held must be replayed here, or
+       * they would wait for a close that never happens again. */
+      if (writes_ok_) retry_held();
+      /* Only block when there is nothing left to do: an unconditional 1 ms wait per pass is
+       * what pins a loop at ~70 % CPU with a backlog it can never clear (kensac/mojo both
+       * enter with min_complete 0 whenever work is queued). */
+      bool busy = last_cqes >= 8;
+      for (auto& wp : workers_) {
+        if (!wp->pending().empty() || !wp->dirty().empty()) {
+          busy = true;
+          break;
+        }
+      }
       for (size_t k = workers_.size(); k-- > 0;) {
         Worker& w = *workers_[k];
         if (k == 0) {
-          const unsigned min = last_cqes >= 8 ? 64 : 1;
-          w.ring().wait(min, kWaitNs);
+          if (busy && (last_cqes != 0 || last_reqs != 0)) {
+            w.ring().wait(1, 0);
+          } else {
+            w.ring().wait(last_cqes >= 8 ? 64 : 1, busy ? 50000 : kWaitNs);
+          }
         } else {
           w.ring().enter();
         }
       }
+      const uint64_t p1 = now_ns();
       last_cqes = 0;
       for (size_t i = 0; i < workers_.size(); i++)
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
+      const uint64_t p2 = now_ns();
       for (size_t i = 0; i < workers_.size(); i++) run_reads(*workers_[i], static_cast<uint32_t>(i));
+      const uint64_t p3 = now_ns();
       commit_and_flush();
-      if ((++pass & 0x7ff) == 0) {
+      const uint64_t p4 = now_ns();
+      if (!writes_ok_) writes_ok_ = !app_->db.writes_held();
+      /* Time-driven, not pass-driven: the pass rate is not bounded from below under load, and a
+       * pass-cadence sweep would then walk the whole slot table many times a second. */
+      if (p4 - last_sweep >= 50000000ULL) {
+        last_sweep = p4;
         now_sec_ = now_sec();
-        sweep_idle();
+        sweep_slice();
+      }
+      const uint64_t p5 = now_ns();
+      t_wait += p1 - p0;
+      t_drain += p2 - p1;
+      t_read += p3 - p2;
+      t_commit += p4 - p3;
+      t_sweep += p5 - p4;
+      cqes_sum += last_cqes;
+      reqs = responded_ - prev_responded;
+      prev_responded = responded_;
+      last_reqs = reqs;
+      requests_sum += reqs;
+      pass++;
+      if (stats) {
+        const uint64_t span = p5 - p0;
+        if (span > 20000000ULL && slow_total < 40) {
+          slow_total++;
+          std::fprintf(stderr,
+                       "slow pass %.1fms cqes=%zu: wait %.1f drain %.1f reads %.1f commit %.1f sweep %.1f\n",
+                       span / 1e6, last_cqes, (p1 - p0) / 1e6, (p2 - p1) / 1e6, (p3 - p2) / 1e6,
+                       (p4 - p3) / 1e6, (p5 - p4) / 1e6);
+        }
+        if (p5 - stat_at >= 1000000000ULL) {
+          std::fprintf(stderr,
+                       "stats: pass=%llu/s cqes=%llu req=%llu gated=%llu/%llu wait=%.1f%% drain=%.1f%% "
+                       "read=%.1f%% commit=%.1f%% sweep=%.1f%%\n",
+                       (unsigned long long)(pass - stat_pass), (unsigned long long)cqes_sum,
+                       (unsigned long long)requests_sum, (unsigned long long)held_gate,
+                       (unsigned long long)(pass - stat_pass), 100.0 * t_wait / (p5 - stat_at),
+                       100.0 * t_drain / (p5 - stat_at), 100.0 * t_read / (p5 - stat_at),
+                       100.0 * t_commit / (p5 - stat_at), 100.0 * t_sweep / (p5 - stat_at));
+          stat_at = p5;
+          stat_pass = pass;
+          t_wait = t_drain = t_read = t_commit = t_sweep = 0;
+          cqes_sum = requests_sum = held_gate = 0;
+        }
       }
     }
   }
@@ -213,6 +321,10 @@ class Server {
   app::ByteBuf& out_of(net::Connection& c) {
     if (!c.out) c.out = app::take_buf(pool_);
     return *c.out;
+  }
+
+  static bool is_write(const app::http::Request& req) {
+    return req.method_len == 4 && std::memcmp(req.method, "POST", 4) == 0;
   }
 
   void mark(Worker& w, uint32_t idx) {
@@ -304,9 +416,18 @@ class Server {
       size_t used = 0;
       app::http::Parsed pr = app::http::parse(buf + off, len - off, req, used);
       if (pr == app::http::Parsed::Done) {
+        if (!writes_ok_ && is_write(req)) {
+          /* The WAL gate is closed: keep this request (and anything behind it) on the
+           * connection and answer it in a later pass. Nothing is written, so no response. */
+          if (!c.held) {
+            c.held = true;
+            w.held().push_back(idx);
+          }
+          break;
+        }
         mark(w, idx);
         c.answered = true;
-        app_->handle(req, out_of(c));
+        app_->handle(req, out_of(c), writes_ok_);
         off += used;
       } else if (pr == app::http::Parsed::Partial) {
         break;
@@ -351,6 +472,7 @@ class Server {
             c = net::Connection{};
             c.gen = g;
             c.open = true;
+            c.last_active = now_sec_;
             arm_recv(w, wi, static_cast<uint32_t>(res), g);
             w.open()++;
             if (static_cast<size_t>(w.open()) + kAcceptDepth >= w.table().size())
@@ -520,6 +642,7 @@ class Server {
         }
         c.in_batch = false;
         c.answered = false;
+        responded_++;
         if (!c.open || c.closing || c.write == net::WriteState::Sending) continue;
         if (c.out && c.out->len) {
           c.wire = c.out;
@@ -541,6 +664,11 @@ class Server {
   app::Pool pool_;
   uint32_t slots_;
   unsigned cq_;
+  uint64_t responded_ = 0;
+  uint64_t stat_pass = 0;
+  bool writes_ok_ = true;
+  uint32_t sweep_ring_ = 0;
+  size_t sweep_off_ = 0;
 };
 
 uint32_t descriptor_slots() {

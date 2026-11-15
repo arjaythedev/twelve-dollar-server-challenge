@@ -101,7 +101,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 19 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
 | 19 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
 | 19 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
-| 19 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,755 | 222.7 | 980.8 | 0.00 | 83 | 29 | 1,105 | 2026-11-14 |
+| 19 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
 | 28 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 29 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 30 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
@@ -1051,10 +1051,11 @@ transport feeding TinyJS's handler, rebased on `main`), 42/42 tests: 75,000 fail
 err) and 78,000 the 2-minute probe (1.36 %). Its first version, #382 (`e6a08ba`), held 43,000 (4,219 req/s, p95 138.1 /
 p99 584.6 ms, 0 err, 86 % CPU, 2026-11-11); #410's earlier head `3b3c64f` also held 71,000 (2026-11-12).
 
-ᶫ **c-iouring-Londopy #438** (`0aa265c`, new entry; held, not merged: its B-tree *writes* are an open question for
-Arjay, see the rule flags below) held **270,000** (25,755 req/s, p95 222.7 / p99 980.8 ms, 0 err, 83 % CPU, 29 µs/req,
-1,105 MB, 2026-11-14), 42/42 tests. 280,000 and 320,000 failed the 2-minute probe on `connection refused` (71 % / 78 %
-errors; no crash or OOM kill in the box's journal).
+ᶫ **c-iouring-Londopy #438** (`04f764d`, new entry; held, not merged: its B-tree *writes* are an open question for
+Arjay, see the rule flags below) held **270,000** (25,837 req/s, p95 173.6 / p99 392.7 ms, 0 err, 82 % CPU, 29 µs/req,
+863 MB, 2026-11-15), 42/42 tests. 280,000 and 320,000 failed the 2-minute probe on latency (p99 788 ms / 8.5 s, 0
+errors). Its first head `0aa265c` also held 270,000 (25,755 req/s, p95 222.7 / p99 980.8 ms, 0 err, 83 % CPU, 1,105 MB,
+2026-11-14); there 280,000 and 320,000 failed on `connection refused`, which `04f764d` fixes.
 
 ᴵ **luajit-iouring-asxpi** stays on its merged #436 row. Its follow-up **#453** (`5124d8f`, reads answered first,
 writes committed at most every 10 ms, kept read transactions, a public `SQLITE_CONFIG_PCACHE2` wrapper; not merged: it
@@ -1244,7 +1245,7 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `sqlite3BtreeInsert` into the table and each of its indexes, with records built by the entry in SQLite's format and
   the constraints (body length, post exists, unique like) checked by its own code, inside SQLite's own transactions and
   WAL. Open question for Arjay: ruling 1 covers B-tree *reads* only (stock SQLite 3.54.1, no source patch, no private
-  struct writes). `WRITES=sql` switches to prepared INSERTs. Scored as submitted (270k at `0aa265c`); held open.
+  struct writes). `WRITES=sql` switches to prepared INSERTs. Scored as submitted (270k at `04f764d`); held open.
 - **cpp-io_uring-0329-at #442 reads `users` pages below the cursor API**: `dbx_users_seek_many` (`shim.c`, new in
   `3c73fa6`) finds the 20 feed authors by walking the `users` B-tree pages itself with SQLite's internal page functions
   (`getAndInitPage`, `xParseCell`, `findCell`) instead of a B-tree cursor. Read-only, stock amalgamation, nothing cached

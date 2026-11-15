@@ -37,8 +37,9 @@ mostly idle sockets under `LimitNOFILE=65535`.
   costs one completion. Requests are parsed in place in the kernel's buffer and the buffer goes
   back at once.
 - One `SEND` per response, headers and body in one buffer (`MSG_WAITALL`, so the completion
-  means all or nothing). Output comes from per-batch arenas that go back to a pool once every
-  send that points into them has completed, so idle connections hold no output memory either.
+  means all or nothing). Output comes from per-batch 1 MB arenas, each its own mapping, that go
+  back to a pool of 16 once every send that points into them has completed; arenas a burst needed
+  beyond that are unmapped. Idle connections hold no output memory either.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
@@ -54,8 +55,14 @@ mostly idle sockets under `LimitNOFILE=65535`.
   socket is drained and the multishot receive is armed again.
 - **Drain first.** A pass reads up to 16,384 times and answers up to 16,384 requests; the rest
   wait in the connection's own buffer (a copy the size of the request) on a ready list that the
-  next pass answers before it reaps anything new, oldest first. A request left in its socket costs a 3–4 KB kernel buffer,
-  and a backlog of those is what runs a 2 GB box out of memory.
+  next pass answers before it reaps anything new, oldest first. A request left in its socket
+  costs a 3–4 KB kernel buffer, and a backlog of those is what runs a 2 GB box out of memory.
+- **A backlog leaves no memory behind.** A connection's buffer is freed as soon as nothing waits
+  in it, and at the first stats tick after a backlog has cleared, `malloc_trim` hands the freed
+  heap back to the kernel. (Before, every connection a backlog touched kept its buffer for good:
+  at 300k users in a 2 GB guest the process grew from ~175 to 365-380 MB and the kernel's OOM
+  killer took it; now it peaks at ~260 MB with a 30-40 MB heap. The stats line prints `heap`,
+  `heap_free`, `arenas` and `trims`.)
 - Closing is a `SHUTDOWN` hard-linked to a direct-descriptor `CLOSE`; a generation number in every
   `user_data` drops completions for a reused slot. Idle connections are never closed by the server.
 - The binary's code and data are locked in RAM (`mlock`, best effort), the connection tables and

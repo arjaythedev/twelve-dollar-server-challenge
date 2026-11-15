@@ -9,6 +9,7 @@
 
 #include <arpa/inet.h>
 #include <sys/wait.h>
+#include <malloc.h>
 
 #include "sqlite3.c"
 
@@ -20,7 +21,7 @@
 #define ACCEPT_STOP_MAX 6144 /* stop accepting on a ring this many slots before its table is full */
 #define RECV_BUF_SIZE 1024 /* a request is ~150-400 bytes; a longer one spans buffers */
 #define ARENA_CAP (1u << 20)
-#define ARENA_POOL 64
+#define ARENA_POOL 16 /* arenas kept for reuse (1 MB each); a burst maps more and unmaps them after */
 #define READS_PER_PASS 16384
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
@@ -109,15 +110,24 @@ static uint64_t reads_done; /* single-shot reads that returned data or EAGAIN */
 
 /* ---------- arenas ---------- */
 
+/* Arenas are their own mappings, not heap blocks: one a burst needed beyond the pool goes back to
+ * the kernel when its last send completes, instead of staying in a heap that never shrinks. */
+static unsigned arenas_mapped;
+static struct arena *arena_map(void) {
+  void *m = mmap(NULL, sizeof(struct arena) + ARENA_CAP, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (m == MAP_FAILED) { perror("mmap arena"); exit(1); }
+  struct arena *a = m;
+  a->cap = ARENA_CAP;
+  arenas_mapped++;
+  return a;
+}
 static struct arena *arena_get(void) {
   struct arena *a = pool;
   if (a) {
     pool = a->next;
     pool_n--;
   } else {
-    a = malloc(sizeof *a + ARENA_CAP);
-    if (!a) { perror("malloc arena"); exit(1); }
-    a->cap = ARENA_CAP;
+    a = arena_map();
   }
   a->refs = 0;
   a->used = 0;
@@ -130,7 +140,8 @@ static void arena_unref(struct arena *a) {
     pool = a;
     pool_n++;
   } else {
-    free(a);
+    munmap(a, sizeof(struct arena) + ARENA_CAP);
+    arenas_mapped--;
   }
 }
 static uint8_t *arena_reserve(unsigned n) {
@@ -145,10 +156,8 @@ static uint8_t *arena_reserve(unsigned n) {
 
 static void prewarm(void) {
   for (unsigned i = 0; i < 8; i++) {
-    struct arena *a = malloc(sizeof *a + ARENA_CAP);
-    if (!a) { perror("malloc arena"); exit(1); }
-    memset(a, 0, sizeof *a + ARENA_CAP);
-    a->cap = ARENA_CAP;
+    struct arena *a = arena_map();
+    memset(a->data, 0, ARENA_CAP);
     a->next = pool;
     pool = a;
     pool_n++;
@@ -233,8 +242,10 @@ static void pend_append(struct conn *c, const uint8_t *p, uint32_t n) {
 /* Keeps p[0..n) as the connection's waiting input (p may point into pend). */
 static void stash(struct conn *c, const uint8_t *p, uint32_t n) {
   if (n == 0) {
+    /* nothing waits: give the buffer back (a backlog would otherwise leave every connection it
+     * touched holding one for good, ~100 MB after 200k deferred requests) */
     c->pend_len = 0;
-    if (c->pend_cap > 4096) { free(c->pend); c->pend = NULL; c->pend_cap = 0; }
+    if (c->pend_cap) { free(c->pend); c->pend = NULL; c->pend_cap = 0; }
     return;
   }
   if (p == c->pend) { c->pend_len = n; return; }
@@ -590,6 +601,8 @@ static void flush_replies(int commit_failed) {
 
 static uint64_t T_reqs, T_accepts, T_closes;
 static long majflt_prev;
+static int trim_due; /* a backlog freed heap memory: hand it back once the backlog is gone */
+static unsigned long long n_trims;
 static void stats(uint64_t dt_ns) {
   unsigned open = 0;
   fprintf(stderr, "rings open=");
@@ -602,12 +615,15 @@ static void stats(uint64_t dt_ns) {
   int c_hit = 0, c_miss = 0, hw;
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_HIT, &c_hit, &hw, 1);
   sqlite3_db_status(A.db.c, SQLITE_DBSTATUS_CACHE_MISS, &c_miss, &hw, 1);
+  if (S.deferred || S.enobufs) trim_due = 1;
+  else if (trim_due && nready == 0) { malloc_trim(0); trim_due = 0; n_trims++; } /* pend buffers a backlog freed leave holes malloc would keep */
+  struct mallinfo2 mi = mallinfo2();
   fprintf(stderr,
           " total_reqs=%llu req/s=%.0f batches/s=%.0f avg_batch=%.1f max_batch=%llu accepts=%llu closes=%llu enobufs=%llu reads=%llu "
           "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
           "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
           "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu "
-          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu\n",
+          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu heap=%zuMB heap_free=%zuMB arenas=%u trims=%llu\n",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
@@ -617,7 +633,7 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)wal_pwrites, (double)A.db.bulk_max_ns / 1e6, (double)A.db.hold_max_ns / 1e6,
           (double)A.db.hold_total_ns / 1e6, (unsigned long long)A.db.n_hold_timeout, (unsigned long long)A.db.tail_frames_max,
           (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max, (double)S.max_gap_ns / 1e6, ru.ru_majflt - majflt_prev,
-          (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy);
+          (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy, mi.arena >> 20, mi.fordblks >> 20, arenas_mapped, n_trims);
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;

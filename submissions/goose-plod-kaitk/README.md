@@ -3,15 +3,15 @@
 The feed API written as an ordinary [Plod](https://github.com/kaitk/plod) application:
 routes, a bearer check, and SQL with bound parameters, on the framework's own HTTP
 server. There is no hand-written event loop, request parser, or B-tree code here, and
-no C: `app.goose` is the whole application, about 250 lines.
+no C: `app.goose` is the whole application, about 500 lines with its comments.
 
 | | |
 |---|---|
 | Language | [Goose](https://github.com/aardappel/goose) release `v2026.4`, which compiles to C; the official release, checked against its SHA-256 by `install.sh` |
-| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.12`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.19` (io_uring) |
+| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.13`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.20` (io_uring) |
 | SQLite | [goose-sqlite](https://github.com/kaitk/goose-sqlite) `v0.0.4`, which builds SQLite 3.54.1's amalgamation, unmodified, into the program |
 | JWT | Plod's HS256 verifier, over [goose-hash](https://github.com/kaitk/goose-hash) `v0.0.4` |
-| C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`) |
+| C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`); SQLite's amalgamation from a profile (PGO) |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ for goose-http's io_uring loop |
 
@@ -26,10 +26,15 @@ no C: `app.goose` is the whole application, about 250 lines.
   same core. goose-sqlite's `Conn` prepares each statement once and keeps it, and a
   query is its SQL and its values:
   `sqlite::query(db, ONE_POST, id) { r => post(out, r); }`.
-- **Each write commits before its response.** `INSERT ... RETURNING` for a post, and
-  `INSERT ... SELECT ... ON CONFLICT DO NOTHING` for a like, each its own transaction,
-  in WAL with `synchronous=NORMAL` (rule 6). A like that changes nothing is a repeat,
-  or a post that doesn't exist, which one more lookup tells apart.
+- **Writes commit together, each answered after its commit** (rule 6), in WAL with
+  `synchronous=NORMAL`. `INSERT ... RETURNING` for a post, and `INSERT ... SELECT ...
+  ON CONFLICT DO NOTHING` for a like, go into the open transaction, which the write
+  begins if none is open. The route then calls `plod::after_pass`, which calls it again
+  once the worker has handled the rest of its pass of events. The first of those calls
+  in a pass commits, and each write answers 201, or 500 if the commit failed. Reads
+  in the same pass see the writes before the commit, as in one transaction a pass. A
+  like that changes nothing is a repeat, or a post that doesn't exist, which one more
+  lookup tells apart; it is answered at once.
 - **One process.** Every k6 user keeps its connection open, and a process can hold
   only `LimitNOFILE` descriptors, 65,535 on the box. goose-http's `ring_direct` keeps
   connections as io_uring direct descriptors instead, in rings of 65,535 slots that
@@ -60,10 +65,17 @@ no C: `app.goose` is the whole application, about 250 lines.
   re-prepares the statement for every request.
 - **A checkpoint lane.** Copying the WAL back into the database waits on fsyncs, and
   on the worker that wait stalls every connection. A goose-http lane, a thread with
-  its own connection, runs a PASSIVE checkpoint every 1,024 writes, about 4,000 WAL
-  pages; PASSIVE never holds up the worker's writes. Writes keep arriving while it
-  runs, so it never empties the WAL itself: the worker's own checkpoint, at 16,000
-  pages (`wal_autocheckpoint`), copies only what is left and lets the WAL start over.
+  its own connection, runs a PASSIVE checkpoint every 1,024 writes; PASSIVE never
+  holds up the worker's writes. Writes keep arriving while it runs, so it never
+  copies the whole WAL back, and the WAL can't start over.
+- **A checkpoint hold.** After 4,096 writes since the WAL last started over, the
+  write commits the open transaction and asks the lane for a checkpoint. It and the
+  writes after it wait, at most 250 ms, before they write; reads go on. With no
+  commits arriving, the checkpoint copies the whole WAL back, the waiting writes run,
+  and the first of them starts the WAL over. The worker checkpoints the WAL itself only
+  at 65,536 pages (`wal_autocheckpoint`), if holds fall behind. Before the hold, the
+  worker checkpointed at 16,000 pages, with fsyncs on its loop, and those were the
+  p99.
 - **The `unix-excl` VFS.** Both connections open the database as a `file:` URI on
   SQLite's `unix-excl` VFS, as the one process holds the database alone: the file is
   locked once, and the two connections share the WAL index in memory, with no `-shm`
@@ -71,10 +83,60 @@ no C: `app.goose` is the whole application, about 250 lines.
 - **Pragmas**: `cache_size` 16 MB on the worker, which leaves page reads at 0.03 a
   request. No `mmap`: with it, every page read looks the page up in the WAL index,
   which was a third of the instructions in a profile.
+- **SQLite built from a profile.** `build.sh` first builds `train.goose` with only
+  `sqlite3.c` instrumented. The trainer makes its own database in the challenge's
+  schema (5,000 users, 50,000 posts, 400,000 likes), since the seed isn't promised at
+  build time, and serves `app.goose`'s routes in-process through `plod::serve_one`,
+  40,000 user loops in `bench/load.js`'s mix, writes and checkpoint holds included.
+  The server is then built with gcc's `-fprofile-use` on `sqlite3.c`. `pgo-gcc` is
+  the compiler `build.sh` passes `goose build`: it adds the flags for `sqlite3.c`
+  only, from two folders, as Goose keeps each compiler path's objects apart.
 - **JSON strings** go through `http::json_string`, which finds what to escape with
   std's `find_any`, not a byte-at-a-time loop.
 
 ## Measured
+
+On the board, the first version held 115,000 users, and the second, with the
+buffers, the lane, and the range reads below, 185,000. At 195,000 the second failed
+the hold on p99 (1.13 s), with no errors and the CPU at about 74%. Entries above it
+fail the same way at 72% to 88%: with fewer µs a request, and with a shorter tail
+from writes, which commit together and keep the WAL's checkpoints off the loop.
+
+Group commit and the hold, against the second version, on the x86-64 machine
+described below, at 10,000 users (about 16,400 requests and 1,200 writes a second),
+three alternating rounds each:
+
+| Build | CPU | p95 | p99 | max | µs a request |
+|---|---|---:|---:|---:|---:|
+| second version | 1 | 6.5 to 7.2 ms | 39.6 to 43.1 ms | 110 to 201 ms | 30.8 to 31.3 |
+| and group commit | 1 | 5.2 to 6.5 ms | 27.0 to 43.8 ms | 115 to 244 ms | 30.3 to 31.1 |
+| and the hold (`start.sh`) | 1 | 4.6 to 4.9 ms | 7.5 to 8.3 ms | 81 to 196 ms | 30.2 to 30.8 |
+| second version | 0.65 | 11.1 to 17.2 ms | 37.0 to 49.4 ms | 82 to 130 ms | 30.6 to 30.9 |
+| and group commit | 0.65 | 6.5 to 8.1 ms | 29.0 to 37.0 ms | 68 to 141 ms | 30.1 to 30.7 |
+| and the hold (`start.sh`) | 0.65 | 5.1 to 5.2 ms | 8.9 to 17.4 ms | 73 to 163 ms | 30.0 to 30.3 |
+| rust-iouring-kensac | 1 | 3.7 ms | 7.0 ms | | 27.6 |
+| rust-iouring-kensac | 0.65 | 3.4 to 4.3 ms | 5.8 to 13.4 ms | | 27.1 to 27.6 |
+
+The hold takes p99 to kensac's range at both CPU limits, in every round. Group commit
+alone is within the spread: at this rate a 1 ms pass holds about one write. The CPU a
+request is about the same as before, so the gain on the board is the tail, not the
+throughput.
+
+SQLite from a profile, against the same build without it, the same setup, three
+alternating rounds each:
+
+| Build | CPU | p95 | p99 | max | µs a request |
+|---|---|---:|---:|---:|---:|
+| the hold | 1 | 4.9 to 5.1 ms | 8.2 to 11.4 ms | 128 to 268 ms | 30.5 to 30.6 |
+| and PGO (`start.sh`) | 1 | 5.0 ms | 9.3 to 9.9 ms | 100 to 240 ms | 30.5 to 30.6 |
+| the hold | 0.65 | 5.3 to 6.1 ms | 12.1 to 52.7 ms | 74 to 170 ms | 30.4 to 30.7 |
+| and PGO (`start.sh`) | 0.65 | 5.1 to 6.0 ms | 8.9 to 48.4 ms | 78 to 165 ms | 30.3 to 30.7 |
+
+Under callgrind with its cache and branch simulation (300 users, 40 s, two runs
+each), PGO gives about 1% fewer instruction-cache misses and 4% fewer mispredicted
+conditional branches a request; instructions a request vary 3% from run to run, and
+the two builds overlap. The 5800X3D's 96 MB L3 hides most of those misses, so the
+rounds here are level; the box, with a smaller cache, may gain more.
 
 The first version, without `ring_buffers` or the lane, held 115,000 users on the
 board; it ran at half the CPU during the hold, and at 120,000 failed at 97% with
@@ -158,8 +220,8 @@ Kernel time there is mostly Docker's bridge, the same for both. Most of the entr
 time is SQLite running the SQL, about 7.6 µs a request. The p99 comes from writes:
 without them it is 2 ms.
 
-These are not the box's numbers. Scaled by the ratio to kensac, the entry estimates
-between 225,000 and 260,000 users.
+These are not the box's numbers. The box runs the entry at about 36 µs a request
+against kensac's 25, a wider gap than here.
 
 ## Running it
 

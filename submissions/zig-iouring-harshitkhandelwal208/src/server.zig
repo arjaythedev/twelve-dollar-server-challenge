@@ -92,7 +92,7 @@ pub const Conn = struct {
     pub const FLAG_SHUT_LIVE: u8 = 1 << 3;
     pub const FLAG_CLOSING: u8 = 1 << 4;
     pub const FLAG_OUT_POOL: u8 = 1 << 5;
-    pub const FLAG_READ_QUEUED: u8 = 1 << 6;
+    pub const FLAG_HELD_WRITE: u8 = 1 << 6;
     pub const FLAG_IN_BATCH: u8 = 1 << 7;
 
     pub inline fn isOpen(self: *const Conn) bool {
@@ -113,6 +113,9 @@ pub const Conn = struct {
     pub inline fn isOutPool(self: *const Conn) bool {
         return (self.flags & FLAG_OUT_POOL) != 0;
     }
+    pub inline fn isHeldWrite(self: *const Conn) bool {
+        return (self.flags & FLAG_HELD_WRITE) != 0;
+    }
 
     pub inline fn setOpen(self: *Conn, v: bool) void {
         self.setFlag(FLAG_OPEN, v);
@@ -122,6 +125,9 @@ pub const Conn = struct {
     }
     pub inline fn setSendLive(self: *Conn, v: bool) void {
         self.setFlag(FLAG_SEND_LIVE, v);
+    }
+    pub inline fn setHeldWrite(self: *Conn, v: bool) void {
+        self.setFlag(FLAG_HELD_WRITE, v);
     }
     pub inline fn setShutLive(self: *Conn, v: bool) void {
         self.setFlag(FLAG_SHUT_LIVE, v);
@@ -198,7 +204,7 @@ pub const Server = struct {
     in_tx: bool = false,
     pending_writes: [16384]PendingWrite = undefined,
     n_pending_writes: usize = 0,
-    held_writes: [4096]HeldWrite = undefined,
+    held_writes: [65536]HeldWrite = undefined,
     n_held_writes: usize = 0,
 
     pub fn init(db: Db, jwt_key: Key) !*Server {
@@ -579,7 +585,7 @@ pub const Server = struct {
                     // Check write-hold during active checkpoint tail
                     if ((head.method == .post or head.method == .delete) and self.db.writesHeld()) {
                         self.savePending(c, rem);
-                        self.pushHeldWrite(w, slot, c.gen);
+                        self.pushHeldWrite(w, slot, c.gen, c);
                         return;
                     }
 
@@ -945,14 +951,23 @@ pub const Server = struct {
         self.n_pending_writes = 0;
     }
 
-    fn pushHeldWrite(self: *Server, w: *RingWorker, slot: u32, gen: u32) void {
-        for (self.held_writes[0..self.n_held_writes]) |hw| {
-            if (hw.w == w and hw.slot == slot and hw.gen == gen) return;
-        }
+    fn pushHeldWrite(self: *Server, w: *RingWorker, slot: u32, gen: u32, c: *Conn) void {
+        if (c.isHeldWrite()) return;
+        c.setHeldWrite(true);
+
         if (self.n_held_writes < self.held_writes.len) {
             self.held_writes[self.n_held_writes] = .{ .w = w, .slot = slot, .gen = gen };
             self.n_held_writes += 1;
+            return;
         }
+
+        // Explicit backpressure: if the 65,536-entry hold queue is full,
+        // synchronously advance the checkpoint until the hold releases (bounded by HOLD_MAX_MS = 100ms in shim.c)
+        while (self.db.writesHeld()) {
+            self.db.tick();
+            std.atomic.spinLoopHint();
+        }
+        self.drainHeldWrites();
     }
 
     fn drainHeldWrites(self: *Server) void {
@@ -962,6 +977,7 @@ pub const Server = struct {
             if (hw.slot < hw.w.slots) {
                 const c = &hw.w.conns[hw.slot];
                 if (c.isOpen() and !c.isClosing() and c.gen == hw.gen) {
+                    c.setHeldWrite(false);
                     self.handleData(hw.w, hw.slot, c, &.{});
                 }
             }
@@ -1065,6 +1081,7 @@ pub const Server = struct {
     fn closeConn(self: *Server, w: *RingWorker, slot: u32, c: *Conn) void {
         if (!c.isOpen() or c.isClosing()) return;
         c.setClosing(true);
+        c.setHeldWrite(false);
 
         if (c.out) |m| {
             if (c.isOutPool()) {

@@ -149,30 +149,34 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
-  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
+  rust-iouring-kensac #264, changed for one vCPU). Past 4,096 WAL frames (16 MB) a thread at
   nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
   writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
   fully copied; so that thread runs pass after pass, each copying what the previous one missed,
   until fewer than 64 frames remain (it converges: it copies faster than the loop writes). Then
   writes are held (reads go on; the next POST on each connection waits in its buffer) while a
   second thread at the normal priority copies that remainder: a few milliseconds of copying plus
-  the syncs of the log and of the database, on a thread. That thread then restarts the log itself
-  with a one-frame transaction (`PRAGMA user_version`): SQLite syncs the log header when a log is
-  reused (`synchronous=NORMAL`), and this way that sync, the last one the loop used to do, lands
-  on the thread too. The loop's reads go on meanwhile from the database file (read mark 0), which
-  a restart does not disturb; a read that began earlier holds another mark and makes the attempt
-  `BUSY`, so it is retried, and if the hold ends first the loop's next write restarts the log as
-  before. A hold
+  the syncs of the log and of the database, on a thread. **The loop's next write restarts the
+  log**, as in kensac's entry. (Until this commit the tail thread restarted it with a one-frame
+  transaction, to keep the log-header sync off the loop. But a log restarted by another
+  connection makes SQLite drop the loop connection's whole page cache at its next read: every
+  cycle, the hot pages were read again, ~105-119k cache misses per run against ~8.9k now. On a
+  disk whose reads cost milliseconds, with the box's memory pressure evicting the file's pages,
+  those misses are reads from the disk on the loop thread. `TAIL_RESTART=1` brings it back.) A hold
   starts and ends only between batches and lasts at most 400 ms (writes only, once per cycle:
   under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the next
   cycle waits for half a log more, so a slow disk never gives back-to-back holds, and the limit
   grows for a log that has missed restarts, up to 800 ms and no further: a POST that waited a
   second would count against the score, so past that the log is simply allowed to grow (a
   longer log costs the loop nothing while its page cache holds the hot pages: the wal-index is
-  consulted only on a cache miss) until the disk gives a restart. Before each pass the bulk
-  thread reads the log sequentially ahead (`readahead`): a pass reads frames in page order,
-  random in the file, and once the box's memory pressure has evicted them (they are clean once
-  written back) that would be a disk seek per frame.
+  consulted only on a cache miss) until the disk gives a restart. Cycles are 16 MB (they were
+  64 MB, with a read-ahead of up to 256 MB of log before each pass; `CKPT_FRAMES=16384
+  WAL_READAHEAD=1` bring that back): less log in the page cache at the box's memory wall, so
+  fewer of the database's own pages are evicted. (`e3070c5` tried 16 MB cycles alone and scored
+  260,000: with the tail thread still restarting the log that meant four times as many cache
+  wipes.) Measured in a 1 vCPU / 2 GB guest with 2 ms added to every disk read and write, 270k
+  users: p99 4.5 s / 2.4 s before, 2.2 s / 0.81 s after; worst commit 249 / 137 ms before,
+  60 / 24 ms after.
   (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms limit: on the
   box the tail's sync of a few hundred random pages outlasted the limit, the log never restarted,
   and the last resort copied half a gigabyte on the loop once per probe, the one stall that

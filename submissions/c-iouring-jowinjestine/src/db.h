@@ -20,10 +20,16 @@
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
-static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
+static int ckpt_frames = 4096;   /* WAL frames (16 MB) after which the bulk thread copies the log back */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
 static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
+/* TAIL_RESTART=1: the tail thread restarts the log. Off by default: a log restarted by another
+ * connection makes SQLite drop the loop's whole page cache at its next read, every cycle (~12x the
+ * cache misses; on a slow disk under memory pressure, reads from the disk on the loop). With it off
+ * the loop's next write restarts the log and its cache survives. */
+static int tail_restart_on = 0;
+static int wal_ra_on = 0;        /* WAL_READAHEAD=1: read the log ahead before a bulk pass (more page cache at the memory wall) */
 static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
@@ -410,10 +416,10 @@ static void *ck_main(void *arg) {
       }
     }
     pthread_mutex_unlock(&d->mu);
-    if (t->state == CK_BULK) wal_readahead(t);
+    if (t->state == CK_BULK && wal_ra_on) wal_readahead(t);
     int nlog = -1, ndone = -2;
     int rc = sqlite3_wal_checkpoint_v2(t->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-    int restarted = t->state == CK_TAIL && rc == SQLITE_OK && nlog > 0 && nlog == ndone && tail_restart(t);
+    int restarted = t->state == CK_TAIL && rc == SQLITE_OK && nlog > 0 && nlog == ndone && tail_restart_on && tail_restart(t);
     pthread_mutex_lock(&d->mu);
     d->tail_restarted = restarted;
     d->ck_left = rc == SQLITE_OK && nlog >= ndone ? nlog - ndone : CKPT_FORCE;

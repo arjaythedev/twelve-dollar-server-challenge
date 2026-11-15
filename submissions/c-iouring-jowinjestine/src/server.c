@@ -872,11 +872,13 @@ int main(int argc, char **argv) {
    * service bursts, more queueing variance. The tail is what the score is made of. */
   wait_min = (unsigned)env_long("WAIT_MIN", 256);
   wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
-  ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
+  ckpt_frames = (int)env_long("CKPT_FRAMES", 4096);
   ckpt_tail = (int)env_long("CKPT_TAIL", 64);
   hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
   wb_kick_ms = env_long("WB_KICK_MS", 250);
   ckpt_log = (int)env_long("CKPT_LOG", 0);
+  tail_restart_on = (int)env_long("TAIL_RESTART", 0);
+  wal_ra_on = (int)env_long("WAL_READAHEAD", 0);
   long want = env_long("MAX_CONNS", 600000);
   NR_MAX = (unsigned)((want + nslots - 1) / nslots);
   if (NR_MAX < 1) NR_MAX = 1;

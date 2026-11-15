@@ -187,7 +187,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 108 | cpp-uwebsockets-tbsvttr | #6 | C++ (uWebSockets) | **115,000** | 10,940 | 261 | 652 | 0.00 | 87 | 74 | 215 | 2026-10-26 |
 | 109 | d-iouring-cyrusmsk | #163 | D (io_uring, during) | **114,000** | 11,158 | 248 | 567 | 0.00 | 87 | 73 | 475 | 2026-11-01 |
 | 110 | zig-usockets-tbsvttr | #25 | Zig (uSockets) | **110,000** | 10,442 | 335 | 721 | 0.00 | 90 | 80 | 188 | 2026-10-26 |
-| 110 | lua-neovim-unorig-username | #443 | Lua (Neovim, libuv, LuaJIT FFI SQLite) | **110,000** | 10,785 | 68.1 | 154.1 | 0.00 | 89 | 77 | 425 | 2026-11-14 |
+| 110 | lua-neovim-unorig-username | #443 | Lua (Neovim, libuv, LuaJIT FFI SQLite) | **110,000** ⱽ | 10,785 | 68.1 | 154.1 | 0.00 | 89 | 77 | 425 | 2026-11-14 |
 | 112 | c-epoll-TheFirstIstari | #64 | C (epoll) | **107,000** | 10,493 | 212 | 409 | 0.94 | 78 | 69 | 169 | 2026-10-21 |
 | 113 | java-nio-stohirov | #88 | Java (FFM epoll) | **102,000** | 10,023 | 86 | 128 | 0.85 | 66 | 61 | 555 | 2026-10-21 |
 | 114 | saad-web-jakobsaadbye | #389 | Saad (native via LLVM, 4 SO_REUSEPORT processes) | **100,000** ᴶ | 9,838 | 35.0 | 160.4 | 0.00 | 93 | 88 | 703 | 2026-11-10 |
@@ -1095,6 +1095,12 @@ writes committed at most every 10 ms, kept read transactions, a public `SQLITE_C
 scored below the merged row) held **230,000** (22,288 req/s, p95 76.8 / p99 207.7 ms, 0 err, 69 % CPU, 29 µs/req,
 1,078 MB, 2026-11-15), 42/42 tests: 240,000 failed the 2-minute probe on p99 (1.07 s at 72 % CPU, 0 errors) and 320,000
 on p95/p99 (4.45 / 26.4 s, 0.34 % timeouts, 92 % CPU).
+
+ⱽ **lua-neovim-unorig-username** stays on its merged #443 row. Its follow-up **#463** (`4dbd5cf`, constant-time JWT
+signature compare, reads on a second SQLite connection, its own copy of Ubuntu's `libsqlite3.so.0`; not merged: it
+scored below the merged row) held **100,000** (9,826 req/s, p95 54.2 / p99 122.6 ms, 0 err, 88 % CPU, 83 µs/req,
+489 MB, 2026-11-15), 42/42 tests. CPU-bound: 105,000 and 110,000 failed the 2-minute probe on p95/p99 (1.66 / 4.32 s
+and 1.80 / 3.05 s at 93 % CPU, 0 errors).
 
 ## Patches (ᵖ) and failures
 

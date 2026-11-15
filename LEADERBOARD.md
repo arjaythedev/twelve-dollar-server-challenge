@@ -881,7 +881,11 @@ at 40k) while CPU stays at 48–79 %, so the write path, not CPU, is the limit.
 
 ᴼ **Emacs Lisp #444's errors are dropped writes at three-quarters CPU.** The 0.96 % in its scored hold (76 % CPU) are
 EOFs, all on POSTs: 13 % of likes and 11 % of new posts failed, 0 reads. They grow with load (0.29 % at 23k, 1.38 % at
-25k); at 30k+ Nginx also returns 502/504s (7.8 % errors at 96 % CPU).
+25k); at 30k+ Nginx also returns 502/504s (7.8 % errors at 96 % CPU). Its follow-up **#464** (`80e2dd4`, serves
+direct on :80, keeps 32 connections alive and answers the rest with `Connection: close`, constant-time JWT signature
+compare; held, not merged: open question for Arjay, see the rule flags) held **35,000** (3,434 req/s, p95 90.0 /
+p99 209.8 ms, 0 err, 92 % CPU, 249 µs/req, 111 MB, 2026-11-15), 42/42 tests. CPU-bound: the 37,000 5-minute hold
+failed on p95/p99 (596 / 971 ms, 0 errors, 96 % CPU). The row stays at #444's merged score until that's answered.
 
 ᴴ **Prolog #455's errors are dropped writes at three-quarters CPU.** The 0.95 % in its scored hold (73 % CPU) are
 EOFs, all on POSTs: 13 % of likes and 11 % of new posts failed, 0 reads. They grow with load (0.26 % at 23k, 1.37 % at
@@ -1295,6 +1299,11 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   is #264's `csrc/shim.c` with the comments removed and small edits; the Zig server, HTTP, JSON and JWT code are the
   author's own. Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; the
   README doesn't credit #264 yet, so it's held until it does. Scored as submitted (219k at `7c2ebfb`).
+- **elisp-emacs-unorig-username #464 (follow-up to #444) closes every connection past the first 32**: it serves direct
+  on :80, keeps 32 connections alive and answers everyone else with `Connection: close`, so nearly every request
+  arrives on a new connection (1,235,237 dials for about 1.24 M requests in the scored hold; TCP connect time isn't
+  part of request latency). Nothing detects the load test and it works for any client. Open question for Arjay
+  (rules 7/9): is that an allowed way to serve direct? Scored as submitted (35k at `80e2dd4`); held open.
 - **Reads can see uncommitted writes** in the same batch: Deno #119 (also serves a snapshot up to 20 ms stale), Zig #125.
 - **start.sh restart loops** (the app restarts itself instead of letting systemd see a crash): Deno #119, c-epoll #64,
   c-iouring-raoz #26 (restarts after a signal exit), go-epoll-Antheurus #65 (worker 0 re-spawns dead workers).

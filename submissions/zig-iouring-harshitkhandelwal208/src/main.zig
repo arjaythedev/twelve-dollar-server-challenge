@@ -27,7 +27,6 @@ fn envInt(init: std.process.Init, name: []const u8, default: u32) u32 {
 }
 
 fn crashHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
-    _ = info;
     _ = ctx;
     if (sig == .TERM or sig == .INT) {
         linux.exit(0);
@@ -43,6 +42,12 @@ fn crashHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) 
     const prefix = "FATAL CRASH: caught ";
     _ = linux.write(2, prefix.ptr, prefix.len);
     _ = linux.write(2, name.ptr, name.len);
+
+    var buf: [64]u8 = undefined;
+    const addr = @intFromPtr(info.fields.sigfault.addr);
+    const msg = std.fmt.bufPrint(&buf, "Faulting address: 0x{x}, code: {d}\n", .{ addr, info.code }) catch "bad addr\n";
+    _ = linux.write(2, msg.ptr, msg.len);
+
     linux.exit(128 + @as(u8, @intCast(@intFromEnum(sig) & 0x7f)));
 }
 

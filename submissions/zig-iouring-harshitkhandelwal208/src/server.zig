@@ -194,6 +194,9 @@ pub const Server = struct {
     n_pending_writes: usize = 0,
 
     pub fn init(db: Db, jwt_key: Key) !*Server {
+        const d0 = "LOG: [3.1] mapping Server\n";
+        _ = linux.write(2, d0.ptr, d0.len);
+
         const smem = try sys.mapAnon(@sizeOf(Server));
         const s: *Server = @ptrCast(@alignCast(smem.ptr));
         @memset(smem, 0);
@@ -208,17 +211,29 @@ pub const Server = struct {
         if (sys.errnoOf(ep) != .SUCCESS) return error.EpollFailed;
         s.epfd = @intCast(ep);
 
+        const d1 = "LOG: [3.2] epoll created, pre-allocating rings\n";
+        _ = linux.write(2, d1.ptr, d1.len);
+
         // Pre-allocate rings
         var n_initialized: usize = 0;
         for (0..k_ring_count) |i| {
+            var log_buf: [32]u8 = undefined;
+            const log_start = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] start\n", .{i}) catch "LOG: start\n";
+            _ = linux.write(2, log_start.ptr, log_start.len);
+
             var rw = &s.rings[i];
             rw.id = @intCast(i);
             rw.slots = slots_per_ring;
             rw.nconn = 0;
             rw.ring = initRing() catch |e| {
+                const log_err = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] initRing err\n", .{i}) catch "LOG: err\n";
+                _ = linux.write(2, log_err.ptr, log_err.len);
                 if (i == 0) return e;
                 break;
             };
+
+            const log_r = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] initRing ok\n", .{i}) catch "LOG: ok\n";
+            _ = linux.write(2, log_r.ptr, log_r.len);
 
             const qmem = try sys.mapAnon(65536 * @sizeOf(u32));
             rw.rearm_queue = @as([*]u32, @ptrCast(@alignCast(qmem.ptr)))[0..65536];
@@ -226,14 +241,24 @@ pub const Server = struct {
             rw.rearm_tail = 0;
 
             setupPbufRing(rw) catch |e| {
+                const log_pb = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] pbuf err\n", .{i}) catch "LOG: err\n";
+                _ = linux.write(2, log_pb.ptr, log_pb.len);
                 if (i == 0) return e;
                 break;
             };
 
+            const log_pb = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] pbuf ok\n", .{i}) catch "LOG: ok\n";
+            _ = linux.write(2, log_pb.ptr, log_pb.len);
+
             rw.ring.register_files_sparse(slots_per_ring) catch |e| {
+                const log_rf = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] files err\n", .{i}) catch "LOG: err\n";
+                _ = linux.write(2, log_rf.ptr, log_rf.len);
                 if (i == 0) return e;
                 break;
             };
+
+            const log_rf = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] files ok\n", .{i}) catch "LOG: ok\n";
+            _ = linux.write(2, log_rf.ptr, log_rf.len);
 
             const cmem = try sys.mapAnon(@as(usize, slots_per_ring) * @sizeOf(Conn));
             sys.madviseHuge(cmem);
@@ -245,13 +270,22 @@ pub const Server = struct {
             };
             _ = linux.epoll_ctl(s.epfd, 1, rw.ring.fd, &ev);
 
+            const log_end = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] done\n", .{i}) catch "LOG: done\n";
+            _ = linux.write(2, log_end.ptr, log_end.len);
+
             n_initialized += 1;
         }
+
+        const d2 = "LOG: [3.3] rings initialized, setting up scratch & pools\n";
+        _ = linux.write(2, d2.ptr, d2.len);
 
         s.active_rings = n_initialized;
         s.scratch = try Scratch.init(128 * 1024);
         s.resp_buf = try Buf.init(128 * 1024);
         s.resp_pool = try RespPool.init();
+
+        const d3 = "LOG: [3.4] init complete\n";
+        _ = linux.write(2, d3.ptr, d3.len);
 
         return s;
     }
@@ -326,7 +360,6 @@ pub const Server = struct {
 
     pub fn makeListeners(self: *Server, host: [4]u8, port: u16) !void {
         const one: c_int = 1;
-        const defer_secs: c_int = 1;
         const rcv: c_int = 2048;
         const snd: c_int = 16384;
         const clamp: c_int = 4096;
@@ -339,7 +372,6 @@ pub const Server = struct {
             _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&one), @sizeOf(c_int));
             _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEPORT, @ptrCast(&one), @sizeOf(c_int));
             _ = linux.setsockopt(fd, linux.IPPROTO.TCP, linux.TCP.NODELAY, @ptrCast(&one), @sizeOf(c_int));
-            _ = linux.setsockopt(fd, linux.IPPROTO.TCP, 9, @ptrCast(&defer_secs), @sizeOf(c_int));
             _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.RCVBUF, @ptrCast(&rcv), @sizeOf(c_int));
             _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.SNDBUF, @ptrCast(&snd), @sizeOf(c_int));
             _ = linux.setsockopt(fd, linux.IPPROTO.TCP, 10, @ptrCast(&clamp), @sizeOf(c_int));
@@ -1045,3 +1077,4 @@ pub const Server = struct {
         s.user_data = ud(.close, 0, 0);
     }
 };
+

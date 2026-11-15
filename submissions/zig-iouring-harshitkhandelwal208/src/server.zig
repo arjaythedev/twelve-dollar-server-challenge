@@ -365,8 +365,8 @@ pub const Server = struct {
         s.now = sys.nowUnix();
         for (&s.listeners) |*l| l.* = -1;
 
-        s.rq = try FifoQueue.init(1048576);
-        s.ready = try FifoQueue.init(1048576);
+        s.rq = try FifoQueue.init(524288);
+        s.ready = try FifoQueue.init(524288);
         s.scratch = try Scratch.init(128 * 1024);
         s.resp_buf = try Buf.init(128 * 1024);
         s.resp_pool = try RespPool.init();
@@ -413,9 +413,18 @@ pub const Server = struct {
         rw.depth = ACCEPT_DEPTH;
         rw.margin = 1024;
 
-        rw.ring = try initRing();
-        try setupPbufRing(rw);
-        try rw.ring.register_files_sparse(slots_per_ring);
+        rw.ring = initRing() catch |err| {
+            std.log.err("initRing({d}) failed: {}", .{ idx, err });
+            return err;
+        };
+        setupPbufRing(rw) catch |err| {
+            std.log.err("setupPbufRing({d}) failed: {}", .{ idx, err });
+            return err;
+        };
+        rw.ring.register_files_sparse(slots_per_ring) catch |err| {
+            std.log.err("register_files_sparse({d}, slots={d}) failed: {}", .{ idx, slots_per_ring, err });
+            return err;
+        };
 
         const cmem = try sys.mapAnon(@as(usize, slots_per_ring) * @sizeOf(Conn));
         sys.madviseHuge(cmem);
@@ -423,31 +432,40 @@ pub const Server = struct {
     }
 
     fn initRing() !IoUring {
-        var last: anyerror = error.RingInitFailed;
         const sq_sizes = [_]u16{ 4096, 2048, 1024 };
-        const cq_sizes = [_]u32{ 65536, 32768, 16384 };
+        const cq_sizes = [_]u32{ 32768, 16384, 8192 };
+        var last: anyerror = error.RingInitFailed;
 
-        const IORING_SETUP_CQSIZE: u32 = 1 << 3;
-        const IORING_SETUP_SUBMIT_ALL: u32 = 1 << 7;
+        const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
         const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
-        const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 
-        // Try high-performance single-issuer defer-taskrun flags
+        // Try with single-issuer lockless flags + IORING_SETUP_CQSIZE
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
-                    .flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL,
+                    .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN,
                 });
                 p.cq_entries = cq;
                 if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
             }
         }
 
-        // Try single-issuer without defer-taskrun
+        // Try single-issuer without coop-taskrun
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
-                    .flags = IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER,
+                    .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER,
+                });
+                p.cq_entries = cq;
+                if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
+            }
+        }
+
+        // Try with standard IORING_SETUP_CQSIZE
+        for (sq_sizes) |sq| {
+            for (cq_sizes) |cq| {
+                var p = std.mem.zeroInit(linux.io_uring_params, .{
+                    .flags = linux.IORING_SETUP_CQSIZE,
                 });
                 p.cq_entries = cq;
                 if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;

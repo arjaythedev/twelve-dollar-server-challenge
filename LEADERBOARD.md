@@ -276,22 +276,22 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 193 | go-nethttp-NaveedZahoorKhan | #129 | Go (net/http, cgo SQLite) | **45,000** ᵏ | 4,429 | 33 | 303 | 0.00 | 67 | 141 | 1,507 | 2026-10-28 |
 | 195 | node-fastify-gmr458 | #61 | TypeScript (Fastify, Node) | **44,000** | 4,285 | 489 | 915 | 0.00 | 86 | 187 | 812 | 2026-10-27 |
 | 196 | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | **43,000** | 4,223 | 89 | 175 | 0.00 | 86 | 189 | 1,096 | 2026-10-26 |
-| 197 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
-| 198 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
-| 199 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
-| 200 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
-| 200 | goose-native-tbsvttr | #143 | Goose (native, epoll) | **32,000** | 3,150 | 0.6 | 148 | 0.00 | 15 | 44 | 384 | 2026-11-02 |
-| 202 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
-| 202 | go-iouring-pmatteo | #168 | Go (io_uring, PGO) | **29,000** ʲ | 2,857 | 2.2 | 42 | 0.00 | 21 | 68 | 326 | 2026-10-29 |
-| 204 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
-| 205 | go-gin-lincolng4 | #103 | Go (Gin) | **27,000** ᵐ | 2,658 | 1.2 | 4.8 | 0.00 | 42 | 147 | 1,600 | 2026-10-27 |
-| 206 | java-flash-relism | #133 | Java (Flash) | **25,000** | 2,449 | 280 | 991 | 0.00 | 38 | 144 | 1,464 | 2026-10-28 |
-| 207 | lua-lunet-simbo1905 | #126 | Lua (lunet), behind Nginx | **24,000** ˡ | 2,362 | 20 | 38 | 0.93 | 93 | 366 | 38 | 2026-10-28 |
-| 207 | crystal-kemal-faustinoaq | #194 | Crystal (Kemal), behind Nginx | **24,000** ʷ | 2,362 | 24 | 70 | 0.96 | 51 | 201 | 126 | 2026-10-29 |
-| 207 | jww-fiber | #328 | Go (Fiber, fasthttp), behind Nginx | **24,000** ᵞ | 2,361 | 28.4 | 76.0 | 0.94 | 49 | 193 | 85 | 2026-11-05 |
-| 207 | elisp-emacs-unorig-username | #444 | Emacs Lisp (GNU Emacs, built-in SQLite), behind Nginx | **24,000** ᴼ | 2,359 | 41.0 | 234.0 | 0.96 | 76 | 300 | 108 | 2026-11-14 |
-| 207 | prolog-swipl-unorig-username | #455 | Prolog (SWI-Prolog, SQLite C binding), behind Nginx | **24,000** ᴴ | 2,362 | 49.1 | 111.0 | 0.95 | 73 | 287 | 84 | 2026-11-15 |
-| 207 | tcl-tclsh-unorig-username | #456 | Tcl (tclsh 8.6 event loop, SQLite Tcl binding), behind Nginx | **24,000** ᶦ | 2,364 | 6.3 | 99.5 | 0.97 | 59 | 232 | 83 | 2026-11-15 |
+| 196 | tcl-tclsh-unorig-username | #470 | Tcl (tclsh 8.7 event loop on its epoll notifier, SQLite Tcl binding) | **43,000** ᶦ | 4,220 | 113.2 | 685.5 | 0.00 | 85 | 187 | 564 | 2026-11-15 |
+| 198 | php-pype-dayne-valourite | #337 | PHP 8.3 (pype framework, OpenSwoole) | **37,000** | 3,626 | 250.9 | 573.1 | 0.00 | 90 | 231 | 329 | 2026-11-06 |
+| 199 | swift-vapor-Tabonx | #299 | Swift (Vapor 4, GRDB) | **35,000** | 3,409 | 297.2 | 498.6 | 0.00 | 100 | 273 | 475 | 2026-11-05 |
+| 200 | d-vibe-http-cyrusmsk | #162 | D (vibe.d) | **33,000** | 3,233 | 300 | 579 | 0.00 | 85 | 244 | 1,663 | 2026-10-29 |
+| 201 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
+| 201 | goose-native-tbsvttr | #143 | Goose (native, epoll) | **32,000** | 3,150 | 0.6 | 148 | 0.00 | 15 | 44 | 384 | 2026-11-02 |
+| 203 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
+| 203 | go-iouring-pmatteo | #168 | Go (io_uring, PGO) | **29,000** ʲ | 2,857 | 2.2 | 42 | 0.00 | 21 | 68 | 326 | 2026-10-29 |
+| 205 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
+| 206 | go-gin-lincolng4 | #103 | Go (Gin) | **27,000** ᵐ | 2,658 | 1.2 | 4.8 | 0.00 | 42 | 147 | 1,600 | 2026-10-27 |
+| 207 | java-flash-relism | #133 | Java (Flash) | **25,000** | 2,449 | 280 | 991 | 0.00 | 38 | 144 | 1,464 | 2026-10-28 |
+| 208 | lua-lunet-simbo1905 | #126 | Lua (lunet), behind Nginx | **24,000** ˡ | 2,362 | 20 | 38 | 0.93 | 93 | 366 | 38 | 2026-10-28 |
+| 208 | crystal-kemal-faustinoaq | #194 | Crystal (Kemal), behind Nginx | **24,000** ʷ | 2,362 | 24 | 70 | 0.96 | 51 | 201 | 126 | 2026-10-29 |
+| 208 | jww-fiber | #328 | Go (Fiber, fasthttp), behind Nginx | **24,000** ᵞ | 2,361 | 28.4 | 76.0 | 0.94 | 49 | 193 | 85 | 2026-11-05 |
+| 208 | elisp-emacs-unorig-username | #444 | Emacs Lisp (GNU Emacs, built-in SQLite), behind Nginx | **24,000** ᴼ | 2,359 | 41.0 | 234.0 | 0.96 | 76 | 300 | 108 | 2026-11-14 |
+| 208 | prolog-swipl-unorig-username | #455 | Prolog (SWI-Prolog, SQLite C binding), behind Nginx | **24,000** ᴴ | 2,362 | 49.1 | 111.0 | 0.95 | 73 | 287 | 84 | 2026-11-15 |
 | 213 | typescript-effect-SeeThruHead | #49 | TypeScript (Effect, Node) | **23,000** | 2,229 | 413 | 765 | 0.00 | 96 | 399 | 623 | 2026-10-26 |
 | 214 | d-arsd-hybridcgi-cyrusmsk | #160 | D (arsd hybrid cgi) | **22,000** ʰ | 2,167 | 10 | 97 | 0.00 | 37 | 159 | 1,688 | 2026-10-29 |
 | 215 | php-symfony-pklebba | #40 | PHP (Symfony, FrankenPHP) | **21,000** | 2,061 | 186 | 274 | 0.00 | 95 | 428 | 915 | 2026-10-26 |
@@ -895,9 +895,15 @@ failed on p95/p99 (596 / 971 ms, 0 errors, 96 % CPU). The row stays at #444's me
 EOFs, all on POSTs: 13 % of likes and 11 % of new posts failed, 0 reads. They grow with load (0.26 % at 23k, 1.37 % at
 25k, 3.3 % at 30k at 84 % CPU); at 40k Nginx also returns 504s (7.0 % errors at 100 % CPU).
 
-ᶦ **Tcl #456's errors are dropped writes at three-fifths CPU.** The 0.97 % in its scored hold (59 % CPU) are EOFs, all
-on POSTs: 13 % of likes and 11 % of new posts failed, 0 reads. They grow with load (0.26 % at 23k, 1.35 % at 25k, 3.3 %
-at 30k, 5.5 % at 40k) while CPU stays at 57–87 %, so the write path, not CPU, is the limit.
+ᶦ **Tcl went from Nginx to direct.** Its merged #456 code (`4a106ce`), behind Nginx, held 24,000 (2,364 req/s, p95 6.3 /
+p99 99.5 ms, 59 % CPU, 232 µs/req, 83 MB, 2026-11-15) with 0.97 % errors: EOFs, all on POSTs (13 % of likes and 11 % of
+new posts, 0 reads), growing with load (0.26 % at 23k, 1.35 % at 25k, 3.3 % at 30k, 5.5 % at 40k) at 57–87 % CPU. Its
+follow-up #470 (`b81f018`, merged) serves the port itself on a Tcl 8.7a5 it builds from the release tarball, with a
+126-line patch to Tcl's epoll notifier, and keeps every keep-alive connection. It is CPU-bound with 0 errors in the
+scored hold: 45,000 failed the 2-minute probe on p99 (1.28 s at 91 % CPU) and 50,000 on p99 plus 0.43 % timeouts (95 %).
+On the rig its `install.sh` exited 100 (the box already had a newer `libsqlite3-tcl`, 3.45.1-1ubuntu2.9, than the
+pinned 3.45.1-1ubuntu2, and apt won't downgrade without `--allow-downgrades`); every package it needs was already
+installed, so the run went ahead unpatched on that newer binding.
 
 ᵅ **TeX went from Nginx to direct.** Its merged #457 code (`3734a94`), behind Nginx, held 24,000 (2,362 req/s, p95 28.4 /
 p99 88.3 ms, 62 % CPU, 244 µs/req, 80 MB, 2026-11-15) with 0.96 % errors: EOFs, all on POSTs (13 % of likes and 11 % of

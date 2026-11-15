@@ -1065,7 +1065,11 @@ a tie with #398's 300,000 and not above it, so #427 is still not merged. #427's 
 request is 25 ms old) held **300,000** at 81 % CPU (28,437 req/s, p95 41.4 / p99 345.0 ms, 0 errors, 1,545 MB; TCP
 connect p99 1,062 ms; 310k failed the 2-minute probe on p99 2.84 s, 320k on p99 2.65 s), again a tie with #398's
 300,000 and not above it, so #427 is still not merged; admission at the door is also still the open question for
-Arjay from #435.
+Arjay from #435. #437's next head (`abe1931`, 2026-11-15: `172dd74` with admission paused on backlog length instead,
+no accepting while 512 parsed requests wait, and non-feed requests answered before feeds in a backlog) held
+**290,000** at 77 % CPU (27,581 req/s, p95 28.4 / p99 238.8 ms, 0 errors, 761 MB; TCP connect p99 1,041 ms; 300k
+failed the 2-minute probe on p99 2.52 s, 320k on p99 3.21 s), below #398's 300,000, so #437 is still not merged; it
+also falls under the same open admission question.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

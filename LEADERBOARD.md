@@ -1042,7 +1042,10 @@ errors, 1,540 MB; 310k failed the 2-minute probe on p99 1.42 s, 320k on p99 3.76
 300,000 and not above it, so #437 is still not merged. #427's latest head (`045b645`, 2026-11-14: `d0cf229` without
 `HOLDYIELD`, checkpoint thread at nice 10 instead of 19, `CKNICE`) held **290,000** at 78 % CPU (27,593 req/s, p95
 27.6 / p99 220.5 ms, 0 errors, 695 MB; 300k failed the 2-minute probe on p99 1.40 s, 320k on p99 3.40 s), below #398's
-300,000, so #427 is still not merged.
+300,000, so #427 is still not merged. #437's newest head (`6831f93`, 2026-11-15: `d0cf229` with `HOLDYIELD` raised
+from 200 to 400 µs and `HOLDYIELDAFTER` lowered from 20 to 10 ms) held **290,000** at 77 % CPU (27,577 req/s, p95
+28.4 / p99 241.1 ms, 0 errors, 1,212 MB; 300k failed the 2-minute probe on p99 1.23 s, 320k on p99 5.43 s), below
+#398's 300,000, so #437 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

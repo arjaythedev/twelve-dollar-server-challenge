@@ -89,34 +89,30 @@ capped at 1 ms of every 1.7 ms of CPU, 2 GB, `nofile=65535`. With that cap the m
 uses about 75% of the cap at 24,000 users. k6 `bench/load.js` from separate containers on other CPUs, 60 s
 ramp, 2 minute hold unless noted.
 
-Same load, merged version against direct (merged: range over 4 runs, 2 series of 2 rounds in opposite order;
-direct: this version, and in brackets the range over 2 runs of an earlier build of it that did not yet
-handle clients that do not read, or check the listening socket every turn):
+Same load, merged version against direct, 2 rounds in opposite order (range over the 2 runs; RSS is swipl
+plus Nginx):
 
 | Users | version | p95 | p99 | failed | CPU of cap | us/request | RSS |
 |---|---|---|---|---|---|---|---|
-| 24,000 | merged, behind Nginx | 1.2 to 2.2 ms | 4.1 to 10 ms | 0% (2 to 5 likes) | 72 to 82% | 172 to 197 | 46 to 53 MB |
-| 24,000 | direct | 0.6 ms (0.5 to 0.7) | 2.5 ms (1.5 to 3.0) | 0% | 49% (41 to 44) | 120 (105 to 113) | 174 MB |
-| 30,000 | merged, behind Nginx | 3.7 to 229 ms | 21 to 2,881 ms | 0 to 0.06% | 94 to 98% | 177 to 186 | 55 to 96 MB |
-| 30,000 | direct | 0.7 ms (0.6) | 3.4 ms (2.2 to 2.7) | 0% | 59% (57 to 60) | 118 (113 to 117) | 206 MB |
+| 24,000 | merged, behind Nginx | 0.9 to 3.7 ms | 4.3 to 142 ms | 0 to 4 requests | 65 to 81% | 150 to 189 | 70 to 105 MB |
+| 24,000 | direct | 0.4 to 0.7 ms | 1.2 to 11 ms | 0 | 38 to 49% | 93 to 119 | 173 to 176 MB |
+| 30,000 | merged, behind Nginx | 1.9 to 6.1 ms | 12 to 52 ms | 1 to 5 requests | 83 to 93% | 154 to 174 | 75 to 95 MB |
+| 30,000 | direct | 0.5 ms | 1.8 to 1.9 ms | 0 | 49 to 54% | 99 to 106 | 206 MB |
 
-Behind Nginx, every run lost a few likes to EOFs on connections Nginx had closed (one 30,000 run also lost
-377 requests); direct lost none.
+Behind Nginx, the failed requests are EOFs on keep-alive connections Nginx had closed (an earlier series also
+lost 377 requests in one 30,000 run); direct lost none.
 
-Climbing (rows up to 55,000 from the build before the listening socket was checked every turn, which only
-matters while users connect faster than about 500 a second):
+Climbing, 5 minute holds unless noted:
 
 | Users | req/s | p95 | p99 | failed | CPU of cap | RSS |
 |---|---|---|---|---|---|---|
-| 40,000 | 3,327 | 1.1 ms | 10 ms | 0% | 76% | 265 MB |
-| 50,000 | 4,160 | 1.8 ms | 22 ms | 0% | 87% | 323 MB |
-| 55,000 | 4,576 | 2.6 ms | 22 ms | 0% | 92% | 351 MB |
-| 60,000 (2 runs) | 4,843 to 4,904 | 1.4 to 2.0 s | 1.9 to 3.9 s | 0% | 98 to 99% | 388 MB |
-| 64,000 (2 runs) | 5,312 to 5,318 | 92 to 196 ms | 198 to 312 ms | 0% | 98% | 406 to 413 MB |
-| 64,000, 5 minute hold | 5,925 | 362 ms | 2.05 s | 0% | 98% | 421 MB |
-From 60,000 the CPU cap is full and requests queue (the median goes from 0.3 ms at 55,000 to 17 ms at 60,000),
-so the local limit is CPU, at about 55,000 users with a short tail and 64,000 without errors. Above 65,000
-the process would run out of descriptors (`nofile=65535`). About 95 to 120 us of CPU per request.
+| 55,000 (2 minutes) | 4,579 | 0.8 ms | 20 ms | 0 | 79% | 350 MB |
+| 55,000 | 5,138 | 0.9 ms | 21 ms | 0 | 78% | 359 MB |
+| 60,000 | 5,601 | 1.7 ms | 38 ms | 0 | 85% | 385 MB |
+| 64,000 | 5,974 | 2.2 ms | 47 ms | 0 | 88% | 407 MB |
+
+64,000 passes with room left on the CPU; above 65,000 the process would run out of descriptors here
+(`nofile=65535`), so that is the local limit. About 80 to 120 us of CPU per request.
 
 ## Tests
 

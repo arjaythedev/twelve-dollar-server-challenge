@@ -1,0 +1,258 @@
+// main.nx: the $12 Server Challenge entry in Nexium, a port of the C entry
+// (c-iouring-Londopy): one event-loop thread driving several io_uring
+// rings. This file is server.c's main(): the configuration from the
+// environment, the rings, and the loop's passes, in the same order.
+
+import uring
+import net
+import loop
+import app
+import db
+
+const stdlib = @cImport("stdlib.h")
+const stdio = @cImport("stdio.h")
+const cstr = @cImport("string.h")
+const rs = @cImport("sys/resource.h")
+const efd = @cImport("sys/eventfd.h")
+const sg = @cImport("signal.h")
+const unistd = @cImport("unistd.h")
+const sysno = @cImport("sys/syscall.h")
+const tm = @cImport("time.h")
+
+/// The kernel's struct sigaction (rt_sigaction).
+struct KSigaction layout(c) {
+    handler: usize
+    flags: u64
+    restorer: usize
+    mask: u64
+}
+
+/// signal(SIGPIPE, SIG_IGN). glibc's signal() takes and returns a function
+/// pointer, which @cImport cannot type, and its sigaction() is not imported
+/// (the struct and the function share the name), so this is the system
+/// call; for SIG_IGN neither glibc's restorer nor its flags matter.
+fn ignore_sigpipe() {
+    var a = KSigaction{ .handler = 1, .flags = 0, .restorer = 0, .mask = 0 }
+    unsafe { _ = unistd.syscall(sysno.SYS_rt_sigaction as i64, sg.SIGPIPE as i64, &mut a, 0 as i64, 8 as i64) }
+}
+
+/// A NUL-terminated C string as a slice (without the NUL).
+fn cslice(p: *u8) -> []u8 {
+    unsafe {
+        let n = cstr.strlen(p)
+        let a = p as *[1 << 20]u8
+        return a[0..n]
+    }
+}
+
+fn print_stats() {
+    unsafe {
+        _ = stdio.dprintf(2, @cstr("stats: accepts=%lu accept_errs=%lu eofs=%lu recv_errs=%lu closes=%lu rearm_nobufs=%lu rearm_final=%lu sends=%lu send_errs=%lu chunks=%u free=%u cur_refs=%u wal=%u taskrun_clears=%lu bufs=%u cache_misses=%lu busy_pct=%d napping=%d nap_us=%d batch=%d nap_backoffs=%lu ready=%u stashed=%lu pbuf_mb=%lu hold_yields=%lu\n"),
+            loop.st.accepts, loop.st.accept_errs, loop.st.eofs, loop.st.recv_errs, loop.st.closes, loop.st.rearm_nobufs,
+            loop.st.rearm_final, loop.st.sends, loop.st.send_errs, net.g_nchunks, net.g_nfree,
+            net.g_chunks[net.g_cur as usize].refs, db.wal_frames(), loop.st.taskrun_clears, net.g_rings[0].q.nbuf_live,
+            db.cache_misses(), (loop.g_busy * 100.0 + 0.5) as i32, loop.g_napping as i32, loop.g_nap_us as i32,
+            (loop.g_batch_ewma + 0.5) as i32, loop.g_nap_backoffs, loop.g_ready_n, loop.g_stashed,
+            (net.g_pbuf_bytes >> 20) as u64, loop.g_hold_yields)
+    }
+}
+
+fn main() {
+    ignore_sigpipe()
+    unsafe {
+        let path = stdlib.getenv(@cstr("SQLITE_PATH")) as *u8
+        let secret = stdlib.getenv(@cstr("JWT_SECRET")) as *u8
+        var host = stdlib.getenv(@cstr("HOST")) as *u8
+        let port = @truncate(i32, loop.env_int(@cstr("PORT"), 3000))
+        if (path as usize) == 0 or (secret as usize) == 0 {
+            _ = stdio.dprintf(2, @cstr("SQLITE_PATH and JWT_SECRET are required\n"))
+            os.exit(1)
+        }
+        if (host as usize) == 0 or host.* == 0 { host = @cstr("0.0.0.0") }
+
+        net.g_nrings = @truncate(i32, loop.env_int(@cstr("RINGS"), 8))
+        loop.g_hold_frames = @truncate(u32, loop.env_int(@cstr("HOLD_FRAMES"), 8192))
+        loop.g_hold_max_us = loop.env_int(@cstr("HOLD_MS"), 250) * 1000
+        // Batch writes: commits at most every COMMIT_US. Each commit rewrites
+        // the same tail pages (posts/likes appends), so committing per pass
+        // multiplies WAL volume.
+        loop.g_commit_interval_us = loop.env_int(@cstr("COMMIT_US"), 5000)
+        net.g_debug = @truncate(i32, loop.env_int(@cstr("DEBUG"), 0))
+        // Pacing: a busy pass pauses, so completions and sends go through the
+        // kernel in batches. On a virtio-net VM at 150k users, a fixed 2 ms cut
+        // the server's CPU per request from ~25 to ~15 us (p50 0.2 -> 1.8 ms).
+        // By default the nap tunes itself (see loop.nap_length);
+        // PACE_US=<us> fixes it, 0 = off.
+        let pace_env = stdlib.getenv(@cstr("PACE_US")) as *u8
+        if (pace_env as usize) != 0 and pace_env.* != 0 and cstr.strcmp(pace_env, @cstr("auto")) != 0 {
+            loop.g_pace_auto = false
+            loop.g_pace_us = stdlib.atoll(pace_env)
+        }
+        app.init(cslice(secret))
+
+        var rl = rs.rlimit{ .rlim_cur = 0, .rlim_max = 0 }
+        _ = rs.getrlimit(rs.RLIMIT_NOFILE, &mut rl)
+        rl.rlim_cur = rl.rlim_max
+        _ = rs.setrlimit(rs.RLIMIT_NOFILE, &rl)
+        _ = rs.getrlimit(rs.RLIMIT_NOFILE, &mut rl)
+        var nfiles: u32 = if rl.rlim_cur > 65535 { 65535 } else { rl.rlim_cur as u32 }
+        if nfiles < 1024 { nfiles = 1024 }
+
+        _ = db.open(cslice(path))
+        db.set_verify(@truncate(i32, loop.env_int(@cstr("VERIFY"), 0)) != 0)
+        db.start_checkpointer(@truncate(u32, loop.env_int(@cstr("CKPT_FRAMES"), 2048)))
+
+        loop.clocks()
+        loop.g_start_mono_s = loop.g_mono_us / 1000000
+        net.g_cur = net.chunk_new()
+        net.g_pos = 0
+
+        net.alloc_rings(net.g_nrings)
+        net.g_evfd = efd.eventfd(0, efd.EFD_CLOEXEC | efd.EFD_NONBLOCK)
+        var i: i32 = 0
+        while i < net.g_nrings {
+            net.ring_init(&mut net.g_rings[i as usize], i, nfiles, host, port)
+            i += 1
+        }
+        let bufs_kind = if net.g_rings[0].q.legacy_bufs { @cstr("legacy provided") } else { @cstr("ring-mapped") }
+        let wake_kind = if net.g_evfd >= 0 { @cstr("eventfd") } else { @cstr("ring-0") }
+        _ = stdio.dprintf(2, @cstr("listening on %s:%d with %d rings x %u connections (%s receive buffers, %s idle wake)\n"),
+            host, port, net.g_nrings, nfiles, bufs_kind, wake_kind)
+
+        var next_stats: i64 = 0
+        loop.g_win_start_us = loop.mono_now_us()
+        while true {
+            loop.clocks()
+            if net.g_debug != 0 and loop.g_mono_us >= next_stats {
+                next_stats = loop.g_mono_us + 5000000
+                print_stats()
+            }
+            loop.track_window()
+            loop.st.passes += 1
+            var events: u32 = 0
+            loop.g_pass_data = 0
+            loop.g_budget = loop.ANSWER_BUDGET
+            loop.run_ready()
+            i = 0
+            while i < net.g_nrings {
+                let r = &mut net.g_rings[i as usize]
+                let sqf = uring.sq_flags(&r.q)
+                if r.q.sqe_tail != r.q.submitted or (sqf & (uring.SQ_TASKRUN | uring.SQ_CQ_OVERFLOW)) != 0 {
+                    _ = uring.enter(&mut r.q, 0)
+                    // 6.8 can leave TASKRUN set with nothing queued: work that
+                    // arrives while task work runs sets it, and the same run's
+                    // retry loop then consumes that work. Only a run clears the
+                    // flag, and an enter runs nothing on an empty list, so the
+                    // loop would never sleep again. The kernel never reads the
+                    // flag, so clear it ourselves and enter once more: that runs
+                    // anything queued before the clear, and anything queued
+                    // after it sets the flag again.
+                    if (sqf & uring.SQ_TASKRUN) != 0 and !uring.cq_ready(&r.q) and (uring.sq_flags(&r.q) & uring.SQ_TASKRUN) != 0 {
+                        uring.clear_taskrun(&mut r.q)
+                        _ = uring.enter(&mut r.q, 0)
+                        loop.st.taskrun_clears += 1
+                    }
+                }
+                events += loop.drain_cq(r)
+                i += 1
+            }
+            // After a stall: empty the sockets in rounds (read, stash, re-arm),
+            // so waiting requests sit in small user buffers, not in kernel memory.
+            var round: i32 = 0
+            while round < loop.READ_ROUNDS {
+                var any = false
+                i = 0
+                while i < net.g_nrings {
+                    let r = &mut net.g_rings[i as usize]
+                    if r.nrearm != 0 {
+                        loop.do_rearms(r)
+                        _ = uring.enter(&mut r.q, 0)
+                        events += loop.drain_cq(r)
+                        any = true
+                    }
+                    i += 1
+                }
+                if !any { break }
+                round += 1
+            }
+            db.read_end()
+            app.commit_writes()
+            i = 0
+            while i < net.g_nrings {
+                if net.g_rings[i as usize].nrearm != 0 { loop.do_rearms(&mut net.g_rings[i as usize]) }
+                i += 1
+            }
+            // Nothing ready: sleep for up to 1 ms (or until the next commit is
+            // due), waking as soon as any ring has work. Never spin while writes
+            // wait: on one vCPU a spinning loop starves the checkpoint thread
+            // they depend on.
+            var slept_us: i64 = 0
+            if events == 0 {
+                var wait_us: i64 = 1000
+                if loop.g_njobs != 0 and loop.g_hold_since_us < 0 {
+                    let due = loop.g_last_commit_us + loop.g_commit_interval_us - loop.g_mono_us
+                    if due < wait_us { wait_us = due }
+                }
+                if wait_us > 0 and !loop.rings_pending() {
+                    let t0 = loop.mono_now_us()
+                    loop.idle_wait(wait_us)
+                    slept_us = loop.mono_now_us() - t0
+                    loop.g_win_sleep_us += slept_us
+                }
+            } else if loop.g_ready_n == 0 {
+                let pace = loop.nap_length()
+                if pace > 0 and loop.g_pass_data != 0 {
+                    // Pacing: let completions pile up so each enter does more
+                    // work. Submit what this pass queued on every ring first, so
+                    // no response waits out the pause. Only passes that received
+                    // requests pause: one that only collected send completions
+                    // goes straight on to the idle wait, which wakes on the next
+                    // request. The pause never runs past a due commit.
+                    i = 0
+                    while i < net.g_nrings {
+                        let r = &mut net.g_rings[i as usize]
+                        if r.q.sqe_tail != r.q.submitted { _ = uring.enter(&mut r.q, 0) }
+                        i += 1
+                    }
+                    let now_us = loop.mono_now_us()
+                    var left = loop.g_mono_us + pace - now_us
+                    if loop.g_njobs != 0 and loop.g_hold_since_us < 0 {
+                        let due = loop.g_last_commit_us + loop.g_commit_interval_us - now_us
+                        if due < left { left = due }
+                    }
+                    if left > 0 {
+                        var d = tm.timespec{ .tv_sec = left / 1000000, .tv_nsec = (left % 1000000) * 1000 }
+                        _ = tm.nanosleep(&d, (0 as usize) as *mut tm.timespec)
+                        slept_us = loop.mono_now_us() - now_us
+                        loop.g_win_sleep_us += slept_us
+                    }
+                }
+            }
+            // Writes are waiting for the checkpoint thread to empty the log. It
+            // runs at nice 19, so beside a loop that never sleeps it gets about
+            // 1% of the CPU: the hold times out, the commit goes ahead, and the
+            // log only grows (to 545 MB at 320k users on the replica, crowding
+            // the database out of the page cache). A pass that slept at least as
+            // long as it worked left the thread room. One that didn't stops here
+            // until the checkpoint is done or the hold runs out: a short pause
+            // now, in place of a log that never shrinks. That is not idle time,
+            // so the nap controller doesn't count it.
+            if loop.g_njobs != 0 and loop.g_hold_since_us >= 0 and loop.g_hold_timeouts < loop.HOLD_GIVE_UP {
+                let now_us = loop.mono_now_us()
+                if now_us - loop.g_mono_us > 2 * slept_us {
+                    i = 0
+                    while i < net.g_nrings {
+                        let r = &mut net.g_rings[i as usize]
+                        if r.q.sqe_tail != r.q.submitted { _ = uring.enter(&mut r.q, 0) }
+                        i += 1
+                    }
+                    var d = tm.timespec{ .tv_sec = 0, .tv_nsec = loop.HOLD_POLL_US * 1000 }
+                    while db.ckpt_generation() == loop.g_hold_gen and loop.mono_now_us() - loop.g_hold_since_us < loop.g_hold_max_us {
+                        _ = tm.nanosleep(&d, (0 as usize) as *mut tm.timespec)
+                        loop.g_hold_yields += 1
+                    }
+                }
+            }
+        }
+    }
+}

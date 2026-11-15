@@ -1,0 +1,592 @@
+// json.nx: the C server's json.h. The writers (integers in decimal, string
+// escaping) and the small strict reader used for POST /posts bodies and the
+// JWT header and payload.
+//
+// Where json.h has pointers into a buffer this has indices into one slice:
+// a range is s[p..e], with `e` playing json.h's end pointer, and null stands
+// for its NULL. Two shapes differ from the C, for the same work:
+//
+// - json_string(p, e, out, outlen) is two functions: string_decode when the
+//   C passes an output buffer and string_skip when it passes NULL. Nexium has
+//   no null slice, and a run-time flag would put a test in the byte loop
+//   (a `comptime bool` parameter, the zero-cost spelling, is miscompiled by
+//   nx 1.5.0).
+// - json_object_each(p, e, cb, ctx) is the `Members` walker. The C calls the
+//   callback once per member, in order, as soon as the member's value has
+//   been validated; here `next()` stops at the same point and the caller's
+//   loop body does what the callback did. After `next()` returns false,
+//   `status` is what json_object_each returns. Every C caller only trusts
+//   what its callback collected when the result is 0, and so does every
+//   caller here. `last_member` is server.c's body_cb on top of it.
+//
+// Nothing here allocates; `skip` recurses at most MAX_DEPTH + 1 levels, as
+// json_skip does.
+
+// ------------------------------------------------------------ output
+
+const DIGITS2: []u8 = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899"
+
+/// Writes v in decimal at out[0..]: the number of bytes written (1 to 20).
+pub fn u64_to_dec(out: []mut u8, v: u64) -> usize !allocates !blocks {
+    // two digits at a time from the right into a scratch buffer, then one
+    // copy, as json.h does
+    var tmp: [24]u8 = undefined
+    var p: usize = 24
+    var x = v
+    while x >= 100 {
+        let r = (x % 100) as usize
+        x = x / 100
+        p -= 2
+        tmp[p] = DIGITS2[r * 2]
+        tmp[p + 1] = DIGITS2[r * 2 + 1]
+    }
+    if x >= 10 {
+        let r = x as usize
+        p -= 2
+        tmp[p] = DIGITS2[r * 2]
+        tmp[p + 1] = DIGITS2[r * 2 + 1]
+    } else {
+        p -= 1
+        tmp[p] = '0' + @truncate(u8, x)
+    }
+    let n = 24 - p
+    out[0..n].copy_from(tmp[p..24])
+    return n
+}
+
+/// Writes v in decimal at out[0..], with a '-' when negative: the number of
+/// bytes written (1 to 20).
+pub fn i64_to_dec(out: []mut u8, v: i64) -> usize !allocates !blocks {
+    if v < 0 {
+        out[0] = '-'
+        // the magnitude in unsigned arithmetic, so i64's minimum has one
+        return 1 + u64_to_dec(out[1..], 0 -% @bitCast(u64, v))
+    }
+    return u64_to_dec(out, @bitCast(u64, v))
+}
+
+/// The room `escape` may need for n input bytes (JSON_ESCAPE_MAX).
+pub fn escape_max(n: usize) -> usize !allocates !blocks {
+    return n * 6
+}
+
+const ONES: u64 = 0x0101010101010101
+const HIGH: u64 = 0x8080808080808080
+const HEX: []u8 = "0123456789abcdef"
+
+// Nexium has no count-trailing-zeros; a de Bruijn multiply and a table built
+// at compile time stand in for __builtin_ctzll.
+const DEBRUIJN: u64 = 0x03f79d71b4cb0a89
+const DB_TABLE: [64]u8 = comptime db_table()
+
+fn db_table() -> [64]u8 {
+    var t: [64]u8 = undefined
+    for i in 0..64 {
+        let bit = (1 as u64) << (i as u64)
+        t[((bit *% DEBRUIJN) >> 58) as usize] = i as u8
+    }
+    return t
+}
+
+/// The number of trailing zero bits of x, which is not 0.
+fn ctz64(x: u64) -> usize {
+    return DB_TABLE[(((x & (0 -% x)) *% DEBRUIJN) >> 58) as usize] as usize
+}
+
+/// Nonzero if any byte of x is '"', '\\' or below 0x20 (bytes from 0x80
+/// never are): json.h's swar_needs_escape.
+fn needs_escape(x: u64) -> u64 {
+    let lt = (x -% (ONES *% 0x20)) & ~x
+    var q = x ^ (ONES *% ('"' as u64))
+    var b = x ^ (ONES *% ('\\' as u64))
+    q = (q -% ONES) & ~q
+    b = (b -% ONES) & ~b
+    return (lt | q | b) & HIGH
+}
+
+/// s[i..i + 8] as a u64 (little-endian on x86-64), the caller having checked
+/// i + 8 <= s.len: one unaligned load, json.h's memcpy(&x, s + i, 8). Spelled
+/// byte by byte it stays eight loads (gcc 15 does not merge them, in C
+/// either), and a binary pattern goes through the runtime's generic bit
+/// reader; so this is the one place the module reaches for `unsafe`.
+fn load64(s: []u8, i: usize) -> u64 {
+    unsafe { return ((s.ptr as usize + i) as *u64).* }
+}
+
+fn escape_byte(out: []mut u8, o: usize, c: u8) -> usize {
+    match c {
+        '"' => {
+            out[o] = '\\'
+            out[o + 1] = '"'
+            return o + 2
+        }
+        '\\' => {
+            out[o] = '\\'
+            out[o + 1] = '\\'
+            return o + 2
+        }
+        '\n' => {
+            out[o] = '\\'
+            out[o + 1] = 'n'
+            return o + 2
+        }
+        '\r' => {
+            out[o] = '\\'
+            out[o + 1] = 'r'
+            return o + 2
+        }
+        '\t' => {
+            out[o] = '\\'
+            out[o + 1] = 't'
+            return o + 2
+        }
+        8 => {
+            out[o] = '\\'
+            out[o + 1] = 'b'
+            return o + 2
+        }
+        12 => {
+            out[o] = '\\'
+            out[o + 1] = 'f'
+            return o + 2
+        }
+        _ => {
+            if c < 0x20 {
+                out[o] = '\\'
+                out[o + 1] = 'u'
+                out[o + 2] = '0'
+                out[o + 3] = '0'
+                out[o + 4] = HEX[(c >> 4) as usize]
+                out[o + 5] = HEX[(c & 15) as usize]
+                return o + 6
+            }
+            out[o] = c
+            return o + 1
+        }
+    }
+}
+
+/// Escapes s as the inside of a JSON string (no quotes around it) at the
+/// start of out: the bytes written. Only what JSON requires is escaped (the
+/// quote, the backslash and bytes below 0x20); other bytes, UTF-8 or not,
+/// pass through. out needs escape_max(s.len) bytes at most; nothing is
+/// written past the returned end, because the 8-byte speculative copy only
+/// runs while 8 or more input bytes remain and each of them produces at
+/// least one output byte.
+///
+/// This is json.h's scalar path (SWAR, then byte by byte). Its AVX2 path
+/// has no counterpart: Nexium has no vector types or intrinsics. The output
+/// is the same.
+pub fn escape(out: []mut u8, s: []u8) -> usize !allocates !blocks {
+    let n = s.len
+    var i: usize = 0
+    var o: usize = 0
+    while i + 8 <= n {
+        let x = load64(s, i)
+        out[o..o + 8].copy_from(s[i..i + 8])      // speculative copy, fixed up below if needed
+        let m = needs_escape(x)
+        if m == 0 {
+            o += 8
+            i += 8
+            continue
+        }
+        let k = ctz64(m) >> 3                     // the first byte that needs escaping
+        o += k
+        i += k
+        o = escape_byte(out, o, s[i])
+        i += 1
+    }
+    while i < n {
+        o = escape_byte(out, o, s[i])
+        i += 1
+    }
+    return o
+}
+
+// ------------------------------------------------------------ input
+
+/// json_skip's nesting limit: a value nested deeper than this is rejected.
+pub const MAX_DEPTH: i32 = 64
+/// Keys up to this many encoded bytes (quotes included) are decoded for the
+/// caller; longer ones are validated and reported as KEY_TOO_LONG.
+pub const KEY_MAX: usize = 32
+pub const KEY_TOO_LONG: usize = ~(0 as usize)
+
+/// The first position from p that is not JSON whitespace, at most e.
+pub fn ws(s: []u8, p: usize, e: usize) -> usize !allocates !blocks {
+    var i = p
+    while i < e and (s[i] == ' ' or s[i] == '\t' or s[i] == '\n' or s[i] == '\r') { i += 1 }
+    return i
+}
+
+fn hexval(c: u8) -> i32 {
+    if c >= '0' and c <= '9' { return (c - '0') as i32 }
+    if c >= 'a' and c <= 'f' { return (c - 'a') as i32 + 10 }
+    if c >= 'A' and c <= 'F' { return (c - 'A') as i32 + 10 }
+    return -1
+}
+
+fn utf8_put(out: []mut u8, o: usize, cp: u32) -> usize {
+    if cp < 0x80 {
+        out[o] = @truncate(u8, cp)
+        return o + 1
+    }
+    if cp < 0x800 {
+        out[o] = @truncate(u8, 0xC0 | (cp >> 6))
+        out[o + 1] = @truncate(u8, 0x80 | (cp & 0x3F))
+        return o + 2
+    }
+    if cp < 0x10000 {
+        out[o] = @truncate(u8, 0xE0 | (cp >> 12))
+        out[o + 1] = @truncate(u8, 0x80 | ((cp >> 6) & 0x3F))
+        out[o + 2] = @truncate(u8, 0x80 | (cp & 0x3F))
+        return o + 3
+    }
+    out[o] = @truncate(u8, 0xF0 | (cp >> 18))
+    out[o + 1] = @truncate(u8, 0x80 | ((cp >> 12) & 0x3F))
+    out[o + 2] = @truncate(u8, 0x80 | ((cp >> 6) & 0x3F))
+    out[o + 3] = @truncate(u8, 0x80 | (cp & 0x3F))
+    return o + 4
+}
+
+/// The code point of the \u escape whose four hex digits start at s[p], and
+/// the position after what was read; null if they are not four hex digits.
+/// As json.h: a high surrogate directly followed by a \u escape of a low
+/// one combines with it; any surrogate left alone becomes U+FFFD, and what
+/// follows it is read again as ordinary string content.
+fn unicode_escape(s: []u8, p0: usize, e: usize) -> ?(u32, usize) {
+    var p = p0
+    if e - p < 4 { return null }
+    let h0 = hexval(s[p])
+    let h1 = hexval(s[p + 1])
+    let h2 = hexval(s[p + 2])
+    let h3 = hexval(s[p + 3])
+    if (h0 | h1 | h2 | h3) < 0 { return null }
+    var cp = @bitCast(u32, (h0 << 12) | (h1 << 8) | (h2 << 4) | h3)
+    p += 4
+    if cp >= 0xD800 and cp <= 0xDBFF and e - p >= 6 and s[p] == '\\' and s[p + 1] == 'u' {
+        let l0 = hexval(s[p + 2])
+        let l1 = hexval(s[p + 3])
+        let l2 = hexval(s[p + 4])
+        let l3 = hexval(s[p + 5])
+        if (l0 | l1 | l2 | l3) >= 0 {
+            let lo = @bitCast(u32, (l0 << 12) | (l1 << 8) | (l2 << 4) | l3)
+            if lo >= 0xDC00 and lo <= 0xDFFF {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)
+                p += 6
+            }
+        }
+    }
+    if cp >= 0xD800 and cp <= 0xDFFF { cp = 0xFFFD }     // a lone surrogate
+    return (cp, p)
+}
+
+/// The byte a one-letter escape stands for, or 0 for none.
+fn simple_escape(c: u8) -> u8 {
+    return match c {
+        '"' => '"',
+        '\\' => '\\',
+        '/' => '/',
+        'b' => 8,
+        'f' => 12,
+        'n' => '\n',
+        'r' => '\r',
+        't' => '\t',
+        _ => 0,
+    }
+}
+
+/// Validates the JSON string whose opening quote is s[p], ending by e: the
+/// position after its closing quote, or null if it is malformed. json.h's
+/// json_string(p, e, NULL, NULL).
+pub fn string_skip(s: []u8, p0: usize, e: usize) -> ?usize !allocates !blocks {
+    var p = p0
+    if p >= e or s[p] != '"' { return null }
+    p += 1
+    while p < e {
+        let c = s[p]
+        if c == '"' { return p + 1 }
+        if c < 0x20 { return null }
+        if c != '\\' {
+            p += 1
+            continue
+        }
+        p += 1
+        if p >= e { return null }
+        let esc = s[p]
+        p += 1
+        if esc == 'u' {
+            let (_cp, after) = unicode_escape(s, p, e) orelse return null
+            p = after
+            continue
+        }
+        if simple_escape(esc) == 0 { return null }
+    }
+    return null
+}
+
+/// string_skip, and the decoded UTF-8 into out with its length in outlen:
+/// json.h's json_string(p, e, out, outlen). The decoded form is never longer
+/// than the encoded one, so out needs e - p bytes at most. outlen is only
+/// set on success; out may hold a partial decoding after a failure.
+pub fn string_decode(s: []u8, p0: usize, e: usize, out: []mut u8, outlen: *mut usize) -> ?usize !allocates !blocks {
+    var p = p0
+    if p >= e or s[p] != '"' { return null }
+    p += 1
+    var o: usize = 0
+    while p < e {
+        let c = s[p]
+        if c == '"' {
+            outlen.* = o
+            return p + 1
+        }
+        if c < 0x20 { return null }
+        if c != '\\' {
+            out[o] = c
+            o += 1
+            p += 1
+            continue
+        }
+        p += 1
+        if p >= e { return null }
+        let esc = s[p]
+        p += 1
+        if esc == 'u' {
+            let (cp, after) = unicode_escape(s, p, e) orelse return null
+            p = after
+            o = utf8_put(out, o, cp)
+            continue
+        }
+        let d = simple_escape(esc)
+        if d == 0 { return null }
+        out[o] = d
+        o += 1
+    }
+    return null
+}
+
+/// Validates the JSON number (RFC 8259) at s[p], ending by e: the position
+/// after it, or null.
+pub fn number(s: []u8, p0: usize, e: usize) -> ?usize !allocates !blocks {
+    var p = p0
+    if p < e and s[p] == '-' { p += 1 }
+    if p >= e { return null }
+    if s[p] == '0' {
+        p += 1
+    } else if s[p] >= '1' and s[p] <= '9' {
+        while p < e and s[p] >= '0' and s[p] <= '9' { p += 1 }
+    } else {
+        return null
+    }
+    if p < e and s[p] == '.' {
+        p += 1
+        if p >= e or s[p] < '0' or s[p] > '9' { return null }
+        while p < e and s[p] >= '0' and s[p] <= '9' { p += 1 }
+    }
+    if p < e and (s[p] == 'e' or s[p] == 'E') {
+        p += 1
+        if p < e and (s[p] == '+' or s[p] == '-') { p += 1 }
+        if p >= e or s[p] < '0' or s[p] > '9' { return null }
+        while p < e and s[p] >= '0' and s[p] <= '9' { p += 1 }
+    }
+    return p
+}
+
+fn word_at(s: []u8, p: usize, e: usize, w: []u8) -> bool {
+    return e - p >= w.len and s[p..p + w.len] == w
+}
+
+/// Skips and validates one JSON value at s[p] (whitespace before it
+/// allowed), ending by e, nested `depth` levels deep: the position after it,
+/// or null if it is malformed or nested deeper than MAX_DEPTH.
+pub fn skip(s: []u8, p0: usize, e: usize, depth: i32) -> ?usize !allocates !blocks {
+    if depth > MAX_DEPTH { return null }
+    var p = ws(s, p0, e)
+    if p >= e { return null }
+    let c = s[p]
+    if c == '"' { return string_skip(s, p, e) }
+    if c == '{' {
+        p = ws(s, p + 1, e)
+        if p < e and s[p] == '}' { return p + 1 }
+        while true {
+            p = string_skip(s, ws(s, p, e), e) orelse return null
+            p = ws(s, p, e)
+            if p >= e or s[p] != ':' { return null }
+            p = skip(s, p + 1, e, depth + 1) orelse return null
+            p = ws(s, p, e)
+            if p >= e { return null }
+            if s[p] == '}' { return p + 1 }
+            if s[p] != ',' { return null }
+            p += 1
+        }
+    }
+    if c == '[' {
+        p = ws(s, p + 1, e)
+        if p < e and s[p] == ']' { return p + 1 }
+        while true {
+            p = skip(s, p, e, depth + 1) orelse return null
+            p = ws(s, p, e)
+            if p >= e { return null }
+            if s[p] == ']' { return p + 1 }
+            if s[p] != ',' { return null }
+            p += 1
+        }
+    }
+    if c == 't' { return if word_at(s, p, e, "true") { p + 4 } else { null } }
+    if c == 'f' { return if word_at(s, p, e, "false") { p + 5 } else { null } }
+    if c == 'n' { return if word_at(s, p, e, "null") { p + 4 } else { null } }
+    return number(s, p, e)
+}
+
+// The walker's state while `status` is not yet a result.
+const BEFORE: i32 = 3      // next() has not run
+const BETWEEN: i32 = 2     // a member was reported; its separator is next
+
+/// The members of the JSON object that should fill all of s (whitespace
+/// around it allowed), one per `next()`, in order: json_object_each with
+/// the callback turned into the caller's loop body.
+///
+///     var m = json.members(s)
+///     while m.next() {
+///         if m.key_is("body") { ... s[m.v..m.ve] is the raw value ... }
+///     }
+///     if m.status != 0 { ... }
+///
+/// After next() returns false, `status` is 0 if s is exactly one valid JSON
+/// object, 1 if it is valid JSON but not an object (no member is reported
+/// then), and -1 if it is malformed.
+pub struct Members {
+    s: []u8
+    status: i32
+    key: [32]u8       // the current member's key, decoded: key[0..klen]
+    klen: usize       // or KEY_TOO_LONG, for keys of more than KEY_MAX encoded bytes
+    v: usize          // the current member's raw value is s[v..ve]
+    ve: usize
+}
+
+pub fn members(s: []u8) -> Members !allocates !blocks {
+    return Members{ .s = s, .status = BEFORE, .key = undefined, .klen = 0, .v = 0, .ve = 0 }
+}
+
+impl Members {
+    /// Moves to the next member: true with key, klen, v and ve set, or
+    /// false at the end of the walk, with `status` set.
+    pub fn next(self: *mut Self) -> bool !allocates !blocks {
+        let s = self.s
+        let e = s.len
+        var p: usize = 0
+        if self.status == BETWEEN {
+            p = ws(s, self.ve, e)
+            if p >= e { return self.done(-1) }
+            if s[p] == '}' { return self.done(if ws(s, p + 1, e) == e { 0 } else { -1 }) }
+            if s[p] != ',' { return self.done(-1) }
+            p += 1
+        } else if self.status == BEFORE {
+            p = ws(s, 0, e)
+            if p >= e { return self.done(-1) }
+            if s[p] != '{' {
+                let q = skip(s, p, e, 0) orelse return self.done(-1)
+                return self.done(if ws(s, q, e) != e { -1 } else { 1 })
+            }
+            p = ws(s, p + 1, e)
+            if p < e and s[p] == '}' { return self.done(if ws(s, p + 1, e) == e { 0 } else { -1 }) }
+        } else {
+            return false
+        }
+        let k = ws(s, p, e)
+        let ke = string_skip(s, k, e) orelse return self.done(-1)
+        if ke - k <= KEY_MAX {
+            _ = string_decode(s, k, e, self.key[..], &mut self.klen)
+        } else {
+            self.klen = KEY_TOO_LONG
+        }
+        p = ws(s, ke, e)
+        if p >= e or s[p] != ':' { return self.done(-1) }
+        let v = ws(s, p + 1, e)
+        let ve = skip(s, v, e, 1) orelse return self.done(-1)
+        self.v = v
+        self.ve = ve
+        self.status = BETWEEN
+        return true
+    }
+
+    /// Whether the current member's decoded key is exactly `want`.
+    pub fn key_is(self: *Self, want: []u8) -> bool !allocates !blocks {
+        return self.klen == want.len and self.key[0..want.len] == want
+    }
+
+    fn done(self: *mut Self, status: i32) -> bool {
+        self.status = status
+        return false
+    }
+}
+
+/// What last_member found.
+pub struct Lookup {
+    status: i32       // as Members.status: 0 an object, 1 valid JSON but not an object, -1 malformed
+    found: bool       // whether the object has a member named as asked
+    v: usize          // the raw value of the last such member is s[v..ve]
+    ve: usize
+}
+
+/// The value of the last member of the JSON object s whose decoded key is
+/// `key`, with the whole of s validated: json_object_each with server.c's
+/// body_cb, for POST /posts.
+pub fn last_member(s: []u8, key: []u8) -> Lookup !allocates !blocks {
+    var r = Lookup{ .status = 0, .found = false, .v = 0, .ve = 0 }
+    var m = members(s)
+    while m.next() {
+        if m.key_is(key) {
+            r.found = true
+            r.v = m.v
+            r.ve = m.ve
+        }
+    }
+    r.status = m.status
+    return r
+}
+
+test "integers in decimal" {
+    var b: [24]u8 = undefined
+    expect(b[0..u64_to_dec(b[..], 0)] == "0")
+    expect(b[0..u64_to_dec(b[..], 9)] == "9")
+    expect(b[0..u64_to_dec(b[..], 10)] == "10")
+    expect(b[0..u64_to_dec(b[..], 100)] == "100")
+    expect(b[0..u64_to_dec(b[..], 18446744073709551615)] == "18446744073709551615")
+    expect(b[0..i64_to_dec(b[..], -9223372036854775807 - 1)] == "-9223372036854775808")
+    expect(b[0..i64_to_dec(b[..], -1)] == "-1")
+    expect(b[0..i64_to_dec(b[..], 9223372036854775807)] == "9223372036854775807")
+}
+
+test "escapes what JSON requires and nothing else" {
+    var buf: [256]u8 = undefined
+    let n = escape(buf[..], "a\"b\\c\nd\te\x01f caf\xc3\xa9 and some more plain text")
+    expect(buf[0..n] == "a\\\"b\\\\c\\nd\\te\\u0001f caf\xc3\xa9 and some more plain text")
+    expect(ctz64(0x80) == 7 and ctz64(0x8000000000000000) == 63 and ctz64(1) == 0)
+}
+
+test "strings, surrogates and numbers" {
+    var out: [64]u8 = undefined
+    var n: usize = 0
+    let s = "\"a\\u00e9\\ud83d\\ude00\\ud800x\\/\""
+    expect((string_decode(s, 0, s.len, out[..], &mut n) orelse 0) == s.len)
+    expect(out[0..n] == "a\xc3\xa9\xf0\x9f\x98\x80\xef\xbf\xbdx/")
+    expect((string_skip(s, 0, s.len) orelse 0) == s.len)
+    expect(string_skip("\"\\x\"", 0, 4) == null)
+    expect((number("-0.5e+3,", 0, 8) orelse 0) == 7)
+    expect((number("01", 0, 2) orelse 0) == 1)
+    expect(number("1.", 0, 2) == null)
+}
+
+test "object walk and depth limit" {
+    let doc = "{\"body\": \"one\", \"x\": [1, {\"y\": null}], \"bo\\u0064y\": \"two\"} "
+    let r = last_member(doc, "body")
+    expect(r.status == 0 and r.found and doc[r.v..r.ve] == "\"two\"")
+    expect(last_member("[1]", "body").status == 1)
+    expect(last_member("{\"a\":1} x", "a").status == -1)
+    var deep: [200]u8 = undefined
+    for i in 0..65 { deep[i] = '[' }
+    for i in 65..130 { deep[i] = ']' }
+    expect((skip(deep[..], 0, 130, 0) orelse 0) == 130)
+    expect(skip(deep[..], 0, 130, 1) == null)
+}

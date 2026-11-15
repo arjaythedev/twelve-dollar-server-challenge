@@ -1,0 +1,681 @@
+// loop.nx: the event loop's work, called from main's passes: completions
+// (on_cqe), arriving requests (on_data, process), the ready list, draining
+// and re-arming the rings, the idle wait, the clocks, and the self-tuning
+// nap. The application is behind app.handle and app.commit_writes; the
+// group-commit timing it shares with the loop is kept here.
+//
+// Reads are answered in the same pass they arrive in, inside one SQLite
+// read transaction per pass. Writes are queued and committed together at
+// the end of the pass (group commit); their responses go out only after
+// COMMIT.
+
+import uring
+import net
+import http
+import app
+
+const cstr = @cImport("string.h")
+const stdlib = @cImport("stdlib.h")
+const stdio = @cImport("stdio.h")
+const tm = @cImport("time.h")
+const pl = @cImport("poll.h")
+const unistd = @cImport("unistd.h")
+const sysno = @cImport("sys/syscall.h")
+const errno_h = @cImport("errno.h")
+
+pub struct Stats {
+    accepts: u64
+    accept_errs: u64
+    eofs: u64
+    recv_errs: u64
+    rearm_nobufs: u64
+    rearm_final: u64
+    sends: u64
+    send_errs: u64
+    closes: u64
+    reqs: u64
+    passes: u64
+    taskrun_clears: u64
+}
+
+pub var st: Stats = Stats{
+    .accepts = 0, .accept_errs = 0, .eofs = 0, .recv_errs = 0, .rearm_nobufs = 0, .rearm_final = 0,
+    .sends = 0, .send_errs = 0, .closes = 0, .reqs = 0, .passes = 0, .taskrun_clears = 0,
+}
+pub var g_pass_data: u32 = 0    // receives with request bytes in this loop pass
+pub var g_win_reqs: u64 = 0     // ...and in the nap controller's current window
+
+pub var g_now_s: i64 = 0        // wall clock seconds, refreshed each pass
+pub var g_mono_us: i64 = 0      // monotonic microseconds, refreshed each pass
+pub var g_start_mono_s: i64 = 0
+
+// ---------------------------------------------------------------- group commit timing
+//
+// The job queue is the application's; the loop needs to know whether jobs
+// wait, when the last commit ran and whether writes are being held, so it
+// never sleeps past a due commit. app.commit_writes keeps these.
+
+pub var g_njobs: u32 = 0            // writes queued for the next commit
+pub var g_hold_since_us: i64 = -1   // writes held since then while a checkpoint catches up, -1 = not held
+pub var g_hold_gen: u64 = 0
+pub var g_hold_frames: u32 = 8192
+pub var g_hold_max_us: i64 = 250000
+// A saturated loop waits out a hold in sleeps of this length (see the end
+// of the main loop), unless this many holds in a row ended on the clock:
+// then waiting isn't what the checkpoint needs, and reads shouldn't pay for it.
+pub const HOLD_POLL_US: i64 = 1000
+pub const HOLD_GIVE_UP: u32 = 8
+pub var g_hold_timeouts: u32 = 0    // holds in a row that ran out (commit_writes counts them)
+pub var g_hold_yields: u64 = 0
+pub var g_commit_interval_us: i64 = 0
+pub var g_last_commit_us: i64 = 0
+pub var g_pace_us: i64 = 0          // PACE_US: minimum loop-pass length when there's work
+
+// ---------------------------------------------------------------- overload: drain first, answer in order
+//
+// After a stall (a checkpoint, a noisy neighbour, a burst), every
+// connection can have a request waiting. Left in its socket, each costs the
+// kernel 2-4 KB of receive buffer: at 270k connections that is over 500 MB,
+// and on the 2 GB box the kernel then prunes queues, drops connections and
+// finally kills the server. So reading and answering are decoupled:
+//  - a pass answers at most ANSWER_BUDGET requests. Past that, an arriving
+//    request is copied into the connection's own buffer (a few hundred
+//    bytes) and the connection goes on the ready list;
+//  - each pass starts by answering from the ready list, oldest first,
+//    before anything that arrives in that pass;
+//  - the sockets are emptied in rounds (see the loop in main), each
+//    re-arming only as many receives as the pool has buffers, so they don't
+//    end in ENOBUFS over and over.
+// While anything is listed or waiting to be re-armed, the loop neither naps
+// nor idles.
+//
+// A test build rewrites the next line to a budget of 1 (and fails if the
+// line is not there exactly as written), so that every request goes through
+// the ready list: the C server's -DANSWER_BUDGET=1.
+pub const ANSWER_BUDGET: u32 = 2048
+pub const READ_ROUNDS: i32 = 8
+
+struct Ready layout(c) {
+    ring: u16
+    slot: u16
+    gen: u16
+}
+
+const READY_MAX: usize = 1 << 24
+var g_ready: *mut [READY_MAX]Ready = undefined   // a ring buffer, g_ready_cap a power of two
+var g_ready_head: u32 = 0
+pub var g_ready_n: u32 = 0
+var g_ready_cap: u32 = 0
+pub var g_budget: u32 = 0
+pub var g_stashed: u64 = 0          // requests that waited on the ready list (DEBUG stats)
+
+var g_provide_fails: u64 = 0
+
+const HEX: []u8 = "0123456789abcdef"
+
+/// DEBUG: what a connection sent, printable bytes as they are and the rest
+/// as \xHH, at most about 500 bytes of it.
+fn dbg_bytes(what: []u8, ring: u32, slot: u32, p: []u8) {
+    var esc: [512]u8 = undefined
+    var o: usize = 0
+    var i: usize = 0
+    while i < p.len and o + 5 < 512 {
+        let c = p[i]
+        if c >= 0x20 and c < 0x7f {
+            esc[o] = c
+            o += 1
+        } else {
+            esc[o] = '\\'
+            esc[o + 1] = 'x'
+            esc[o + 2] = HEX[(c >> 4) as usize]
+            esc[o + 3] = HEX[(c & 15) as usize]
+            o += 4
+        }
+        i += 1
+    }
+    esc[o] = 0
+    unsafe {
+        _ = stdio.dprintf(2, @cstr("[r%u s%u] %.*s (%zu bytes): %s\n"), ring, slot, what.len as i32, what.ptr, p.len, esc[..].ptr)
+    }
+}
+
+fn ready_push(r: *mut net.Ring, slot: u32) {
+    let c = &mut r.conns[slot as usize]
+    if (c.flags & net.F_READY) != 0 { return }
+    unsafe {
+        if g_ready_n == g_ready_cap {
+            let cap: u32 = if g_ready_cap > 0 { g_ready_cap * 2 } else { 4096 }
+            let nq = stdlib.malloc((cap as usize) * @sizeOf(Ready)) as *mut [READY_MAX]Ready
+            if (nq as usize) == 0 { uring.crash() }
+            var i: u32 = 0
+            while i < g_ready_n {
+                nq[i as usize] = g_ready[((g_ready_head + i) & (g_ready_cap - 1)) as usize]
+                i += 1
+            }
+            stdlib.free(g_ready as *mut u8)
+            g_ready = nq
+            g_ready_cap = cap
+            g_ready_head = 0
+        }
+        g_ready[((g_ready_head + g_ready_n) & (g_ready_cap - 1)) as usize] = Ready{ .ring = r.idx as u16, .slot = slot as u16, .gen = c.gen }
+        g_ready_n += 1
+        c.flags |= net.F_READY
+        g_stashed += 1
+    }
+}
+
+/// Request bytes arrived on a connection.
+fn on_data(r: *mut net.Ring, slot: u32, data: []u8) {
+    let c = &mut r.conns[slot as usize]
+    let hold = c.qbytes > net.OUT_LIMIT or (c.flags & net.F_WRITE_PENDING) != 0
+    unsafe {
+        if hold or c.plen != 0 or g_budget == 0 {
+            if net.pbuf_over(c, data.len) {     // a client that sends without reading
+                net.pbuf_store(c, 0, 0)
+                net.conn_shutdown(r, slot)
+                return
+            }
+            net.pbuf_append(c, data.ptr as usize, data.len)
+            if hold { return }                  // the commit or the send completion resumes it
+            if g_budget != 0 and (c.flags & net.F_READY) == 0 {
+                g_budget -= 1
+                process_stash(r, slot)
+            } else {
+                ready_push(r, slot)             // keeps its place if it's already listed
+            }
+        } else {
+            g_budget -= 1
+            process(r, slot, data)
+        }
+    }
+}
+
+/// process over the connection's stash.
+pub fn process_stash(r: *mut net.Ring, slot: u32) {
+    let s = net.stash(&r.conns[slot as usize])
+    process(r, slot, s)
+}
+
+/// Parses and answers every complete request in data; keeps the rest.
+/// Stops early behind a pending write, or while the client isn't reading
+/// what it's already owed (resumed from the send completion). data is
+/// either a receive buffer or the connection's own stash.
+pub fn process(r: *mut net.Ring, slot: u32, data: []u8) {
+    let c = &mut r.conns[slot as usize]
+    var o = net.out_new()
+    let n = data.len
+    var off: usize = 0
+    var bad = false
+    while off < n and (c.flags & net.F_WRITE_PENDING) == 0 and !net.conn_backlogged(c, &o) {
+        var q = http.new_req()
+        var expect = false
+        let k = http.parse_request(data[off..n], &mut q, &mut expect)
+        if k < 0 {
+            unsafe {
+                if net.g_debug != 0 { dbg_bytes("unparseable request", r.idx as u32, slot, data[off..n]) }
+            }
+            bad = true
+            break
+        }
+        if k == 0 {
+            if expect and (c.flags & net.F_CONTINUED) == 0 {
+                c.flags |= net.F_CONTINUED
+                let b = net.body_begin(r, slot, &mut o)
+                let cont = "HTTP/1.1 100 Continue\r\n\r\n"
+                unsafe {
+                    let bp = b.ptr as usize
+                    let h = bp - cont.len
+                    _ = cstr.memcpy(h as *mut u8, cont.ptr, cont.len)
+                    if o.start == 0 {
+                        o.start = h
+                        o.end = bp
+                    } else {
+                        _ = cstr.memmove(o.end as *mut u8, h as *mut u8, cont.len)
+                        o.end += cont.len
+                    }
+                }
+            }
+            break
+        }
+        c.flags &= ~net.F_CONTINUED
+        _ = app.handle(r, slot, &mut o, data[off..n], &q)
+        off += k as usize
+    }
+    net.flush_out(r, slot, &mut o)
+    var from_stash = false
+    unsafe { from_stash = (data.ptr as usize) == c.pbuf }
+    if bad or (!from_stash and net.pbuf_over(c, n - off)) or n - off > net.PBUF_LIMIT {
+        net.pbuf_store(c, 0, 0)
+        net.conn_shutdown(r, slot)
+        return
+    }
+    if from_stash {
+        if off > 0 { net.pbuf_store(c, c.pbuf + off, n - off) }
+    } else {
+        unsafe { net.pbuf_store(c, (data.ptr as usize) + off, n - off) }
+    }
+}
+
+/// Answers stashed requests, oldest first, within the pass's budget.
+pub fn run_ready() {
+    unsafe {
+        while g_budget != 0 and g_ready_n != 0 {
+            let e = g_ready[g_ready_head as usize]
+            g_ready_head = (g_ready_head + 1) & (g_ready_cap - 1)
+            g_ready_n -= 1
+            let r = &mut net.g_rings[e.ring as usize]
+            let c = &mut r.conns[e.slot as usize]
+            if c.state != net.C_OPEN or c.gen != e.gen or (c.flags & net.F_READY) == 0 { continue }   // closed since
+            c.flags &= ~net.F_READY
+            // behind a write or a client that isn't reading: the commit or the
+            // send resumes it (and closes a half-closed connection once it's answered)
+            if (c.flags & (net.F_WRITE_PENDING | net.F_SHUT)) != 0 or c.qbytes > net.OUT_LIMIT { continue }
+            if c.plen != 0 {
+                g_budget -= 1
+                process_stash(r, e.slot as u32)
+            }
+            net.close_if_done(r, e.slot as u32)     // the client may have half-closed while this waited
+        }
+    }
+}
+
+// ---------------------------------------------------------------- completions
+
+fn on_cqe(r: *mut net.Ring, cqe: uring.Cqe) {
+    let u = cqe.user_data
+    let op = uring.ud_op(u)
+    let slot = uring.ud_slot(u)
+    let gen = uring.ud_gen(u)
+    let res = cqe.res
+    unsafe {
+        if op == uring.OP_ACCEPT {
+            if (cqe.flags & uring.CQE_F_MORE) == 0 { r.accept_armed = false }
+            if res < 0 {
+                st.accept_errs += 1
+                if net.g_debug != 0 { _ = stdio.dprintf(2, @cstr("[r%d] accept error %d\n"), r.idx, res) }
+            }
+            if res >= 0 {
+                st.accepts += 1
+                let s = res as u32
+                if net.g_debug != 0 and r.conns[s as usize].state == net.C_OPEN {
+                    _ = stdio.dprintf(2, @cstr("[r%d s%u] accept reused a slot we think is open!\n"), r.idx, s)
+                }
+                let c = &mut r.conns[s as usize]
+                c.gen +%= 1
+                c.state = net.C_OPEN
+                c.flags = 0
+                c.plen = 0
+                c.pq = 0
+                c.qbytes = 0
+                c.sending_len = 0
+                net.arm_recv(r, s)
+            } else if res == 0 - errno_h.ENFILE {
+                r.accept_full = true
+            }
+            if !r.accept_armed and !r.accept_full { net.arm_accept(r) }
+            return
+        }
+        if op == uring.OP_RECV {
+            let c = &mut r.conns[slot as usize]
+            let live = c.state == net.C_OPEN and (c.gen as u32) == gen
+            if res > 0 {
+                let bid = cqe.flags >> uring.CQE_BUFFER_SHIFT
+                if live and (c.flags & net.F_SHUT) == 0 {
+                    g_pass_data += 1
+                    g_win_reqs += 1
+                    on_data(r, slot, uring.buffer(&r.q, bid, res as usize))
+                }
+                uring.recycle(&mut r.q, bid)
+            }
+            if (cqe.flags & uring.CQE_F_MORE) == 0 and live {
+                if res > 0 or res == 0 - errno_h.ENOBUFS {
+                    if (c.flags & net.F_REARM) == 0 {
+                        c.flags |= net.F_REARM
+                        r.rearm[r.nrearm as usize] = slot
+                        r.nrearm += 1
+                    }
+                } else if res == 0 and (c.flags & net.F_SHUT) == 0 {
+                    // Half-close: answer what the client already sent, then close.
+                    st.eofs += 1
+                    c.flags |= net.F_EOF
+                    net.close_if_done(r, slot)
+                } else {
+                    if net.g_debug != 0 and res < 0 { _ = stdio.dprintf(2, @cstr("[r%d s%u] recv error %d, closing\n"), r.idx, slot, res) }
+                    if res < 0 { st.recv_errs += 1 }
+                    net.conn_close(r, slot)
+                }
+                if res == 0 - errno_h.ENOBUFS {
+                    st.rearm_nobufs += 1
+                } else if res > 0 {
+                    st.rearm_final += 1
+                }
+            }
+            if res == 0 - errno_h.ENOBUFS { r.q.bufs_short = true }
+            return
+        }
+        if op == uring.OP_SEND {
+            st.sends += 1
+            if res < 0 { st.send_errs += 1 }
+            net.chunk_release(uring.ud_chunk(u))
+            let c = &mut r.conns[slot as usize]
+            if (c.gen as u32) != gen or c.state != net.C_OPEN { return }    // a closed connection's send
+            c.flags &= ~net.F_SENDING
+            c.qbytes -= c.sending_len
+            // MSG_WAITALL: anything short of the full length means the socket failed
+            if res < 0 or (res as u32) != c.sending_len {
+                if net.g_debug != 0 { _ = stdio.dprintf(2, @cstr("[r%d s%u] send %d of %u, shutting down\n"), r.idx, slot, res, c.sending_len) }
+                net.pend_drop(c)
+                c.qbytes = 0
+                net.conn_shutdown(r, slot)
+                return
+            }
+            if c.pq != 0 {
+                let e = c.pq as *mut net.Pend
+                c.pq = e.next
+                net.issue_send(r, slot, e.p, e.n, e.chunk)
+                stdlib.free(e as *mut u8)
+            }
+            // resume requests held back while the client wasn't reading
+            if c.plen != 0 and (c.flags & (net.F_WRITE_PENDING | net.F_SHUT)) == 0 and c.qbytes <= net.OUT_LIMIT {
+                process_stash(r, slot)
+            }
+            net.close_if_done(r, slot)
+            return
+        }
+        if op == uring.OP_CLOSE {
+            st.closes += 1
+            let c = &mut r.conns[slot as usize]
+            if (c.gen as u32) == gen and c.state == net.C_CLOSING { c.state = net.C_FREE }
+            if r.accept_full {
+                r.accept_full = false
+                if !r.accept_armed { net.arm_accept(r) }
+            }
+            return
+        }
+        if op == uring.OP_PROVIDE {     // only failures complete (IOSQE_CQE_SKIP_SUCCESS)
+            // Requeue the range (bid in the slot field, count in the chunk
+            // field) so flush_freed retries it at the end of this drain;
+            // dropping it would shrink the pool for good.
+            g_provide_fails += 1
+            if g_provide_fails <= 10 or g_provide_fails % 1000 == 0 {
+                _ = stdio.dprintf(2, @cstr("[r%d] PROVIDE_BUFFERS failed: %d (%lu so far), retrying\n"), r.idx, res, g_provide_fails)
+            }
+            var n = uring.ud_chunk(u)
+            if r.q.nfreed + n > uring.NBUF {    // every buffer is in exactly one place, so this can't happen
+                _ = stdio.dprintf(2, @cstr("[r%d] freed list overflow (%u + %u), dropping the excess\n"), r.idx, r.q.nfreed, n)
+                n = uring.NBUF - r.q.nfreed
+            }
+            var i: u32 = 0
+            while i < n {
+                r.q.freed[r.q.nfreed as usize] = @truncate(u16, slot + i)
+                r.q.nfreed += 1
+                i += 1
+            }
+            return
+        }
+        if op == uring.OP_SHUT {
+            let c = &mut r.conns[slot as usize]
+            if (c.gen as u32) != gen { return }     // can't happen: the slot stays allocated until now
+            c.flags &= ~net.F_SHUT_INFLIGHT
+            if c.state == net.C_CLOSING and (c.flags & net.F_CLOSE_DEFERRED) != 0 {
+                c.flags &= ~net.F_CLOSE_DEFERRED
+                net.submit_close(r, slot)
+            } else if c.state == net.C_OPEN and (c.flags & net.F_EOF) != 0 {
+                net.conn_close(r, slot)     // the recv already ended; nothing else will close it
+            }
+            return
+        }
+    }
+}
+
+/// Handles every completion waiting on the ring, then grows the buffer pool
+/// if a receive found it empty and hands the freed buffers back. Returns the
+/// completions handled.
+pub fn drain_cq(r: *mut net.Ring) -> u32 {
+    var head = r.q.cq_head.*
+    var n: u32 = 0
+    while true {
+        let tail = r.q.cq_tail.*
+        if head == tail { break }
+        while head != tail {
+            on_cqe(r, r.q.cqes[(head & r.q.cq_mask) as usize])
+            head +%= 1
+            n += 1
+        }
+        r.q.cq_head.* = head
+    }
+    if r.q.bufs_short { uring.grow_bufs(&mut r.q, r.nrearm) }
+    if r.q.legacy_bufs {
+        uring.flush_freed(&mut r.q)
+    } else {
+        uring.publish_bufs(&mut r.q)
+    }
+    return n
+}
+
+/// Arms a fresh multishot recv for the connections whose recv ended.
+pub fn do_rearms(r: *mut net.Ring) {
+    let n = r.nrearm
+    var done: u32 = 0
+    // no more than the pool can serve: each re-armed receive finds its data
+    // waiting and takes a buffer at once
+    while done < n and done < r.q.nbuf_live {
+        let slot = r.rearm[done as usize]
+        let c = &mut r.conns[slot as usize]
+        c.flags &= ~net.F_REARM
+        if c.state == net.C_OPEN {
+            if (c.flags & net.F_SHUT) != 0 {
+                net.conn_close(r, slot)     // no recv left to see the shutdown
+            } else {
+                net.arm_recv(r, slot)
+            }
+        }
+        done += 1
+    }
+    if done < n {
+        unsafe {
+            let base = r.rearm as usize
+            _ = cstr.memmove(base as *mut u8, (base + (done as usize) * 4) as *mut u8, ((n - done) as usize) * 4)
+        }
+    }
+    r.nrearm = n - done
+}
+
+// ---------------------------------------------------------------- waiting
+
+/// Anything for the next pass to do on any ring?
+pub fn rings_pending() -> bool {
+    unsafe {
+        if g_ready_n != 0 { return true }
+        var i: i32 = 0
+        while i < net.g_nrings {
+            let r = &mut net.g_rings[i as usize]
+            if r.q.sqe_tail != r.q.submitted or r.nrearm != 0 or (uring.sq_flags(&r.q) & (uring.SQ_TASKRUN | uring.SQ_CQ_OVERFLOW)) != 0 or uring.cq_ready(&r.q) {
+                return true
+            }
+            i += 1
+        }
+        return false
+    }
+}
+
+/// Sleeps until any ring has work, or for wait_us.
+///
+/// With DEFER_TASKRUN, completions queue as task work that the kernel
+/// announces by setting IORING_SQ_TASKRUN and, when an eventfd is
+/// registered, signalling it. That signal is switched off
+/// (IORING_CQ_EVENTFD_DISABLED) except while we sleep here, so a busy loop
+/// pays next to nothing for it (on 6.8, an uncontended lock and a flag check
+/// per CQ flush). Switching it on and then checking TASKRUN, both behind
+/// full barriers (the kernel sets TASKRUN with an atomic op before it reads
+/// the flag), means a completion either shows up in the check or signals the
+/// eventfd.
+pub fn idle_wait(wait_us: i64) {
+    unsafe {
+        if net.g_evfd < 0 {
+            var kts = uring.KernelTimespec{ .tv_sec = 0, .tv_nsec = wait_us * 1000 }
+            _ = uring.enter_timeout(&mut net.g_rings[0].q, 1, &mut kts)
+            return
+        }
+        var i: i32 = 0
+        while i < net.g_nrings {
+            uring.eventfd_signal(&mut net.g_rings[i as usize].q, true)
+            i += 1
+        }
+        uring.fence()
+        if !rings_pending() {
+            // ppoll(&pfd, 1, &ts, NULL), as the system call: glibc declares
+            // ppoll only under _GNU_SOURCE, which @cImport does not define
+            var pfd = pl.pollfd{ .fd = net.g_evfd, .events = pl.POLLIN as i16, .revents = 0 }
+            var ts = tm.timespec{ .tv_sec = 0, .tv_nsec = wait_us * 1000 }
+            _ = unistd.syscall(sysno.SYS_ppoll as i64, &mut pfd, 1 as i64, &mut ts, 0 as i64, 8 as i64)
+        }
+        i = 0
+        while i < net.g_nrings {
+            uring.eventfd_signal(&mut net.g_rings[i as usize].q, false)
+            i += 1
+        }
+        var v: u64 = 0
+        if unistd.read(net.g_evfd, (&mut v) as *mut u8, 8) < 0 and uring.errno() != errno_h.EAGAIN {
+            stdio.perror(@cstr("read eventfd"))     // reset it
+        }
+    }
+}
+
+pub fn mono_now_us() -> i64 {
+    var ts = tm.timespec{ .tv_sec = 0, .tv_nsec = 0 }
+    unsafe { _ = tm.clock_gettime(tm.CLOCK_MONOTONIC, &mut ts) }
+    return ts.tv_sec * 1000000 + ts.tv_nsec / 1000
+}
+
+pub fn clocks() {
+    var ts = tm.timespec{ .tv_sec = 0, .tv_nsec = 0 }
+    unsafe {
+        _ = tm.clock_gettime(tm.CLOCK_REALTIME_COARSE, &mut ts)
+        g_now_s = ts.tv_sec
+        _ = tm.clock_gettime(tm.CLOCK_MONOTONIC, &mut ts)
+        g_mono_us = ts.tv_sec * 1000000 + ts.tv_nsec / 1000
+    }
+}
+
+/// getenv(name) as a number (strtoll's reading of it), or def when unset or
+/// empty.
+pub fn env_int(name: *u8, def: i64) -> i64 {
+    unsafe {
+        let v = stdlib.getenv(name)
+        // atoll is glibc's strtoll(v, NULL, 10); strtoll's char ** does not
+        // pass through @cImport with gcc 15
+        if (v as usize) != 0 and v.* != 0 { return stdlib.atoll(v) }
+        return def
+    }
+}
+
+// ---------------------------------------------------------------- the nap
+//
+// The self-tuning nap (the default; PACE_US=<us> fixes it, PACE_US=0 turns
+// it off). Batching completions and sends through the kernel is what makes
+// a request cheap on a virtio-net box, so a busy pass pauses before the
+// next one. Three loops pick the pause, all measured in 50 ms windows:
+//  - whether to nap: the share of the time the loop isn't asleep. It starts
+//    napping above NAP_ON and stops below NAP_OFF, so a quiet server
+//    answers at once;
+//  - whether napping is hurting: clients that wait for each answer before
+//    sending the next one (a benchmark loop, a smoke test) send fewer
+//    requests when the server pauses, whereas users with think time keep
+//    arriving at the same rate. So when napping starts, the request rate of
+//    the first windows is compared with the window before: if it fell by
+//    more than NAP_THROTTLE, the loop stops napping and leaves it off for a
+//    while (1 s, doubling up to 16 s, reset once napping has held for 2 s);
+//  - how long: while napping, it watches how many requests each pass
+//    collects and stretches the nap when passes come in under NAP_TARGET,
+//    shrinks it when they come in over, between NAP_MIN_US and NAP_MAX_US.
+//    At saturation a pass outlasts any nap, so the loop stops sleeping by
+//    itself.
+
+const NAP_MIN_US: f64 = 500.0
+const NAP_MAX_US: f64 = 3000.0
+const NAP_TARGET: f64 = 64.0
+const NAP_ON: f64 = 0.20
+const NAP_OFF: f64 = 0.08
+const NAP_THROTTLE: f64 = 0.75          // napping is hurting if the request rate falls below this share
+const NAP_PROBE_US: i64 = 150000        // ...within this long of starting
+const NAP_PROBE_MIN_RATE: f64 = 2000.0  // req/s: below ~100 requests a window, a 25% drop is noise
+// ...and above this the check is off. No handful of waiting clients sends
+// that much, and a server that busy needs its nap: a VM stall (the guest
+// frozen while requests pile up outside) looks just like throttled clients,
+// and backing off then would cost ~40% more CPU per request right where the
+// load is highest.
+const NAP_PROBE_MAX_RATE: f64 = 20000.0
+
+pub var g_pace_auto: bool = true
+pub var g_napping: bool = false
+pub var g_nap_us: f64 = 2000.0
+pub var g_batch_ewma: f64 = 64.0
+pub var g_busy: f64 = 0.0
+var g_rate_before: f64 = 0.0
+pub var g_win_start_us: i64 = 0
+pub var g_win_sleep_us: i64 = 0
+var g_nap_since_us: i64 = 0
+var g_nap_block_until_us: i64 = 0
+var g_nap_last_fire_us: i64 = 0
+var g_nap_backoff_us: i64 = 1000000
+pub var g_nap_backoffs: u64 = 0
+
+/// Called at the start of every pass (g_mono_us is the pass start).
+pub fn track_window() {
+    unsafe {
+        let win = g_mono_us - g_win_start_us
+        if win < 50000 { return }
+        let busy = 1.0 - (g_win_sleep_us as f64) / (win as f64)
+        let rate = (g_win_reqs as f64) * 1e6 / (win as f64)
+        g_busy = if busy < 0.0 { 0.0 } else { busy }
+        if !g_pace_auto {
+            // PACE_US fixed or off: nothing to decide
+        } else if !g_napping {
+            if g_busy > NAP_ON and g_mono_us >= g_nap_block_until_us {
+                g_napping = true
+                g_nap_since_us = g_mono_us
+                g_rate_before = rate
+            }
+        } else if g_mono_us - g_nap_since_us <= NAP_PROBE_US and g_rate_before >= NAP_PROBE_MIN_RATE
+            and g_rate_before <= NAP_PROBE_MAX_RATE and rate < NAP_THROTTLE * g_rate_before and g_busy < NAP_ON {
+            // The clients were waiting on our naps: fewer requests, and the
+            // server went nearly idle. A rate that dips while the server stays
+            // busy is a stall or an overload, and napping is exactly what an
+            // overloaded server needs, so that never backs off. (A load that
+            // simply stops looks the same for these 150 ms; its backoff is
+            // harmless.)
+            g_napping = false
+            g_nap_backoffs += 1
+            // a backoff earned long ago (a smoke test before the real load) shouldn't carry over
+            if g_mono_us - g_nap_last_fire_us > 2 * g_nap_backoff_us { g_nap_backoff_us = 1000000 }
+            g_nap_last_fire_us = g_mono_us
+            g_nap_block_until_us = g_mono_us + g_nap_backoff_us
+            if g_nap_backoff_us < 16000000 { g_nap_backoff_us *= 2 }
+        } else if g_busy < NAP_OFF {
+            g_napping = false       // the load went away
+        } else if g_mono_us - g_nap_since_us > 2000000 {
+            g_nap_backoff_us = 1000000      // napping has held up: forget earlier backoffs
+        }
+        g_win_start_us = g_mono_us
+        g_win_sleep_us = 0
+        g_win_reqs = 0
+    }
+}
+
+/// The pause for this pass, in us from its start (0 = none).
+pub fn nap_length() -> i64 {
+    unsafe {
+        if !g_pace_auto { return g_pace_us }
+        if !g_napping or g_pass_data == 0 { return 0 }
+        g_batch_ewma += 0.125 * ((g_pass_data as f64) - g_batch_ewma)
+        if g_batch_ewma < NAP_TARGET {
+            g_nap_us *= 1.02
+        } else {
+            g_nap_us *= 0.98
+        }
+        if g_nap_us < NAP_MIN_US { g_nap_us = NAP_MIN_US }
+        if g_nap_us > NAP_MAX_US { g_nap_us = NAP_MAX_US }
+        return g_nap_us as i64
+    }
+}

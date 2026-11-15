@@ -1,0 +1,453 @@
+// app.nx: the application. Five endpoints over the database layer, and the
+// group commit that answers the writes.
+//
+//   GET  /feed             the 20 newest posts
+//   GET  /posts/:id        one post
+//   GET  /health           database check and uptime
+//   POST /posts            create a post (JWT)
+//   POST /posts/:id/like   like a post (JWT)
+//
+// Reads are answered at once. A write is queued as a job and its connection
+// held behind F_WRITE_PENDING; commit_writes runs every queued job in one
+// transaction, and only then answers them, so an answer always follows its
+// COMMIT (WAL, synchronous=NORMAL).
+
+import net
+import loop
+import http
+import json
+import jwt
+import sha256
+import db
+
+const cstr = @cImport("string.h")
+const stdlib = @cImport("stdlib.h")
+
+const J_POST: u8 = 1
+const J_LIKE: u8 = 2
+
+/// One queued write, and after the commit its result. (The C keeps the
+/// results in arrays beside the job list; here they ride in the job.)
+struct Job layout(c) {
+    ring: u32
+    slot: u32
+    gen: u16
+    kind: u8
+    uid: i64
+    pid: i64
+    body: usize         // copies, from jobmem_copy
+    uname: usize
+    blen: u32
+    ulen: u32
+    status: i32         // the HTTP status this job is answered with
+    id: i64             // the new post's id
+    clen: usize
+    created: [32]u8     // the new post's created_at
+}
+
+const JOB_MAX: usize = 1 << 24
+// Two job lists: while one batch is being answered (which can resume held
+// connections and queue new writes), new jobs go to the other.
+var g_jobs: *mut [JOB_MAX]Job = undefined
+var g_jobs_alt: *mut [JOB_MAX]Job = undefined
+var g_jobcap: u32 = 0
+var g_jobcap_alt: u32 = 0
+
+var g_jwt_key: sha256.HmacKey = undefined
+
+// The decoded "body" member of a POST. A JSON string never decodes to more
+// bytes than it has, so a whole request's worth is always enough.
+// (nx 1.5.0 refuses an array length that names another module's constant,
+// so BODYBUF repeats http.MAX_REQ.)
+const BODYBUF: usize = 65536
+var g_bodybuf: [BODYBUF]u8 = undefined
+
+/// A block of the bump allocator for job strings. Growing adds a block
+/// (older jobs keep pointers into older blocks); a reset frees all but the
+/// newest block. The data follows the header.
+struct JBlock layout(c) {
+    prev: usize
+    cap: usize
+    used: usize
+}
+
+var g_jb: usize = 0
+
+fn jobmem_copy(p: usize, n: usize) -> usize {
+    unsafe {
+        var grow = g_jb == 0
+        if !grow {
+            let b = g_jb as *mut JBlock
+            grow = b.used + n > b.cap
+        }
+        if grow {
+            var cap: usize = 1 << 20
+            if g_jb != 0 { cap = (g_jb as *mut JBlock).cap * 2 }
+            while cap < n { cap *= 2 }
+            let nb = stdlib.malloc(@sizeOf(JBlock) + cap) as usize
+            if nb == 0 { stdlib.abort() }
+            let b = nb as *mut JBlock
+            b.prev = g_jb
+            b.cap = cap
+            b.used = 0
+            g_jb = nb
+        }
+        let b = g_jb as *mut JBlock
+        let d = g_jb + @sizeOf(JBlock) + b.used
+        _ = cstr.memcpy(d as *mut u8, p as *mut u8, n)
+        b.used += (n + 7) & ~(7 as usize)
+        return d
+    }
+}
+
+fn jobmem_reset() {
+    unsafe {
+        if g_jb == 0 { return }
+        let top = g_jb as *mut JBlock
+        var b = top.prev
+        while b != 0 {
+            let prev = (b as *mut JBlock).prev
+            stdlib.free(b as *mut u8)
+            b = prev
+        }
+        top.prev = 0
+        top.used = 0
+    }
+}
+
+fn job_new() -> *mut Job {
+    unsafe {
+        if loop.g_njobs == g_jobcap {
+            g_jobcap = if g_jobcap > 0 { g_jobcap * 2 } else { 1024 }
+            g_jobs = stdlib.realloc(g_jobs as *mut u8, (g_jobcap as usize) * @sizeOf(Job)) as *mut [JOB_MAX]Job
+            if (g_jobs as usize) == 0 { stdlib.abort() }
+        }
+        let j = &mut g_jobs[loop.g_njobs as usize]
+        loop.g_njobs += 1
+        return j
+    }
+}
+
+/// A job's copied string as a slice.
+fn job_bytes(p: usize, n: u32) -> []u8 {
+    unsafe { return (p as *[1 << 20]u8)[0..(n as usize)] }
+}
+
+/// Appends s to b at offset at and returns the new offset.
+fn put(b: []mut u8, at: usize, s: []u8) -> usize {
+    b[at..at + s.len].copy_from(s)
+    return at + s.len
+}
+
+/// Called once at startup with JWT_SECRET: derives the HMAC key, so a
+/// request's verification starts from the two precomputed pads.
+pub fn init(secret: []u8) {
+    unsafe { g_jwt_key = sha256.hmac_key(secret) }
+}
+
+/// The bearer token of the request, verified. Answers 401 itself and
+/// returns false when there isn't a good one.
+fn check_auth(r: *mut net.Ring, slot: u32, o: *mut net.Out, p: []u8, q: *http.Req, cl: *mut jwt.Claims) -> bool {
+    var bearer = q.has_auth and q.alen >= 7
+    if bearer { bearer = p[q.auth..q.auth + 7] == "Bearer " }
+    if !bearer {
+        net.respond_error(r, slot, o, 401, "missing bearer token")
+        return false
+    }
+    var t = q.auth + 7
+    var tl = q.alen - 7
+    while tl != 0 and p[t] == ' ' {
+        t += 1
+        tl -= 1
+    }
+    var v: i32 = 0
+    unsafe { v = jwt.verify(&g_jwt_key, p[t..t + tl], loop.g_now_s, cl) }
+    if v == jwt.JWT_OK { return true }
+    if v == jwt.JWT_BAD_PAYLOAD {
+        net.respond_error(r, slot, o, 401, "invalid token payload")
+    } else {
+        net.respond_error(r, slot, o, 401, "invalid or expired token")
+    }
+    return false
+}
+
+/// Reads the "body" member of a POST /posts request into g_bodybuf and
+/// checks it: a string, not blank once trimmed, valid UTF-8, at most 500
+/// characters. The text is g_bodybuf[off..off + n]. Answers 400 itself and
+/// returns false otherwise.
+fn read_post_body(r: *mut net.Ring, slot: u32, o: *mut net.Out, body: []u8, off: *mut usize, n: *mut usize) -> bool {
+    let lk = json.last_member(body, "body")
+    if lk.status < 0 {
+        net.respond_error(r, slot, o, 400, "malformed JSON body")
+        return false
+    }
+    var len: usize = 0
+    var ok = lk.status == 0 and lk.found and lk.v < lk.ve
+    if ok { ok = body[lk.v] == '"' }
+    unsafe {
+        if ok { ok = json.string_decode(body, lk.v, lk.ve, g_bodybuf[..], &mut len) != null }
+        if !ok {
+            net.respond_error(r, slot, o, 400, "body is required")
+            return false
+        }
+        var s: usize = 0
+        var e = len
+        while s < e and http.is_ws(g_bodybuf[s]) { s += 1 }
+        while e > s and http.is_ws(g_bodybuf[e - 1]) { e -= 1 }
+        if s == e {
+            net.respond_error(r, slot, o, 400, "body is required")
+            return false
+        }
+        // JSON text is UTF-8
+        if !http.utf8_text_ok(g_bodybuf[s..e]) {
+            net.respond_error(r, slot, o, 400, "malformed JSON body")
+            return false
+        }
+        var chars: usize = 0
+        var i = s
+        while i < e {
+            if (g_bodybuf[i] & 0xC0) != 0x80 { chars += 1 }
+            i += 1
+        }
+        if chars > 500 {
+            net.respond_error(r, slot, o, 400, "body must be at most 500 characters")
+            return false
+        }
+        off.* = s
+        n.* = e - s
+    }
+    return true
+}
+
+fn handle_get(r: *mut net.Ring, slot: u32, o: *mut net.Out, path: []u8) {
+    if path == "/feed" {
+        let b = net.body_begin(r, slot, o)
+        let n = db.feed_json(b)
+        if n < 0 {
+            net.respond_error(r, slot, o, 500, "internal server error")
+        } else {
+            net.body_finish(o, 200, b, n as usize)
+        }
+        return
+    }
+    if path.len > 7 and path[0..7] == "/posts/" {
+        let rest = path[7..]
+        var id: i64 = 0
+        let k = http.parse_id(rest, &mut id)
+        if k < 0 {
+            var slash = false
+            unsafe { slash = (cstr.memchr(rest.ptr, '/' as i32, rest.len) as usize) != 0 }
+            if slash {
+                net.respond_error(r, slot, o, 404, "not found")
+            } else {
+                net.respond_error(r, slot, o, 400, "invalid post id")
+            }
+            return
+        }
+        let b = net.body_begin(r, slot, o)
+        // digits that don't fit an id can't name a post
+        let n = if k != 0 { db.NOT_FOUND } else { db.post_json(id, b) }
+        if n == db.ERR {
+            net.respond_error(r, slot, o, 500, "internal server error")
+        } else if n < 0 {
+            net.respond_error(r, slot, o, 404, "post not found")
+        } else {
+            net.body_finish(o, 200, b, n as usize)
+        }
+        return
+    }
+    if path == "/health" {
+        var err: [256]u8 = undefined
+        let b = net.body_begin(r, slot, o)
+        let hl = db.health(err[..])
+        if hl == 0 {
+            var e = put(b, 0, "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":")
+            unsafe { e += json.i64_to_dec(b[e..], loop.g_mono_us / 1000000 - loop.g_start_mono_s) }
+            b[e] = '}'
+            net.body_finish(o, 200, b, e + 1)
+        } else {
+            let ml = if hl > 0 { hl as usize } else { 0 }
+            var e = put(b, 0, "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\"")
+            e += json.escape(b[e..], err[0..ml])
+            e = put(b, e, "\"}")
+            net.body_finish(o, 503, b, e)
+        }
+        return
+    }
+    net.respond_error(r, slot, o, 404, "not found")
+}
+
+/// Handles one complete request, p[0..] holding it as q describes. Returns
+/// 1 if a write was queued (the connection then waits for the commit
+/// before more of its requests are handled).
+pub fn handle(r: *mut net.Ring, slot: u32, o: *mut net.Out, p: []u8, q: *http.Req) -> i32 {
+    var path = p[q.path..q.path + q.plen]
+    unsafe {
+        let qm = cstr.memchr(path.ptr, '?' as i32, path.len) as usize
+        if qm != 0 { path = path[0..(qm - (path.ptr as usize))] }
+    }
+    let method = p[0..q.mlen]
+    if method == "GET" {
+        handle_get(r, slot, o, path)
+        return 0
+    }
+    if !(method == "POST") {
+        net.respond_error(r, slot, o, 404, "not found")
+        return 0
+    }
+
+    let is_create = path == "/posts"
+    var is_like = path.len > 12
+    if is_like { is_like = path[0..7] == "/posts/" and path[path.len - 5..] == "/like" }
+    if !is_create and !is_like {
+        net.respond_error(r, slot, o, 404, "not found")
+        return 0
+    }
+    var cl: jwt.Claims = undefined
+    if !check_auth(r, slot, o, p, q, &mut cl) { return 0 }
+    if is_like {
+        var id: i64 = 0
+        let k = http.parse_id(path[7..path.len - 5], &mut id)
+        if k < 0 {
+            net.respond_error(r, slot, o, 400, "invalid post id")
+            return 0
+        }
+        if k > 0 {
+            net.respond_error(r, slot, o, 404, "post not found")
+            return 0
+        }
+        let j = job_new()
+        j.ring = r.idx as u32
+        j.slot = slot
+        j.gen = r.conns[slot as usize].gen
+        j.kind = J_LIKE
+        j.uid = cl.uid
+        j.pid = id
+        j.body = 0
+        j.uname = 0
+        j.blen = 0
+        j.ulen = 0
+    } else {
+        var off: usize = 0
+        var n: usize = 0
+        if q.blen > BODYBUF {
+            net.respond_error(r, slot, o, 400, "body must be at most 500 characters")
+            return 0
+        }
+        if !read_post_body(r, slot, o, p[q.body..q.body + q.blen], &mut off, &mut n) { return 0 }
+        let j = job_new()
+        j.ring = r.idx as u32
+        j.slot = slot
+        j.gen = r.conns[slot as usize].gen
+        j.kind = J_POST
+        j.uid = cl.uid
+        j.pid = 0
+        unsafe {
+            j.body = jobmem_copy((&g_bodybuf[off]) as usize, n)
+            j.uname = jobmem_copy((&cl.uname[0]) as usize, cl.uname_len)
+        }
+        j.blen = n as u32
+        j.ulen = cl.uname_len as u32
+    }
+    r.conns[slot as usize].flags |= net.F_WRITE_PENDING
+    return 1
+}
+
+/// The group commit: runs every queued write in one transaction, then
+/// answers them and lets each held connection go on with what it sent
+/// meanwhile.
+pub fn commit_writes() {
+    unsafe {
+        if loop.g_njobs == 0 { return }
+        if loop.g_commit_interval_us != 0 and loop.g_mono_us - loop.g_last_commit_us < loop.g_commit_interval_us { return }
+        // Hold writes while the WAL is over its limit and a checkpoint is
+        // catching up, so the next commit can restart the log instead of
+        // growing it.
+        if db.wal_frames() >= loop.g_hold_frames {
+            if loop.g_hold_since_us < 0 {
+                loop.g_hold_since_us = loop.g_mono_us
+                loop.g_hold_gen = db.ckpt_generation()
+            }
+            let caught_up = db.ckpt_generation() != loop.g_hold_gen
+            if !caught_up and loop.g_mono_us - loop.g_hold_since_us < loop.g_hold_max_us { return }
+            loop.g_hold_timeouts = if caught_up { 0 } else { loop.g_hold_timeouts + 1 }
+        }
+        loop.g_hold_since_us = -1
+        loop.g_last_commit_us = loop.g_mono_us
+
+        let n = loop.g_njobs
+        var ok = db.write_begin() == 0
+        var i: u32 = 0
+        while ok and i < n {
+            let j = &mut g_jobs[i as usize]
+            i += 1
+            if j.kind == J_LIKE {
+                let k = db.insert_like(j.uid, j.pid)
+                j.status = if k == 1 { 201 } else if k == 0 { 200 } else if k == -1 { 404 } else { 500 }
+            } else {
+                let rc = db.insert_post(j.uid, job_bytes(j.body, j.blen), &mut j.id, &mut j.created, &mut j.clen)
+                j.status = if rc == 0 { 201 } else { 500 }
+            }
+        }
+        if ok and db.write_commit() != 0 { ok = false }
+        if !ok {
+            // nothing of this batch is in the database, so nothing of it succeeded
+            db.write_rollback()
+            i = 0
+            while i < n {
+                g_jobs[i as usize].status = 500
+                i += 1
+            }
+        }
+
+        // Swap lists: resuming held connections below may queue new jobs.
+        let jobs = g_jobs
+        let jcap = g_jobcap
+        g_jobs = g_jobs_alt
+        g_jobcap = g_jobcap_alt
+        g_jobs_alt = jobs
+        g_jobcap_alt = jcap
+        loop.g_njobs = 0
+        i = 0
+        while i < n {
+            let j = &mut jobs[i as usize]
+            i += 1
+            let r = &mut net.g_rings[j.ring as usize]
+            let c = &mut r.conns[j.slot as usize]
+            if c.state != net.C_OPEN or c.gen != j.gen { continue }
+            var o = net.out_new()
+            if j.status == 500 {
+                net.respond_error(r, j.slot, &mut o, 500, "internal server error")
+            } else if j.status == 404 {
+                net.respond_error(r, j.slot, &mut o, 404, "post not found")
+            } else if j.kind == J_LIKE {
+                let b = net.body_begin(r, j.slot, &mut o)
+                var e = put(b, 0, "{\"liked\":true,\"already_liked\":")
+                e = put(b, e, if j.status == 200 { "true" } else { "false" })
+                e = put(b, e, ",\"post_id\":")
+                e += json.i64_to_dec(b[e..], j.pid)
+                b[e] = '}'
+                net.body_finish(&mut o, j.status, b, e + 1)
+            } else {
+                let b = net.body_begin(r, j.slot, &mut o)
+                var e = put(b, 0, "{\"post\":{\"id\":")
+                e += json.i64_to_dec(b[e..], j.id)
+                e = put(b, e, ",\"body\":\"")
+                e += json.escape(b[e..], job_bytes(j.body, j.blen))
+                e = put(b, e, "\",\"created_at\":\"")
+                e += json.escape(b[e..], j.created[0..j.clen])
+                e = put(b, e, "\",\"author\":\"")
+                e += json.escape(b[e..], job_bytes(j.uname, j.ulen))
+                e = put(b, e, "\",\"like_count\":0}}")
+                net.body_finish(&mut o, 201, b, e)
+            }
+            net.flush_out(r, j.slot, &mut o)
+            c.flags &= ~net.F_WRITE_PENDING
+            if c.plen != 0 { loop.process_stash(r, j.slot) }
+            net.close_if_done(r, j.slot)
+        }
+        // jobs queued while resuming keep their copies in the job memory, so
+        // only reset it once nothing is queued
+        if loop.g_njobs == 0 { jobmem_reset() }
+    }
+}

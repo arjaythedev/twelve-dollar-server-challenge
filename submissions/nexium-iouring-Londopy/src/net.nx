@@ -1,0 +1,535 @@
+// net.nx: the rings and their connection tables, the response arena, sends
+// (one in flight per connection), shutdown and close, the request stash,
+// and the response helpers the application builds its answers with.
+//
+// Per connection there is a 40-byte record and no buffers while idle: a
+// multishot recv per connection pulls from the ring's shared pool of
+// provided buffers, and buffers go straight back after each request is
+// parsed. Only a request that is incomplete, or one that has to wait, is
+// copied into a buffer of the connection's own (the stash).
+//
+// Memory here is C's: the tables are mmap'ed, and the stash, the queued
+// sends and the arena's chunk list come from malloc, as in server.c, so no
+// Nexium value on these paths owns anything or is reference counted.
+
+import uring
+import http
+import json
+
+const cstr = @cImport("string.h")
+const stdlib = @cImport("stdlib.h")
+const stdio = @cImport("stdio.h")
+const mman = @cImport("sys/mman.h")
+const sock = @cImport("sys/socket.h")
+const inet = @cImport("netinet/in.h")
+const tcp = @cImport("netinet/tcp.h")
+const arpa = @cImport("arpa/inet.h")
+const unistd = @cImport("unistd.h")
+
+pub const MAX_REQ: usize = 64 * 1024
+pub const CHUNK_SIZE: usize = 4 << 20
+pub const RESP_RESERVE: usize = 384 << 10   // worst-case single response (a feed of escaped 500-char bodies)
+pub const HDR_ROOM: usize = 128
+
+pub const OUT_LIMIT: u32 = 256 << 10        // stop answering a connection that owes this much unsent output
+pub const PBUF_LIMIT: usize = 1 << 20       // ...and drop it if it then buffers this many unread request bytes
+pub const PBUF_GLOBAL: usize = 128 << 20    // past this much buffered input server-wide, drop the biggest bufferers
+pub var g_pbuf_bytes: usize = 0             // allocated request-buffer bytes, all connections
+
+pub const C_FREE: u8 = 0
+pub const C_OPEN: u8 = 1
+pub const C_CLOSING: u8 = 2
+
+pub const F_WRITE_PENDING: u16 = 1   // a POST waits for the group commit; later requests wait behind it
+pub const F_REARM: u16 = 2           // queued for a fresh multishot recv
+pub const F_SHUT: u16 = 4            // shutting down: ignore further input
+pub const F_CONTINUED: u16 = 8       // sent 100 Continue for the request being read
+pub const F_SHUT_INFLIGHT: u16 = 16  // SHUTDOWN SQE outstanding: the slot must not be closed yet
+pub const F_CLOSE_DEFERRED: u16 = 32 // close once that SHUTDOWN completes
+pub const F_SENDING: u16 = 64        // a SEND SQE is outstanding
+pub const F_EOF: u16 = 128           // the client half-closed: finish what's owed, then close
+pub const F_READY: u16 = 256         // on the ready list: a stashed request waits its turn (see loop.run_ready)
+
+// The bounds of the array views over the tables (65,535 slots per ring at
+// most; ready-list entries carry the ring index in 16 bits).
+pub const MAX_SLOTS: usize = 65536
+pub const MAX_RINGS: usize = 65536
+const MAX_CHUNKS: usize = 65536
+
+const MAP_FAILED: usize = 0xffffffffffffffff
+
+/// An output run queued behind the connection's in-flight SEND. io_uring
+/// doesn't order two SENDs on one socket (a partial MSG_WAITALL send re-arms
+/// on POLLOUT and a later one can overtake it), so each connection has at
+/// most one.
+pub struct Pend layout(c) {
+    next: usize         // the next queued run, 0 at the end
+    p: usize
+    n: u32
+    chunk: u32
+}
+
+pub struct Conn layout(c) {
+    pbuf: usize         // bytes of an incomplete request (or ones held behind a pending write); 0 = none
+    plen: u32
+    pcap: u32
+    pq: usize           // queued output, in order (a list of Pend); 0 = none
+    qbytes: u32         // bytes queued plus in flight
+    sending_len: u32    // length of the in-flight SEND
+    gen: u16
+    state: u8
+    flags: u16
+}
+
+/// server.c's struct ring: one io_uring with its own SO_REUSEPORT listener
+/// and its own table of connections, indexed by direct-descriptor slot.
+pub struct Ring {
+    q: uring.Uring
+    idx: i32
+    lfd: i32
+    accept_armed: bool
+    accept_full: bool
+    nfiles: u32
+    conns: *mut [MAX_SLOTS]Conn
+    rearm: *mut [MAX_SLOTS]u32
+    nrearm: u32
+}
+
+/// Why several rings: the kernel caps an io_uring's direct-descriptor table
+/// at RLIMIT_NOFILE (65,535 on the benchmark box), so holding 300k+
+/// keep-alive connections needs at least five tables. Each ring has its own
+/// SO_REUSEPORT listener on the same port, so the kernel spreads new
+/// connections across them, and one thread services all rings in turn.
+pub var g_rings: *mut [MAX_RINGS]Ring = undefined
+pub var g_nrings: i32 = 8
+pub var g_evfd: i32 = -1        // registered on every ring: wakes the idle loop (see loop.idle_wait)
+pub var g_debug: i32 = 0        // DEBUG=1: log why connections close and what got a 4xx
+
+/// The ring table, n rings, zeroed (server.c's calloc).
+pub fn alloc_rings(n: i32) {
+    unsafe { g_rings = stdlib.calloc(n as usize, @sizeOf(Ring)) as *mut [MAX_RINGS]Ring }
+}
+
+// ---------------------------------------------------------------- response arena
+
+pub struct Chunk layout(c) {
+    mem: usize
+    refs: u32
+    live: u8
+}
+
+pub var g_chunks: *mut [MAX_CHUNKS]Chunk = undefined
+pub var g_nchunks: u32 = 0
+var g_chunk_cap: u32 = 0
+var g_free_chunks: *mut [MAX_CHUNKS]u32 = undefined
+pub var g_nfree: u32 = 0
+pub var g_cur: u32 = 0          // current chunk
+pub var g_pos: u32 = 0          // next free byte in the current chunk
+
+pub fn chunk_new() -> u32 {
+    unsafe {
+        if g_nfree > 0 {
+            g_nfree -= 1
+            return g_free_chunks[g_nfree as usize]
+        }
+        if g_nchunks == g_chunk_cap {
+            g_chunk_cap = if g_chunk_cap > 0 { g_chunk_cap * 2 } else { 16 }
+            if g_chunk_cap > 65535 {
+                _ = stdio.dprintf(2, @cstr("arena exhausted\n"))
+                uring.crash()
+            }
+            g_chunks = stdlib.realloc(g_chunks as *mut u8, (g_chunk_cap as usize) * @sizeOf(Chunk)) as *mut [MAX_CHUNKS]Chunk
+            g_free_chunks = stdlib.realloc(g_free_chunks as *mut u8, (g_chunk_cap as usize) * 4) as *mut [MAX_CHUNKS]u32
+        }
+        let i = g_nchunks
+        g_nchunks += 1
+        let mem = mman.mmap((0 as usize) as *mut u8, CHUNK_SIZE, mman.PROT_READ | mman.PROT_WRITE, mman.MAP_PRIVATE | mman.MAP_ANONYMOUS, -1, 0) as usize
+        g_chunks[i as usize].mem = mem
+        if mem == MAP_FAILED {
+            stdio.perror(@cstr("mmap chunk"))
+            uring.crash()
+        }
+        g_chunks[i as usize].refs = 0
+        return i
+    }
+}
+
+/// Free chunks beyond a small reserve give their memory back (they stay
+/// mapped and fault back in if a burst needs them again).
+fn chunk_free(i: u32) {
+    unsafe {
+        if g_nfree >= 2 { _ = mman.madvise(g_chunks[i as usize].mem as *mut u8, CHUNK_SIZE, mman.MADV_DONTNEED) }
+        g_free_chunks[g_nfree as usize] = i
+        g_nfree += 1
+    }
+}
+
+pub fn chunk_release(i: u32) {
+    unsafe {
+        let c = &mut g_chunks[i as usize]
+        c.refs -= 1
+        if c.refs == 0 and i != g_cur { chunk_free(i) }
+    }
+}
+
+fn arena_ensure() {
+    unsafe {
+        if CHUNK_SIZE - (g_pos as usize) >= RESP_RESERVE { return }
+        let old = g_cur
+        g_cur = chunk_new()
+        g_pos = 0
+        if g_chunks[old as usize].refs == 0 { chunk_free(old) }
+    }
+}
+
+/// An outgoing byte run for one connection, contiguous in the current chunk.
+pub struct Out {
+    start: usize        // 0 = nothing yet
+    end: usize
+}
+
+pub fn out_new() -> Out {
+    return Out{ .start = 0, .end = 0 }
+}
+
+// ---------------------------------------------------------------- sends, shutdown, close
+
+pub fn arm_accept(r: *mut Ring) {
+    uring.prep_accept(&mut r.q, r.lfd)
+    r.accept_armed = true
+}
+
+pub fn arm_recv(r: *mut Ring, slot: u32) {
+    let gen = r.conns[slot as usize].gen
+    uring.prep_recv(&mut r.q, slot, gen)
+}
+
+pub fn issue_send(r: *mut Ring, slot: u32, p: usize, n: u32, chunk: u32) {
+    let c = &mut r.conns[slot as usize]
+    uring.prep_send(&mut r.q, slot, p, n, chunk, c.gen)
+    c.flags |= F_SENDING
+    c.sending_len = n
+}
+
+/// Sends p[0..n) (in arena chunk `chunk`) after anything already owed on
+/// this connection. The chunk stays referenced until the bytes are sent or
+/// dropped.
+pub fn submit_send(r: *mut Ring, slot: u32, p: usize, n: usize, chunk: u32) {
+    let c = &mut r.conns[slot as usize]
+    unsafe {
+        g_chunks[chunk as usize].refs += 1
+        c.qbytes += n as u32
+        if (c.flags & F_SENDING) == 0 {
+            issue_send(r, slot, p, n as u32, chunk)
+            return
+        }
+        let e = stdlib.malloc(@sizeOf(Pend)) as *mut Pend
+        if (e as usize) == 0 { uring.crash() }
+        e.next = 0
+        e.p = p
+        e.n = n as u32
+        e.chunk = chunk
+        if c.pq == 0 {
+            c.pq = e as usize
+        } else {
+            var t = c.pq as *mut Pend
+            while t.next != 0 { t = t.next as *mut Pend }
+            t.next = e as usize
+        }
+    }
+}
+
+/// Output that will never be sent: give the chunk references back.
+pub fn pend_drop(c: *mut Conn) {
+    unsafe {
+        var e = c.pq
+        while e != 0 {
+            let p = e as *mut Pend
+            let nx = p.next
+            chunk_release(p.chunk)
+            stdlib.free(p as *mut u8)
+            e = nx
+        }
+    }
+    c.pq = 0
+}
+
+pub fn conn_shutdown(r: *mut Ring, slot: u32) {
+    let c = &mut r.conns[slot as usize]
+    if c.state != C_OPEN or (c.flags & F_SHUT) != 0 { return }
+    // The kernel runs SHUTDOWN from an io-wq worker and only resolves the
+    // fixed slot when that worker gets to it. Until its completion arrives
+    // the slot must stay allocated, or a new connection accepted into it
+    // gets shut down.
+    c.flags |= F_SHUT | F_SHUT_INFLIGHT
+    uring.prep_shutdown(&mut r.q, slot, c.gen)
+}
+
+pub fn submit_close(r: *mut Ring, slot: u32) {
+    let gen = r.conns[slot as usize].gen
+    uring.prep_close(&mut r.q, slot, gen)
+}
+
+pub fn conn_close(r: *mut Ring, slot: u32) {
+    let c = &mut r.conns[slot as usize]
+    if c.state != C_OPEN { return }
+    c.state = C_CLOSING
+    unsafe {
+        g_pbuf_bytes -= c.pcap as usize
+        stdlib.free(c.pbuf as *mut u8)
+    }
+    c.pbuf = 0
+    c.plen = 0
+    c.pcap = 0
+    pend_drop(c)
+    if (c.flags & F_SHUT_INFLIGHT) != 0 {
+        c.flags |= F_CLOSE_DEFERRED     // the OP_SHUT completion submits the CLOSE
+        return
+    }
+    submit_close(r, slot)
+}
+
+/// After a half-close, the connection closes once nothing more is owed. It
+/// shuts down first and the SHUTDOWN completion closes it: on 6.8 a
+/// fixed-file CLOSE doesn't release the socket (so no FIN goes out) until
+/// every request armed before it on the ring has finished, and long-lived
+/// multishot recvs on idle connections can hold that off indefinitely.
+/// SHUTDOWN sends the FIN now.
+pub fn close_if_done(r: *mut Ring, slot: u32) {
+    let c = &r.conns[slot as usize]
+    if c.state == C_OPEN and (c.flags & F_EOF) != 0 and (c.flags & (F_WRITE_PENDING | F_SENDING | F_READY)) == 0 and c.pq == 0 {
+        conn_shutdown(r, slot)      // F_READY: a stashed request is still owed its answer
+    }
+}
+
+/// Sends what o holds and starts the next output after it, 64-byte aligned.
+pub fn flush_out(r: *mut Ring, slot: u32, o: *mut Out) {
+    if o.start == 0 { return }
+    unsafe {
+        submit_send(r, slot, o.start, o.end - o.start, g_cur)
+        g_pos = (((o.end - g_chunks[g_cur as usize].mem) + 63) & ~(63 as usize)) as u32
+    }
+    o.start = 0
+    o.end = 0
+}
+
+// ---------------------------------------------------------------- responses
+
+/// The current chunk from address b to its end.
+fn room(b: usize) -> []mut u8 {
+    unsafe {
+        let mem = g_chunks[g_cur as usize].mem
+        let chunk = mem as *mut [CHUNK_SIZE]u8
+        return chunk[(b - mem)..CHUNK_SIZE]
+    }
+}
+
+/// Where the next response body goes: after HDR_ROOM bytes of header space.
+/// The slice runs to the end of the arena chunk (server.c's body_limit), so
+/// it holds at least RESP_RESERVE - HDR_ROOM bytes.
+pub fn body_begin(r: *mut Ring, slot: u32, o: *mut Out) -> []mut u8 {
+    unsafe {
+        var base = if o.start != 0 { o.end } else { g_chunks[g_cur as usize].mem + (g_pos as usize) }
+        if g_chunks[g_cur as usize].mem + CHUNK_SIZE - base < RESP_RESERVE {
+            flush_out(r, slot, o)
+            arena_ensure()
+            base = g_chunks[g_cur as usize].mem + (g_pos as usize)
+        }
+        return room(base + HDR_ROOM)
+    }
+}
+
+/// The end of the current chunk: the limit of what body_begin handed out.
+pub fn body_limit() -> usize {
+    unsafe { return g_chunks[g_cur as usize].mem + CHUNK_SIZE }
+}
+
+/// Puts the header in front of body[0..blen) (body as body_begin returned
+/// it) and appends the whole response to o.
+pub fn body_finish(o: *mut Out, status: i32, body: []mut u8, blen: usize) {
+    let line = http.status_line(status)
+    let sl = line.len
+    var num: [24]u8 = undefined
+    let nl = json.u64_to_dec(num[..], blen as u64)
+    let hl = sl + nl + 4
+    unsafe {
+        let b = body.ptr as usize
+        let h = b - hl
+        _ = cstr.memcpy(h as *mut u8, line.ptr, sl)
+        _ = cstr.memcpy((h + sl) as *mut u8, num[..].ptr, nl)
+        _ = cstr.memcpy((h + sl + nl) as *mut u8, "\r\n\r\n".ptr, 4)
+        if o.start == 0 {
+            o.start = h
+            o.end = b + blen
+        } else {
+            let n = b + blen - h
+            _ = cstr.memmove(o.end as *mut u8, h as *mut u8, n)
+            o.end += n
+        }
+    }
+}
+
+/// A JSON error answer, {"error":"msg"}.
+pub fn respond_error(r: *mut Ring, slot: u32, o: *mut Out, status: i32, msg: []u8) {
+    unsafe {
+        if g_debug != 0 and status != 401 and status != 400 {
+            _ = stdio.dprintf(2, @cstr("[r%d s%u] %d %.*s\n"), r.idx, slot, status, msg.len as i32, msg.ptr)
+        }
+        let b = body_begin(r, slot, o)
+        let ml = msg.len
+        let p = b.ptr as usize
+        _ = cstr.memcpy(p as *mut u8, "{\"error\":\"".ptr, 10)
+        _ = cstr.memcpy((p + 10) as *mut u8, msg.ptr, ml)
+        _ = cstr.memcpy((p + 10 + ml) as *mut u8, "\"}".ptr, 2)
+        body_finish(o, status, b, 12 + ml)
+    }
+}
+
+// ---------------------------------------------------------------- the request stash
+
+/// A first buffer is sized to what it must hold (to 64 bytes): after a stall
+/// every connection may have a request stashed, and 300k of them at 1 KiB
+/// each would be 300 MB where ~100 MB does. Growth doubles.
+fn pbuf_cap(cur: usize, need: usize) -> usize {
+    if cur == 0 { return (need + 63) & ~(63 as usize) }
+    var c = cur
+    while c < need { c *= 2 }
+    return c
+}
+
+/// Makes p[0..n) the connection's stash (n == 0 frees it).
+pub fn pbuf_store(c: *mut Conn, p: usize, n: usize) {
+    unsafe {
+        if n == 0 {     // idle connections hold no buffer
+            g_pbuf_bytes -= c.pcap as usize
+            stdlib.free(c.pbuf as *mut u8)
+            c.pbuf = 0
+            c.plen = 0
+            c.pcap = 0
+            return
+        }
+        if (c.pcap as usize) < n {
+            let cap = pbuf_cap(c.pcap as usize, n)
+            let nb = stdlib.malloc(cap) as usize
+            if nb == 0 { uring.crash() }
+            stdlib.free(c.pbuf as *mut u8)
+            g_pbuf_bytes += cap - (c.pcap as usize)
+            c.pbuf = nb
+            c.pcap = cap as u32
+        }
+        _ = cstr.memmove(c.pbuf as *mut u8, p as *mut u8, n)
+        c.plen = n as u32
+    }
+}
+
+/// Appends p[0..n) to the connection's stash.
+pub fn pbuf_append(c: *mut Conn, p: usize, n: usize) {
+    unsafe {
+        let need = (c.plen as usize) + n
+        if need > (c.pcap as usize) {
+            let cap = pbuf_cap(c.pcap as usize, need)
+            let nb = stdlib.realloc(c.pbuf as *mut u8, cap) as usize
+            if nb == 0 { uring.crash() }
+            g_pbuf_bytes += cap - (c.pcap as usize)
+            c.pbuf = nb
+            c.pcap = cap as u32
+        }
+        _ = cstr.memcpy((c.pbuf + (c.plen as usize)) as *mut u8, p as *mut u8, n)
+        c.plen += n as u32
+    }
+}
+
+/// The stash as a slice (empty when there is none).
+pub fn stash(c: *Conn) -> []u8 {
+    if c.pbuf == 0 { return "" }
+    unsafe {
+        let p = c.pbuf as *[PBUF_ROOM]u8
+        return p[0..(c.plen as usize)]
+    }
+}
+
+// a stash never outgrows this: PBUF_LIMIT plus one receive buffer, doubled
+const PBUF_ROOM: usize = 4 << 20
+
+/// Whether buffering n more request bytes would be too much: per
+/// connection, or (past a server-wide budget) for any connection already
+/// holding more than one maximum-size request.
+pub fn pbuf_over(c: *Conn, n: usize) -> bool {
+    let after = (c.plen as usize) + n
+    unsafe { return after > PBUF_LIMIT or (g_pbuf_bytes > PBUF_GLOBAL and after > MAX_REQ + 16384) }
+}
+
+/// Whether the connection owes more unsent output than OUT_LIMIT,
+/// counting what o holds.
+pub fn conn_backlogged(c: *Conn, o: *Out) -> bool {
+    let held: u32 = if o.start != 0 { (o.end - o.start) as u32 } else { 0 }
+    return c.qbytes + held > OUT_LIMIT
+}
+
+// ---------------------------------------------------------------- setup
+
+/// struct sockaddr_in (16 bytes). glibc sizes sin_zero with a sizeof
+/// expression, which @cImport cannot evaluate, so its struct comes in opaque.
+pub struct SockaddrIn layout(c) {
+    family: u16
+    port: u16           // network order
+    addr: u32           // network order
+    zero: [8]u8
+}
+
+fn make_listener(host: *u8, port: i32) -> i32 {
+    unsafe {
+        let fd = sock.socket(inet.AF_INET, sock.SOCK_STREAM | sock.SOCK_CLOEXEC, 0)
+        if fd < 0 { uring.die(@cstr("socket")) }
+        var one: i32 = 1
+        _ = sock.setsockopt(fd, sock.SOL_SOCKET, sock.SO_REUSEADDR, (&one) as *u8, 4)
+        if sock.setsockopt(fd, sock.SOL_SOCKET, sock.SO_REUSEPORT, (&one) as *u8, 4) != 0 { uring.die(@cstr("SO_REUSEPORT")) }
+        _ = sock.setsockopt(fd, inet.IPPROTO_TCP, tcp.TCP_NODELAY, (&one) as *u8, 4)    // inherited by accepted sockets
+        let cc = stdlib.getenv(@cstr("TCP_CC"))
+        if (cc as usize) != 0 and cc.* != 0 and sock.setsockopt(fd, inet.IPPROTO_TCP, tcp.TCP_CONGESTION, cc as *u8, cstr.strlen(cc) as u32) != 0 {
+            stdio.perror(@cstr("TCP_CONGESTION"))
+        }
+        var a = SockaddrIn{ .family = inet.AF_INET as u16, .port = arpa.htons(@truncate(u16, port)), .addr = 0, .zero = [0, 0, 0, 0, 0, 0, 0, 0] }
+        if arpa.inet_pton(inet.AF_INET, host, (&mut a.addr) as *mut u8) != 1 {
+            _ = stdio.dprintf(2, @cstr("bad HOST %s\n"), host)
+            os.exit(1)
+        }
+        if sock.bind(fd, (&a) as *sock.sockaddr, @sizeOf(SockaddrIn) as u32) != 0 { uring.die(@cstr("bind")) }
+        if sock.listen(fd, 65535) != 0 { uring.die(@cstr("listen")) }
+        return fd
+    }
+}
+
+/// Sets up ring `idx` (server.c's ring_init): the io_uring with its
+/// fallbacks, the direct-descriptor table, the idle eventfd, the receive
+/// buffers, the connection tables, the listener, and the first accept.
+pub fn ring_init(r: *mut Ring, idx: i32, nfiles: u32, host: *u8, port: i32) {
+    r.idx = idx
+    uring.setup_queues(&mut r.q, idx)
+    uring.register_files(&mut r.q, nfiles)
+    r.nfiles = nfiles
+
+    // The idle eventfd starts switched off; idle_wait turns it on only while
+    // the loop sleeps. Without it the loop falls back to sleeping on ring 0.
+    uring.eventfd_signal(&mut r.q, false)
+    unsafe {
+        if g_evfd >= 0 and !uring.register_eventfd(&mut r.q, &mut g_evfd) {
+            stdio.perror(@cstr("register eventfd"))
+            var i: i32 = 0
+            while i < idx {
+                uring.unregister_eventfd(&mut g_rings[i as usize].q)
+                i += 1
+            }
+            _ = unistd.close(g_evfd)
+            g_evfd = -1
+        }
+    }
+
+    uring.setup_bufs(&mut r.q, idx)
+    unsafe {
+        r.conns = uring.xmap((nfiles as usize) * @sizeOf(Conn)) as *mut [MAX_SLOTS]Conn
+        r.rearm = uring.xmap((nfiles as usize) * 4) as *mut [MAX_SLOTS]u32
+    }
+    r.lfd = make_listener(host, port)
+    arm_accept(r)
+}

@@ -18,6 +18,7 @@ extern "c" fn td_commit() c_int;
 extern "c" fn td_rollback() void;
 extern "c" fn td_tick() void;
 extern "c" fn td_writes_held() c_int;
+extern "c" fn td_in_batch() c_int;
 extern "c" fn td_cursor(i: c_int) ?*anyopaque;
 extern "c" fn td_seek(c: ?*anyopaque, id: i64) c_int;
 extern "c" fn td_seek_ge(c: ?*anyopaque, k: i64) c_int;
@@ -196,6 +197,11 @@ pub const Db = struct {
     pub inline fn writesHeld(self: *Db) bool {
         _ = self;
         return td_writes_held() != 0;
+    }
+
+    pub inline fn inBatch(self: *Db) bool {
+        _ = self;
+        return td_in_batch() != 0;
     }
 
     fn countLikes(cur: ?*anyopaque, id: i64) !i64 {

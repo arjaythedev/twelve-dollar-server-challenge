@@ -177,6 +177,12 @@ pub const PendingWrite = struct {
     slot: u32,
 };
 
+pub const HeldWrite = struct {
+    w: *RingWorker,
+    slot: u32,
+    gen: u32,
+};
+
 pub const Server = struct {
     rings: [k_ring_count]RingWorker = undefined,
     active_rings: usize = 0,
@@ -190,8 +196,10 @@ pub const Server = struct {
     resp_buf: Buf = .{},
     resp_pool: RespPool = undefined,
     in_tx: bool = false,
-    pending_writes: [4096]PendingWrite = undefined,
+    pending_writes: [16384]PendingWrite = undefined,
     n_pending_writes: usize = 0,
+    held_writes: [4096]HeldWrite = undefined,
+    n_held_writes: usize = 0,
 
     pub fn init(db: Db, jwt_key: Key) !*Server {
         const smem = try sys.mapAnon(@sizeOf(Server));
@@ -332,8 +340,8 @@ pub const Server = struct {
     pub fn makeListeners(self: *Server, host: [4]u8, port: u16) !void {
         const one: c_int = 1;
         const rcv: c_int = 2048;
-        const snd: c_int = 16384;
-        const clamp: c_int = 4096;
+        const snd: c_int = 4096;
+        const clamp: c_int = 2048;
 
         for (0..self.active_rings) |i| {
             const s = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
@@ -390,24 +398,19 @@ pub const Server = struct {
 
             // Group commit: Commit any pending writes from this pass before sending responses
             if (self.in_tx) {
-                if (self.db.commitTx()) {
-                    for (self.pending_writes[0..self.n_pending_writes]) |pw| {
-                        const c = &pw.w.conns[pw.slot];
-                        if (c.isOpen() and !c.isClosing() and c.out != null) {
-                            self.armSend(pw.w, pw.slot, c);
-                        }
-                    }
-                } else {
-                    self.db.rollbackTx();
-                    for (self.pending_writes[0..self.n_pending_writes]) |pw| {
-                        const c = &pw.w.conns[pw.slot];
-                        if (c.isOpen()) {
-                            self.sendError(pw.w, pw.slot, c, 500, "internal server error", false);
-                        }
-                    }
+                self.commitPendingWrites();
+            } else if (self.db.inBatch()) {
+                // End bounded read snapshot: close read-only transaction so WAL read locks are released
+                // and checkpoints can progress
+                _ = self.db.commitTx();
+            }
+
+            // If writes were held during checkpoint and checkpoint is now complete, drain them
+            if (self.n_held_writes > 0 and !self.db.writesHeld()) {
+                self.drainHeldWrites();
+                if (self.in_tx) {
+                    self.commitPendingWrites();
                 }
-                self.in_tx = false;
-                self.n_pending_writes = 0;
             }
 
             // Submit pending SQEs across all active rings
@@ -572,6 +575,14 @@ pub const Server = struct {
                         return;
                     }
                     const body = rem[head.head_len..req_len];
+
+                    // Check write-hold during active checkpoint tail
+                    if ((head.method == .post or head.method == .delete) and self.db.writesHeld()) {
+                        self.savePending(c, rem);
+                        self.pushHeldWrite(w, slot, c.gen);
+                        return;
+                    }
+
                     offset += req_len;
 
                     self.serve(w, slot, c, &head, body);
@@ -589,6 +600,11 @@ pub const Server = struct {
         }
 
         if (offset >= input.len) {
+            if (c.pend_buf) |pbuf| {
+                gpa.free(pbuf[0..c.pend_cap]);
+                c.pend_buf = null;
+                c.pend_cap = 0;
+            }
             c.pend_len = 0;
         } else {
             self.savePending(c, input[offset..]);
@@ -907,6 +923,51 @@ pub const Server = struct {
         }
     }
 
+    fn commitPendingWrites(self: *Server) void {
+        if (!self.in_tx) return;
+        if (self.db.commitTx()) {
+            for (self.pending_writes[0..self.n_pending_writes]) |pw| {
+                const c = &pw.w.conns[pw.slot];
+                if (c.isOpen() and !c.isClosing() and c.out != null) {
+                    self.armSend(pw.w, pw.slot, c);
+                }
+            }
+        } else {
+            self.db.rollbackTx();
+            for (self.pending_writes[0..self.n_pending_writes]) |pw| {
+                const c = &pw.w.conns[pw.slot];
+                if (c.isOpen()) {
+                    self.sendError(pw.w, pw.slot, c, 500, "internal server error", false);
+                }
+            }
+        }
+        self.in_tx = false;
+        self.n_pending_writes = 0;
+    }
+
+    fn pushHeldWrite(self: *Server, w: *RingWorker, slot: u32, gen: u32) void {
+        for (self.held_writes[0..self.n_held_writes]) |hw| {
+            if (hw.w == w and hw.slot == slot and hw.gen == gen) return;
+        }
+        if (self.n_held_writes < self.held_writes.len) {
+            self.held_writes[self.n_held_writes] = .{ .w = w, .slot = slot, .gen = gen };
+            self.n_held_writes += 1;
+        }
+    }
+
+    fn drainHeldWrites(self: *Server) void {
+        const n = self.n_held_writes;
+        self.n_held_writes = 0;
+        for (self.held_writes[0..n]) |hw| {
+            if (hw.slot < hw.w.slots) {
+                const c = &hw.w.conns[hw.slot];
+                if (c.isOpen() and !c.isClosing() and c.gen == hw.gen) {
+                    self.handleData(hw.w, hw.slot, c, &.{});
+                }
+            }
+        }
+    }
+
     fn queueWriteResponse(self: *Server, w: *RingWorker, slot: u32, c: *Conn, status: u16, body: []const u8, keep_alive: bool) void {
         var hdr_buf: [128]u8 = undefined;
         const hdr_len = writeHeaderDirect(&hdr_buf, status, body.len, keep_alive);
@@ -936,12 +997,14 @@ pub const Server = struct {
         c.out_off = 0;
         c.setOutPool(is_pool);
 
-        if (self.n_pending_writes < self.pending_writes.len) {
-            self.pending_writes[self.n_pending_writes] = .{ .w = w, .slot = slot };
-            self.n_pending_writes += 1;
-        } else {
-            self.armSend(w, slot, c);
+        if (self.n_pending_writes >= self.pending_writes.len) {
+            // Queue full: commit the batch immediately and start a fresh transaction
+            self.commitPendingWrites();
+            self.ensureTx();
         }
+
+        self.pending_writes[self.n_pending_writes] = .{ .w = w, .slot = slot };
+        self.n_pending_writes += 1;
     }
 
     fn armSend(self: *Server, w: *RingWorker, slot: u32, c: *Conn) void {

@@ -282,6 +282,7 @@ void td_tick(void) {
 }
 
 int td_writes_held(void) { return writes_held; }
+int td_in_batch(void) { return in_batch; }
 
 void td_rollback(void) {
   if (!in_batch) return;

@@ -70,9 +70,6 @@ pub fn main(init: std.process.Init) !void {
     };
     _ = linux.sigaction(.PIPE, &ignore, null);
 
-    // Lock memory into RAM to eliminate page faults during benchmark
-    sys.lockMemory();
-
     // Bump RLIMIT_NOFILE
     var rl: linux.rlimit = undefined;
     _ = linux.getrlimit(.NOFILE, &rl);
@@ -93,6 +90,9 @@ pub fn main(init: std.process.Init) !void {
     // Initialize multi-ring server (8 rings x 65,472 = 523,776 direct descriptors)
     const s = try server.Server.init(db, jwt_key);
     try s.makeListeners(host, port);
+
+    // Lock all pre-allocated structures into RAM to eliminate page faults during benchmark
+    sys.lockMemory();
 
     std.log.info("Server listening on {d}.{d}.{d}.{d}:{d} with {d} rings x {d} slots = {d} direct descriptors", .{
         host[0], host[1], host[2], host[3], port, s.active_rings, server.slots_per_ring, s.active_rings * server.slots_per_ring,

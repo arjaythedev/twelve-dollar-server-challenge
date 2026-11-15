@@ -20,6 +20,8 @@ const Key = jwt.Key;
 
 const log = std.log.scoped(.server);
 
+extern "c" fn malloc_trim(pad: usize) c_int;
+
 pub const buf_size = 2048;
 pub const n_bufs_per_ring = 2048;
 pub const bgid = 1;
@@ -428,8 +430,9 @@ pub const Server = struct {
             // Tick WAL checkpoint coordinator
             self.db.tick();
 
-            // If no completions were reaped anywhere, wait in epoll for next event
+            // If no completions were reaped anywhere, trim heap and wait in epoll for next event
             if (total_reaped == 0) {
+                _ = malloc_trim(0);
                 _ = linux.epoll_wait(self.epfd, &ep_events, ep_events.len, 50);
             }
         }

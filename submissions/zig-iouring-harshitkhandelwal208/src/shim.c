@@ -139,7 +139,7 @@ int td_open(const char *path, char *err, int n) {
     return fail(err, n, "open");
   if (exec("PRAGMA journal_mode = WAL") ||
       exec("PRAGMA synchronous = NORMAL") || exec("PRAGMA temp_store = MEMORY") ||
-      exec("PRAGMA cache_size = -32768") || exec("PRAGMA mmap_size = 0") ||
+      exec("PRAGMA cache_size = -8192") || exec("PRAGMA mmap_size = 0") ||
       exec("PRAGMA wal_autocheckpoint = 0") || exec("SELECT count(*) FROM sqlite_schema"))
     return fail(err, n, "pragmas");
   sqlite3_wal_hook(db, wal_hook, 0);

@@ -38,7 +38,7 @@ pub fn madviseHuge(mem: []const u8) void {
 pub fn lockMemory() void {
     var ml: linux.rlimit = .{ .cur = std.math.maxInt(usize), .max = std.math.maxInt(usize) };
     _ = linux.setrlimit(.MEMLOCK, &ml);
-    _ = linux.syscall1(.mlockall, 1); // MCL_CURRENT = 1
+    _ = linux.syscall1(.mlockall, 3); // MCL_CURRENT (1) | MCL_FUTURE (2)
 }
 
 pub fn unshareFiles() void {

@@ -1,5 +1,6 @@
 -- server.lua: loaded by server.tex. Plain Lua 5.3 inside LuaTeX; TeX's main loop calls tick() forever.
-local socket, mime = require("socket"), require("mime")
+local mime = require("mime")
+local ev = assert(package.loadlib("./bin/evio.so", "luaopen_evio"))() -- epoll, see evio.c
 local sqlite3 = assert(package.loadlib("./bin/lsqlite3.so", "luaopen_lsqlite3"))()
 local find, sub, match, lower, gsub, byte, char = string.find, string.sub, string.match, string.lower, string.gsub, string.byte, string.char
 local concat, digest = table.concat, sha2.digest256
@@ -225,34 +226,37 @@ local function write(c, buf, pos, h, body)
   reply(c, "201 Created", "\\post", o)
 end
 
--- Connections. luasocket waits with select(), so at most 1024 descriptors: this runs behind Nginx,
--- which keeps a few dozen upstream connections open, and stops accepting at MAXC.
-local MAXC = 900
+-- Connections. luasocket's select() cannot watch a descriptor above 1023, so the sockets are plain fds
+-- on an epoll set (evio.c). Every keep-alive connection stays open until its client closes it.
 local host, port = os.getenv("HOST") or "127.0.0.1", tonumber(os.getenv("PORT")) or 3000
-local srv = assert(socket.bind(host, port, 1024))
-srv:settimeout(0)
-local rset, wset, conns = { srv }, {}, {} -- rset: the listener (while accepting) and every client
+local srv = ev.listen(host, port, 4096)
+local ep = ev.epoll()
+ev.add(ep, srv, 1)
+local conns = {} -- fd -> connection
 local sending, hungup = {}, {} -- connections with output this tick; peers that closed this tick
+-- A connection reads only while it has no unsent output and no unparsed requests, and answers at most
+-- PIPE pipelined requests a turn (the rest wait in c.buf, listed in more): a client that never reads
+-- holds at most PIPE answers here instead of making the server buffer without limit.
+local PIPE, more = 32, {}
+local function arm(c)
+  ev.mod(ep, c.fd, (c.rest and 2 or 0) | ((c.gone or c.rest or c.more) and 0 or 1))
+end
 
 local function close(c)
   if c.closed then return end
   c.closed = true
-  c.s:close()
-  conns[c.s] = nil
-  for i = #rset, 1, -1 do
-    if rset[i] == c.s then rset[i] = rset[#rset]; rset[#rset] = nil; break end
-  end
-  for i = #wset, 1, -1 do
-    if wset[i] == c.s then table.remove(wset, i); break end
-  end
+  conns[c.fd] = nil
+  ev.close(c.fd) -- closing the fd also takes it out of the epoll set
 end
 
 -- shortcut: no Transfer-Encoding: chunked, no Expect: 100-continue, GET bodies are not skipped,
 -- Connection: close is left to the client. Add them if a client needs them.
 local function on_data(c, data)
   local buf = c.buf and c.buf .. data or data
-  local pos, len = 1, #buf
+  local pos, len, k = 1, #buf, 0
   while pos <= len do
+    if k == PIPE then c.more = true; more[#more + 1] = c; arm(c); break end
+    k = k + 1
     local _, he = find(buf, "\r\n\r\n", pos, true)
     if not he then break end
     local nxt, ok, e = he + 1
@@ -275,49 +279,56 @@ local function on_data(c, data)
 end
 
 local function push(c, s) -- send what the socket takes now; keep the rest for when it is writable
-  local i, err, j = c.s:send(s)
-  if i then
+  local n = ev.send(c.fd, s)
+  if n == #s then
     if c.gone then close(c) end
     return
   end
-  if err ~= "timeout" then return close(c) end
-  if not c.rest then wset[#wset + 1] = c.s end
-  c.rest = sub(s, j + 1)
+  if not n then return close(c) end
+  c.rest = sub(s, n + 1)
+  arm(c)
 end
 
+local fds, evs = {}, {}
 local function tick()
-  local r, w = socket.select(rset, wset, 1)
-  for _, s in ipairs(w) do
-    local c = conns[s]
-    if c and c.rest then
-      local rest = c.rest
-      c.rest = nil
-      for i = #wset, 1, -1 do if wset[i] == s then table.remove(wset, i) end end
-      push(c, rest)
+  local m = more
+  if #m > 0 then more = {} end -- no new table on the common turn
+  local n = ev.wait(ep, #m > 0 and 0 or 1000, fds, evs)
+  for i = 1, #m do -- requests left in c.buf last turn; a connection still sending waits for its drain below
+    local c = m[i]
+    if not c.closed and not c.rest then
+      c.more = nil
+      on_data(c, "")
+      if not c.closed and not c.more then arm(c) end
     end
   end
-  for _, s in ipairs(r) do
-    if s == srv then
-      for _ = 1, 64 do
-        local cs = srv:accept()
+  for k = 1, n do
+    local fd, e = fds[k], evs[k]
+    if fd == srv then
+      -- shortcut: if accept fails for want of descriptors (65,535 here) the listener spins until one frees.
+      for _ = 1, 256 do
+        local cs = ev.accept(srv)
         if not cs then break end
-        cs:settimeout(0)
-        cs:setoption("tcp-nodelay", true)
-        local c = { s = cs, out = {} }
-        conns[cs] = c
-        rset[#rset + 1] = cs
-        if #rset > MAXC then -- full: leave new connections in the kernel's backlog
-          rset[1] = rset[#rset]; rset[#rset] = nil
-          break
-        end
+        conns[cs] = { fd = cs, out = {} }
+        ev.add(ep, cs, 1)
       end
     else
-      local c = conns[s]
-      if c then
-        local d, err, part = s:receive(65536)
-        d = d or part
-        if d and #d > 0 then on_data(c, d) end
-        if err == "closed" then c.gone = true; hungup[#hungup + 1] = c end
+      local c = conns[fd]
+      if c and e & 2 ~= 0 and c.rest then
+        local rest = c.rest
+        c.rest = nil
+        push(c, rest)
+        if not c.closed and not c.rest then
+          if c.more then more[#more + 1] = c else arm(c) end
+        end
+      end
+      if c and not c.closed and not c.gone and not c.more and e & 1 ~= 0 then
+        local d, err = ev.recv(fd)
+        if d then on_data(c, d) end
+        if err == "closed" then
+          c.gone = true; hungup[#hungup + 1] = c
+          arm(c) -- an EOF stays readable; only wait for output now
+        end
       end
     end
   end
@@ -370,9 +381,6 @@ F[3] = function()
   for i = 1, #hungup do -- peers that hung up: closed now, or by push() once their last bytes are out
     if not hungup[i].rest then close(hungup[i]) end
     hungup[i] = nil
-  end
-  if rset[1] ~= srv and #rset < MAXC then
-    rset[#rset + 1] = rset[1]; rset[1] = srv
   end
 end
 

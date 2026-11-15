@@ -28,9 +28,6 @@ fn envInt(init: std.process.Init, name: []const u8, default: u32) u32 {
 
 fn crashHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
     _ = ctx;
-    if (sig == .TERM or sig == .INT) {
-        linux.exit(0);
-    }
     const name: []const u8 = switch (sig) {
         .SEGV => "SIGSEGV (segmentation fault)\n",
         .BUS => "SIGBUS (bus error)\n",
@@ -48,11 +45,12 @@ fn crashHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) 
     const msg = std.fmt.bufPrint(&buf, "Faulting address: 0x{x}, code: {d}\n", .{ addr, info.code }) catch "bad addr\n";
     _ = linux.write(2, msg.ptr, msg.len);
 
-    linux.exit(128 + @as(u8, @intCast(@intFromEnum(sig) & 0x7f)));
+    linux.exit_group(128 + @as(u8, @intCast(@intFromEnum(sig) & 0x7f)));
 }
 
 pub fn main(init: std.process.Init) !void {
-    // Install signal crash handler
+    // Install signal crash handler for fatal crashes only.
+    // SIGTERM and SIGINT are left at default action so the kernel cleanly terminates all threads on shutdown.
     const sa: linux.Sigaction = .{
         .handler = .{ .sigaction = crashHandler },
         .mask = linux.sigemptyset(),
@@ -63,8 +61,6 @@ pub fn main(init: std.process.Init) !void {
     _ = linux.sigaction(.ILL, &sa, null);
     _ = linux.sigaction(.FPE, &sa, null);
     _ = linux.sigaction(.ABRT, &sa, null);
-    _ = linux.sigaction(.TERM, &sa, null);
-    _ = linux.sigaction(.INT, &sa, null);
 
     // Ignore SIGPIPE so disconnected clients don't kill the server process
     const ignore: linux.Sigaction = .{

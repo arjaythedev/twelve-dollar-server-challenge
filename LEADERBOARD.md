@@ -1093,7 +1093,10 @@ p99 (2.45 s at 80 % CPU) and 280,000 the 2-minute probe (p99 1.55 s at 81 %).
 ᵀ **typescript-tinyjs-animuni-express** is scored at its merged follow-up **#410** (`048312f`, a native `Bun.serve`
 transport feeding TinyJS's handler, rebased on `main`), 42/42 tests: 75,000 failed the 5-minute hold on timeouts (1.59 %
 err) and 78,000 the 2-minute probe (1.36 %). Its first version, #382 (`e6a08ba`), held 43,000 (4,219 req/s, p95 138.1 /
-p99 584.6 ms, 0 err, 86 % CPU, 2026-11-11); #410's earlier head `3b3c64f` also held 71,000 (2026-11-12).
+p99 584.6 ms, 0 err, 86 % CPU, 2026-11-11); #410's earlier head `3b3c64f` also held 71,000 (2026-11-12). The open
+follow-up **#467** (`65b50f0`, closes idle keep-alive connections after 3 s; held, not merged) scored **0**
+(2026-11-15), 42/42 tests: every 2-minute probe from 20,000 down to 500 users failed on about 7 % errors (EOF on
+`POST` requests sent on a connection the server had just closed; `GET`s had no failures) at 3–37 % CPU.
 
 ᶫ **c-iouring-Londopy #438** (`04f764d`, new entry; held, not merged: its B-tree *writes* are an open question for
 Arjay, see the rule flags below) held **270,000** (25,837 req/s, p95 173.6 / p99 392.7 ms, 0 err, 82 % CPU, 29 µs/req,

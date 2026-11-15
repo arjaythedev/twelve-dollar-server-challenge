@@ -1207,14 +1207,19 @@ committed in this repo.
   users in the same order every time" (its README) — tuned to the load test's order (rule 7 question). Its score
   (210k) is below that point, so it doesn't affect the number.
 - **go-lowlevel #91 builds with committed PGO profiles** (`profiles/go.pprof`, `profiles/sqlite.profraw`, on by default)
-  that the author trained on their own load runs; the author asked for organizer review (rule 7/10 question: profile
-  data tuned to the benchmark, and a non-source input to the build). Scored as submitted (125k); held open for Arjay.
+  that the author trained on their own load runs. **Arjay's ruling (2026-11-15, rule 10):** profile-guided
+  optimization is fine when `build.sh` records the profile on the box during the build (a training run on a scratch
+  database); a committed profile recorded somewhere else is not. #91 was scored as submitted (125k) and stays held
+  until the author generates the profile in `build.sh` or drops it; it gets re-run then.
   go-fasthttp-savak1990 #106 does the same (committed Go `default.pgo` + gcc `sqlite#sqlite3.gcda` from the author's
-  own k6 runs, used by the default build); scored as submitted (65k, `71acb19`), held open for Arjay.
+  own k6 runs, used by the default build); scored as submitted (65k, `71acb19`), held on the same ruling.
   zig-iouring-harshitkhandelwal208 #460 (`122da96`) commits a clang profile for its SQLite shim
   (`src/c/sqlite.proftext`) that build.sh uses when `clang` and `llvm-profdata` are installed; on the challenge box
   that step was skipped ("Clang PGO build skipped; falling back to native Zig build"), so its 260k was scored without
-  the profile. Same question, held open for Arjay.
+  the profile. The committed profile still has to go before it can be merged.
+  go-gnet-kaikegm (merged #48 / #180, 88k) also carries a committed Go `default.pgo` "captured under realistic load"
+  (its README), which `go build` picks up by default; it was merged before the ruling, and whether its row needs a
+  re-run without the profile is open for Arjay.
 - **Arjay's rulings on SQLite (2026-10-31).** Reading `/feed` and `/posts/:id` through SQLite's own B-tree/cursor API
   is allowed (rules 2/3), so the B-tree entries (lean-derive #153, mojo #224, v-epoll #191, c-uring-curvynes #217,
   crystal-rayo #218, c-iouring-moneebullah25 #244, rust-native #265 and others) carry no flag. Ordering routes or fast
@@ -1229,8 +1234,9 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   installed as a prebuilt PyPI wheel; the author says it's their own open-source framework and builds from source
   with `--no-binary` (rule 10 question). Scored as submitted (53k); held open for Arjay.
 - **odin-odinhttp #139 drops the box's page cache at startup**: `pagecache.odin` walks /usr, /var, /etc (and its own
-  folder) and calls `posix_fadvise(DONTNEED)` on each file (rule 11 question: it acts on files outside its folder).
-  Scored as submitted (130k); held open for Arjay.
+  folder) and calls `posix_fadvise(DONTNEED)` on each file. **Arjay's ruling (2026-11-15, rule 11):** nothing may act
+  on the box outside the entry's own files; limiting the walk to the entry's folder and `$SQLITE_PATH` is fine.
+  Scored as submitted (130k); held until the author drops or limits the walk, then re-run.
 - **sql-oneselect #243 answers each batch of up to 256 requests with one SELECT** over an eponymous virtual table
   (`sqlite3_create_module`) that holds the parsed requests. Open question for Arjay: rule 3 (a virtual table as the
   request queue; probably covered by the public-plugin-API ruling). Since `57cf5b2` the `/feed` subquery is

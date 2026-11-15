@@ -86,6 +86,9 @@ fail, so 65,000 is the ceiling here, set by `LimitNOFILE` rather than by CPU. Ab
 
 - Request bodies need `Content-Length`; chunked uploads and `Expect: 100-continue` are not handled, GET
   bodies are not skipped, and `Connection: close` is left to the client. A request over 1 MB drops the connection.
+- A connection is read only while it has no unsent output, and at most 32 pipelined requests are answered
+  per turn (the rest wait in its buffer), so a client that never reads its answers holds a bounded amount
+  of memory (1,000 such clients: 789 MB RSS, other clients unaffected) instead of the server buffering without limit.
 - One descriptor per connection and no idle timeout: past `LimitNOFILE` (65,535) new connections wait in the
   kernel backlog, and the listener stays readable, so the loop spins until a client leaves.
 - A query string is ignored; a trailing slash makes a path unknown (404).

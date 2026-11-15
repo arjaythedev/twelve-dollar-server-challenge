@@ -234,6 +234,13 @@ local ep = ev.epoll()
 ev.add(ep, srv, 1)
 local conns = {} -- fd -> connection
 local sending, hungup = {}, {} -- connections with output this tick; peers that closed this tick
+-- A connection reads only while it has no unsent output and no unparsed requests, and answers at most
+-- PIPE pipelined requests a turn (the rest wait in c.buf, listed in more): a client that never reads
+-- holds at most PIPE answers here instead of making the server buffer without limit.
+local PIPE, more = 32, {}
+local function arm(c)
+  ev.mod(ep, c.fd, (c.rest and 2 or 0) | ((c.gone or c.rest or c.more) and 0 or 1))
+end
 
 local function close(c)
   if c.closed then return end
@@ -246,8 +253,10 @@ end
 -- Connection: close is left to the client. Add them if a client needs them.
 local function on_data(c, data)
   local buf = c.buf and c.buf .. data or data
-  local pos, len = 1, #buf
+  local pos, len, k = 1, #buf, 0
   while pos <= len do
+    if k == PIPE then c.more = true; more[#more + 1] = c; arm(c); break end
+    k = k + 1
     local _, he = find(buf, "\r\n\r\n", pos, true)
     if not he then break end
     local nxt, ok, e = he + 1
@@ -276,13 +285,23 @@ local function push(c, s) -- send what the socket takes now; keep the rest for w
     return
   end
   if not n then return close(c) end
-  if not c.rest then ev.mod(ep, c.fd, c.gone and 2 or 3) end
   c.rest = sub(s, n + 1)
+  arm(c)
 end
 
 local fds, evs = {}, {}
 local function tick()
-  local n = ev.wait(ep, 1000, fds, evs)
+  local m = more
+  if #m > 0 then more = {} end -- no new table on the common turn
+  local n = ev.wait(ep, #m > 0 and 0 or 1000, fds, evs)
+  for i = 1, #m do -- requests left in c.buf last turn; a connection still sending waits for its drain below
+    local c = m[i]
+    if not c.closed and not c.rest then
+      c.more = nil
+      on_data(c, "")
+      if not c.closed and not c.more then arm(c) end
+    end
+  end
   for k = 1, n do
     local fd, e = fds[k], evs[k]
     if fd == srv then
@@ -298,15 +317,17 @@ local function tick()
       if c and e & 2 ~= 0 and c.rest then
         local rest = c.rest
         c.rest = nil
-        ev.mod(ep, fd, c.gone and 0 or 1)
         push(c, rest)
+        if not c.closed and not c.rest then
+          if c.more then more[#more + 1] = c else arm(c) end
+        end
       end
-      if c and not c.closed and not c.gone and e & 1 ~= 0 then
+      if c and not c.closed and not c.gone and not c.more and e & 1 ~= 0 then
         local d, err = ev.recv(fd)
         if d then on_data(c, d) end
         if err == "closed" then
           c.gone = true; hungup[#hungup + 1] = c
-          ev.mod(ep, fd, c.rest and 2 or 0) -- an EOF stays readable; only wait for output now
+          arm(c) -- an EOF stays readable; only wait for output now
         end
       end
     end

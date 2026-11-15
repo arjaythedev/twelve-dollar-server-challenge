@@ -23,10 +23,24 @@
 (defun feed-hmac (msg)
   (secure-hash 'sha256 (concat feed-opad (secure-hash 'sha256 (concat feed-ipad msg) nil nil t)) nil nil t))
 
+(defun feed-same-p (a b)
+  "Whether strings A and B are equal, in a time that depends only on their lengths."
+  (and (= (length a) (length b))
+       (let ((d 0)) (dotimes (i (length a)) (setq d (logior d (logxor (aref a i) (aref b i))))) (= d 0))))
+
+(defvar feed-conns 0 "Open client connections.")
+(defconst feed-keep 32
+  "Open connections past which a response carries `Connection: close'.
+`select' costs time for every open descriptor on every wakeup, so the
+users beyond this many reconnect for each request instead of idling.")
+(defconst feed-max 256 "Open connections at which accepting pauses.")
+
 (defun feed-reply (proc status body)
-  (process-send-string
-   proc (concat "HTTP/1.1 " status "\r\nContent-Type: application/json\r\nContent-Length: "
-                (number-to-string (string-bytes body)) "\r\n\r\n" body)))
+  (let ((close (>= feed-conns feed-keep)))
+    (when close (process-put proc 'close t))
+    (process-send-string
+     proc (concat "HTTP/1.1 " status "\r\nContent-Type: application/json\r\nContent-Length: "
+                  (number-to-string (string-bytes body)) (if close "\r\nConnection: close\r\n\r\n" "\r\n\r\n") body))))
 
 (defun feed-error (proc status msg)
   (feed-reply proc status (concat "{\"error\":\"" msg "\"}")))
@@ -52,7 +66,7 @@
              (c (ignore-errors
                   (let* ((c (and (= (length parts) 3)
                                  (equal (gethash "alg" (json-parse-string (base64-decode-string h t))) "HS256")
-                                 (string= (nth 2 parts) (base64url-encode-string (feed-hmac (concat h "." p)) t))
+                                 (feed-same-p (nth 2 parts) (base64url-encode-string (feed-hmac (concat h "." p)) t))
                                  (json-parse-string (decode-coding-string (base64-decode-string p t) 'utf-8))))
                          (exp (gethash "exp" c)) (nbf (gethash "nbf" c)))
                     (and (numberp exp) (> exp (float-time)) (or (not nbf) (and (numberp nbf) (<= nbf (float-time)))) c)))))
@@ -121,25 +135,25 @@
   ;; An error that escapes a filter kills a batch Emacs, so a failed write drops the connection.
   (condition-case nil
       (let* ((old (process-get proc 'buf)) (buf (if old (concat old chunk) chunk)) (pos 0) end total)
-        (while (and (setq end (string-search "\r\n\r\n" buf pos))
+        (while (and (not (process-get proc 'close)) (setq end (string-search "\r\n\r\n" buf pos))
                     (<= (setq total (+ end 4 (string-to-number (or (feed-header "\r\ncontent-length: *\\([0-9]+\\)" buf pos end) "0"))))
                         (length buf)))
           (feed-handle proc buf pos end total)
           (setq pos total))
-        (when (> (- (length buf) pos) 1048576) (error "Request too large"))
-        (process-put proc 'buf (and (< pos (length buf)) (substring buf pos))))
+        (if (or (process-get proc 'close) (> (- (length buf) pos) 1048576))
+            (delete-process proc)
+          (process-put proc 'buf (and (< pos (length buf)) (substring buf pos)))))
     (error (delete-process proc))))
 
-(defvar feed-conns 0)
 (defvar feed-server)
 
 (defun feed-sentinel (_proc msg)
-  "Count connections; stop accepting near the 1024 descriptors of `select'."
+  "Count connections; past `feed-max' leave new ones in the kernel's queue."
   (setq feed-conns (+ feed-conns (if (string-prefix-p "open" msg) 1 -1)))
-  (if (< feed-conns 1000) (continue-process feed-server) (stop-process feed-server)))
+  (if (< feed-conns feed-max) (continue-process feed-server) (stop-process feed-server)))
 
 (setq feed-server
-      (make-network-process :name "feed" :server 1024 :family 'ipv4 :host (getenv "HOST")
+      (make-network-process :name "feed" :server 4096 :family 'ipv4 :host (getenv "HOST")
                             :service (string-to-number (getenv "PORT")) :coding '(binary . utf-8) :nodelay t
                             :noquery t :filter #'feed-filter :sentinel #'feed-sentinel))
 (while t (accept-process-output nil 3600))

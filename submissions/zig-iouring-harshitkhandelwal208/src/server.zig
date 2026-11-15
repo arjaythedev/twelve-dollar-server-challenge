@@ -451,7 +451,7 @@ pub const Server = struct {
 
             var sa: linux.sockaddr.in = .{ .port = std.mem.nativeToBig(u16, port), .addr = @bitCast(host) };
             if (sys.errnoOf(linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in))) != .SUCCESS) return error.BindFailed;
-            if (sys.errnoOf(linux.listen(fd, 4096)) != .SUCCESS) return error.ListenFailed;
+            if (sys.errnoOf(linux.listen(fd, 65535)) != .SUCCESS) return error.ListenFailed;
 
             self.listeners[i] = fd;
             self.armAccept(&self.rings[i], @intCast(i));
@@ -1113,7 +1113,7 @@ pub const Server = struct {
         }
 
         // Explicit backpressure: if the 65,536-entry hold queue is full,
-        // synchronously advance the checkpoint until the hold releases (bounded by HOLD_MAX_MS = 250ms in shim.c)
+        // synchronously advance the checkpoint until the hold releases (bounded by HOLD_MAX_MS = 100ms in db.zig)
         while (self.db.writesHeld()) {
             self.db.tick();
             std.atomic.spinLoopHint();

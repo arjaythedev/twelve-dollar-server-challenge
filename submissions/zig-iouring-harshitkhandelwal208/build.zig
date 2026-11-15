@@ -46,7 +46,7 @@ pub fn build(b: *std.Build) void {
 
     exe.root_module.addIncludePath(b.path("deps/sqlite-amalgamation-3540100"));
     exe.root_module.addCSourceFile(.{
-        .file = b.path("src/shim.c"),
+        .file = b.path("deps/sqlite-amalgamation-3540100/sqlite3.c"),
         .flags = &sqlite_flags,
     });
     exe.root_module.link_libc = true;
@@ -68,7 +68,7 @@ pub fn build(b: *std.Build) void {
     tests.root_module.addImport("c", c_mod);
     tests.root_module.addIncludePath(b.path("deps/sqlite-amalgamation-3540100"));
     tests.root_module.addCSourceFile(.{
-        .file = b.path("src/shim.c"),
+        .file = b.path("deps/sqlite-amalgamation-3540100/sqlite3.c"),
         .flags = &sqlite_flags,
     });
     tests.root_module.link_libc = true;

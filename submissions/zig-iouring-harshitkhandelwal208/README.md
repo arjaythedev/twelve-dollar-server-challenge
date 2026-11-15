@@ -21,18 +21,18 @@ High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/t
 - Zero mid-ramp ring or table allocations: eliminates page compaction latency stalls.
 - Connections are tracked via an ultra-compact **32-byte packed `Conn` struct** fitting two descriptors per 64-byte L1 cache line, keeping connection state memory across all 523k descriptors under 17 MB.
 
-### 2. Direct SQLite B-Tree Integration & SQL Fallback
-- Completely bypasses SQLite's SQL parser and VDBE bytecode engine for typical read queries.
-- `src/shim.c` compiles directly in the SQLite amalgamation translation unit (`-O3`), accessing internal B-tree cursors:
-  - `td_seek_ge` and `td_next` perform a forward range walk on `posts_created_at_id_idx` to retrieve the top 20 posts.
-  - `td_count_likes` performs an index-only range walk on `likes_post_id_idx` with bounds-checked record scanning and SIMD byte swapping.
-  - Zero-allocation varint and SQLite serial type decoding directly deserializes payload data into the response buffer.
-- Robust fallback guarantees: If any query encounters non-leaf index traversal, unsupported record types, or cursor anomalies, the query transparently falls back to SQLite's compiled prepared statement query (`td_feed_sql_step`), guaranteeing 100% data integrity under all database schemas.
+### 2. Pure Zig SQLite Engine (`src/db.zig`) & Zero-Allocation Queries
+- The database engine is written in **100% native Zig** without any C shim files, interfacing directly with the SQLite 3.54.1 amalgamation library.
+- Prepared statements are pre-compiled at startup using `sqlite3_prepare_v3` with `SQLITE_PREPARE_PERSISTENT`, keeping compiled bytecode hot in memory and eliminating query parse overhead:
+  - Persistent prepared statements for `/feed`, `/posts/:id`, likes, post creation, and health checks.
+  - Zero-allocation column extraction directly streams UTF-8 payload bytes into response buffers with fast-path JSON string escaping.
+  - Sized to an 8 MB page cache (`PRAGMA cache_size = -8192`), freeing ~24 MB physical memory for kernel TCP connection slabbing.
 
-### 3. Background Checkpointer Thread & Read-First Group Commits
-- A dedicated background checkpoint thread (`pthread` running at `nice 19`) performs passive WAL checkpoints (`sqlite3_wal_checkpoint_v2(SQLITE_CHECKPOINT_PASSIVE)`) without blocking the event loop.
-- A hold-window timeout (`HOLD_MAX_MS = 250ms`) protects against checkpoint stalls.
-- Group-commits pending write transactions (posts and likes) at the end of each completion pass before dispatching HTTP responses, with strict transaction rollback on batch or commit failure.
+### 3. Futex-Coordinated Background Checkpointer & Read-First Group Commits
+- A dedicated background checkpoint thread running at `nice 19` performs two-phase non-blocking WAL checkpoints (`SQLITE_CHECKPOINT_PASSIVE`).
+- The event loop communicates with the checkpointer using lockless atomic states and Linux futex syscalls (`linux.futex_4arg`), completely avoiding mutex contention on the single vCPU.
+- A hold-window timeout (`HOLD_MAX_MS = 100ms`) bounds maximum write holds and prevents p99 latency spikes.
+- Pending write transactions (posts and likes) are group-committed in batches before dispatching HTTP responses, with strict transaction rollback on batch or commit failure.
 
 ### 4. Right-Sized Kernel Buffer Rings & ENOBUFS Burst Queue
 - Provisions 2,048 buffers per ring (2 KB per buffer) using `IORING_REGISTER_PBUF_RING` with fallback for Linux 6.8+ kernels (`resv[0] = 1`).
@@ -136,7 +136,13 @@ passed=42 failed=0
 cd submissions/zig-iouring-harshitkhandelwal208
 zig build test --summary all
 ```
-All 24 unit tests pass, validating generation-tag wraparound, pending buffer bounds, varint decoders, B-tree boundary checks, HTTP parsing & framing, and differential B-tree vs SQL query equivalence.
+All 22 unit tests pass, validating generation-tag wraparound, pending buffer bounds, pool allocations, HTTP parsing & framing, and native Zig database query executions on seed databases.
+
+---
+
+## Attribution & Acknowledgements
+
+- **`submissions/rust-iouring-kensac #264`**: We gratefully credit and acknowledge the SQLite B-tree shim exploration in `csrc/shim.c` from submission #264, which provided valuable inspiration and architectural reference during early database optimization exploration. In this implementation, the entire database subsystem has been cleanly migrated into 100% native Zig (`src/db.zig`) using persistent prepared statements (`sqlite3_prepare_v3`) and Linux futex signaling.
 
 ---
 

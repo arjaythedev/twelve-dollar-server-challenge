@@ -71,34 +71,6 @@ test "pending buffer limits and rejection" {
     }
 }
 
-test "sqlite varint decoding" {
-    // 1-byte varints (0x00 to 0x7f)
-    const p1 = [_]u8{ 0x00, 0x42, 0x7f };
-    var i: usize = 0;
-    try std.testing.expectEqual(@as(u64, 0), try dbm.varint(&p1, &i));
-    try std.testing.expectEqual(@as(u64, 0x42), try dbm.varint(&p1, &i));
-    try std.testing.expectEqual(@as(u64, 0x7f), try dbm.varint(&p1, &i));
-    try std.testing.expectEqual(@as(usize, 3), i);
-
-    // 2-byte varint (0x81, 0x00 = 128)
-    const p2 = [_]u8{ 0x81, 0x00 };
-    i = 0;
-    try std.testing.expectEqual(@as(u64, 128), try dbm.varint(&p2, &i));
-    try std.testing.expectEqual(@as(usize, 2), i);
-
-    // 9-byte varint with full 8 bits in 9th byte
-    const p9 = [_]u8{ 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0xff };
-    i = 0;
-    const v9 = try dbm.varint(&p9, &i);
-    try std.testing.expectEqual(@as(u64, 0xff), v9);
-    try std.testing.expectEqual(@as(usize, 9), i);
-
-    // Truncated buffer returns error
-    const p_trunc = [_]u8{ 0x81 };
-    i = 0;
-    try std.testing.expectError(dbm.DbError.Corrupt, dbm.varint(&p_trunc, &i));
-}
-
 test "http parsing pipelined and partial" {
     const raw = "GET /feed HTTP/1.1\r\nHost: localhost\r\n\r\nGET /health HTTP/1.1\r\nHost: localhost\r\n\r\n";
     const head1 = http.parseHead(raw);
@@ -161,17 +133,36 @@ test "ring worker rearm and close queues" {
     try std.testing.expectEqual(@as(?u32, null), w.popClose());
 }
 
-extern "c" fn td_count_likes(c: ?*anyopaque, lo: i64, hi: i64, n: [*]u32) c_int;
+extern "c" fn access(path: [*c]const u8, mode: c_int) c_int;
 
-test "b-tree count likes boundary validation" {
-    var counts: [16]u32 = @splat(0);
-    // hi < lo must return fallback 1
-    const r1 = td_count_likes(null, 100, 50, &counts);
-    try std.testing.expectEqual(@as(c_int, 1), r1);
+test "native zig db operations on seed database" {
+    if (access("../../seed/feed.db", 0) != 0) return;
 
-    // hi - lo > 1000 must return fallback 1
-    const r2 = td_count_likes(null, 100, 1200, &counts);
-    try std.testing.expectEqual(@as(c_int, 1), r2);
+    var db = dbm.Db.init("../../seed/feed.db") catch return;
+    defer db.deinit();
+
+    var out = try bufm.Buf.init(65536);
+    defer out.deinit();
+
+    // Health
+    try std.testing.expect(try db.health(&out, 42));
+    try std.testing.expect(out.len > 0);
+    out.reset();
+
+    // Check post exists
+    try std.testing.expectEqual(dbm.Db.ExistsResult.exists, db.checkPostExists(1));
+    try std.testing.expectEqual(dbm.Db.ExistsResult.not_found, db.checkPostExists(999999999));
+
+    // Get post
+    const res = db.getPost(1, &out);
+    try std.testing.expectEqual(dbm.Db.GetPostResult.ok, res);
+    try std.testing.expect(out.len > 0);
+    out.reset();
+
+    // Feed
+    try db.feed(&out);
+    try std.testing.expect(out.len > 0);
+    try std.testing.expect(std.mem.startsWith(u8, out.slice(), "{\"posts\":["));
 }
 
 test "parseId validation" {
@@ -232,23 +223,4 @@ test "writeHeaderDirect formatting" {
     try std.testing.expect(std.mem.startsWith(u8, s500, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 15\r\n\r\n"));
 }
 
-extern "c" fn access(path: [*c]const u8, mode: c_int) c_int;
 
-test "differential: direct b-tree feed vs prepared sql feed" {
-    if (access("../../seed/feed.db", 0) != 0) return;
-
-    var db = dbm.Db.init("../../seed/feed.db") catch return;
-    defer db.deinit();
-
-    var out_btree = try bufm.Buf.init(65536);
-    defer out_btree.deinit();
-
-    var out_sql = try bufm.Buf.init(65536);
-    defer out_sql.deinit();
-
-    try db.feed(&out_btree);
-    try db.feedSql(&out_sql);
-
-    try std.testing.expect(out_btree.len > 0);
-    try std.testing.expectEqualStrings(out_sql.slice(), out_btree.slice());
-}

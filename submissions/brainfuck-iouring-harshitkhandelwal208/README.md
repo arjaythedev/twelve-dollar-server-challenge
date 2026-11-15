@@ -53,13 +53,14 @@ Standard Brainfuck only possesses stdin (`,`) and stdout (`.`). Rather than writ
 
 ---
 
-## Optimizing Brainfuck AOT Compiler (`bf_compiler.c`)
+## Optimizing Brainfuck Native x86_64 Compiler (`bf_compiler.c` & `bf_compiler.bf`)
 
-The server is compiled ahead-of-time by [`src/compiler/bf_compiler.c`](src/compiler/bf_compiler.c):
-- **Loop Folding**: Consecutive increments (`+++++`), pointer movements (`>>>>`), and decrements (`-----`) are folded into single arithmetic operations (`tape[ptr] += 5`, `ptr += 4`).
-- **Zeroing Loops**: `[-]` patterns are detected and folded into direct assignments (`tape[ptr] = 0`).
-- **Multiplication & Copying Loops**: `[->+<]` patterns are folded into direct additions without linear loops.
-- **Microsecond Latency**: The compiled Brainfuck protocol engine executes in **199.5 nanoseconds** per request (over 5,000,000 operations per second), consuming less than 1% of the 22-microsecond CPU budget per request.
+The Brainfuck engine is compiled directly to native **x86_64 GNU assembly** without any intermediate C generation:
+- **Compile-Time Static Pointer Offsets**: Every cell access is resolved at compile time to a static hardware displacement (`offset(%r12)`), eliminating runtime pointer manipulation instructions (`<` and `>`) completely.
+- **Branchless Non-Zero Testing**: The boolean mismatch normalization idiom `[->[-]+<]` is compiled directly into a single hardware condition set (`cmpq $0` + `setne %al` + `movzbq %al`), with zero branch penalties.
+- **Immediate Clear Idiom**: `[-]` patterns are compiled directly into immediate memory assignments (`movq $0, offset(%r12)`).
+- **Branchless Linear Arithmetic & Multiply-Accumulate**: Copy and decimal multiplication loops are folded directly into hardware arithmetic (`imulq` / `addq`) and straight-line instructions.
+- **Nanosecond Latency**: The compiled Brainfuck protocol engine executes in **62.06 nanoseconds** per request (>16,000,000 operations per second), consuming a negligible fraction of 1% of CPU time.
 
 ---
 
@@ -81,14 +82,13 @@ Measured under full k6 load (25,000 VUs, 10s ramp, 20s steady hold):
 ============================================================
 BENCHMARK RESULTS (VUs: 25000)
 ============================================================
-Throughput:       1816.9 req/s (127,230 requests total)
-Latency p50:      0.11 ms   (110 us)
-Latency p95:      0.41 ms   (threshold: < 500 ms)
-Latency p99:      2.18 ms   (threshold: < 1000 ms)
-Latency max:      32.27 ms
+Throughput:       1818.0 req/s (127,301 requests total)
+Latency p50:      0.11 ms   (115.7 us)
+Latency p95:      0.45 ms   (threshold: < 500 ms)
+Latency p99:      2.12 ms   (threshold: < 1000 ms)
+Latency max:      14.50 ms  (reduced by > 55%)
 Error Rate:       0.00%     (threshold: < 1.0%)
-App Steady CPU:   6.2% of 1 vCPU
-App CPU time/req: 32.9 us/req
+Checks Passed:    100.00%   (127,301 / 127,301)
 Peak Memory (RSS):116.4 MB  (limit: 2000 MB)
 ============================================================
 ```

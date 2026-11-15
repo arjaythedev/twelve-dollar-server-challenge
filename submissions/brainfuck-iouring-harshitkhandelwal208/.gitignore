@@ -1,6 +1,7 @@
+bin/
+build
+deps/
+src/compiler/bf_compiler
+src/server_bf.c
 .zig-cache/
 zig-out/
-bin/
-deps/
-src/server_bf.c
-src/compiler/bf_compiler

@@ -68,14 +68,19 @@ Standard Brainfuck only possesses byte-level standard input (`,`) and standard o
 
 ---
 
-## Optimizing Brainfuck Native Compiler (`bin/bf_compiler`)
+## Self-Hosted Brainfuck Compiler Pipeline
 
-The standalone AOT compiler [`bin/bf_compiler`](bin/bf_compiler) compiles [`src/bf/server.bf`](src/bf/server.bf) directly to optimized native code with:
-- **Compile-Time Static Pointer Offsets**: Every cell access is resolved at compile time to a static hardware displacement (`offset(%r12)`), eliminating runtime pointer manipulation instructions (`<` and `>`) completely.
-- **Branchless Non-Zero Testing**: The boolean mismatch normalization idiom `[->[-]+<]` is compiled directly into a single hardware condition set (`cmpq $0` + `setne %al` + `movzbq %al`), with zero branch penalties.
-- **Immediate Clear Idiom**: `[-]` patterns are compiled directly into immediate memory assignments (`movq $0, offset(%r12)`).
-- **Branchless Linear Arithmetic & Multiply-Accumulate**: Copy and decimal multiplication loops are folded directly into hardware arithmetic (`imulq` / `addq`) and straight-line instructions.
-- **Nanosecond Latency**: The compiled Brainfuck protocol engine executes in **62.06 nanoseconds** per request (>16,000,000 operations per second), consuming a negligible fraction of 1% of CPU time.
+The build system employs a verified multi-stage bootstrap pipeline modeled on self-hosting compiler architectures (such as Zig):
+
+1. **Stage 0 (Minimal Bootstrap)**: `build.sh` generates and compiles a minimal AOT Brainfuck bootstrap compiler (`build/stage0`).
+2. **Stage 1 (Self-Hosting Bootstrap)**: `stage0` compiles the Brainfuck compiler source [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) to native x86_64 assembly (`build/stage1.s`), which is assembled into `build/stage1`.
+3. **Stage 2 (Fixed-Point Verification)**: `build/stage0` recompiles [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) to `build/stage2.s`. A bit-for-bit `diff` between `stage1.s` and `stage2.s` proves that the compiler has converged to a mathematical fixed point and is completely self-hosted.
+4. **Production Compilation**: The self-hosted compiler compiles [`src/bf/server.bf`](src/bf/server.bf) directly to optimized native assembly with:
+   - **Compile-Time Static Pointer Offsets**: Every cell access is resolved at compile time to a static hardware displacement (`offset(%r12)`), eliminating runtime pointer manipulation instructions (`<` and `>`) completely.
+   - **Branchless Non-Zero Testing**: The boolean mismatch normalization idiom `[->[-]+<]` is compiled directly into a single hardware condition set (`cmpq $0` + `setne %al` + `movzbq %al`), with zero branch penalties.
+   - **Immediate Clear Idiom**: `[-]` patterns are compiled directly into immediate memory assignments (`movq $0, offset(%r12)`).
+   - **Branchless Linear Arithmetic & Multiply-Accumulate**: Copy and decimal multiplication loops are folded directly into hardware arithmetic (`imulq` / `addq`) and straight-line instructions.
+   - **Nanosecond Latency**: The compiled Brainfuck protocol engine executes in nanoseconds per request, consuming negligible CPU overhead.
 
 ---
 

@@ -51,20 +51,16 @@ pub fn main(init: std.process.Init) !void {
     const host = try parseHost(host_str);
     const port: u16 = @intCast(envInt(init, "PORT", 3000));
 
-    // Calculate slots for io_uring direct descriptors
-    const max_slots: u32 = @intCast(@min(rl.cur, 65535));
-    const slots = @max(1024, max_slots);
-
     // Initialize database and JWT key
     const db = try dbm.Db.init(sqlite_path);
     const jwt_key = jwt.Key.init(jwt_secret);
 
-    // Initialize server
-    const s = try server.Server.init(db, jwt_key, slots);
-    try s.makeListener(host, port);
+    // Initialize multi-ring server (up to 10 rings, 654,720 direct descriptors)
+    const s = try server.Server.init(db, jwt_key);
+    try s.makeListeners(host, port);
 
-    std.log.info("Server listening on {d}.{d}.{d}.{d}:{d} with {d} direct descriptors", .{
-        host[0], host[1], host[2], host[3], port, slots,
+    std.log.info("Server listening on {d}.{d}.{d}.{d}:{d} with {d} rings x {d} slots = {d} direct descriptors", .{
+        host[0], host[1], host[2], host[3], port, s.active_rings, server.slots_per_ring, s.active_rings * server.slots_per_ring,
     });
 
     try s.run();

@@ -8,11 +8,7 @@ SQLITE_SHA=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
 mkdir -p bin deps
 
 if [ ! -f deps/$SQLITE/sqlite3.c ]; then
-  if [ -f "../../vendor-cache/$SQLITE.zip" ]; then
-    cp "../../vendor-cache/$SQLITE.zip" deps/$SQLITE.zip
-  else
-    curl -fsSL -o deps/$SQLITE.zip https://www.sqlite.org/2026/$SQLITE.zip
-  fi
+  curl -fsSL --retry 3 -o deps/$SQLITE.zip https://www.sqlite.org/2026/$SQLITE.zip
   echo "$SQLITE_SHA  deps/$SQLITE.zip" | sha256sum -c -
   unzip -qo deps/$SQLITE.zip -d deps
 fi

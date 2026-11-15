@@ -12,14 +12,23 @@ grew up with: `package require sqlite3`, `db eval`. No framework, no helper proc
 | SQLite | The Tcl binding `libsqlite3-tcl 3.45.1-1ubuntu2` (`package require sqlite3`), in-process, on the system `libsqlite3.so.0` (3.45.1) |
 | JSON | SQLite's JSON functions: `json_object` builds every response that has a post, `json_valid` / `json_each` / `json_extract` parse request bodies and JWT payloads |
 | JWT | HS256 over tcllib 1.21's C SHA-256 (`sha256c`, compiled from the source tcllib ships, with critcl 3.1.18.1, by `build.sh`) |
-| Front | **Behind Nginx** (`bench/nginx.conf`), listening on `127.0.0.1:3000` |
+| Front | **Direct**, listening on `0.0.0.0:80` (no Nginx) |
 
-## Why Nginx
+## Why direct, with 1024 descriptors
 
 Tcl 8.6 waits on its channels with `select()` (the `epoll` notifier only arrived in Tcl 8.7/9.0), so one
-process can watch at most 1024 descriptors. Thousands of direct keep-alive connections are out of
-reach; the few dozen upstream connections Nginx keeps are easy. The server refuses (closes) connections
-past 1000 so no descriptor above 1023 ever reaches `select()`.
+process can watch at most 1024 descriptors, and its notifier finds a socket's handler by searching a
+list of all of them, so every event costs time for each open one. So the server cannot hold one
+keep-alive connection per user. It keeps up to 32 connections alive; past that
+a response carries `Connection: close`, the server closes the socket after writing it, and that user
+reconnects for the next request. Connections are short, so only a few dozen are open at a time. The
+server still closes connections past 1000, so no descriptor above 1023 ever reaches `select()`.
+
+The first version sat behind Nginx, which held 24,000 users on the benchmark box and failed above that
+on POSTs that got no response (0.97% errors at 24,000, 1.35% at 25,000), with CPU to spare. Every entry
+behind Nginx that reached 24,000 stopped there with the same errors, which points at Nginx's 16,384
+`worker_connections` for 24,000 keep-alive users rather than at the app. Going direct also drops
+Nginx's share of the CPU.
 
 ## How it works
 
@@ -30,6 +39,9 @@ past 1000 so no descriptor above 1023 ever reaches `select()`.
   text goes into SQLite as a blob (`@var`) and is `CAST` to `TEXT` in SQL; responses come back from SQLite
   as `CAST(... AS BLOB)`, which the binding hands over as a Tcl byte array that `puts` writes untouched.
   UTF-8 (emoji included) is never decoded or re-encoded by Tcl.
+- **Keep-alive within a budget.** An idle connection is never closed by the server; a response sent
+  while 32 or more connections are open is the last one on its connection (see above). A request with
+  `Connection: close` also gets that header back.
 - **SQLite writes the JSON.** A post, the feed (20 posts with their live like counts) and a created post are
   each one statement that returns the finished body, so Tcl touches one value per request, not 100 columns.
   Statements are prepared once and reused from the binding's statement cache (`db cache size 32`).
@@ -55,30 +67,39 @@ channel and `select()` round trip.
 
 ## Numbers (local, rough)
 
-A 1-CPU, 2 GB, no-swap cgroup holding Nginx (one worker) and `tclsh` on a shared laptop VM, x86_64
-under emulation; k6 `bench/load.js` outside the cgroup, 30 s ramp and a 1 minute hold. Other benchmarks
-were running on the same VM (load average 10 to 30 on 12 cores), so treat these as a sketch. Local runs
-like this have overstated the benchmark box by about 1.3x to 2.5x for earlier entries.
+Measured in a container on one core of a shared laptop VM (x86_64 under emulation), throttled to
+1 ms in every 1.7 ms of that core so that the first version behind Nginx used about the same CPU share
+at 24,000 users as on the benchmark box (60 to 65% here, 59% there). k6 `bench/load.js` from three
+other cores, 60 s ramp, 2 minute hold, two runs per row, run alternately with the first version behind
+Nginx. Not the benchmark box; treat them as a sketch.
 
-| VUs | req/s | p95 | p99 | failed | CPU (cgroup) | Memory (cgroup, incl. page cache) | RSS tclsh |
-|---|---|---|---|---|---|---|---|
-| 20,000 | 1,596 | 3.2 ms | 10.7 ms | 0% | 45% | 394 MB | 70 MB |
-| 30,000 | 2,390 | 1.7 ms | 5.6 ms | 0% | 60% | 549 MB | 62 MB |
-| 40,000 | 3,191 | 3.2 ms | 10.3 ms | 0% | 80% | 391 MB | 73 MB |
-| 50,000 | 3,987 | 2.1 ms | 9.5 ms | 0% | 85 to 90% | 575 MB | 74 MB |
-| 60,000 | 4,782 | 2.6 ms | 10.5 ms | 0% | 97 to 99% | 580 MB | 79 MB |
+| VUs | req/s | p95 | p99 | failed | CPU (of the throttled core) | CPU per request |
+|---|---|---|---|---|---|---|
+| 24,000 | 1,997 | 0.5 to 1.8 ms | 8.4 to 22 ms | 0% | 49 to 57% | 116 to 137 us |
+| 30,000 | 2,494 | 0.6 to 2.4 ms | 19 to 37 ms | 0% | 56 to 66% | 106 to 126 us |
+| 36,000 | 2,993 | 6.6 to 6.7 ms | 56 ms | 0% | 73 to 74% | 116 to 118 us |
+| 42,000 | 3,493 | 20 ms | 79 to 97 ms | 0% | 81 to 82% | 111 to 112 us |
+| 45,000 | 3,742 | 3.4 to 17 ms | 48 to 92 ms | 0% | 70 to 78% | 88 to 103 us |
+| 48,000 | 3,996 | 6.2 to 7.4 ms | 56 to 63 ms | 0% | 72 to 76% | 86 to 89 us |
+| 51,000 | 4,243 | 9.5 to 10 ms | 64 to 65 ms | 0% | 77 to 78% | 86 us |
+| 60,000 (one run) | 4,989 | 48 ms | 108 ms | 0% | 88% | 84 us |
 
-The CPU is full at 60,000 users, so the limit here is a little above that. A first 40,000 run during a
-busier moment on the VM failed (p99 2.5 s), which says how noisy this is.
-
-Without think time (`wrk`, 64 connections, 100 feed : 100 post : 15 like : 2 create): about 21,000 req/s
-direct to Tcl (42 us of CPU per request) and 14,900 req/s through Nginx.
+The first version behind Nginx in the same runs: every run from 24,000 to 48,000 passed (60 to 98% of the throttled
+core, 111 to 155 us per request, Tcl plus Nginx) except two that fell inside a VM-wide stall that also hit
+other benchmarks running at the time; single runs at 54,000 and 60,000 passed at 98 and 101%, and 66,000
+failed (2.8% errors). So here both versions top out between 60,000 and 66,000. Nginx logged "worker_connections are not enough" about 165 to 190
+times per run from 24,000 up, but here that cost 0 to 9 POSTs per run, not the 1% the benchmark box
+sees, so this setup does not reproduce the 24,000 limit; what it does show is the CPU: CPU per request
+is 10 to 25% lower direct at the same load, and the VM's quiet periods lower every arm's number (the rows above span
+both).
 
 `test/run.sh`: 42 passed, 0 failed.
 
 ## Known limits
 
-- At most 1000 open connections (see above), which is why it sits behind Nginx.
+- At most 32 users keep their connection between requests; everyone else reconnects for each request
+  (see above). A pipelined request after a `Connection: close` response is not answered. At most 1000
+  connections are open at once; more are closed on accept.
 - Request bodies need `Content-Length`; chunked uploads are not parsed. A request over 1 MB drops the
   connection.
-- `Expect: 100-continue` is not answered; Nginx does not send it.
+- `Expect: 100-continue` is not answered; k6 does not send it.

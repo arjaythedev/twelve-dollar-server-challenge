@@ -115,7 +115,7 @@ proc create {c uid name j} {
         RETURNING CAST(json_object('post', json_object('id', id, 'body', body, 'created_at', created_at,
                                    'author', CAST(@name AS TEXT), 'like_count', 0)) AS BLOB)
     }] 0]
-    puts -nonewline $c $::H201[string length $b]\r\n\r\n
+    puts -nonewline $c $::H201[string length $b]$::EOH
     puts -nonewline $c $b
     return ""
 }
@@ -157,7 +157,7 @@ proc handle {c buf pos he next lh} {
         } else {
             return $::E(404)
         }
-        puts -nonewline $c $::H200[string length $b]\r\n\r\n
+        puts -nonewline $c $::H200[string length $b]$::EOH
         puts -nonewline $c $b
         return ""
     }
@@ -176,6 +176,10 @@ proc handle {c buf pos he next lh} {
     like $uid $id
 }
 
+# select() also costs time for every open descriptor on every wakeup, so only this many connections
+# stay open between requests: past it a response carries "Connection: close" and the server closes
+# the socket after writing it, and that client reconnects for its next request.
+set KEEP 32
 set nconn 0
 proc drop {c} {
     incr ::nconn -1
@@ -201,8 +205,11 @@ proc rd {c} {
             if {$cl > 0} {incr next $cl}
             if {$next > $len} break
         }
-        if {[string first "\nconnection: close" $lh] >= 0} {set close 1}
+        if {[string first "\nconnection: close" $lh] >= 0 || $::nconn >= $::KEEP} {set close 1}
+        set ::EOH [expr {$close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n"}]
         if {[catch {handle $c $b $pos $he $next $lh} r]} {puts stderr $::errorInfo; set r $::E(500)}
+        # A returned response is header and JSON body; a JSON body has no raw CRLF.
+        if {$close} {set r [string map [list \r\n\r\n $::EOH] $r]}
         puts -nonewline $c $r
         set pos $next
         if {$close} break

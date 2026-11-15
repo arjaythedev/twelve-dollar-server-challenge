@@ -76,7 +76,9 @@ proc auth {buf pos lh} {
         return {"" token}
     }
     set mac [sha2::sha256c_update [sha2::sha256c_update $h.$p $::ictx] $::octx]
-    if {[string map {+ - / _ = {}} [binary encode base64 $mac]] ne $sig} {return {"" token}}
+    # Compares keyed hashes of the two signatures, so the time `ne` takes says nothing about $sig.
+    set want [string map {+ - / _ = {}} [binary encode base64 $mac]]
+    if {"[sha2::sha256c_update $want $::ictx]" ne "[sha2::sha256c_update $sig $::ictx]"} {return {"" token}}
     if {[catch {
         set hj [b64u $h]; set pj [b64u $p]
         db eval {

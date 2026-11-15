@@ -37,7 +37,7 @@ past 1000 so no descriptor above 1023 ever reaches `select()`.
   `json_each` gives the last `body` key when a key is repeated, and `trim()`/`length()` do the trimming and
   the 500-character check in SQL.
 - **Every token is verified.** HMAC-SHA256 with two hash contexts that have already absorbed the key
-  pads (built once at start), two C calls per token, then the signature is compared in base64url. The
+  pads (built once at start), two C calls per token, then keyed hashes of the expected and given signatures are compared. The
   header must say `HS256`; `exp` is required and must be a number in the future, `nbf` if present must be
   a number in the past, `sub` a positive integer string, `username` a string. Nothing is remembered.
 - **Writes.** WAL, `synchronous=NORMAL`, autocommit: `db eval` returns after the `INSERT` has committed,

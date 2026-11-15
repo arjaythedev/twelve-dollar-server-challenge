@@ -1,0 +1,1134 @@
+{
+  "fixture": {
+    "stock_load_generator": "arjaythedev/million-users-challenge@ae4e5a74b399d41851b2f188c91122aaa6d9b7a0",
+    "server": "AMD EPYC Genoa, single shared service and Linux receive CPU, stock Linux TCP, 524288 server hash buckets, 1750 MiB application cap, swap disabled",
+    "clients": "Four pinned, separately paced stock load generators in private routed namespaces on the same host",
+    "scoring": "Stock percentiles include ramp and five-minute hold. Full-occupancy scoring-window qualification also requires exact dials, clean fixtures and no scored service OOM. Through-stop qualification additionally requires service survival as all clients disconnect.",
+    "official_leaderboard": "https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/f4485ff56545d0c12e2283aad651fce16497ec48/LEADERBOARD.md",
+    "official_checked_utc": "2026-11-14T02:31:36Z",
+    "official_hybrid_score": null
+  },
+  "local_comparison": {
+    "journal_regrade_sha256": "9d9a8f618862aa7081952d76c570fb95c4e31a8d9c87f7b6dcecaea9494a12b9",
+    "source_workloads": 78,
+    "verified_generator_exits": 312,
+    "entries": [
+      {
+        "entry": "Rust / Kensac",
+        "official_users": 310000,
+        "official_pr": 264,
+        "stock_thresholds": {
+          "users": 310000,
+          "passes": 2,
+          "attempts": 3
+        },
+        "qualified_scoring_window": {
+          "users": 310000,
+          "passes": 2,
+          "attempts": 3
+        },
+        "qualified_through_intentional_stop": {
+          "users": 310000,
+          "passes": 2,
+          "attempts": 3
+        },
+        "stock_350k_p99_ms": [
+          23215.691
+        ]
+      },
+      {
+        "entry": "Mojo / Oh-meh",
+        "official_users": 304000,
+        "official_pr": 257,
+        "stock_thresholds": {
+          "users": 325000,
+          "passes": 1,
+          "attempts": 2
+        },
+        "qualified_scoring_window": {
+          "users": 320000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_through_intentional_stop": {
+          "users": 320000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "stock_350k_p99_ms": [
+          22532.921
+        ]
+      },
+      {
+        "entry": "Rust / Rkkautsar",
+        "official_users": 300000,
+        "official_pr": 355,
+        "stock_thresholds": {
+          "users": 260000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_scoring_window": {
+          "users": 260000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_through_intentional_stop": {
+          "users": 260000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "stock_350k_p99_ms": [
+          11340.774
+        ]
+      },
+      {
+        "entry": "Swift / Akbashev",
+        "official_users": 300000,
+        "official_pr": 376,
+        "stock_thresholds": {
+          "users": 280000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_scoring_window": {
+          "users": 280000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_through_intentional_stop": {
+          "users": 280000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "stock_350k_p99_ms": [
+          28896.939
+        ]
+      },
+      {
+        "entry": "F# / Delneg",
+        "official_users": 300000,
+        "official_pr": 398,
+        "stock_thresholds": {
+          "users": 360000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_scoring_window": {
+          "users": 360000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_through_intentional_stop": {
+          "users": 350000,
+          "passes": 2,
+          "attempts": 2
+        },
+        "stock_350k_p99_ms": [
+          318.617,
+          266.37
+        ]
+      },
+      {
+        "entry": "C / Willwang original",
+        "official_users": 280000,
+        "official_pr": 403,
+        "stock_thresholds": {
+          "users": 345000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_scoring_window": {
+          "users": 345000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "qualified_through_intentional_stop": {
+          "users": 330000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "stock_350k_p99_ms": [
+          1105.201
+        ]
+      },
+      {
+        "entry": "C / Willwang update",
+        "official_users": 257000,
+        "official_pr": 428,
+        "stock_thresholds": {
+          "users": 360000,
+          "passes": 1,
+          "attempts": 2
+        },
+        "qualified_scoring_window": {
+          "users": 360000,
+          "passes": 1,
+          "attempts": 2
+        },
+        "qualified_through_intentional_stop": {
+          "users": 345000,
+          "passes": 1,
+          "attempts": 1
+        },
+        "stock_350k_p99_ms": [
+          951.964,
+          699.291
+        ]
+      }
+    ]
+  },
+  "hybrid_native": {
+    "registration_sha256": "9b7d9bbaf05484425cbbda36fc844a678a7e910d7a35446b4529d73a8498453f",
+    "result_sha256": "eb16ab72d6557ecfc3e578106efbe59c01b968b6d99fad0940cfa3bb3aa81c74",
+    "cases": [
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-350-h1",
+        "users": 350000,
+        "ramp_s": 105,
+        "hold_s": 300,
+        "chosen_for_arm": true,
+        "requests": 13155655,
+        "failed": 0,
+        "p95_ms": 188.03413722111935,
+        "p99_ms": 828.1736249996883,
+        "stock_pass": true,
+        "full_hold_checks": 59,
+        "expected_checks": 59,
+        "dials_per_shard": [
+          87500,
+          87500,
+          87500,
+          87500
+        ],
+        "exclusions": [],
+        "qualified_scoring_window": true,
+        "qualified_through_intentional_stop": false,
+        "stop_reason": "service exited",
+        "last_active_drain_sample": null,
+        "drain_jsonl_sha256": "97a875e7772972a46c6e01ca8495d132bd79589fafa755ef6b5b29430e848903",
+        "service_oom_s_after_cutoff": 2.847319,
+        "last_generator_exit_s_after_cutoff": 2.618804,
+        "attempt_sha256": "d6a98f3a51bc6295c768d7de596419f231826736c1627ff85093e5f0ccdffcb8",
+        "shard_results_sha256": {
+          "shard-0.json": "1f4b39e0b121e85d800ffe144eceef82ce6cb078d600e1c835e06abb01a54c5f",
+          "shard-1.json": "acee60c8835fc844b173b43252b1d15df52c6e4c294694ef0882314faf69cf5a",
+          "shard-2.json": "1687ff56a048361cbb2281c633ca3d522eca6bc4e2dddd040af95531001ebae0",
+          "shard-3.json": "dcfbf47068c14e0ffec3eaadb6d9a7512c0b3e54244fa65f97351b7297759113"
+        }
+      },
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-360-h1",
+        "users": 360000,
+        "ramp_s": 108,
+        "hold_s": 300,
+        "chosen_for_arm": false,
+        "requests": 12998784,
+        "failed": 0,
+        "p95_ms": 1645.4935577431593,
+        "p99_ms": 9768.36982569535,
+        "stock_pass": false,
+        "full_hold_checks": 58,
+        "expected_checks": 59,
+        "dials_per_shard": [
+          90000,
+          90000,
+          90000,
+          90000
+        ],
+        "exclusions": [
+          "not all target connections present",
+          "private TAP TX in tra3f1e3cs reported a drop or error",
+          "private TAP TX in tra3f1e3cc1 reported a drop or error",
+          "private TAP TX in tra3f1e3cc2 reported a drop or error",
+          "private TAP TX in tra3f1e3cc3 reported a drop or error",
+          "native service_tx=9027",
+          "native generator_tx=[0, 60343, 213, 29885]",
+          "native scored environment or eligibility failed"
+        ],
+        "qualified_scoring_window": false,
+        "qualified_through_intentional_stop": false,
+        "stop_reason": "service drain time budget reached",
+        "last_active_drain_sample": {
+          "elapsed_s": 120.54,
+          "server_established": 359572,
+          "client_established": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "drain_jsonl_sha256": "aac41845bd774e7b3d0530eb8e3f7a80cb56b6a45b12a5088f3ce4bb54fd7aad",
+        "service_oom_s_after_cutoff": null,
+        "last_generator_exit_s_after_cutoff": 2.253755,
+        "attempt_sha256": "8e6d070c866207a38b7901c97050fa4ae0f9799a7676fea437f6aeff48cc9f38",
+        "shard_results_sha256": {
+          "shard-0.json": "6ea0e6358ac4e66634cf95dff9e45fc30607e316722b4b3595acdb6b64e82fb6",
+          "shard-1.json": "2d65baa4a7ccebdc3fccfafc7f532a8ca96a2ca2a00a0bd26db0e9ede3cdb716",
+          "shard-2.json": "28e2a05e300f7c07bd08d8a025f5379c9516520c1a5c567408230e0524e0c937",
+          "shard-3.json": "9137984671f9de4715c65a3836f4338810cd93d731551a24b1929bca7883b008"
+        }
+      },
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-360-h1-infra1",
+        "users": 360000,
+        "ramp_s": 108,
+        "hold_s": 300,
+        "chosen_for_arm": true,
+        "requests": 13578244,
+        "failed": 0,
+        "p95_ms": 186.17241309021713,
+        "p99_ms": 819.9738861383051,
+        "stock_pass": true,
+        "full_hold_checks": 59,
+        "expected_checks": 59,
+        "dials_per_shard": [
+          90000,
+          90000,
+          90000,
+          90000
+        ],
+        "exclusions": [],
+        "qualified_scoring_window": true,
+        "qualified_through_intentional_stop": true,
+        "stop_reason": "service drain time budget reached",
+        "last_active_drain_sample": {
+          "elapsed_s": 120.574,
+          "server_established": 359890,
+          "client_established": [
+            0,
+            0,
+            0,
+            0
+          ]
+        },
+        "drain_jsonl_sha256": "b616bcabf0de996c6e132f82d74d566bc8a20af33c9bcca85f4ad909d142e37d",
+        "service_oom_s_after_cutoff": null,
+        "last_generator_exit_s_after_cutoff": 2.056853,
+        "attempt_sha256": "749c6857c1772b77301f18d17a9496cdc82b0e186d5d14915cdb7bd5de55cc02",
+        "shard_results_sha256": {
+          "shard-0.json": "cc27f2b6af64b3acfab5f28888c772ddc2c1aaf167fa10ddbbf3cbf6b4f74282",
+          "shard-1.json": "b72703edc492b2f306ea311ba6bbc2a127b371ba9863c334ad660dcb52333a88",
+          "shard-2.json": "71a5f6eea21611d26d84702a8cd12981e1d6d19bc1be06a18c888b96755a1da3",
+          "shard-3.json": "6e0618bbe7e1bdbd1c4fba4e5aca557d8774fe3fc798ae4493a03595c63576ad"
+        }
+      },
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-370-h1",
+        "users": 370000,
+        "ramp_s": 111,
+        "hold_s": 300,
+        "chosen_for_arm": true,
+        "requests": 13658362,
+        "failed": 0,
+        "p95_ms": 498.5759580031654,
+        "p99_ms": 8085.669609606898,
+        "stock_pass": false,
+        "full_hold_checks": 59,
+        "expected_checks": 59,
+        "dials_per_shard": [
+          92500,
+          92500,
+          92500,
+          92500
+        ],
+        "exclusions": [
+          "server unavailable at client exit, consult timeline",
+          "private TAP TX in tr978d6aas reported a drop or error",
+          "private TAP TX in tr978d6aac0 reported a drop or error",
+          "private TAP TX in tr978d6aac1 reported a drop or error",
+          "private TAP TX in tr978d6aac3 reported a drop or error",
+          "native service_tx=6073",
+          "native generator_tx=[5420, 13760, 0, 5660]",
+          "native scored environment or eligibility failed"
+        ],
+        "qualified_scoring_window": false,
+        "qualified_through_intentional_stop": false,
+        "stop_reason": "service exited",
+        "last_active_drain_sample": null,
+        "drain_jsonl_sha256": "c83299a7046fc9a822a9482197765505d3f830293ee290f37504586885da1c42",
+        "service_oom_s_after_cutoff": 5.135136,
+        "last_generator_exit_s_after_cutoff": 2.283099,
+        "attempt_sha256": "8208df1fb34ae0c968105a6ec979188b3a92d2ad7d73f469a76b79f418fe4e4c",
+        "shard_results_sha256": {
+          "shard-0.json": "6a56eee2c31097f0a7d95bb8dc96168e80f063231f9278144387809ab94f0e86",
+          "shard-1.json": "49ba3a29f29bb75071fe1a8efccf310b6c4abade87b8425938ca8bb518bb105a",
+          "shard-2.json": "ef4d08395487ebaf1bbacc38e8fc21d876ed2bfb2073e64c3cfdbf75e7503719",
+          "shard-3.json": "42ebfde769b308c9420ed4babb2fb5391ddcb9109df2abd7afaf98ad5f5b4886"
+        }
+      }
+    ],
+    "unopened": [
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-370-h2",
+        "reason": "Earlier registered load did not qualify: 370h1"
+      },
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-380-h1",
+        "reason": "Earlier registered load did not qualify: 370h1"
+      },
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-380-h2",
+        "reason": "Earlier registered load did not qualify: 380h1"
+      },
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-400-h1",
+        "reason": "Earlier registered load did not qualify: 380h1"
+      },
+      {
+        "tag": "hash512k-quiet-nov14-fsharp-rank-400-h2",
+        "reason": "Earlier registered load did not qualify: 400h1"
+      }
+    ],
+    "370k_before_wire_loss": {
+      "receipt_sha256": "7d7414db0df134271b825d581044edf91552252c4b104915225ceb2ed29cb8f9",
+      "stock_requests": 13658362,
+      "wire_events": [
+        {
+          "earliest_s": 380.6027317047119,
+          "increments": {
+            "tr978d6aac0/tx/dropped": 5420,
+            "tr978d6aac1/tx/dropped": 13760,
+            "tr978d6aac3/tx/dropped": 5660,
+            "tr978d6aas/tx/dropped": 6073
+          },
+          "latest_s": 389.272497177124,
+          "next_poll_s": [
+            389.11745619773865,
+            389.272497177124
+          ],
+          "previous_poll_s": [
+            380.6027317047119,
+            380.7319812774658
+          ]
+        }
+      ],
+      "above_threshold_before_loss": {
+        "1000": {
+          "combined_lower_bound": 173208,
+          "entire_stock_allowance": 136583,
+          "exceeds_entire_stock_allowance": true,
+          "margin_lower_minus_allowance": 36625,
+          "per_shard_lower_bounds": [
+            42428,
+            42384,
+            43801,
+            44595
+          ],
+          "pooled_lower_bound": 173208
+        },
+        "500": {
+          "combined_lower_bound": 219818,
+          "entire_stock_allowance": 682918,
+          "exceeds_entire_stock_allowance": false,
+          "margin_lower_minus_allowance": -463100,
+          "per_shard_lower_bounds": [
+            52212,
+            51797,
+            54183,
+            61626
+          ],
+          "pooled_lower_bound": 219818
+        }
+      },
+      "above_threshold_30s_before_loss": {
+        "1000": {
+          "combined_lower_bound": 167369,
+          "entire_stock_allowance": 136583,
+          "exceeds_entire_stock_allowance": true,
+          "margin_lower_minus_allowance": 30786,
+          "per_shard_lower_bounds": [
+            40970,
+            40923,
+            42344,
+            43132
+          ],
+          "pooled_lower_bound": 167369
+        },
+        "500": {
+          "combined_lower_bound": 210128,
+          "entire_stock_allowance": 682918,
+          "exceeds_entire_stock_allowance": false,
+          "margin_lower_minus_allowance": -472790,
+          "per_shard_lower_bounds": [
+            50272,
+            49857,
+            52246,
+            57753
+          ],
+          "pooled_lower_bound": 210128
+        }
+      }
+    },
+    "disconnect_evidence_sha256": "b75b9459a67e037f104aea99fade2862eeca96acc2c1574742faba1c4d01072e",
+    "disconnect_by_attempt": {
+      "hash512k-quiet-nov14-fsharp-rank-350-h1": {
+        "active_observations_including_sample_at_stop_decision": 0,
+        "additional_all_service_and_generator_tap_drops_and_errors": 185000,
+        "additional_generator_tap_tx_drops": 185000,
+        "first_observed_simultaneous_established_zero": {
+          "elapsed_drain_s": 4.498,
+          "fixture_stop_reason": "service exited",
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 0,
+          "service_state": "inactive"
+        },
+        "input_sha256": {
+          "drain.json": "f320cedc9bf3bdac1985cc15dd43b36ba24d5672e4c60e3b9f518f6d9b2a3287",
+          "drain.jsonl": "97a875e7772972a46c6e01ca8495d132bd79589fafa755ef6b5b29430e848903",
+          "external-at-client-exit.json": "4cd14b5b88ced89fdfb6a021fc8cb2b879b71a3340c4addc4cd37437dd3a0526",
+          "network-samples.jsonl": "d2d36cf667d5ce232ad988f367ed297cabe64e23d4b8f71031f75308dc0b4f1d",
+          "shape.json": "3ce446e446ef0df4a060f4dd10a1358d969941744f64c353e8b0b79b272ca24f",
+          "timing.json": "39a186b03f4f7eedf08cf7b43943b370e2989c54347dcb9edbc3cebaf967635a"
+        },
+        "last_active_drain_before_any_stop_reason": null,
+        "last_active_drain_observation": null,
+        "last_scored_wire_poll_to_cutoff_seconds": 4.600065469741821,
+        "late_wire_constraint": "These are changes from the final scored network poll to the distinct post-generator-exit snapshot. They cannot be assigned to one side of the stock cutoff from these two observations.",
+        "native_all_socket_cleanup": true,
+        "native_service_stop_reason": "service exited",
+        "simultaneous_established_zero_while_active_at_or_before_stop_decision": false,
+        "simultaneous_established_zero_while_active_before_stop_request": false,
+        "tap_increments_from_last_scored_wire_poll_to_after_generator_exit": {
+          "generator_0": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 45194,
+            "tx_errors": 0
+          },
+          "generator_1": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 83879,
+            "tx_errors": 0
+          },
+          "generator_2": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 0,
+            "tx_errors": 0
+          },
+          "generator_3": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 55927,
+            "tx_errors": 0
+          },
+          "service": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 0,
+            "tx_errors": 0
+          }
+        }
+      },
+      "hash512k-quiet-nov14-fsharp-rank-360-h1": {
+        "active_observations_including_sample_at_stop_decision": 58,
+        "additional_all_service_and_generator_tap_drops_and_errors": 124178,
+        "additional_generator_tap_tx_drops": 124178,
+        "first_observed_simultaneous_established_zero": {
+          "elapsed_drain_s": 126.97,
+          "fixture_stop_reason": "service drain time budget reached",
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 0,
+          "service_state": "inactive"
+        },
+        "input_sha256": {
+          "drain.json": "61c7f4d1ce90b28b5aaf3131e218ca38aee524b09623e670a8a67bbe63b83569",
+          "drain.jsonl": "aac41845bd774e7b3d0530eb8e3f7a80cb56b6a45b12a5088f3ce4bb54fd7aad",
+          "external-at-client-exit.json": "e1b97358d0e057d06509ef166b15a07e3ef8bd31c32482e59d90f31d27c9196b",
+          "network-samples.jsonl": "811975dfd6477a58d0ded1f3bb72379bbdeefa0665ddbed7863ac841d29600d5",
+          "shape.json": "92a77345564257ab44ba8c9afd1e7bd9c95ee85eb55492774b117678576ef859",
+          "timing.json": "f1d65464f296066e3bb7415f59a61632862127c20b879c7be4a3d71fc4648cb9"
+        },
+        "last_active_drain_before_any_stop_reason": {
+          "elapsed_drain_s": 118.433,
+          "fixture_stop_reason": null,
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 359572,
+          "service_state": "active"
+        },
+        "last_active_drain_observation": {
+          "elapsed_drain_s": 120.54,
+          "fixture_stop_reason": "service drain time budget reached",
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 359572,
+          "service_state": "active"
+        },
+        "last_scored_wire_poll_to_cutoff_seconds": 1.2783613204956055,
+        "late_wire_constraint": "These are changes from the final scored network poll to the distinct post-generator-exit snapshot. They cannot be assigned to one side of the stock cutoff from these two observations.",
+        "native_all_socket_cleanup": true,
+        "native_service_stop_reason": "service drain time budget reached",
+        "simultaneous_established_zero_while_active_at_or_before_stop_decision": false,
+        "simultaneous_established_zero_while_active_before_stop_request": false,
+        "tap_increments_from_last_scored_wire_poll_to_after_generator_exit": {
+          "generator_0": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 10147,
+            "tx_errors": 0
+          },
+          "generator_1": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 99782,
+            "tx_errors": 0
+          },
+          "generator_2": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 0,
+            "tx_errors": 0
+          },
+          "generator_3": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 14249,
+            "tx_errors": 0
+          },
+          "service": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 0,
+            "tx_errors": 0
+          }
+        }
+      },
+      "hash512k-quiet-nov14-fsharp-rank-360-h1-infra1": {
+        "active_observations_including_sample_at_stop_decision": 58,
+        "additional_all_service_and_generator_tap_drops_and_errors": 137331,
+        "additional_generator_tap_tx_drops": 137331,
+        "first_observed_simultaneous_established_zero": {
+          "elapsed_drain_s": 127.199,
+          "fixture_stop_reason": "service drain time budget reached",
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 0,
+          "service_state": "inactive"
+        },
+        "input_sha256": {
+          "drain.json": "3c0993daaaccfb756cefeaee3e87a157adc44cd2085e8e753d767a335d8ab82a",
+          "drain.jsonl": "b616bcabf0de996c6e132f82d74d566bc8a20af33c9bcca85f4ad909d142e37d",
+          "external-at-client-exit.json": "6e133c9901ba94c9cd3db8fdbc867467bf06a6275d5155f6726dd4b8fea8713a",
+          "network-samples.jsonl": "aba4b80fd9e33beb943faabfedbb463a8d0a28ea9336d780500ef6ec790c9fd9",
+          "shape.json": "27c6a28c929d9449a675ccd66d9bb197c34212b2a2875cf624c4ee8af6910213",
+          "timing.json": "c049b0d3b00eab5423a7d632c25363cb7d20382c0efe209c989d75c645ebd19e"
+        },
+        "last_active_drain_before_any_stop_reason": {
+          "elapsed_drain_s": 118.471,
+          "fixture_stop_reason": null,
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 359890,
+          "service_state": "active"
+        },
+        "last_active_drain_observation": {
+          "elapsed_drain_s": 120.574,
+          "fixture_stop_reason": "service drain time budget reached",
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 359890,
+          "service_state": "active"
+        },
+        "last_scored_wire_poll_to_cutoff_seconds": 1.4547159671783447,
+        "late_wire_constraint": "These are changes from the final scored network poll to the distinct post-generator-exit snapshot. They cannot be assigned to one side of the stock cutoff from these two observations.",
+        "native_all_socket_cleanup": true,
+        "native_service_stop_reason": "service drain time budget reached",
+        "simultaneous_established_zero_while_active_at_or_before_stop_decision": false,
+        "simultaneous_established_zero_while_active_before_stop_request": false,
+        "tap_increments_from_last_scored_wire_poll_to_after_generator_exit": {
+          "generator_0": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 18247,
+            "tx_errors": 0
+          },
+          "generator_1": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 90085,
+            "tx_errors": 0
+          },
+          "generator_2": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 0,
+            "tx_errors": 0
+          },
+          "generator_3": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 28999,
+            "tx_errors": 0
+          },
+          "service": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 0,
+            "tx_errors": 0
+          }
+        }
+      },
+      "hash512k-quiet-nov14-fsharp-rank-370-h1": {
+        "active_observations_including_sample_at_stop_decision": 0,
+        "additional_all_service_and_generator_tap_drops_and_errors": 159393,
+        "additional_generator_tap_tx_drops": 158586,
+        "first_observed_simultaneous_established_zero": {
+          "elapsed_drain_s": 6.371,
+          "fixture_stop_reason": "service exited",
+          "four_generator_namespaces_established": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_namespace_established": 0,
+          "service_state": "inactive"
+        },
+        "input_sha256": {
+          "drain.json": "14552945d53ea092e01ca1a4f6713123e3fda2e50f5725927548435e53eaf47a",
+          "drain.jsonl": "c83299a7046fc9a822a9482197765505d3f830293ee290f37504586885da1c42",
+          "external-at-client-exit.json": "80282b6afb50f53aec364cdac66b096bce3ae2178cf840fb300d8fb4631ac66d",
+          "network-samples.jsonl": "c285b86a6f0c982f2ea092ac8be4f85b98417a81a04a768da74682bacfcb9fec",
+          "shape.json": "99cd7b9fc41608984016bf0938c30ea28ca231c3b195b0b8d0abf213f76ba87e",
+          "timing.json": "307c62683ab7663e5426a83f98b9a3a569bd18f5863d2fe3b2216fb6c686a8f4"
+        },
+        "last_active_drain_before_any_stop_reason": null,
+        "last_active_drain_observation": null,
+        "last_scored_wire_poll_to_cutoff_seconds": 1.2095842361450195,
+        "late_wire_constraint": "These are changes from the final scored network poll to the distinct post-generator-exit snapshot. They cannot be assigned to one side of the stock cutoff from these two observations.",
+        "native_all_socket_cleanup": true,
+        "native_service_stop_reason": "service exited",
+        "simultaneous_established_zero_while_active_at_or_before_stop_decision": false,
+        "simultaneous_established_zero_while_active_before_stop_request": false,
+        "tap_increments_from_last_scored_wire_poll_to_after_generator_exit": {
+          "generator_0": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 30161,
+            "tx_errors": 0
+          },
+          "generator_1": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 81413,
+            "tx_errors": 0
+          },
+          "generator_2": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 864,
+            "tx_errors": 0
+          },
+          "generator_3": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 46148,
+            "tx_errors": 0
+          },
+          "service": {
+            "rx_dropped": 0,
+            "rx_errors": 0,
+            "tx_dropped": 807,
+            "tx_errors": 0
+          }
+        }
+      }
+    },
+    "shared_core_and_memory": {
+      "receipt_sha256": "279dc6f7b4949cdc0dedb6eb793bb8ad07753bbbc6a278883c227e8f0cde1324",
+      "cases": {
+        "hash512k-quiet-nov13-fsharp-350-h2": {
+          "cgroup_oom_at_teardown": null,
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 0,
+          "resource_row_sha256": "4b90a944f0641aaa7d332c86ae4f3c8219c80da9c75cb18c9e63725f38e5c494",
+          "source": "original F#",
+          "steady": {
+            "app_sys_us_per_completion": 12.217201,
+            "app_user_us_per_completion": 2.303317,
+            "completions_per_s": 36965.655172,
+            "core_busy_pct": 95.55042,
+            "napi_us_per_completion": 11.252195,
+            "scored_clock_s": [
+              110,
+              400
+            ],
+            "whole_core_busy_us_per_completion": 25.848431
+          },
+          "stock_memory_peak_mib": 843.16015625
+        },
+        "hash512k-quiet-nov13-fsharp-350-h3": {
+          "cgroup_oom_at_teardown": null,
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 0,
+          "resource_row_sha256": "c3d08c832e0693bb83b752e743b1d97094d6b26bc38d5d8fd8875514bdbdc8af",
+          "source": "original F#",
+          "steady": {
+            "app_sys_us_per_completion": 12.009403,
+            "app_user_us_per_completion": 2.368802,
+            "completions_per_s": 36974.727586,
+            "core_busy_pct": 94.036015,
+            "napi_us_per_completion": 10.942469,
+            "scored_clock_s": [
+              110,
+              400
+            ],
+            "whole_core_busy_us_per_completion": 25.43251
+          },
+          "stock_memory_peak_mib": 818.01171875
+        },
+        "hash512k-quiet-nov13-fsharp-360-h1": {
+          "cgroup_oom_at_teardown": {
+            "anon_mib": 193.1640625,
+            "bound_kernel_lines_sha256": "55886e038f486c0960726399737a4b9011ab48086a1cdf3c2b88d74492cefd0a",
+            "direct_reclaimed_pages": 15868,
+            "direct_scanned_pages": 15964,
+            "file_mib": 4.92578125,
+            "kernel_journal_received_s_after_cutoff": 2.307073,
+            "limit_mib": 1750.0,
+            "reported_matching_stack_frames": [
+              "mem_cgroup_charge_skmem",
+              "sk_forced_mem_schedule",
+              "tcp_send_fin",
+              "tcp_close"
+            ],
+            "same_pid": 179860,
+            "slab_mib": 541.9315414428711,
+            "socket_mib": 1023.9921875,
+            "unit": "twelve-revisit-trf523d24.service",
+            "usage_mib": 1782.85546875
+          },
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 0,
+          "resource_row_sha256": "40ceb6d19694416b271e9431bb59710fec27d7201ab886f79563ad9f9efdf267",
+          "source": "original F#",
+          "steady": {
+            "app_sys_us_per_completion": 11.499504,
+            "app_user_us_per_completion": 2.150222,
+            "completions_per_s": 37878.693103,
+            "core_busy_pct": 98.084832,
+            "napi_us_per_completion": 12.199734,
+            "scored_clock_s": [
+              110,
+              400
+            ],
+            "whole_core_busy_us_per_completion": 25.89446
+          },
+          "stock_memory_peak_mib": 1004.6640625
+        },
+        "hash512k-quiet-nov13-fsharp-370-h2": {
+          "cgroup_oom_at_teardown": null,
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 512,
+          "resource_row_sha256": "e9fcd891ca59f704ca463da500cdb7c6b38acdeaba5296c08bd4faba5fb6cc48",
+          "source": "original F#",
+          "steady": {
+            "app_sys_us_per_completion": 11.376387,
+            "app_user_us_per_completion": 2.053484,
+            "completions_per_s": 38396.065517,
+            "core_busy_pct": 99.830642,
+            "napi_us_per_completion": 12.559396,
+            "scored_clock_s": [
+              115,
+              405
+            ],
+            "whole_core_busy_us_per_completion": 26.000227
+          },
+          "stock_memory_peak_mib": 1333.73046875
+        },
+        "hash512k-quiet-nov14-fsharp-rank-350-h1": {
+          "cgroup_oom_at_teardown": {
+            "anon_mib": 187.46875,
+            "bound_kernel_lines_sha256": "7da7ec721a4926c66f99629fe1bfe08b9c271b16d59f77acf9214d64a877fd36",
+            "direct_reclaimed_pages": 15861,
+            "direct_scanned_pages": 17049,
+            "file_mib": 4.90234375,
+            "kernel_journal_received_s_after_cutoff": 2.839899,
+            "limit_mib": 1750.0,
+            "reported_matching_stack_frames": [
+              "mem_cgroup_charge_skmem",
+              "sk_forced_mem_schedule",
+              "tcp_send_fin",
+              "tcp_close"
+            ],
+            "same_pid": 472000,
+            "slab_mib": 520.517936706543,
+            "socket_mib": 1123.08203125,
+            "unit": "twelve-revisit-trcd4a383.service",
+            "usage_mib": 1854.7890625
+          },
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 0,
+          "resource_row_sha256": "83740dea6b1076274862ecad0bde37edcf5fb9790b97fc2d2143a24e6b44035a",
+          "source": "hybrid",
+          "steady": {
+            "app_sys_us_per_completion": 11.798844,
+            "app_user_us_per_completion": 2.059922,
+            "completions_per_s": 36822.358621,
+            "core_busy_pct": 97.872828,
+            "napi_us_per_completion": 12.671437,
+            "scored_clock_s": [
+              110,
+              400
+            ],
+            "whole_core_busy_us_per_completion": 26.579728
+          },
+          "stock_memory_peak_mib": 1088.484375
+        },
+        "hash512k-quiet-nov14-fsharp-rank-360-h1": {
+          "cgroup_oom_at_teardown": null,
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 0,
+          "resource_row_sha256": "b1303cd265c481af479820cfa9c0cb798ecbebdea6e15bdf9695353bd25b2317",
+          "source": "hybrid",
+          "steady": {
+            "app_sys_us_per_completion": 11.958704,
+            "app_user_us_per_completion": 2.096288,
+            "completions_per_s": 35972.155172,
+            "core_busy_pct": 99.537944,
+            "napi_us_per_completion": 13.596136,
+            "scored_clock_s": [
+              110,
+              400
+            ],
+            "whole_core_busy_us_per_completion": 27.670831
+          },
+          "stock_memory_peak_mib": 1653.40234375
+        },
+        "hash512k-quiet-nov14-fsharp-rank-360-h1-infra1": {
+          "cgroup_oom_at_teardown": null,
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 0,
+          "resource_row_sha256": "c32a6a8fb18a8035531eb211286b500a105d93ef50550ff5af742f8bf54e3c2f",
+          "source": "hybrid",
+          "steady": {
+            "app_sys_us_per_completion": 11.667181,
+            "app_user_us_per_completion": 1.921058,
+            "completions_per_s": 37872.544828,
+            "core_busy_pct": 98.687273,
+            "napi_us_per_completion": 12.42079,
+            "scored_clock_s": [
+              110,
+              400
+            ],
+            "whole_core_busy_us_per_completion": 26.057735
+          },
+          "stock_memory_peak_mib": 953.42578125
+        },
+        "hash512k-quiet-nov14-fsharp-rank-370-h1": {
+          "cgroup_oom_at_teardown": {
+            "anon_mib": 221.65625,
+            "bound_kernel_lines_sha256": "bae1a396fe62ff72c9ccc0448990ab91c05691bd5ee47af37c287c6f739e72eb",
+            "direct_reclaimed_pages": 29885,
+            "direct_scanned_pages": 30085,
+            "file_mib": 111.18359375,
+            "kernel_journal_received_s_after_cutoff": 3.027318,
+            "limit_mib": 1750.0,
+            "reported_matching_stack_frames": [
+              "memory_max_write"
+            ],
+            "same_pid": 490743,
+            "slab_mib": 563.9866256713867,
+            "socket_mib": 979.37109375,
+            "unit": "twelve-revisit-tr978d6aa.service",
+            "usage_mib": 1895.109375
+          },
+          "file_refault": 0,
+          "memory_pressure_us": {
+            "full": 0,
+            "some": 0
+          },
+          "pgscan": 0,
+          "resource_row_sha256": "f5a7724192f42f792828a0790711a9c779912d8794750cb3b04eab799d1d9019",
+          "source": "hybrid",
+          "steady": {
+            "app_sys_us_per_completion": 11.401871,
+            "app_user_us_per_completion": 1.957664,
+            "completions_per_s": 37875.624138,
+            "core_busy_pct": 99.982636,
+            "napi_us_per_completion": 13.028512,
+            "scored_clock_s": [
+              115,
+              405
+            ],
+            "whole_core_busy_us_per_completion": 26.397621
+          },
+          "stock_memory_peak_mib": 1570.81640625
+        }
+      }
+    }
+  },
+  "hybrid_component": {
+    "result_sha256": "17f17215c9e0ddc3aa7e9d673755b71350992858b8d9684c551b6d0b09c14fe5",
+    "total_operations": 2097152,
+    "pairs": [
+      {
+        "pair": 0,
+        "order": "AB",
+        "original_issuer_us": 4.61907958984375,
+        "hybrid_issuer_us": 2.6927566528320312,
+        "delta_issuer_us": 1.9263229370117188,
+        "delta_wall_us": 1.9267148361206052,
+        "p99_batch_ratio": 0.6107343467991913
+      },
+      {
+        "pair": 1,
+        "order": "BA",
+        "original_issuer_us": 4.5671539306640625,
+        "hybrid_issuer_us": 2.6597747802734375,
+        "delta_issuer_us": 1.907379150390625,
+        "delta_wall_us": 1.9077262420654297,
+        "p99_batch_ratio": 0.6696595115040094
+      },
+      {
+        "pair": 2,
+        "order": "AB",
+        "original_issuer_us": 4.602455139160156,
+        "hybrid_issuer_us": 2.9899826049804688,
+        "delta_issuer_us": 1.6124725341796875,
+        "delta_wall_us": 1.6128503646850585,
+        "p99_batch_ratio": 0.9286996310856807
+      },
+      {
+        "pair": 3,
+        "order": "BA",
+        "original_issuer_us": 4.7265625,
+        "hybrid_issuer_us": 2.6958847045898438,
+        "delta_issuer_us": 2.0306777954101562,
+        "delta_wall_us": 2.030901794433594,
+        "p99_batch_ratio": 0.6419539444129768
+      },
+      {
+        "pair": 4,
+        "order": "AB",
+        "original_issuer_us": 4.554359436035156,
+        "hybrid_issuer_us": 2.7598724365234375,
+        "delta_issuer_us": 1.7944869995117188,
+        "delta_wall_us": 1.7949241333007815,
+        "p99_batch_ratio": 0.9483995951282647
+      },
+      {
+        "pair": 5,
+        "order": "BA",
+        "original_issuer_us": 4.5894775390625,
+        "hybrid_issuer_us": 2.6571884155273438,
+        "delta_issuer_us": 1.9322891235351562,
+        "delta_wall_us": 1.9326447219848633,
+        "p99_batch_ratio": 0.6996752480684338
+      },
+      {
+        "pair": 6,
+        "order": "AB",
+        "original_issuer_us": 4.6463165283203125,
+        "hybrid_issuer_us": 2.718170166015625,
+        "delta_issuer_us": 1.9281463623046875,
+        "delta_wall_us": 1.9284630508422858,
+        "p99_batch_ratio": 0.647693270639961
+      },
+      {
+        "pair": 7,
+        "order": "BA",
+        "original_issuer_us": 4.5829620361328125,
+        "hybrid_issuer_us": 2.6438064575195312,
+        "delta_issuer_us": 1.9391555786132812,
+        "delta_wall_us": 1.9394362335205075,
+        "p99_batch_ratio": 0.6831520859768196
+      }
+    ],
+    "median_issuer_us_saved": 1.9272346496582031,
+    "median_p99_batch_ratio": 0.6764057987404145,
+    "batch_requests": 32
+  },
+  "actual_checkout": {
+    "receipt_sha256": "55d5f3737b254fdecbee9c8895561b05d636d665e27b6e2ea3efe327d895624e",
+    "canonical_release_sha256": {
+      "FSharp.Core.dll": "1aa3734d40c3bc23be86628cf14918fe074320a587ed1cc8e946434885d37aaa",
+      "Server": "dd44f6b9a0213c823e47a0e9e24e5a20ea01209eab9f1b70732926a666d8489a",
+      "Server.deps.json": "ebe37066e9b81bafddf9f5ddeff46f93622227e4dfcd752c30e9e5d33f2f83ab",
+      "Server.dll": "53446193b9eba7d9a7639aea25a2d88750ae3803ee78294c703eed23482f36d7",
+      "Server.pdb": "de7e648f30d452839dc91169e0e9cc1758873dcf41fef5df273df683a453d364",
+      "Server.runtimeconfig.json": "24f776fa92fdddc5ca511f2c51f8629f7168b27cddcf3fb644e7abf833e2fed8",
+      "libsqlite3td.so": "8ca6ad9856dea5ffd40eb773d37dcc8e1e78120893183cc036821b8d02785cab"
+    },
+    "release_manifest_sha256": "a65de2e7b2791ac98f1074c452d889e70f7a27b6e87f6f1471d98c3a8525898e",
+    "mapped_runtime_sha256": {
+      "host/fxr/11.0.0/libhostfxr.so": "b0f73eb2f2eed3eecf39068bb432dfac81966e2afa62d66318daee54f307faf8",
+      "shared/Microsoft.NETCore.App/11.0.0/libcoreclr.so": "f1c71f4752aed4f8bd3e712e356260f4a4d4cbb977fc46c0e2a3207ee3ae4bf1",
+      "shared/Microsoft.NETCore.App/11.0.0/libhostpolicy.so": "347dd396f4cada507f10887cf59ad8996829d3f0ff17b701939275638a58f7b2"
+    },
+    "managed_code_comparison": {
+      "all_754_managed_method_declarations_identical": true,
+      "all_658_managed_method_bodies_signatures_locals_eh_identical": true,
+      "ready_to_run_native_functions": 682,
+      "ready_to_run_instructions": 21551,
+      "identical_raw_instructions": 17923,
+      "RIP_relative_memory_displacement_changes": 3628
+    },
+    "native_layout_queries": 473,
+    "stock_checks_passed": 42,
+    "suite_sha256": "679e722044fd1f366d85093232e7f2ec2e3398ea312032dd9eb6cbdf8b17306a",
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a"
+  }
+}

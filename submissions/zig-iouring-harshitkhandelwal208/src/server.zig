@@ -20,13 +20,11 @@ const Key = jwt.Key;
 
 const log = std.log.scoped(.server);
 
-extern "c" fn malloc_trim(pad: usize) c_int;
-
 pub const buf_size = 2048;
 pub const n_bufs_per_ring = 2048;
 pub const bgid = 1;
 
-pub const pool_buf_size: usize = 4096;
+pub const pool_buf_size: usize = 16384;
 pub const pool_count: usize = 2048;
 
 pub const k_ring_count: usize = 8;
@@ -59,12 +57,12 @@ pub const RespPool = struct {
         if (self.top == 0) return null;
         self.top -= 1;
         const id = self.free_stack[self.top];
-        return (self.mem + @as(usize, id) * pool_buf_size)[0..pool_buf_size];
+        return (self.mem + (@as(usize, id) << 14))[0..pool_buf_size];
     }
 
     pub inline fn release(self: *RespPool, ptr: [*]u8) void {
         const offset = @intFromPtr(ptr) - @intFromPtr(self.mem);
-        const id: u16 = @intCast(offset / pool_buf_size);
+        const id: u16 = @intCast(offset >> 14);
         self.free_stack[self.top] = id;
         self.top += 1;
     }
@@ -211,6 +209,7 @@ pub const Server = struct {
 
     pub fn init(db: Db, jwt_key: Key) !*Server {
         const smem = try sys.mapAnon(@sizeOf(Server));
+        sys.madviseHuge(smem);
         const s: *Server = @ptrCast(@alignCast(smem.ptr));
         @memset(smem, 0);
 
@@ -277,7 +276,21 @@ pub const Server = struct {
         const cq_sizes = [_]u32{ 32768, 16384, 8192 };
         var last: anyerror = error.ArgumentsInvalid;
 
-        // Try with IORING_SETUP_CQSIZE (cq_entries must only be set when this flag is active)
+        const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
+        const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
+
+        // Try with single-issuer lockless flags + IORING_SETUP_CQSIZE
+        for (sq_sizes) |sq| {
+            for (cq_sizes) |cq| {
+                var p = std.mem.zeroInit(linux.io_uring_params, .{
+                    .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN,
+                });
+                p.cq_entries = cq;
+                if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
+            }
+        }
+
+        // Try with standard IORING_SETUP_CQSIZE (cq_entries must only be set when this flag is active)
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
@@ -325,7 +338,7 @@ pub const Server = struct {
     inline fn returnBuf(w: *RingWorker, bid: u16) void {
         const idx = w.pbuf_tail & (n_bufs_per_ring - 1);
         w.pbuf_ring[idx] = .{
-            .addr = @intFromPtr(w.pbuf_mem + @as(usize, bid) * buf_size),
+            .addr = @intFromPtr(w.pbuf_mem) + (@as(usize, bid) << 11),
             .len = buf_size,
             .bid = bid,
             .resv = 0,
@@ -430,9 +443,8 @@ pub const Server = struct {
             // Tick WAL checkpoint coordinator
             self.db.tick();
 
-            // If no completions were reaped anywhere, trim heap and wait in epoll for next event
+            // If no completions were reaped anywhere, wait in epoll for next event
             if (total_reaped == 0) {
-                _ = malloc_trim(0);
                 _ = linux.epoll_wait(self.epfd, &ep_events, ep_events.len, 50);
             }
         }
@@ -461,10 +473,6 @@ pub const Server = struct {
                         const bid: u16 = @truncate(cqe.flags >> linux.IORING_CQE_BUFFER_SHIFT);
                         returnBuf(w, bid);
                         returned += 1;
-                        if (returned >= 64) {
-                            publishBufs(w);
-                            returned = 0;
-                        }
                     }
                 },
                 .send => self.onSend(w, slot, gen, cqe.res),
@@ -675,16 +683,14 @@ pub const Server = struct {
     }
 
     fn parseId(s: []const u8) ?i64 {
-        if (s.len == 0) return null;
+        if (s.len == 0 or s.len > 18) return null;
         var v: i64 = 0;
         for (s) |ch| {
-            if (ch < '0' or ch > '9') return null;
-            if (v < 100_000_000_000_000_000) {
-                v = v * 10 + (ch - '0');
-            } else return null;
+            const d = ch -% '0';
+            if (d > 9) return null;
+            v = v * 10 + d;
         }
-        if (v <= 0) return null;
-        return v;
+        return if (v > 0) v else null;
     }
 
     fn serve(self: *Server, w: *RingWorker, slot: u32, c: *Conn, head: *const http.Head, body: []const u8) void {

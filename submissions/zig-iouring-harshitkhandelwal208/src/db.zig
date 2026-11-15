@@ -75,17 +75,11 @@ fn varintLong(p: []const u8, i: *usize) !u64 {
     return v;
 }
 
+const serial_lens = [12]u8{ 0, 1, 2, 3, 4, 6, 8, 8, 0, 0, 0, 0 };
+
 inline fn serialLen(t: u64) usize {
-    return switch (t) {
-        0, 8, 9, 10, 11 => 0,
-        1 => 1,
-        2 => 2,
-        3 => 3,
-        4 => 4,
-        5 => 6,
-        6, 7 => 8,
-        else => @intCast((t - 12) / 2),
-    };
+    if (t < 12) return serial_lens[t];
+    return @intCast((t - 12) >> 1);
 }
 
 inline fn intOf(t: u64, b: []const u8) !i64 {
@@ -95,14 +89,14 @@ inline fn intOf(t: u64, b: []const u8) !i64 {
         1 => @as(i8, @bitCast(b[0])),
         2 => std.mem.readInt(i16, b[0..2], .big),
         3 => {
-            const v = (@as(u32, b[0]) << 16) | (@as(u32, b[1]) << 8) | @as(u32, b[2]);
-            return if (v & 0x800000 != 0) @as(i32, @bitCast(v | 0xff000000)) else @as(i32, @bitCast(v));
+            const raw = (@as(u32, b[0]) << 24) | (@as(u32, b[1]) << 16) | (@as(u32, b[2]) << 8);
+            return @as(i32, @bitCast(raw)) >> 8;
         },
         4 => std.mem.readInt(i32, b[0..4], .big),
         5 => {
-            const hi = std.mem.readInt(i16, b[0..2], .big);
-            const lo = std.mem.readInt(u32, b[2..6], .big);
-            return (@as(i64, hi) << 32) | @as(i64, lo);
+            const raw = (@as(u64, b[0]) << 56) | (@as(u64, b[1]) << 48) | (@as(u64, b[2]) << 40) |
+                (@as(u64, b[3]) << 32) | (@as(u64, b[4]) << 24) | (@as(u64, b[5]) << 16);
+            return @as(i64, @bitCast(raw)) >> 16;
         },
         6 => std.mem.readInt(i64, b[0..8], .big),
         else => DbError.Corrupt,

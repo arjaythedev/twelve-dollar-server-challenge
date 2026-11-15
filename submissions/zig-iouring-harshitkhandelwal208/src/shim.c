@@ -120,6 +120,7 @@ static int ck_start(const char *path, char *err, int n) {
     snprintf(err, n, "ck sqlite3_open_v2: %s", sqlite3_errmsg(ckdb));
     return -1;
   }
+  sqlite3_busy_timeout(ckdb, 5000);
   if (sqlite3_exec(ckdb, "PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0; PRAGMA cache_size = 16", 0, 0, 0)) {
     snprintf(err, n, "ck sqlite3_exec: %s", sqlite3_errmsg(ckdb));
     return -1;
@@ -140,6 +141,7 @@ int td_open(const char *path, char *err, int n) {
   if (exec("PRAGMA journal_mode = WAL") ||
       exec("PRAGMA synchronous = NORMAL") || exec("PRAGMA temp_store = MEMORY") ||
       exec("PRAGMA cache_size = -8192") || exec("PRAGMA mmap_size = 0") ||
+      exec("PRAGMA busy_timeout = 5000") ||
       exec("PRAGMA wal_autocheckpoint = 0") || exec("SELECT count(*) FROM sqlite_schema"))
     return fail(err, n, "pragmas");
   sqlite3_wal_hook(db, wal_hook, 0);
@@ -299,19 +301,26 @@ int td_seek(BtCursor *c, i64 id) {
   return res == 0 && c->eState == CURSOR_VALID;
 }
 
+static Mem seek_m;
+static UnpackedRecord seek_r;
+static int seek_inited;
+
 int td_seek_ge(BtCursor *c, i64 k) {
-  Mem m;
-  UnpackedRecord r;
+  if (__builtin_expect(!seek_inited, 0)) {
+    memset(&seek_m, 0, sizeof seek_m);
+    memset(&seek_r, 0, sizeof seek_r);
+    seek_m.flags = MEM_Int;
+    seek_r.aMem = &seek_m;
+    seek_r.nField = 1;
+    seek_r.default_rc = +1;
+    seek_inited = 1;
+  }
+  seek_m.u.i = k;
+  seek_r.pKeyInfo = c->pKeyInfo;
+  seek_r.eqSeen = 0;
+  seek_r.errCode = 0;
   int res = 0;
-  memset(&m, 0, sizeof m);
-  m.flags = MEM_Int;
-  m.u.i = k;
-  memset(&r, 0, sizeof r);
-  r.pKeyInfo = c->pKeyInfo;
-  r.aMem = &m;
-  r.nField = 1;
-  r.default_rc = +1;
-  if (sqlite3BtreeIndexMoveto(c, &r, &res) != SQLITE_OK) return -1;
+  if (sqlite3BtreeIndexMoveto(c, &seek_r, &res) != SQLITE_OK) return -1;
   if (sqlite3BtreeEof(c)) return 0;
   if (res < 0) {
     int rc = sqlite3BtreeNext(c, 0);
@@ -340,8 +349,28 @@ int td_count_likes(BtCursor *c, i64 lo, i64 hi, unsigned *n) {
         u32 k = sz[t];
         if (h + k > len) return 1;
         const u8 *q = p + h;
-        v = (int8_t)q[0];
-        for (u32 j = 1; j < k; j++) v = v << 8 | q[j];
+        if (t == 4) {
+          uint32_t raw;
+          memcpy(&raw, q, 4);
+          v = (int32_t)__builtin_bswap32(raw);
+        } else if (t == 2) {
+          uint16_t raw;
+          memcpy(&raw, q, 2);
+          v = (int16_t)__builtin_bswap16(raw);
+        } else if (t == 1) {
+          v = (int8_t)q[0];
+        } else if (t == 3) {
+          uint32_t raw = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8);
+          v = ((int32_t)raw) >> 8;
+        } else if (t == 6) {
+          uint64_t raw;
+          memcpy(&raw, q, 8);
+          v = (int64_t)__builtin_bswap64(raw);
+        } else {
+          uint64_t raw = ((uint64_t)q[0] << 56) | ((uint64_t)q[1] << 48) | ((uint64_t)q[2] << 40) |
+                         ((uint64_t)q[3] << 32) | ((uint64_t)q[4] << 24) | ((uint64_t)q[5] << 16);
+          v = ((int64_t)raw) >> 16;
+        }
       } else if (t == 8 || t == 9) {
         v = t - 8;
       } else {

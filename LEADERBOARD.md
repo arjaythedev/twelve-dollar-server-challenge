@@ -63,7 +63,9 @@ held, not merged: it didn't beat the merged row) scored 230,000 (22,383 req/s, p
 26 µs/req, 674 MB, 2026-11-14; 240,000 failed the 2-minute probe on p99 1.39 s); its next commit `3be2728` (log restarts
 spaced by hold length) scored 280,000 (26,693 req/s, p95 197.6 / p99 539.9 ms, 0 err, 76 % CPU, 26 µs/req, 860 MB,
 2026-11-14; 290,000 failed the 2-minute probe on p99 2.03 s), the same as the merged row, so it isn't merged either. asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
-#414 code (`7c9e722`, thread per connection behind Nginx) held 24,000.
+#414 code (`7c9e722`, thread per connection behind Nginx) held 24,000. zig-iouring-harshitkhandelwal208 is scored at
+its follow-up PR #460 (`7c2ebfb`: 8 io_uring rings, SQLite B-tree cursor reads; held, not merged yet: its `src/shim.c`
+needs a README credit to #264, see the rule flags); its merged #454 code (`ede8d01`) held 65,000 (connection-capped, see ᶜ).
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -136,114 +138,114 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 59 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
 | 59 | cpp-io_uring-0329-at | #442 | C++ (io_uring, SQLite B-tree reads) | **219,000** ᴹ | 21,372 | 29.8 | 154.1 | 0.48 | 71 | 31 | 1,130 | 2026-11-14 |
 | 59 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
-| 62 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
-| 62 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
-| 62 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
-| 62 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
-| 62 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
-| 67 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
-| 68 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
-| 69 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
-| 69 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
-| 69 | lean-derive-lowmem-hargup | #434 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **200,000** | 19,673 | 55.3 | 189.9 | 0.00 | 72 | 34 | 1,222 | 2026-11-14 |
-| 69 | goose-plod-kaitk | #448 | Goose (Plod, io_uring) | **200,000** | 19,664 | 25.7 | 246.0 | 0.00 | 74 | 35 | 755 | 2026-11-15 |
-| 73 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
-| 74 | sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN | #243 | SQL (one SELECT over a virtual table, C io_uring) | **190,000** | 18,653 | 129 | 573 | 0.00 | 94 | 47 | 1,205 | 2026-11-02 |
-| 75 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
-| 75 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
-| 77 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
-| 77 | c-modular-ascendnoosphere | #333 | C (io_uring, SQLite B-tree reads) | **185,000** | 18,127 | 178.9 | 294.2 | 0.00 | 79 | 41 | 397 | 2026-11-06 |
-| 79 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
-| 80 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
-| 81 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |
-| 82 | asm-nasm-melroy89 | #86 | x86-64 asm (io_uring) | **171,000** | 16,777 | 87 | 142 | 0.00 | 78 | 43 | 358 | 2026-10-21 |
-| 83 | go-epoll-unorig-username | #186 | Go (raw epoll, cgo SQLite) | **165,000** | 16,020 | 479 | 952 | 0.00 | 97 | 56 | 665 | 2026-10-29 |
-| 84 | asm-epoll-HauLTCE | #207 | x86-64 asm (epoll, forked workers) | **160,000** ᵃ | 15,682 | 291 | 757 | 0.61 | 95 | 56 | 1,307 | 2026-10-30 |
-| 84 | ruby-cring-cicloid | #309 | Ruby (C io_uring extension, SQLite B-tree reads) | **160,000** | 15,628 | 266 | 699 | 0.01 | 84 | 50 | 1,017 | 2026-11-04 |
-| 86 | java-uring-crux | #170 | Java (FFM io_uring, C row formatter) | **158,000** | 15,531 | 137 | 312 | 0.00 | 72 | 43 | 1,139 | 2026-10-29 |
-| 87 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
-| 87 | python-pypy-iouring-kiwamizamurai | #284 | PyPy (io_uring, SQLite B-tree reads) | **155,000** | 15,201 | 120 | 277 | 0.00 | 80 | 49 | 525 | 2026-11-03 |
-| 87 | ruby-btreereads-cicloid | #308 | Ruby (io_uring, SQLite B-tree reads) | **155,000** | 15,121 | 274 | 545 | 0.00 | 87 | 53 | 791 | 2026-11-04 |
-| 90 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
-| 91 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
-| 91 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
-| 91 | cider-iouring-pomilon | #208 | Cider (native x86-64, io_uring) | **135,000** | 13,168 | 256 | 489 | 0.00 | 88 | 62 | 425 | 2026-10-30 |
-| 94 | odin-odinhttp-wanderingaura | #139 | Odin (odin-http) | **130,000** | 12,644 | 429 | 924 | 0.00 | 82 | 60 | 624 | 2026-10-28 |
-| 94 | ruby-uring-cicloid | #197 | Ruby (io_uring) | **130,000** ᵛ | 12,625 | 366 | 573 | 0.00 | 90 | 66 | 679 | 2026-10-29 |
-| 96 | c-iouring-fajarreza-gif | #302 | C (io_uring) | **128,000** | 12,592 | 60 | 80 | 0.04 | 55 | 41 | 316 | 2026-11-05 |
-| 96 | go-epoll-champ3oy | #76 | Go (io_uring) | **128,000** | 12,604 | 3 | 23 | 0.00 | 77 | 57 | 385 | 2026-10-21 |
-| 98 | cobol-gnucobol-unorig-username | #185 | COBOL (GnuCOBOL, epoll) | **126,000** | 12,398 | 34 | 125 | 0.00 | 93 | 70 | 607 | 2026-10-29 |
-| 99 | cpp-uwebsockets-v2-tbsvttr | #15 | C++ (uWebSockets) | **125,000** | 12,188 | 204 | 306 | 0.00 | 89 | 68 | 182 | 2026-10-26 |
-| 99 | go-epoll-Antheurus | #65 | Go (raw epoll, 3 processes) | **125,000** | 12,274 | 116 | 665 | 0.00 | 98 | 74 | 292 | 2026-10-27 |
-| 99 | go-lowlevel-janso123 | #91 | Go (io_uring, PGO + ThinLTO) | **125,000** | 12,284 | 68 | 261 | 0.00 | 95 | 72 | 500 | 2026-10-27 |
-| 99 | java-nio-unorig-username | #187 | Java (NIO, FFM SQLite) | **125,000** | 12,303 | 9.2 | 49 | 0.00 | 88 | 66 | 1,038 | 2026-10-29 |
-| 99 | asm-raw-StefanoC90 | #431 | x86-64 asm (NASM, epoll, 4 SO_REUSEPORT processes) | **125,000** | 12,200 | 388.8 | 596.4 | 0.00 | 91 | 69 | 1,336 | 2026-11-14 |
-| 104 | kotlin-nio-3x3xX3N0N | #83 | Kotlin (NIO, 2 JVMs) | **120,000** ᴷ | 11,759 | 246 | 524 | 0.00 | 100 | 79 | 1,380 | 2026-10-21 |
-| 104 | rust-iouring-unorig-username | #188 | Rust (io_uring) | **120,000** | 11,799 | 12 | 144 | 0.00 | 46 | 36 | 543 | 2026-10-29 |
-| 106 | cpp-uwebsockets-tbsvttr | #6 | C++ (uWebSockets) | **115,000** | 10,940 | 261 | 652 | 0.00 | 87 | 74 | 215 | 2026-10-26 |
-| 107 | d-iouring-cyrusmsk | #163 | D (io_uring, during) | **114,000** | 11,158 | 248 | 567 | 0.00 | 87 | 73 | 475 | 2026-11-01 |
-| 108 | zig-usockets-tbsvttr | #25 | Zig (uSockets) | **110,000** | 10,442 | 335 | 721 | 0.00 | 90 | 80 | 188 | 2026-10-26 |
-| 108 | lua-neovim-unorig-username | #443 | Lua (Neovim, libuv, LuaJIT FFI SQLite) | **110,000** | 10,785 | 68.1 | 154.1 | 0.00 | 89 | 77 | 425 | 2026-11-14 |
-| 110 | c-epoll-TheFirstIstari | #64 | C (epoll) | **107,000** | 10,493 | 212 | 409 | 0.94 | 78 | 69 | 169 | 2026-10-21 |
-| 111 | java-nio-stohirov | #88 | Java (FFM epoll) | **102,000** | 10,023 | 86 | 128 | 0.85 | 66 | 61 | 555 | 2026-10-21 |
-| 112 | saad-web-jakobsaadbye | #389 | Saad (native via LLVM, 4 SO_REUSEPORT processes) | **100,000** ᴶ | 9,838 | 35.0 | 160.4 | 0.00 | 93 | 88 | 703 | 2026-11-10 |
-| 112 | c-iouring-Pranjay-kumar | #424 | C (io_uring) | **100,000** | 9,843 | 19.6 | 91.9 | 0.00 | 93 | 88 | 591 | 2026-11-13 |
-| 114 | d-eventcore-cyrusmsk | #165 | D (eventcore) | **98,000** | 9,610 | 109 | 750 | 0.00 | 85 | 82 | 475 | 2026-11-01 |
-| 115 | node-uwebsockets-zahidcakici | #102 | Node (uWebSockets) | **97,000** | 9,471 | 264 | 484 | 0.00 | 92 | 90 | 336 | 2026-10-21 |
-| 116 | typescript-bun-xxmohamed012 | #3 | Bun | **90,000** | 8,826 | 140 | 359 | 0.00 | 83 | 87 | 301 | 2026-10-21 |
-| 116 | scala-netty-jacksonhoran | #107 | Scala (Netty) | **90,000** ʸ | 8,801 | 484 | 757 | 0.00 | 87 | 92 | 825 | 2026-10-21 |
-| 116 | python-pypy-epoll-pranavds-codes | #84 | PyPy (epoll) | **90,000** | 8,801 | 280 | 474 | 0.00 | 89 | 94 | 270 | 2026-10-21 |
-| 116 | java-springboot-bogdan-blaj | #124 | Java (Spring Boot, Netty, FFM SQLite) | **90,000** | 8,804 | 342 | 888 | 0.00 | 85 | 90 | 1,172 | 2026-10-28 |
-| 120 | lua-openresty-yar0slav | #94 | Lua (OpenResty) | **88,000** | 8,477 | 434 | 591 | 0.04 | 92 | 101 | 267 | 2026-10-21 |
-| 120 | asm-epoll-FlavouredTux | #75 | x86-64 asm (epoll) | **88,000** | 8,628 | 170 | 438 | 0.00 | 85 | 92 | 189 | 2026-10-27 |
-| 120 | go-gnet-kaikegm | #180 | Go (gnet) | **88,000** ⁿ | 8,633 | 236 | 363 | 0.00 | 77 | 83 | 313 | 2026-10-29 |
-| 123 | archbtw-epoll-BlueFill | #200 | ArchBTW (transpiled to C, epoll) | **85,000** | 8,284 | 349 | 562 | 0.02 | 88 | 99 | 525 | 2026-10-30 |
-| 124 | rust-axum-tbsvttr | #17 | Rust (Axum) | **76,000** | 7,434 | 280 | 551 | 0.00 | 85 | 106 | 1,118 | 2026-10-26 |
-| 125 | python-stdlib-shawal-mbalire | #118 | Python (stdlib, PGO CPython) | **75,000** | 7,327 | 342 | 514 | 0.00 | 90 | 114 | 326 | 2026-10-27 |
-| 126 | zig-iouring-marler8997 ᵖ | #125 | Zig (io_uring) | **71,000** ᶠ | 6,559 | 1.0 | 1.5 | 0.93 | 31 | 44 | 199 | 2026-10-21 |
-| 126 | typescript-deno-JakeAve | #119 | Deno | **71,000** ᶠ | 6,558 | 5.6 | 13 | 0.93 | 47 | 67 | 412 | 2026-10-21 |
-| 126 | dart-rawsocket-C-Hatton | #46 | Dart | **71,000** ᶠ | 6,550 | 34 | 80 | 0.93 | 94 | 134 | 475 | 2026-10-21 |
-| 126 | cpp-epoll-khalefa-ow | #8 | C++ (epoll) | **71,000** ᶠ | 6,558 | 19 | 37 | 0.93 | 94 | 134 | 184 | 2026-10-21 |
-| 126 | go-fib-sirkostya009 | #34 | Go (fib, epoll) | **71,000** ᶠ | 6,552 | 109 | 248 | 0.93 | 61 | 87 | 674 | 2026-10-26 |
-| 126 | cpp-epoll_inmem-khalefa-ow | #9 | C++ (epoll) | **71,000** ᶠ | 6,555 | 30 | 148 | 0.93 | 92 | 131 | 353 | 2026-10-26 |
-| 126 | c-h2o-einhornimmond | #39 | C (H2O) | **71,000** ᶠ | 6,558 | 0.8 | 4.9 | 0.93 | 39 | 56 | 331 | 2026-10-26 |
-| 126 | c-epoll-benclawbot | #42 | C (epoll) | **71,000** ᶠ | 6,555 | 29 | 53 | 0.93 | 94 | 134 | 409 | 2026-10-26 |
-| 126 | go-stdlib-vkrishna03 | #44 | Go (stdlib, epoll) | **71,000** ᶠ | 6,547 | 74 | 251 | 0.93 | 38 | 54 | 231 | 2026-10-26 |
-| 126 | php-swoole-mattsplat | #24 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 45 | 103 | 0.93 | 66 | 94 | 1,025 | 2026-10-26 |
-| 126 | go-epoll-damianoneill | #52 | Go (raw epoll) | **71,000** ᶠ | 6,551 | 50 | 78 | 0.93 | 41 | 59 | 157 | 2026-10-26 |
-| 126 | c-iouring-einhornimmond | #55 | C (io_uring) | **71,000** ᶠ | 6,556 | 2.7 | 10 | 0.92 | 36 | 51 | 190 | 2026-10-27 |
-| 126 | php-swoole-tzimpel | #28 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 17 | 175 | 0.93 | 71 | 101 | 325 | 2026-10-27 |
-| 126 | c-iouring-27bhd | #68 | C (io_uring) | **71,000** ᶠ | 6,554 | 30 | 44 | 0.93 | 84 | 120 | 186 | 2026-10-27 |
-| 126 | go-nethttp-mattn-vedic | #100 | Go (raw epoll, cgo SQLite) | **71,000** ᶠ | 6,552 | 36 | 50 | 0.93 | 55 | 78 | 332 | 2026-10-27 |
-| 126 | rust-axum-mjc | #114 | Rust (Axum) | **71,000** ᶠ | 6,556 | 2.2 | 3.5 | 0.93 | 40 | 57 | 1,551 | 2026-10-27 |
-| 126 | java-micronaut-Clickin | #116 | Java (Micronaut, JDBC SQLite) | **71,000** ᶠ | 6,546 | 78 | 148 | 0.93 | 85 | 121 | 1,293 | 2026-10-27 |
-| 126 | c-libco-ssmurfgg04-gif | #121 | C (libco coroutines, epoll) | **71,000** ᶠ | 6,546 | 141 | 210 | 0.93 | 52 | 74 | 717 | 2026-10-27 |
-| 126 | java-springboot-reactor-mohkamfer | #138 | Java (Spring Boot, Reactor Netty, FFM SQLite) | **71,000** ᶠ | 6,555 | 11 | 56 | 0.93 | 62 | 88 | 503 | 2026-10-28 |
-| 126 | rust-axum-connorw-dev | #140 | Rust (Axum) | **71,000** ᶠ | 6,554 | 6.1 | 11 | 0.93 | 52 | 74 | 1,131 | 2026-10-28 |
-| 126 | bun-yatta-psrockstar098 | #179 | Bun (Yatta JS, bun:sqlite) | **71,000** ᶠ ᵠ | 6,545 | 54 | 133 | 0.93 | 91 | 130 | 213 | 2026-10-29 |
-| 126 | rust-mqbridge-marcomq | #253 | Rust (mq-bridge, sqlx SQLite) | **71,000** ᶠ | 6,548 | 72 | 106 | 0.93 | 76 | 109 | 1,409 | 2026-11-01 |
-| 126 | c-iouring-marwanabdelhameed | #270 | C (io_uring) | **71,000** ᶠ | 6,558 | 0.8 | 3.4 | 0.93 | 39 | 56 | 1,448 | 2026-11-02 |
-| 126 | typescript-tinyjs-animuni-express | #410 | TypeScript (TinyJS on Bun) | **71,000** ᶠ ᵀ | 6,534 | 184.3 | 524.0 | 0.93 | 92 | 132 | 219 | 2026-11-14 |
-| 126 | wat-sqlite-ext-delneg | #445 | WebAssembly (hand-written WAT, WasmEdge AOT, loaded as an extension by the stock sqlite3 shell, io_uring) | **71,000** ᶠ | 6,546 | 86.5 | 256.0 | 0.93 | 96 | 137 | 535 | 2026-11-14 |
-| 126 | c-fio-tbsvttr | #5 | C (facil.io) | **71,000** | 6,959 | 130 | 621 | 0.00 | 81 | 108 | 646 | 2026-10-26 |
-| 126 | ruby-async-cicloid | #71 | Ruby (async, YJIT) | **71,000** | 6,967 | 121 | 349 | 0.00 | 83 | 111 | 362 | 2026-10-27 |
-| 126 | forth-gforth-FantasticForth | #171 | Forth (gforth, epoll) | **71,000** | 6,916 | 291 | 765 | 0.00 | 92 | 124 | 318 | 2026-10-29 |
-| 154 | python-fastapi-granian-shawal-mbalire | #41 | Python (FastAPI, Granian) | **70,000** | 6,801 | 465 | 862 | 0.00 | 94 | 129 | 1,192 | 2026-10-26 |
-| 154 | fortran-microhttpd-tbsvttr | #16 | Fortran (libmicrohttpd) | **70,000** | 6,866 | 141 | 401 | 0.00 | 89 | 120 | 1,134 | 2026-10-26 |
-| 156 | trux-http-claudioscheer | #145 | Trux (io_uring) | **69,000** ᵗ | 6,514 | 1.6 | 234 | 0.59 | 49 | 70 | 1,043 | 2026-10-28 |
-| 157 | fsharp-oxpecker-delneg | #108 | F# (Oxpecker) | **65,000** ᵍ | 6,392 | 84 | 229 | 0.00 | 55 | 80 | 1,255 | 2026-10-21 |
-| 157 | go-gnet-Haris0059 | #38 | Go (gnet) | **65,000** ⁿ | 6,396 | 39 | 54 | 0.00 | 42 | 61 | 350 | 2026-10-26 |
-| 157 | kotlin-ktor-C-Hatton | #45 | Kotlin (Ktor, Netty, FFM SQLite) | **65,000** | 6,374 | 198 | 713 | 0.00 | 65 | 95 | 1,273 | 2026-10-26 |
-| 157 | go-fasthttp-b3nhard | #56 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,399 | 4.8 | 19 | 0.00 | 77 | 112 | 547 | 2026-10-27 |
-| 157 | cpp-drogon-hendy643 | #29 | C++ (Drogon) | **65,000** | 6,398 | 36 | 60 | 0.00 | 52 | 76 | 814 | 2026-10-27 |
-| 157 | java-netty-lfeagan | #63 | Java (Netty, FFM SQLite) | **65,000** | 6,401 | 1.9 | 28 | 0.00 | 62 | 90 | 1,494 | 2026-10-27 |
-| 157 | csharp-aspnetcore-vijay-highlo | #77 | C# (ASP.NET Core, Native AOT) | **65,000** | 6,389 | 87 | 319 | 0.00 | 56 | 82 | 1,278 | 2026-10-27 |
-| 157 | node-net-barrard | #78 | Node (node:net, node:sqlite) | **65,000** | 6,383 | 133 | 312 | 0.00 | 75 | 109 | 483 | 2026-10-28 |
-| 157 | cpp-iouring-edwin-2024 | #98 | C++ (io_uring) | **65,000** ˢ | 6,399 | 33 | 55 | 0.00 | 30 | 44 | 200 | 2026-10-27 |
-| 157 | java-raw-agrison | #101 | Java (raw NIO, FFM SQLite) | **65,000** | 6,387 | 99 | 443 | 0.00 | 81 | 118 | 731 | 2026-10-27 |
-| 157 | lean-c-iouring-loafecho | #239 | C (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,399 | 32 | 56 | 0.00 | 28 | 41 | 605 | 2026-11-01 |
-| 157 | go-fasthttp-savak1990 | #106 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,397 | 45 | 66 | 0.00 | 66 | 96 | 875 | 2026-11-05 |
-| 157 | zig-iouring-harshitkhandelwal208 | #454 | Zig (io_uring) | **65,000** ᶜ | 6,396 | 33.6 | 57.0 | 0.00 | 34 | 49 | 258 | 2026-11-15 |
+| 59 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **219,000** | 21,373 | 20.6 | 396.6 | 0.00 | 79 | 34 | 566 | 2026-11-15 |
+| 63 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
+| 63 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
+| 63 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
+| 63 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
+| 63 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
+| 68 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
+| 69 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
+| 70 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
+| 70 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
+| 70 | lean-derive-lowmem-hargup | #434 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **200,000** | 19,673 | 55.3 | 189.9 | 0.00 | 72 | 34 | 1,222 | 2026-11-14 |
+| 70 | goose-plod-kaitk | #448 | Goose (Plod, io_uring) | **200,000** | 19,664 | 25.7 | 246.0 | 0.00 | 74 | 35 | 755 | 2026-11-15 |
+| 74 | dexlang-iouring-ensamuel7 | #251 | DexLang (generated C, io_uring) | **199,000** | 19,425 | 316 | 579 | 0.00 | 89 | 43 | 713 | 2026-11-01 |
+| 75 | sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN | #243 | SQL (one SELECT over a virtual table, C io_uring) | **190,000** | 18,653 | 129 | 573 | 0.00 | 94 | 47 | 1,205 | 2026-11-02 |
+| 76 | csharp-iouring-oswaldosierra | #157 | C# (Native AOT, io_uring) | **189,000** | 18,592 | 20 | 51 | 0.00 | 88 | 44 | 1,176 | 2026-10-28 |
+| 76 | csharp-iouring-AlexandruLT | #196 | C# (Native AOT, io_uring) | **189,000** | 18,599 | 19.5 | 212 | 0.00 | 84 | 42 | 693 | 2026-10-29 |
+| 78 | go-epoll-MegaPanchamZ | #144 | Go (raw epoll) | **185,000** | 18,086 | 288 | 479 | 0.00 | 99 | 51 | 1,286 | 2026-10-28 |
+| 78 | c-modular-ascendnoosphere | #333 | C (io_uring, SQLite B-tree reads) | **185,000** | 18,127 | 178.9 | 294.2 | 0.00 | 79 | 41 | 397 | 2026-11-06 |
+| 80 | cpp-iouring-smolblackhole | #318 | C++ (io_uring, SQLite B-tree reads) | **181,000** | 17,809 | 18.0 | 51.1 | 0.00 | 73 | 38 | 437 | 2026-11-05 |
+| 81 | go-epoll-kaikegm | #151 | Go (raw epoll, cgo SQLite) | **175,000** | 16,616 | 37 | 253 | 0.61 | 98 | 55 | 749 | 2026-10-28 |
+| 82 | c-iouring-raoz | #26 | C (io_uring) | **172,000** | 16,875 | 98 | 125 | 0.00 | 69 | 38 | 419 | 2026-10-27 |
+| 83 | asm-nasm-melroy89 | #86 | x86-64 asm (io_uring) | **171,000** | 16,777 | 87 | 142 | 0.00 | 78 | 43 | 358 | 2026-10-21 |
+| 84 | go-epoll-unorig-username | #186 | Go (raw epoll, cgo SQLite) | **165,000** | 16,020 | 479 | 952 | 0.00 | 97 | 56 | 665 | 2026-10-29 |
+| 85 | asm-epoll-HauLTCE | #207 | x86-64 asm (epoll, forked workers) | **160,000** ᵃ | 15,682 | 291 | 757 | 0.61 | 95 | 56 | 1,307 | 2026-10-30 |
+| 85 | ruby-cring-cicloid | #309 | Ruby (C io_uring extension, SQLite B-tree reads) | **160,000** | 15,628 | 266 | 699 | 0.01 | 84 | 50 | 1,017 | 2026-11-04 |
+| 87 | java-uring-crux | #170 | Java (FFM io_uring, C row formatter) | **158,000** | 15,531 | 137 | 312 | 0.00 | 72 | 43 | 1,139 | 2026-10-29 |
+| 88 | asm-epoll-unorig-username | #181 | x86-64 asm (epoll) | **155,000** | 15,256 | 14 | 55 | 0.00 | 87 | 53 | 858 | 2026-10-29 |
+| 88 | python-pypy-iouring-kiwamizamurai | #284 | PyPy (io_uring, SQLite B-tree reads) | **155,000** | 15,201 | 120 | 277 | 0.00 | 80 | 49 | 525 | 2026-11-03 |
+| 88 | ruby-btreereads-cicloid | #308 | Ruby (io_uring, SQLite B-tree reads) | **155,000** | 15,121 | 274 | 545 | 0.00 | 87 | 53 | 791 | 2026-11-04 |
+| 91 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
+| 92 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
+| 92 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
+| 92 | cider-iouring-pomilon | #208 | Cider (native x86-64, io_uring) | **135,000** | 13,168 | 256 | 489 | 0.00 | 88 | 62 | 425 | 2026-10-30 |
+| 95 | odin-odinhttp-wanderingaura | #139 | Odin (odin-http) | **130,000** | 12,644 | 429 | 924 | 0.00 | 82 | 60 | 624 | 2026-10-28 |
+| 95 | ruby-uring-cicloid | #197 | Ruby (io_uring) | **130,000** ᵛ | 12,625 | 366 | 573 | 0.00 | 90 | 66 | 679 | 2026-10-29 |
+| 97 | c-iouring-fajarreza-gif | #302 | C (io_uring) | **128,000** | 12,592 | 60 | 80 | 0.04 | 55 | 41 | 316 | 2026-11-05 |
+| 97 | go-epoll-champ3oy | #76 | Go (io_uring) | **128,000** | 12,604 | 3 | 23 | 0.00 | 77 | 57 | 385 | 2026-10-21 |
+| 99 | cobol-gnucobol-unorig-username | #185 | COBOL (GnuCOBOL, epoll) | **126,000** | 12,398 | 34 | 125 | 0.00 | 93 | 70 | 607 | 2026-10-29 |
+| 100 | cpp-uwebsockets-v2-tbsvttr | #15 | C++ (uWebSockets) | **125,000** | 12,188 | 204 | 306 | 0.00 | 89 | 68 | 182 | 2026-10-26 |
+| 100 | go-epoll-Antheurus | #65 | Go (raw epoll, 3 processes) | **125,000** | 12,274 | 116 | 665 | 0.00 | 98 | 74 | 292 | 2026-10-27 |
+| 100 | go-lowlevel-janso123 | #91 | Go (io_uring, PGO + ThinLTO) | **125,000** | 12,284 | 68 | 261 | 0.00 | 95 | 72 | 500 | 2026-10-27 |
+| 100 | java-nio-unorig-username | #187 | Java (NIO, FFM SQLite) | **125,000** | 12,303 | 9.2 | 49 | 0.00 | 88 | 66 | 1,038 | 2026-10-29 |
+| 100 | asm-raw-StefanoC90 | #431 | x86-64 asm (NASM, epoll, 4 SO_REUSEPORT processes) | **125,000** | 12,200 | 388.8 | 596.4 | 0.00 | 91 | 69 | 1,336 | 2026-11-14 |
+| 105 | kotlin-nio-3x3xX3N0N | #83 | Kotlin (NIO, 2 JVMs) | **120,000** ᴷ | 11,759 | 246 | 524 | 0.00 | 100 | 79 | 1,380 | 2026-10-21 |
+| 105 | rust-iouring-unorig-username | #188 | Rust (io_uring) | **120,000** | 11,799 | 12 | 144 | 0.00 | 46 | 36 | 543 | 2026-10-29 |
+| 107 | cpp-uwebsockets-tbsvttr | #6 | C++ (uWebSockets) | **115,000** | 10,940 | 261 | 652 | 0.00 | 87 | 74 | 215 | 2026-10-26 |
+| 108 | d-iouring-cyrusmsk | #163 | D (io_uring, during) | **114,000** | 11,158 | 248 | 567 | 0.00 | 87 | 73 | 475 | 2026-11-01 |
+| 109 | zig-usockets-tbsvttr | #25 | Zig (uSockets) | **110,000** | 10,442 | 335 | 721 | 0.00 | 90 | 80 | 188 | 2026-10-26 |
+| 109 | lua-neovim-unorig-username | #443 | Lua (Neovim, libuv, LuaJIT FFI SQLite) | **110,000** | 10,785 | 68.1 | 154.1 | 0.00 | 89 | 77 | 425 | 2026-11-14 |
+| 111 | c-epoll-TheFirstIstari | #64 | C (epoll) | **107,000** | 10,493 | 212 | 409 | 0.94 | 78 | 69 | 169 | 2026-10-21 |
+| 112 | java-nio-stohirov | #88 | Java (FFM epoll) | **102,000** | 10,023 | 86 | 128 | 0.85 | 66 | 61 | 555 | 2026-10-21 |
+| 113 | saad-web-jakobsaadbye | #389 | Saad (native via LLVM, 4 SO_REUSEPORT processes) | **100,000** ᴶ | 9,838 | 35.0 | 160.4 | 0.00 | 93 | 88 | 703 | 2026-11-10 |
+| 113 | c-iouring-Pranjay-kumar | #424 | C (io_uring) | **100,000** | 9,843 | 19.6 | 91.9 | 0.00 | 93 | 88 | 591 | 2026-11-13 |
+| 115 | d-eventcore-cyrusmsk | #165 | D (eventcore) | **98,000** | 9,610 | 109 | 750 | 0.00 | 85 | 82 | 475 | 2026-11-01 |
+| 116 | node-uwebsockets-zahidcakici | #102 | Node (uWebSockets) | **97,000** | 9,471 | 264 | 484 | 0.00 | 92 | 90 | 336 | 2026-10-21 |
+| 117 | typescript-bun-xxmohamed012 | #3 | Bun | **90,000** | 8,826 | 140 | 359 | 0.00 | 83 | 87 | 301 | 2026-10-21 |
+| 117 | scala-netty-jacksonhoran | #107 | Scala (Netty) | **90,000** ʸ | 8,801 | 484 | 757 | 0.00 | 87 | 92 | 825 | 2026-10-21 |
+| 117 | python-pypy-epoll-pranavds-codes | #84 | PyPy (epoll) | **90,000** | 8,801 | 280 | 474 | 0.00 | 89 | 94 | 270 | 2026-10-21 |
+| 117 | java-springboot-bogdan-blaj | #124 | Java (Spring Boot, Netty, FFM SQLite) | **90,000** | 8,804 | 342 | 888 | 0.00 | 85 | 90 | 1,172 | 2026-10-28 |
+| 121 | lua-openresty-yar0slav | #94 | Lua (OpenResty) | **88,000** | 8,477 | 434 | 591 | 0.04 | 92 | 101 | 267 | 2026-10-21 |
+| 121 | asm-epoll-FlavouredTux | #75 | x86-64 asm (epoll) | **88,000** | 8,628 | 170 | 438 | 0.00 | 85 | 92 | 189 | 2026-10-27 |
+| 121 | go-gnet-kaikegm | #180 | Go (gnet) | **88,000** ⁿ | 8,633 | 236 | 363 | 0.00 | 77 | 83 | 313 | 2026-10-29 |
+| 124 | archbtw-epoll-BlueFill | #200 | ArchBTW (transpiled to C, epoll) | **85,000** | 8,284 | 349 | 562 | 0.02 | 88 | 99 | 525 | 2026-10-30 |
+| 125 | rust-axum-tbsvttr | #17 | Rust (Axum) | **76,000** | 7,434 | 280 | 551 | 0.00 | 85 | 106 | 1,118 | 2026-10-26 |
+| 126 | python-stdlib-shawal-mbalire | #118 | Python (stdlib, PGO CPython) | **75,000** | 7,327 | 342 | 514 | 0.00 | 90 | 114 | 326 | 2026-10-27 |
+| 127 | zig-iouring-marler8997 ᵖ | #125 | Zig (io_uring) | **71,000** ᶠ | 6,559 | 1.0 | 1.5 | 0.93 | 31 | 44 | 199 | 2026-10-21 |
+| 127 | typescript-deno-JakeAve | #119 | Deno | **71,000** ᶠ | 6,558 | 5.6 | 13 | 0.93 | 47 | 67 | 412 | 2026-10-21 |
+| 127 | dart-rawsocket-C-Hatton | #46 | Dart | **71,000** ᶠ | 6,550 | 34 | 80 | 0.93 | 94 | 134 | 475 | 2026-10-21 |
+| 127 | cpp-epoll-khalefa-ow | #8 | C++ (epoll) | **71,000** ᶠ | 6,558 | 19 | 37 | 0.93 | 94 | 134 | 184 | 2026-10-21 |
+| 127 | go-fib-sirkostya009 | #34 | Go (fib, epoll) | **71,000** ᶠ | 6,552 | 109 | 248 | 0.93 | 61 | 87 | 674 | 2026-10-26 |
+| 127 | cpp-epoll_inmem-khalefa-ow | #9 | C++ (epoll) | **71,000** ᶠ | 6,555 | 30 | 148 | 0.93 | 92 | 131 | 353 | 2026-10-26 |
+| 127 | c-h2o-einhornimmond | #39 | C (H2O) | **71,000** ᶠ | 6,558 | 0.8 | 4.9 | 0.93 | 39 | 56 | 331 | 2026-10-26 |
+| 127 | c-epoll-benclawbot | #42 | C (epoll) | **71,000** ᶠ | 6,555 | 29 | 53 | 0.93 | 94 | 134 | 409 | 2026-10-26 |
+| 127 | go-stdlib-vkrishna03 | #44 | Go (stdlib, epoll) | **71,000** ᶠ | 6,547 | 74 | 251 | 0.93 | 38 | 54 | 231 | 2026-10-26 |
+| 127 | php-swoole-mattsplat | #24 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 45 | 103 | 0.93 | 66 | 94 | 1,025 | 2026-10-26 |
+| 127 | go-epoll-damianoneill | #52 | Go (raw epoll) | **71,000** ᶠ | 6,551 | 50 | 78 | 0.93 | 41 | 59 | 157 | 2026-10-26 |
+| 127 | c-iouring-einhornimmond | #55 | C (io_uring) | **71,000** ᶠ | 6,556 | 2.7 | 10 | 0.92 | 36 | 51 | 190 | 2026-10-27 |
+| 127 | php-swoole-tzimpel | #28 | PHP (Swoole) | **71,000** ᶠ | 6,552 | 17 | 175 | 0.93 | 71 | 101 | 325 | 2026-10-27 |
+| 127 | c-iouring-27bhd | #68 | C (io_uring) | **71,000** ᶠ | 6,554 | 30 | 44 | 0.93 | 84 | 120 | 186 | 2026-10-27 |
+| 127 | go-nethttp-mattn-vedic | #100 | Go (raw epoll, cgo SQLite) | **71,000** ᶠ | 6,552 | 36 | 50 | 0.93 | 55 | 78 | 332 | 2026-10-27 |
+| 127 | rust-axum-mjc | #114 | Rust (Axum) | **71,000** ᶠ | 6,556 | 2.2 | 3.5 | 0.93 | 40 | 57 | 1,551 | 2026-10-27 |
+| 127 | java-micronaut-Clickin | #116 | Java (Micronaut, JDBC SQLite) | **71,000** ᶠ | 6,546 | 78 | 148 | 0.93 | 85 | 121 | 1,293 | 2026-10-27 |
+| 127 | c-libco-ssmurfgg04-gif | #121 | C (libco coroutines, epoll) | **71,000** ᶠ | 6,546 | 141 | 210 | 0.93 | 52 | 74 | 717 | 2026-10-27 |
+| 127 | java-springboot-reactor-mohkamfer | #138 | Java (Spring Boot, Reactor Netty, FFM SQLite) | **71,000** ᶠ | 6,555 | 11 | 56 | 0.93 | 62 | 88 | 503 | 2026-10-28 |
+| 127 | rust-axum-connorw-dev | #140 | Rust (Axum) | **71,000** ᶠ | 6,554 | 6.1 | 11 | 0.93 | 52 | 74 | 1,131 | 2026-10-28 |
+| 127 | bun-yatta-psrockstar098 | #179 | Bun (Yatta JS, bun:sqlite) | **71,000** ᶠ ᵠ | 6,545 | 54 | 133 | 0.93 | 91 | 130 | 213 | 2026-10-29 |
+| 127 | rust-mqbridge-marcomq | #253 | Rust (mq-bridge, sqlx SQLite) | **71,000** ᶠ | 6,548 | 72 | 106 | 0.93 | 76 | 109 | 1,409 | 2026-11-01 |
+| 127 | c-iouring-marwanabdelhameed | #270 | C (io_uring) | **71,000** ᶠ | 6,558 | 0.8 | 3.4 | 0.93 | 39 | 56 | 1,448 | 2026-11-02 |
+| 127 | typescript-tinyjs-animuni-express | #410 | TypeScript (TinyJS on Bun) | **71,000** ᶠ ᵀ | 6,534 | 184.3 | 524.0 | 0.93 | 92 | 132 | 219 | 2026-11-14 |
+| 127 | wat-sqlite-ext-delneg | #445 | WebAssembly (hand-written WAT, WasmEdge AOT, loaded as an extension by the stock sqlite3 shell, io_uring) | **71,000** ᶠ | 6,546 | 86.5 | 256.0 | 0.93 | 96 | 137 | 535 | 2026-11-14 |
+| 127 | c-fio-tbsvttr | #5 | C (facil.io) | **71,000** | 6,959 | 130 | 621 | 0.00 | 81 | 108 | 646 | 2026-10-26 |
+| 127 | ruby-async-cicloid | #71 | Ruby (async, YJIT) | **71,000** | 6,967 | 121 | 349 | 0.00 | 83 | 111 | 362 | 2026-10-27 |
+| 127 | forth-gforth-FantasticForth | #171 | Forth (gforth, epoll) | **71,000** | 6,916 | 291 | 765 | 0.00 | 92 | 124 | 318 | 2026-10-29 |
+| 155 | python-fastapi-granian-shawal-mbalire | #41 | Python (FastAPI, Granian) | **70,000** | 6,801 | 465 | 862 | 0.00 | 94 | 129 | 1,192 | 2026-10-26 |
+| 155 | fortran-microhttpd-tbsvttr | #16 | Fortran (libmicrohttpd) | **70,000** | 6,866 | 141 | 401 | 0.00 | 89 | 120 | 1,134 | 2026-10-26 |
+| 157 | trux-http-claudioscheer | #145 | Trux (io_uring) | **69,000** ᵗ | 6,514 | 1.6 | 234 | 0.59 | 49 | 70 | 1,043 | 2026-10-28 |
+| 158 | fsharp-oxpecker-delneg | #108 | F# (Oxpecker) | **65,000** ᵍ | 6,392 | 84 | 229 | 0.00 | 55 | 80 | 1,255 | 2026-10-21 |
+| 158 | go-gnet-Haris0059 | #38 | Go (gnet) | **65,000** ⁿ | 6,396 | 39 | 54 | 0.00 | 42 | 61 | 350 | 2026-10-26 |
+| 158 | kotlin-ktor-C-Hatton | #45 | Kotlin (Ktor, Netty, FFM SQLite) | **65,000** | 6,374 | 198 | 713 | 0.00 | 65 | 95 | 1,273 | 2026-10-26 |
+| 158 | go-fasthttp-b3nhard | #56 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,399 | 4.8 | 19 | 0.00 | 77 | 112 | 547 | 2026-10-27 |
+| 158 | cpp-drogon-hendy643 | #29 | C++ (Drogon) | **65,000** | 6,398 | 36 | 60 | 0.00 | 52 | 76 | 814 | 2026-10-27 |
+| 158 | java-netty-lfeagan | #63 | Java (Netty, FFM SQLite) | **65,000** | 6,401 | 1.9 | 28 | 0.00 | 62 | 90 | 1,494 | 2026-10-27 |
+| 158 | csharp-aspnetcore-vijay-highlo | #77 | C# (ASP.NET Core, Native AOT) | **65,000** | 6,389 | 87 | 319 | 0.00 | 56 | 82 | 1,278 | 2026-10-27 |
+| 158 | node-net-barrard | #78 | Node (node:net, node:sqlite) | **65,000** | 6,383 | 133 | 312 | 0.00 | 75 | 109 | 483 | 2026-10-28 |
+| 158 | cpp-iouring-edwin-2024 | #98 | C++ (io_uring) | **65,000** ˢ | 6,399 | 33 | 55 | 0.00 | 30 | 44 | 200 | 2026-10-27 |
+| 158 | java-raw-agrison | #101 | Java (raw NIO, FFM SQLite) | **65,000** | 6,387 | 99 | 443 | 0.00 | 81 | 118 | 731 | 2026-10-27 |
+| 158 | lean-c-iouring-loafecho | #239 | C (io_uring, SQLite B-tree reads) | **65,000** ᶜ | 6,399 | 32 | 56 | 0.00 | 28 | 41 | 605 | 2026-11-01 |
+| 158 | go-fasthttp-savak1990 | #106 | Go (fasthttp, cgo SQLite) | **65,000** ⁿ | 6,397 | 45 | 66 | 0.00 | 66 | 96 | 875 | 2026-11-05 |
 | 170 | bun-elysia-shashishsoni | #59 | Bun (Elysia) | **64,000** | 6,300 | 14 | 75 | 0.00 | 89 | 131 | 1,507 | 2026-10-27 |
 | 171 | csharp-aspnetcore-maks-march | #27 | C# (ASP.NET Core) | **63,000** | 6,136 | 417 | 757 | 0.00 | 87 | 131 | 925 | 2026-10-27 |
 | 171 | csharp-aspnetcore-devv-guru | #195 | C# (ASP.NET Core, Native AOT) | **63,000** | 6,156 | 202 | 679 | 0.00 | 79 | 119 | 1,081 | 2026-10-29 |
@@ -929,6 +931,10 @@ Its follow-up #442 is no longer capped and replaces the #412 row (see ᴹ).
 **Zig io_uring #454** (`ede8d01`) is capped at the same point: at 65,000 it ran at 34 % CPU (33.6 ms p95, 57.0 ms
 p99, 0 errors, 258 MB); 68,000, 70,000 and 80,000 failed on `connection reset by peer` (5.2 %, 9.1 %, 24.6 %) at
 41–59 % CPU. Its direct-descriptor table has one slot per connection, at most 65,535 (main.zig:55).
+Its follow-up #460 (`7c2ebfb`, 8 rings with their own descriptor tables) is no longer capped and replaces the #454 row:
+it held **219,000** (21,373 req/s, p95 20.6 / p99 396.6 ms, 0 errors, 79 % CPU, 34 µs/req, 566 MB, 2026-11-15). 230,000
+passed the 2-minute probe but failed the 5-minute hold on p99 (1.01 s, 0 errors, 82 % CPU); 240,000 failed on p99
+(13.2 s, 0 errors) and 320,000 on `connection refused` (80.7 %).
 
 ᴹ **C++ io_uring #442** (`8512d44`, follow-up to the merged #412's 65,000 ᶜ: rewrite into `src/`, PASSIVE checkpoints on
 a second connection) held **199,000** (19,576 req/s, p95 15.0 / p99 80.7 ms, 0 errors, 64 % CPU, 30 µs/req, 1,170 MB,
@@ -1272,6 +1278,11 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   (`getAndInitPage`, `xParseCell`, `findCell`) instead of a B-tree cursor. Read-only, stock amalgamation, nothing cached
   or written. Open question for Arjay: ruling 1 allows B-tree/cursor reads; this is one step past the cursor. Scored
   as submitted (219k at `3c73fa6`); held open.
+- **zig-iouring-harshitkhandelwal208 #460 (follow-up to #454) reuses rust-iouring-kensac #264's SQLite shim without
+  credit**: `src/shim.c` (517 lines: B-tree open/layout/seek/`td_count_likes` helpers and the checkpoint state machine)
+  is #264's `csrc/shim.c` with the comments removed and small edits; the Zig server, HTTP, JSON and JWT code are the
+  author's own. Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; the
+  README doesn't credit #264 yet, so it's held until it does. Scored as submitted (219k at `7c2ebfb`).
 - **Reads can see uncommitted writes** in the same batch: Deno #119 (also serves a snapshot up to 20 ms stale), Zig #125.
 - **start.sh restart loops** (the app restarts itself instead of letting systemd see a crash): Deno #119, c-epoll #64,
   c-iouring-raoz #26 (restarts after a signal exit), go-epoll-Antheurus #65 (worker 0 re-spawns dead workers).

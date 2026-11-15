@@ -1,4 +1,4 @@
-# The feed API in Tcl 8.6, the language SQLite was born in. Run by start.sh: tclsh8.6 server.tcl
+# The feed API in Tcl, the language SQLite was born in. Run by start.sh: tclsh8.7 server.tcl NOFILE
 #
 # Every socket is in binary mode, so a Tcl string here is a string of bytes (one char per byte).
 # Text goes to SQLite as a blob (@var) and is CAST to TEXT there; JSON comes back as a blob,

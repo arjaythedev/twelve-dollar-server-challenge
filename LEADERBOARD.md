@@ -112,7 +112,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 33 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
 | 33 | rust-iouring-not-my-segfault | #401 | Rust (io_uring, SQLite B-tree reads) | **250,000** | 24,071 | 138.1 | 678.7 | 0.00 | 79 | 30 | 1,297 | 2026-11-12 |
 | 33 | holyphp-io-uring-elifoxcoder | #418 | HolyPHP (io_uring, SQLite B-tree reads) | **250,000** ᵘ | 24,124 | 91.9 | 297.2 | 0.00 | 82 | 31 | 1,334 | 2026-11-13 |
-| 33 | luajit-iouring-asxpi | #436 | LuaJIT (io_uring, SQLite B-tree reads) | **250,000** | 24,064 | 149.6 | 460.4 | 0.00 | 78 | 30 | 1,187 | 2026-11-14 |
+| 33 | luajit-iouring-asxpi | #436 | LuaJIT (io_uring, SQLite B-tree reads) | **250,000** ᴵ | 24,064 | 149.6 | 460.4 | 0.00 | 78 | 30 | 1,187 | 2026-11-14 |
 | 39 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
 | 39 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
 | 41 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
@@ -1055,6 +1055,12 @@ p99 584.6 ms, 0 err, 86 % CPU, 2026-11-11); #410's earlier head `3b3c64f` also h
 Arjay, see the rule flags below) held **270,000** (25,755 req/s, p95 222.7 / p99 980.8 ms, 0 err, 83 % CPU, 29 µs/req,
 1,105 MB, 2026-11-14), 42/42 tests. 280,000 and 320,000 failed the 2-minute probe on `connection refused` (71 % / 78 %
 errors; no crash or OOM kill in the box's journal).
+
+ᴵ **luajit-iouring-asxpi** stays on its merged #436 row. Its follow-up **#453** (`5124d8f`, reads answered first,
+writes committed at most every 10 ms, kept read transactions, a public `SQLITE_CONFIG_PCACHE2` wrapper; not merged: it
+scored below the merged row) held **230,000** (22,288 req/s, p95 76.8 / p99 207.7 ms, 0 err, 69 % CPU, 29 µs/req,
+1,078 MB, 2026-11-15), 42/42 tests: 240,000 failed the 2-minute probe on p99 (1.07 s at 72 % CPU, 0 errors) and 320,000
+on p95/p99 (4.45 / 26.4 s, 0.34 % timeouts, 92 % CPU).
 
 ## Patches (ᵖ) and failures
 

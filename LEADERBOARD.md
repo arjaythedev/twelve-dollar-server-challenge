@@ -66,8 +66,9 @@ held, not merged: it didn't beat the merged row) scored 230,000 (22,383 req/s, p
 spaced by hold length) scored 280,000 (26,693 req/s, p95 197.6 / p99 539.9 ms, 0 err, 76 % CPU, 26 µs/req, 860 MB,
 2026-11-14; 290,000 failed the 2-minute probe on p99 2.03 s), the same as the merged row, so it isn't merged either. asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
 #414 code (`7c9e722`, thread per connection behind Nginx) held 24,000. zig-iouring-harshitkhandelwal208 is scored at
-its follow-up PR #460 (`7c2ebfb`: 8 io_uring rings, SQLite B-tree cursor reads; held, not merged yet: its `src/shim.c`
-needs a README credit to #264, see the rule flags); its merged #454 code (`ede8d01`) held 65,000 (connection-capped, see ᶜ).
+its follow-up PR #460 (`122da96`: 8 io_uring rings, SQLite B-tree cursor reads; held, not merged yet: the README's
+credit to #264 doesn't match the code and it commits a PGO profile, see the rule flags; its earlier `7c2ebfb` held
+219,000); its merged #454 code (`ede8d01`) held 65,000 (connection-capped, see ᶜ).
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -108,40 +109,40 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 19 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
 | 28 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 29 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 30 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
-| 30 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
-| 30 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
-| 33 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
-| 33 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
-| 33 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
-| 33 | rust-iouring-not-my-segfault | #401 | Rust (io_uring, SQLite B-tree reads) | **250,000** | 24,071 | 138.1 | 678.7 | 0.00 | 79 | 30 | 1,297 | 2026-11-12 |
-| 33 | holyphp-io-uring-elifoxcoder | #418 | HolyPHP (io_uring, SQLite B-tree reads) | **250,000** ᵘ | 24,124 | 91.9 | 297.2 | 0.00 | 82 | 31 | 1,334 | 2026-11-13 |
-| 33 | luajit-iouring-asxpi | #436 | LuaJIT (io_uring, SQLite B-tree reads) | **250,000** ᴵ | 24,064 | 149.6 | 460.4 | 0.00 | 78 | 30 | 1,187 | 2026-11-14 |
-| 39 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
-| 39 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
-| 41 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
-| 41 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
-| 41 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
-| 41 | java-iouring-davidhsv | #393 | Java (FFM, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 80.7 | 961.5 | 0.00 | 74 | 29 | 1,458 | 2026-11-11 |
-| 45 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
-| 45 | c-epoll-patrickryankenneth | #289 | C (io_uring, epoll fallback, SQLite B-tree reads) | **238,000** | 23,026 | 163.6 | 508.6 | 0.00 | 81 | 32 | 711 | 2026-11-08 |
-| 47 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
-| 47 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
-| 49 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
-| 49 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
-| 49 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
-| 49 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
-| 49 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
-| 54 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
-| 54 | lean-derive-drain-hargup | #462 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **228,000** | 22,147 | 94.6 | 455.9 | 0.00 | 76 | 32 | 698 | 2026-11-15 |
-| 56 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
-| 57 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
-| 57 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
-| 57 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
-| 57 | cpp-io_uring-0329-at | #442 | C++ (io_uring, SQLite B-tree reads) | **220,000** ᴹ | 21,320 | 341.6 | 465.0 | 0.00 | 71 | 31 | 777 | 2026-11-15 |
-| 61 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 61 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
-| 61 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **219,000** | 21,373 | 20.6 | 396.6 | 0.00 | 79 | 34 | 566 | 2026-11-15 |
+| 29 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **260,000** | 25,010 | 39.4 | 163.6 | 0.00 | 80 | 29 | 638 | 2026-11-15 |
+| 31 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
+| 31 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
+| 31 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
+| 34 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 34 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
+| 34 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
+| 34 | rust-iouring-not-my-segfault | #401 | Rust (io_uring, SQLite B-tree reads) | **250,000** | 24,071 | 138.1 | 678.7 | 0.00 | 79 | 30 | 1,297 | 2026-11-12 |
+| 34 | holyphp-io-uring-elifoxcoder | #418 | HolyPHP (io_uring, SQLite B-tree reads) | **250,000** ᵘ | 24,124 | 91.9 | 297.2 | 0.00 | 82 | 31 | 1,334 | 2026-11-13 |
+| 34 | luajit-iouring-asxpi | #436 | LuaJIT (io_uring, SQLite B-tree reads) | **250,000** ᴵ | 24,064 | 149.6 | 460.4 | 0.00 | 78 | 30 | 1,187 | 2026-11-14 |
+| 40 | fsharp-kestrel-delneg | #201 | F# (Kestrel, io_uring) | **247,000** | 23,884 | 14 | 72 | 0.00 | 71 | 27 | 750 | 2026-10-30 |
+| 40 | lisp-sbcl-heyitstony97-max | #283 | Common Lisp (SBCL, io_uring, SQLite B-tree reads) | **247,000** | 23,772 | 251 | 596 | 0.00 | 79 | 30 | 1,187 | 2026-11-03 |
+| 42 | asm-epoll-umitaltintas | #152 | x86-64 asm (io_uring) | **240,000** | 22,985 | 366 | 633 | 0.00 | 83 | 33 | 545 | 2026-10-28 |
+| 42 | cider-iouring-pomilon-v5 | #273 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 145 | 236 | 0.02 | 92 | 36 | 706 | 2026-11-02 |
+| 42 | c-rawsqlite-larvance | #210 | C (io_uring, SQLite B-tree reads) | **240,000** | 23,237 | 118 | 280 | 0.00 | 84 | 33 | 1,153 | 2026-11-05 |
+| 42 | java-iouring-davidhsv | #393 | Java (FFM, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 80.7 | 961.5 | 0.00 | 74 | 29 | 1,458 | 2026-11-11 |
+| 46 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
+| 46 | c-epoll-patrickryankenneth | #289 | C (io_uring, epoll fallback, SQLite B-tree reads) | **238,000** | 23,026 | 163.6 | 508.6 | 0.00 | 81 | 32 | 711 | 2026-11-08 |
+| 48 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 48 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
+| 50 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
+| 50 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
+| 50 | go-iouring-rkkautsar | #260 | Go (io_uring, cgo SQLite B-tree reads) | **230,000** | 22,069 | 66.8 | 438 | 0.00 | 93 | 39 | 799 | 2026-11-03 |
+| 50 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
+| 50 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
+| 55 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
+| 55 | lean-derive-drain-hargup | #462 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **228,000** | 22,147 | 94.6 | 455.9 | 0.00 | 76 | 32 | 698 | 2026-11-15 |
+| 57 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
+| 58 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
+| 58 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
+| 58 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
+| 58 | cpp-io_uring-0329-at | #442 | C++ (io_uring, SQLite B-tree reads) | **220,000** ᴹ | 21,320 | 341.6 | 465.0 | 0.00 | 71 | 31 | 777 | 2026-11-15 |
+| 62 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 62 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
 | 64 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
 | 64 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
 | 64 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
@@ -941,7 +942,9 @@ p99, 0 errors, 258 MB); 68,000, 70,000 and 80,000 failed on `connection reset by
 Its follow-up #460 (`7c2ebfb`, 8 rings with their own descriptor tables) is no longer capped and replaces the #454 row:
 it held **219,000** (21,373 req/s, p95 20.6 / p99 396.6 ms, 0 errors, 79 % CPU, 34 µs/req, 566 MB, 2026-11-15). 230,000
 passed the 2-minute probe but failed the 5-minute hold on p99 (1.01 s, 0 errors, 82 % CPU); 240,000 failed on p99
-(13.2 s, 0 errors) and 320,000 on `connection refused` (80.7 %).
+(13.2 s, 0 errors) and 320,000 on `connection refused` (80.7 %). Its later commit `122da96` held **260,000** (25,010 req/s, p95 39.4 / p99 163.6 ms, 0 errors, 80 %
+CPU, 29 µs/req, 638 MB, 2026-11-15) and is the row now; 270,000 and 280,000 failed the 2-minute probe on p99 (2.35 s,
+2.65 s) and 320,000 on p95 (38 s).
 
 ᴹ **C++ io_uring #442** (`8512d44`, follow-up to the merged #412's 65,000 ᶜ: rewrite into `src/`, PASSIVE checkpoints on
 a second connection) held **199,000** (19,576 req/s, p95 15.0 / p99 80.7 ms, 0 errors, 64 % CPU, 30 µs/req, 1,170 MB,
@@ -1210,6 +1213,10 @@ committed in this repo.
   data tuned to the benchmark, and a non-source input to the build). Scored as submitted (125k); held open for Arjay.
   go-fasthttp-savak1990 #106 does the same (committed Go `default.pgo` + gcc `sqlite#sqlite3.gcda` from the author's
   own k6 runs, used by the default build); scored as submitted (65k, `71acb19`), held open for Arjay.
+  zig-iouring-harshitkhandelwal208 #460 (`122da96`) commits a clang profile for its SQLite shim
+  (`src/c/sqlite.proftext`) that build.sh uses when `clang` and `llvm-profdata` are installed; on the challenge box
+  that step was skipped ("Clang PGO build skipped; falling back to native Zig build"), so its 260k was scored without
+  the profile. Same question, held open for Arjay.
 - **Arjay's rulings on SQLite (2026-10-31).** Reading `/feed` and `/posts/:id` through SQLite's own B-tree/cursor API
   is allowed (rules 2/3), so the B-tree entries (lean-derive #153, mojo #224, v-epoll #191, c-uring-curvynes #217,
   crystal-rayo #218, c-iouring-moneebullah25 #244, rust-native #265 and others) carry no flag. Ordering routes or fast
@@ -1308,7 +1315,10 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   credit**: `src/shim.c` (517 lines: B-tree open/layout/seek/`td_count_likes` helpers and the checkpoint state machine)
   is #264's `csrc/shim.c` with the comments removed and small edits; the Zig server, HTTP, JSON and JWT code are the
   author's own. Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; the
-  README doesn't credit #264 yet, so it's held until it does. Scored as submitted (219k at `7c2ebfb`).
+  README didn't credit #264 at `7c2ebfb` (219k). At `122da96` (260k, the row) the README credits #264 as inspiration
+  but says the database layer is all Zig with prepared statements, while the build still ships and uses the
+  #264-derived `src/shim.c`; held until the README says plainly that shim.c is adapted from #264. `122da96` also
+  commits a PGO profile (see the #91 line above).
 - **elisp-emacs-unorig-username #464 (follow-up to #444) closes every connection past the first 32**: it serves direct
   on :80, keeps 32 connections alive and answers everyone else with `Connection: close`, so nearly every request
   arrives on a new connection (1,235,237 dials for about 1.24 M requests in the scored hold; TCP connect time isn't

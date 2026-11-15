@@ -136,11 +136,13 @@ verified(Tok, Payload) :-
     secret(Key), string_length(H, HL), string_length(P, PL), DL is HL + 1 + PL,
     sub_string(Tok, 0, DL, _, Data),
     hmac_sha(Key, Data, Mac, [algorithm(sha256)]),
-    unbase64(S, Sig), string_codes(Sig, Mac),
+    unbase64(S, Sig), string_codes(Sig, Sc), foldl(xor_or, Sc, Mac, 0, 0),   % no early exit on the first wrong byte
     b64_json(P, obj(Payload)),
     get_time(Now),
     last_value(Payload, "exp", Exp), number(Exp), Exp > floor(Now),
     ( last_value(Payload, "nbf", Nbf) -> number(Nbf), Nbf =< floor(Now) ; true ).
+
+xor_or(A, B, D0, D) :- D is D0 \/ (A xor B).
 
 b64_json(B64, V) :-
     unbase64(B64, Plain),
@@ -302,13 +304,13 @@ accept(Sock) :-
 
 readable(I, Outs0, Outs) :- % adds Out-Responses for the requests that arrived on I
     conn(I, O),
-    (   catch((fill_buffer(I), read_pending_codes(I, Cs, [])), _, fail), Cs \== []
-    ->  string_codes(New, Cs),
+    (   catch((fill_buffer(I), read_pending_codes(I, Cs, [])), _, fail), Cs \== [],
+        string_codes(New, Cs),
         ( retract(rest(I, Old)) -> string_concat(Old, New, Buf) ; Buf = New ),
-        requests(Buf, Rs, Left),
-        ( Rs == [] -> Outs = Outs0 ; Outs = [O-Rs|Outs0] ),
+        requests(Buf, Rs, Left)                % fails on a request line that is not Method Target ...
+    ->  ( Rs == [] -> Outs = Outs0 ; Outs = [O-Rs|Outs0] ),
         string_length(Left, LL),
-        (   LL > 1048576 -> drop(I)            % no request of ours is this large
+        (   LL > 65536 -> drop(I)              % the spec stops at 16 KB; bounds parse stacks and rescans
         ;   LL > 0 -> assertz(rest(I, Left))
         ;   true
         )

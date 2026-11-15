@@ -83,4 +83,5 @@ At 42,000 the CPU is close to full, so the local limit is not far above that. Pe
 
 The spec does not ask for them: `Transfer-Encoding: chunked`, `Expect: 100-continue`, `Connection: close`
 (the client closes), bodies on `GET`, write backpressure for a client that pipelines without reading, and
-lone UTF-16 surrogates in request JSON (rejected as malformed).
+lone UTF-16 surrogates in request JSON (rejected as malformed). A request line that does not parse, or an
+unfinished request over 64 KB, closes that connection.

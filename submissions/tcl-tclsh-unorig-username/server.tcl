@@ -7,6 +7,8 @@
 # First in auto_path, so build.sh's sha256c wins over tcllib's own sha256c.tcl, which would run
 # critcl at startup and compile into ~/.critcl.
 set auto_path [linsert $auto_path 0 [file join [file dirname [file normalize [info script]]] lib]]
+# The Debian packaged SQLite binding (an 8.6 stubs extension, which 8.7 loads).
+lappend auto_path /usr/lib/tcltk
 package require sqlite3
 package require sha256c
 if {![string match *__critcl_load__* [package ifneeded sha256c [package present sha256c]]]} {
@@ -115,7 +117,7 @@ proc create {c uid name j} {
         RETURNING CAST(json_object('post', json_object('id', id, 'body', body, 'created_at', created_at,
                                    'author', CAST(@name AS TEXT), 'like_count', 0)) AS BLOB)
     }] 0]
-    puts -nonewline $c $::H201[string length $b]$::EOH
+    puts -nonewline $c $::H201[string length $b]\r\n\r\n
     puts -nonewline $c $b
     return ""
 }
@@ -157,7 +159,7 @@ proc handle {c buf pos he next lh} {
         } else {
             return $::E(404)
         }
-        puts -nonewline $c $::H200[string length $b]$::EOH
+        puts -nonewline $c $::H200[string length $b]\r\n\r\n
         puts -nonewline $c $b
         return ""
     }
@@ -176,11 +178,8 @@ proc handle {c buf pos he next lh} {
     like $uid $id
 }
 
-# select() also costs time for every open descriptor on every wakeup, so only this many connections
-# stay open between requests: past it a response carries "Connection: close" and the server closes
-# the socket after writing it, and that client reconnects for its next request.
-set KEEP 32
 set nconn 0
+set MAXCONN [expr {[lindex $argv 0] - 64}]
 proc drop {c} {
     incr ::nconn -1
     unset -nocomplain ::B($c)
@@ -205,11 +204,8 @@ proc rd {c} {
             if {$cl > 0} {incr next $cl}
             if {$next > $len} break
         }
-        if {[string first "\nconnection: close" $lh] >= 0 || $::nconn >= $::KEEP} {set close 1}
-        set ::EOH [expr {$close ? "\r\nConnection: close\r\n\r\n" : "\r\n\r\n"}]
+        if {[string first "\nconnection: close" $lh] >= 0} {set close 1}
         if {[catch {handle $c $b $pos $he $next $lh} r]} {puts stderr $::errorInfo; set r $::E(500)}
-        # A returned response is header and JSON body; a JSON body has no raw CRLF.
-        if {$close} {set r [string map [list \r\n\r\n $::EOH] $r]}
         puts -nonewline $c $r
         set pos $next
         if {$close} break
@@ -219,10 +215,10 @@ proc rd {c} {
 }
 
 proc accept {c addr port} {
-    # Tcl 8.6 waits with select(): a descriptor of 1024 or more must never get a file handler.
-    if {$::nconn >= 1000} {return [close $c]}
+    # Below start.sh's descriptor limit (argv), so accept never fails with EMFILE and spins.
+    if {$::nconn >= $::MAXCONN} {return [close $c]}
     incr ::nconn
-    fconfigure $c -blocking 0 -translation binary -buffering full -buffersize 262144
+    fconfigure $c -blocking 0 -translation binary -buffering full
     fileevent $c readable [list rd $c]
 }
 

@@ -4,9 +4,14 @@
 # Text goes to SQLite as a blob (@var) and is CAST to TEXT there; JSON comes back as a blob,
 # built by SQLite. That keeps UTF-8 exact and leaves Tcl almost nothing to do per row.
 
-lappend auto_path [file join [file dirname [file normalize [info script]]] lib]
+# First in auto_path, so build.sh's sha256c wins over tcllib's own sha256c.tcl, which would run
+# critcl at startup and compile into ~/.critcl.
+set auto_path [linsert $auto_path 0 [file join [file dirname [file normalize [info script]]] lib]]
 package require sqlite3
 package require sha256c
+if {![string match *__critcl_load__* [package ifneeded sha256c [package present sha256c]]]} {
+    error "sha256c did not load from ./lib: run build.sh"
+}
 
 sqlite3 db $env(SQLITE_PATH)
 db eval {

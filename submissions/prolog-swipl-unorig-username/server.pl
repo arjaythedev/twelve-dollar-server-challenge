@@ -1,4 +1,4 @@
-% The whole API in SWI-Prolog: one thread, one event loop over wait_for_input/3, one SQLite connection.
+% The whole API in SWI-Prolog: one thread, one epoll event loop, one SQLite connection.
 % Run with: swipl server.pl   (config from SQLITE_PATH, JWT_SECRET, HOST, PORT)
 :- use_module(library(socket)).
 :- use_module(library(sha)).
@@ -7,10 +7,11 @@
 :- use_module(library(lists)).
 :- prolog_load_context(directory, Dir), atom_concat(Dir, '/lib', Lib), asserta(user:file_search_path(foreign, Lib)).
 :- use_foreign_library(foreign(sqlite4pl)).   % built by build.sh from sqlite4pl.c
+:- use_foreign_library(foreign(epoll4pl)).     % epoll_add/1, epoll_wait/1, epoll_watch/2, fd_send/3, from epoll4pl.c
 
 :- initialization(main, main).
 
-:- dynamic conn/2, rest/2, dirty/0, stmt/2, started/1.
+:- dynamic conn/2, fd/2, rest/2, pending/2, dirty/0, stmt/2, started/1.
 
 % ---------------------------------------------------------------- SQL
 % A post object is built by SQLite's json_object, in the spec's key order.
@@ -235,11 +236,10 @@ status_line(404, "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nCo
 status_line(500, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: ").
 status_line(503, "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: ").
 
-send(O, error(Status, Msg)) :- !, atomics_to_string(["{\"error\":\"", Msg, "\"}"], B), send(O, Status-B).
-send(O, 500-"") :- !, send(O, error(500, "internal server error")).
-send(O, Status-Body) :-
-    status_line(Status, H), string_length(Body, Len),
-    write(O, H), write(O, Len), write(O, "\r\n\r\n"), write(O, Body).
+% response(+R, -Parts): the bytes of one response, as a list of strings and numbers.
+response(error(Status, Msg), Ps) :- !, atomics_to_string(["{\"error\":\"", Msg, "\"}"], B), response(Status-B, Ps).
+response(500-"", Ps) :- !, response(error(500, "internal server error"), Ps).
+response(Status-Body, [H, Len, "\r\n\r\n", Body]) :- status_line(Status, H), string_length(Body, Len).
 
 % Answers every complete request in Buf, in order; returns what is left of an unfinished one.
 requests(Buf, Rs, Left) :-
@@ -273,42 +273,52 @@ main :-
     forall(sql(Name, Q), ( sqlite_prepare(Q, S), assertz(stmt(Name, S)) )),
     getenv('HOST', Host), getenv('PORT', PortA), atom_number(PortA, Port),
     tcp_socket(Sock), tcp_setopt(Sock, reuseaddr), tcp_bind(Sock, Host:Port), tcp_listen(Sock, 4096),
-    tcp_open_socket(Sock, Listen, _),
+    tcp_open_socket(Sock, Listen, _), stream_property(Listen, file_no(LFd)), epoll_add(LFd),
     get_time(T0), assertz(started(T0)),
     format(user_error, "listening on ~w:~w~n", [Host, Port]),
     repeat,   % failure driven: each turn starts with empty stacks, connection state lives in the database
     catch(turn(Sock, Listen), E, print_message(error, E)),
     fail.
 
+% Every connection stays open (keep-alive) until the client closes it. Accepting comes after the reads, so a
+% descriptor number closed and reused within one turn is never read as the old connection. The listening
+% socket is checked every turn, not only when epoll_wait/1 (at most 1,024 per call) happens to report it:
+% with thousands of busy connections it came up too rarely, and the kernel's accept queue overflowed.
 turn(Sock, Listen) :-
-    findall(I, conn(I, _), Ins),   % O(connections) per turn: fine for Nginx's few dozen, not for 15,000
-    wait_for_input([Listen|Ins], Ready, infinite),
-    foldl(ready(Sock, Listen), Ready, [], Outs),
+    epoll_wait(Fds),
+    foldl(ready, Fds, [], Outs),
+    accept_all(Sock, Listen, 256),
     flush(Outs).
 
-ready(Sock, Listen, I, Outs0, Outs) :-
-    (   I == Listen -> accept_all(Sock, Listen, 256), Outs = Outs0
-    ;   readable(I, Outs0, Outs)
+ready(Fd, Outs0, Outs) :-
+    (   retract(pending(Fd, S))                                % writable again: send the rest, then read
+    ->  put(Fd, S), ( pending(Fd, _) -> true ; fd(Fd, _) -> epoll_watch(Fd, in) ; true ), Outs = Outs0
+    ;   fd(Fd, I) -> readable(Fd, I, Outs0, Outs)
+    ;   Outs = Outs0
     ).
 
 accept_all(Sock, Listen, N) :- % what the backlog holds, at most N per turn
-    catch(accept(Sock), E, print_message(error, E)),
-    (   N > 1, wait_for_input([Listen], [_], 0) -> N1 is N - 1, accept_all(Sock, Listen, N1) ; true ).
+    (   N > 0, wait_for_input([Listen], [_], 0)
+    ->  catch(accept(Sock), E, print_message(error, E)), N1 is N - 1, accept_all(Sock, Listen, N1)
+    ;   true
+    ).
 
 accept(Sock) :-
     tcp_accept(Sock, C, _),
     tcp_open_socket(C, I, O),
     catch(tcp_setopt(C, nodelay), _, true),   % fails on a peer that already reset; the read will drop it
-    set_stream(I, encoding(octet)), set_stream(O, encoding(octet)), set_stream(O, buffer_size(65536)),
-    assertz(conn(I, O)).
+    set_stream(I, encoding(octet)),   % O is never written: responses go out through fd_send/3
+    stream_property(I, file_no(Fd)),
+    (   epoll_add(Fd) -> assertz(conn(I, O)), assertz(fd(Fd, I))
+    ;   close(I, [force(true)]), close(O, [force(true)])
+    ).
 
-readable(I, Outs0, Outs) :- % adds Out-Responses for the requests that arrived on I
-    conn(I, O),
+readable(Fd, I, Outs0, Outs) :- % adds Fd-Responses for the requests that arrived on I
     (   catch((fill_buffer(I), read_pending_codes(I, Cs, [])), _, fail), Cs \== [],
         string_codes(New, Cs),
         ( retract(rest(I, Old)) -> string_concat(Old, New, Buf) ; Buf = New ),
         requests(Buf, Rs, Left)                % fails on a request line that is not Method Target ...
-    ->  ( Rs == [] -> Outs = Outs0 ; Outs = [O-Rs|Outs0] ),
+    ->  ( Rs == [] -> Outs = Outs0 ; Outs = [Fd-Rs|Outs0] ),
         string_length(Left, LL),
         (   LL > 65536 -> drop(I)              % the spec stops at 16 KB; bounds parse stacks and rescans
         ;   LL > 0 -> assertz(rest(I, Left))
@@ -318,7 +328,7 @@ readable(I, Outs0, Outs) :- % adds Out-Responses for the requests that arrived o
     ).
 
 drop(I) :-
-    retract(conn(I, O)), retractall(rest(I, _)),
+    retract(conn(I, O)), retract(fd(Fd, I)), retractall(rest(I, _)), retractall(pending(Fd, _)),
     close(I, [force(true)]), close(O, [force(true)]).
 
 % Group commit: one COMMIT for every write of this turn, then the responses. A 201 never leaves first.
@@ -328,8 +338,18 @@ flush(Outs) :-
     ->  ( run(commit, [], done(_)) -> Ok = true ; run(rollback, [], _), Ok = false )
     ;   Ok = true
     ),
-    forall(member(O-Rs, Outs),
-           (   Ok == true, catch(( forall(member(R, Rs), send(O, R)), flush_output(O) ), _, fail) -> true
-           ;   conn(I, O) -> drop(I)
+    forall(member(Fd-Rs, Outs),
+           (   Ok == true, maplist(response, Rs, Pss), append(Pss, Ps), atomics_to_string(Ps, S),
+               put(Fd, S) -> true                      % one send() per connection per turn
+           ;   fd(Fd, I) -> drop(I)
            ;   true
            )).
+
+% put(+Fd, +Bytes): sends what the socket takes. A client that does not read its answers keeps the rest in
+% pending/2 and is not read again until the rest has gone out, so it can hold at most one turn's output.
+put(Fd, S) :-
+    (   catch(fd_send(Fd, S, Left), _, fail)
+    ->  ( Left == "" -> true ; assertz(pending(Fd, Left)), epoll_watch(Fd, out) )
+    ;   fd(Fd, I) -> drop(I)
+    ;   true
+    ).

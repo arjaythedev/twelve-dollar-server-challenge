@@ -79,9 +79,10 @@ treat them as a sketch.
 | 45,000, 5 min hold | 4,197 | 55 ms | 109 ms | 0% | 97% | 105 µs |
 | 50,000 | 4,087 to 4,146 | 224 to 521 ms | 515 to 660 ms | 0% | 99 to 100% | 98 to 103 µs |
 
-Two runs per row except the hold. The same setup with the first version behind Nginx: 24,000 passed
-(155 to 180 µs per request, Emacs plus Nginx), 27,000 passed once and failed once, 30,000 failed both
-times (21 to 27% errors, Nginx upstream timeouts).
+Two runs per row except the hold. The same setup with the first version behind Nginx, over two
+separate series: 24,000 passed every time (141 to 186 µs per request, Emacs plus Nginx), 27,000
+passed 3 of 4 times, 30,000 2 of 5, 33,000 1 of 2, 36,000 failed. Each failure was a collapse at 95
+to 100% CPU (8 to 52% errors, Nginx upstream timeouts), not a slow climb.
 
 ## Known limits
 

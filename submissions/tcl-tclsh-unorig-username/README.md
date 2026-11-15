@@ -47,6 +47,8 @@ and passes it to the server, which closes new connections 64 short of it so `acc
 - **One process, one thread, one event loop** (`vwait forever`). Each connection is a Tcl channel in
   `-translation binary -buffering full` mode; its readable handler reads what has arrived, answers every
   complete request in it (pipelined and split requests both work) and flushes once.
+  A client that stops reading its responses is paused once 1 MB of output is queued for it, and a
+  failed write drops the connection, so neither can grow memory or delay other clients.
 - **Bytes all the way.** Because the channels are binary, a Tcl string here is one char per byte. Request
   text goes into SQLite as a blob (`@var`) and is `CAST` to `TEXT` in SQL; responses come back from SQLite
   as `CAST(... AS BLOB)`, which the binding hands over as a Tcl byte array that `puts` writes untouched.

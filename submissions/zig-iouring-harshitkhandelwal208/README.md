@@ -1,11 +1,6 @@
 # zig-iouring-harshitkhandelwal208
 
-High-performance, clean-room Zig implementation for the $12 Server Challenge (`arjaythedev/twelve-dollar-server-challenge`).
-
-## Author & Attribution
-
-- **Author**: Harshit Khandelwal ([@harshitkhandelwal208](https://github.com/harshitkhandelwal208))
-- **Implementation**: 100% genuine, clean-room Zig implementation written from scratch. Contains zero copied code, stolen logic, or external runtime dependencies beyond the official Zig standard library toolchain and the SQLite amalgamation.
+High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/twelve-dollar-server-challenge`).
 
 ---
 
@@ -43,51 +38,20 @@ High-performance, clean-room Zig implementation for the $12 Server Challenge (`a
 - The SQLite page cache is mapped via an anonymous 32 MB block backed by `MADV_HUGEPAGE` (2 MB Transparent Huge Pages).
 - Configured via `SQLITE_CONFIG_PAGECACHE` with 4,096-byte pages, drastically cutting TLB miss latency and dTLB shootdowns during high-concurrency database queries.
 
-### 5. AVX2 SIMD HTTP Header Parser
+### 5. AVX2 SIMD HTTP Header Parser & Route Fast-Paths
 - HTTP request lines and header delimiters (`\r\n\r\n`) are scanned using 32-byte AVX2 SIMD vector registers (`@Vector(32, u8)`).
 - Zero-copy header inspection identifies `Content-Length`, `Authorization`, and `Connection` tokens in a single pass without substring allocations.
-- Word-level SWAR fast paths detect `GET `, `POST `, HTTP/1.1 and HTTP/1.0 request verbs.
+- Word-level 64-bit fast paths detect `GET /feed` and common endpoints without intermediate parsing passes.
 
 ### 6. Branchless Signature Verification & Precomputed HMAC Pads
 - HS256 JWT signature verification uses precomputed SHA-256 inner/outer pads derived once at startup.
 - Signature decoding features a branchless 43-character Base64URL decoder (`decodeSig43`) that translates 32 signature bytes directly into HMAC comparison buffers in 22 machine cycles without branch mispredictions.
 - Fully adheres to Rule 5: every request validates signature, timestamp, and payload on-the-fly without response or verification caches.
 
-### 7. Branchless Integer & JSON Serializer
+### 7. Zero-Allocation Response Slab & Branchless Integer Serializer
+- Outgoing response buffers are serviced from a pre-allocated, huge-page-backed response slab, bypassing glibc `malloc`/`free` calls during response transmission.
 - Responses are formatted using precomputed two-digit decimal lookup tables (`writeU64`), writing up to 18 decimal digits per cycle with minimal division operations.
 - JSON escaping streams directly into pre-allocated connection buffers without intermediary string allocations.
-
----
-
-## Clean-Room Verification & Plagiarism Audit
-
-This implementation was audited and verified to be a clean-room Zig submission:
-1. **Independent Logic & Architecture**:
-   - Built cleanly on pure Zig standard library abstractions and high-level SQLite prepared statements (`sqlite3_prepare_v3`).
-   - Uses zero internal SQLite B-Tree cursor scraping (unlike C submissions such as PR #290 which access private `sqlite3.c` B-tree headers, `BtCursor`, and `MemPage`).
-   - Avoids zstd compression dictionaries, auxiliary background checkpoint threads, or multi-ring process arrays, utilizing a single, highly optimized, non-blocking `IoUring` instance with multishot CQE draining.
-2. **Authentic Codebase Lineage**:
-   - Data structures (`Scratch` bump allocator, `Buf` growable byte buffer, `jp` zero-copy JSON reader, `jwt` HS256 verifier, SIMD `http` parser) originate from the author's prior clean-room Zig systems research and have been rigorously tested and adapted for the $12 challenge requirements.
-
----
-
-## Credits & Acknowledgments
-
-This project gratefully acknowledges the following foundational technologies and architectural inspirations:
-
-1. **The Zig Programming Language and Toolchain**:
-   - Created by Andrew Kelley and maintained by the [Zig Software Foundation](https://ziglang.org/).
-   - Zig master / 0.17 provides incredible control over memory layout, first-class SIMD vector primitives (`@Vector`), seamless C translation via `b.addTranslateC`, and optimal release optimization modes (`ReleaseFast`).
-2. **The SQLite Database Engine**:
-   - Created by D. Richard Hipp, Dan Kennedy, and Joe Mistachkin ([Hipp, Wyrick & Company, Inc.](https://www.sqlite.org/)).
-   - Dedicated to the public domain through the SQLite Blessing. SQLite provides world-class in-process transactional storage, persistent prepared statement compilation, and customizable low-level memory allocators (`SQLITE_CONFIG_PAGECACHE`).
-3. **The Linux Kernel `io_uring` Subsystem**:
-   - Designed and maintained by Jens Axboe and the Linux kernel community.
-   - `io_uring` enables truly asynchronous, zero-syscall system architectures through ring-buffer shared memory, multishot accept/recv, and provided buffer ring recycling.
-4. **Architectural Inspirations & Open Source Community**:
-   - The Linux kernel community and documentation on `IORING_REGISTER_PBUF_RING` and kernel direct descriptors (`IORING_REGISTER_FILES_SPARSE`).
-   - High-performance systems research on Transparent Huge Pages (`MADV_HUGEPAGE`), SIMD delimiter searching, and branchless Base64URL parsing.
-   - The organizers and community of the **$12 Server Challenge** (`arjaythedev/twelve-dollar-server-challenge`) for providing a rigorous, competitive benchmark environment.
 
 ---
 

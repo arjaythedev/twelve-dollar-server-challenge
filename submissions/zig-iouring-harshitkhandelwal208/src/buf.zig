@@ -9,6 +9,31 @@ pub const digits: *const [200]u8 =
     "6061626364656667686970717273747576777879" ++
     "8081828384858687888990919293949596979899";
 
+pub inline fn writeU64Direct(buf: []u8, val: u64) usize {
+    var v = val;
+    var b: [24]u8 = undefined;
+    var i: usize = 24;
+    while (v >= 100) {
+        const r: usize = @intCast(v % 100);
+        v /= 100;
+        i -= 2;
+        b[i] = digits[r * 2];
+        b[i + 1] = digits[r * 2 + 1];
+    }
+    if (v >= 10) {
+        const r: usize = @intCast(v);
+        i -= 2;
+        b[i] = digits[r * 2];
+        b[i + 1] = digits[r * 2 + 1];
+    } else {
+        i -= 1;
+        b[i] = '0' + @as(u8, @truncate(v));
+    }
+    const len = 24 - i;
+    @memcpy(buf[0..len], b[i..24]);
+    return len;
+}
+
 pub const Buf = struct {
     ptr: [*]u8 = undefined,
     len: usize = 0,
@@ -50,47 +75,58 @@ pub const Buf = struct {
     }
 
     pub fn writeU64(self: *Buf, val: u64) void {
-        var v = val;
-        var b: [24]u8 = undefined;
-        var i: usize = 24;
-        while (v >= 100) {
-            const r: usize = @intCast(v % 100);
-            v /= 100;
-            i -= 2;
-            b[i] = digits[r * 2];
-            b[i + 1] = digits[r * 2 + 1];
-        }
-        if (v >= 10) {
-            const r: usize = @intCast(v);
-            i -= 2;
-            b[i] = digits[r * 2];
-            b[i + 1] = digits[r * 2 + 1];
-        } else {
-            i -= 1;
-            b[i] = '0' + @as(u8, @truncate(v));
-        }
-        self.writeAll(b[i..24]);
+        self.ensure(24) catch @panic("OOM");
+        const written = writeU64Direct(self.ptr[self.len..][0..24], val);
+        self.len += written;
     }
 
     pub fn writeJsonString(self: *Buf, s: []const u8) void {
-        self.ensure(s.len * 2 + 2) catch @panic("OOM");
-        for (s) |ch| {
-            switch (ch) {
-                '"' => self.writeAll("\\\""),
-                '\\' => self.writeAll("\\\\"),
-                '\n' => self.writeAll("\\n"),
-                '\r' => self.writeAll("\\r"),
-                '\t' => self.writeAll("\\t"),
-                else => {
-                    if (ch < 0x20) {
+        self.ensure(s.len * 6 + 2) catch @panic("OOM");
+        var start: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) : (i += 1) {
+            const ch = s[i];
+            if (ch == '"' or ch == '\\' or ch < 0x20) {
+                if (i > start) {
+                    const chunk = s[start..i];
+                    @memcpy(self.ptr[self.len..][0..chunk.len], chunk);
+                    self.len += chunk.len;
+                }
+                switch (ch) {
+                    '"' => {
+                        @memcpy(self.ptr[self.len..][0..2], "\\\"");
+                        self.len += 2;
+                    },
+                    '\\' => {
+                        @memcpy(self.ptr[self.len..][0..2], "\\\\");
+                        self.len += 2;
+                    },
+                    '\n' => {
+                        @memcpy(self.ptr[self.len..][0..2], "\\n");
+                        self.len += 2;
+                    },
+                    '\r' => {
+                        @memcpy(self.ptr[self.len..][0..2], "\\r");
+                        self.len += 2;
+                    },
+                    '\t' => {
+                        @memcpy(self.ptr[self.len..][0..2], "\\t");
+                        self.len += 2;
+                    },
+                    else => {
                         var esc: [6]u8 = undefined;
                         _ = std.fmt.bufPrint(&esc, "\\u00{x:0>2}", .{ch}) catch unreachable;
-                        self.writeAll(&esc);
-                    } else {
-                        self.writeByte(ch);
-                    }
-                },
+                        @memcpy(self.ptr[self.len..][0..6], &esc);
+                        self.len += 6;
+                    },
+                }
+                start = i + 1;
             }
+        }
+        if (i > start) {
+            const chunk = s[start..i];
+            @memcpy(self.ptr[self.len..][0..chunk.len], chunk);
+            self.len += chunk.len;
         }
     }
 
@@ -98,3 +134,15 @@ pub const Buf = struct {
         return self.ptr[0..self.len];
     }
 };
+
+test "writeU64Direct and writeJsonString" {
+    var b = try Buf.init(1024);
+    defer b.deinit();
+
+    b.writeU64(1234567890);
+    try std.testing.expectEqualStrings("1234567890", b.slice());
+
+    b.reset();
+    b.writeJsonString("hello \"world\"\n");
+    try std.testing.expectEqualStrings("hello \\\"world\\\"\\n", b.slice());
+}

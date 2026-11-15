@@ -22,6 +22,47 @@ pub const buf_size = 2048;
 pub const n_bufs = 16384;
 pub const bgid = 1;
 
+pub const pool_buf_size: usize = 4096;
+pub const pool_count: usize = 8192;
+
+pub const RespPool = struct {
+    mem: [*]u8 = undefined,
+    free_stack: []u16 = &.{},
+    top: usize = 0,
+
+    pub fn init() !RespPool {
+        const total_bytes = pool_count * pool_buf_size;
+        const mem = try sys.mapAnon(total_bytes);
+        sys.madviseHuge(mem);
+
+        const stack_mem = try sys.mapAnon(pool_count * @sizeOf(u16));
+        const stack: []u16 = @as([*]u16, @ptrCast(@alignCast(stack_mem.ptr)))[0..pool_count];
+        for (0..pool_count) |i| {
+            stack[i] = @intCast(i);
+        }
+
+        return .{
+            .mem = mem.ptr,
+            .free_stack = stack,
+            .top = pool_count,
+        };
+    }
+
+    pub inline fn acquire(self: *RespPool) ?[]u8 {
+        if (self.top == 0) return null;
+        self.top -= 1;
+        const id = self.free_stack[self.top];
+        return (self.mem + @as(usize, id) * pool_buf_size)[0..pool_buf_size];
+    }
+
+    pub inline fn release(self: *RespPool, ptr: [*]u8) void {
+        const offset = @intFromPtr(ptr) - @intFromPtr(self.mem);
+        const id: u16 = @intCast(offset / pool_buf_size);
+        self.free_stack[self.top] = id;
+        self.top += 1;
+    }
+};
+
 const Tag = enum(u8) { accept = 1, recv, send, shut, close, timer };
 
 inline fn ud(tag: Tag, gen: u32, idx: u32) u64 {
@@ -37,9 +78,10 @@ pub const Conn = struct {
     closing: bool = false,
     pend_buf: ?[]u8 = null,
     pend_len: usize = 0,
-    out: ?[]u8 = null,
+    out: ?[*]u8 = null,
     out_len: usize = 0,
     out_off: usize = 0,
+    out_is_pool: bool = false,
 };
 
 pub const Server = struct {
@@ -57,7 +99,7 @@ pub const Server = struct {
     pbuf_tail: u16 = 0,
     scratch: Scratch = undefined,
     resp_buf: Buf = .{},
-    head_buf: Buf = .{},
+    resp_pool: RespPool = undefined,
 
     pub fn init(db: Db, jwt_key: Key, slots: u32) !*Server {
         const s = try gpa.create(Server);
@@ -84,7 +126,7 @@ pub const Server = struct {
 
         s.scratch = try Scratch.init(128 * 1024);
         s.resp_buf = try Buf.init(128 * 1024);
-        s.head_buf = try Buf.init(4096);
+        s.resp_pool = try RespPool.init();
 
         return s;
     }
@@ -294,22 +336,23 @@ pub const Server = struct {
 
         var offset: usize = 0;
         while (offset < input.len and c.open and !c.closing) {
-            const parsed = http.parseHead(input[offset..]);
+            const rem = input[offset..];
+            const parsed = http.parseHead(rem);
             switch (parsed) {
                 .ok => |head| {
                     const req_len = head.head_len + head.content_length;
                     if (offset + req_len > input.len) {
                         // Incomplete body
-                        self.savePending(c, input[offset..]);
+                        self.savePending(c, rem);
                         return;
                     }
-                    const body = input[offset + head.head_len .. offset + req_len];
+                    const body = rem[head.head_len..req_len];
                     offset += req_len;
 
                     self.serve(slot, c, &head, body);
                 },
                 .need_more => {
-                    self.savePending(c, input[offset..]);
+                    self.savePending(c, rem);
                     return;
                 },
                 .bad => |status| {
@@ -322,6 +365,8 @@ pub const Server = struct {
 
         if (offset >= input.len) {
             c.pend_len = 0;
+        } else {
+            self.savePending(c, input[offset..]);
         }
     }
 
@@ -545,34 +590,75 @@ pub const Server = struct {
         self.sendResponse(slot, c, status, self.resp_buf.slice(), keep_alive);
     }
 
-    fn sendResponse(self: *Server, slot: u32, c: *Conn, status: u16, body: []const u8, keep_alive: bool) void {
-        self.head_buf.reset();
-        const status_line = switch (status) {
-            200 => "HTTP/1.1 200 OK\r\n",
-            201 => "HTTP/1.1 201 Created\r\n",
-            400 => "HTTP/1.1 400 Bad Request\r\n",
-            401 => "HTTP/1.1 401 Unauthorized\r\n",
-            404 => "HTTP/1.1 404 Not Found\r\n",
-            503 => "HTTP/1.1 503 Service Unavailable\r\n",
-            else => "HTTP/1.1 500 Internal Server Error\r\n",
-        };
-        self.head_buf.writeAll(status_line);
-        self.head_buf.writeAll("Content-Type: application/json\r\n");
-        if (!keep_alive) {
-            self.head_buf.writeAll("Connection: close\r\n");
+    inline fn writeHeaderDirect(buf: *[128]u8, status: u16, body_len: usize, keep_alive: bool) usize {
+        var off: usize = 0;
+        if (status == 200) {
+            const s = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n";
+            @memcpy(buf[0..s.len], s);
+            off = s.len;
+        } else if (status == 201) {
+            const s = "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\n";
+            @memcpy(buf[0..s.len], s);
+            off = s.len;
+        } else {
+            const line = switch (status) {
+                400 => "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n",
+                401 => "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n",
+                404 => "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n",
+                503 => "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n",
+                else => "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n",
+            };
+            @memcpy(buf[0..line.len], line);
+            off = line.len;
         }
-        self.head_buf.writeAll("Content-Length: ");
-        self.head_buf.writeU64(body.len);
-        self.head_buf.writeAll("\r\n\r\n");
 
-        const total_len = self.head_buf.len + body.len;
-        const out_mem = gpa.alloc(u8, total_len) catch return;
-        @memcpy(out_mem[0..self.head_buf.len], self.head_buf.slice());
-        @memcpy(out_mem[self.head_buf.len..][0..body.len], body);
+        if (!keep_alive) {
+            const s = "Connection: close\r\n";
+            @memcpy(buf[off..][0..s.len], s);
+            off += s.len;
+        }
 
-        c.out = out_mem;
+        const cl = "Content-Length: ";
+        @memcpy(buf[off..][0..cl.len], cl);
+        off += cl.len;
+
+        off += bufm.writeU64Direct(buf[off..], body_len);
+
+        const end = "\r\n\r\n";
+        @memcpy(buf[off..][0..end.len], end);
+        off += end.len;
+
+        return off;
+    }
+
+    fn sendResponse(self: *Server, slot: u32, c: *Conn, status: u16, body: []const u8, keep_alive: bool) void {
+        var hdr_buf: [128]u8 = undefined;
+        const hdr_len = writeHeaderDirect(&hdr_buf, status, body.len, keep_alive);
+        const total_len = hdr_len + body.len;
+
+        var out_ptr: [*]u8 = undefined;
+        var is_pool = false;
+
+        if (total_len <= pool_buf_size) {
+            if (self.resp_pool.acquire()) |p| {
+                out_ptr = p.ptr;
+                is_pool = true;
+            } else {
+                const mem = gpa.alloc(u8, total_len) catch return;
+                out_ptr = mem.ptr;
+            }
+        } else {
+            const mem = gpa.alloc(u8, total_len) catch return;
+            out_ptr = mem.ptr;
+        }
+
+        @memcpy(out_ptr[0..hdr_len], hdr_buf[0..hdr_len]);
+        @memcpy((out_ptr + hdr_len)[0..body.len], body);
+
+        c.out = out_ptr;
         c.out_len = total_len;
         c.out_off = 0;
+        c.out_is_pool = is_pool;
 
         self.armSend(slot, c);
     }
@@ -580,7 +666,7 @@ pub const Server = struct {
     fn armSend(self: *Server, slot: u32, c: *Conn) void {
         const s = self.ring.get_sqe() catch return;
         const slice = c.out.?[c.out_off..c.out_len];
-        s.prep_send(@intCast(slot), slice, 0);
+        s.prep_send(@intCast(slot), slice, linux.MSG.NOSIGNAL);
         s.flags |= linux.IOSQE_FIXED_FILE;
         s.user_data = ud(.send, c.gen, slot);
         c.send_live = true;
@@ -605,11 +691,16 @@ pub const Server = struct {
 
         // Response fully sent
         if (c.out) |m| {
-            gpa.free(m);
+            if (c.out_is_pool) {
+                self.resp_pool.release(m);
+            } else {
+                gpa.free(m[0..c.out_len]);
+            }
             c.out = null;
         }
         c.out_len = 0;
         c.out_off = 0;
+        c.out_is_pool = false;
 
         if (c.closing) {
             self.closeConn(slot, c);
@@ -629,9 +720,16 @@ pub const Server = struct {
         c.closing = true;
 
         if (c.out) |m| {
-            gpa.free(m);
+            if (c.out_is_pool) {
+                self.resp_pool.release(m);
+            } else {
+                gpa.free(m[0..c.out_len]);
+            }
             c.out = null;
         }
+        c.out_len = 0;
+        c.out_off = 0;
+        c.out_is_pool = false;
         if (c.pend_buf) |p| {
             gpa.free(p);
             c.pend_buf = null;

@@ -1,5 +1,4 @@
-bin/*
-!bin/bf_compiler
+bin/
 build/
 .zig-cache/
 zig-out/

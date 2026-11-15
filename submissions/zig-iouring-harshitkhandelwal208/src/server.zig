@@ -152,7 +152,7 @@ pub const RingWorker = struct {
     pbuf_ring: [*]linux.io_uring_buf = undefined,
     pbuf_mem: [*]u8 = undefined,
     pbuf_tail: u16 = 0,
-    rearm_queue: [65536]u32 = undefined,
+    rearm_queue: []u32 = &.{},
     rearm_head: u32 = 0,
     rearm_tail: u32 = 0,
 
@@ -194,13 +194,15 @@ pub const Server = struct {
     n_pending_writes: usize = 0,
 
     pub fn init(db: Db, jwt_key: Key) !*Server {
-        const s = try gpa.create(Server);
-        s.* = .{
-            .db = db,
-            .jwt = jwt_key,
-            .started = sys.nowUnix(),
-            .now = sys.nowUnix(),
-        };
+        const smem = try sys.mapAnon(@sizeOf(Server));
+        const s: *Server = @ptrCast(@alignCast(smem.ptr));
+        @memset(smem, 0);
+
+        s.db = db;
+        s.jwt = jwt_key;
+        s.started = sys.nowUnix();
+        s.now = sys.nowUnix();
+        for (&s.listeners) |*l| l.* = -1;
 
         const ep = linux.epoll_create1(linux.EPOLL.CLOEXEC);
         if (sys.errnoOf(ep) != .SUCCESS) return error.EpollFailed;
@@ -218,6 +220,11 @@ pub const Server = struct {
                 break;
             };
 
+            const qmem = try sys.mapAnon(65536 * @sizeOf(u32));
+            rw.rearm_queue = @as([*]u32, @ptrCast(@alignCast(qmem.ptr)))[0..65536];
+            rw.rearm_head = 0;
+            rw.rearm_tail = 0;
+
             setupPbufRing(rw) catch |e| {
                 if (i == 0) return e;
                 break;
@@ -231,7 +238,6 @@ pub const Server = struct {
             const cmem = try sys.mapAnon(@as(usize, slots_per_ring) * @sizeOf(Conn));
             sys.madviseHuge(cmem);
             rw.conns = @as([*]Conn, @ptrCast(@alignCast(cmem.ptr)))[0..slots_per_ring];
-            @memset(rw.conns, Conn{});
 
             var ev: linux.epoll_event = .{
                 .events = linux.EPOLL.IN,

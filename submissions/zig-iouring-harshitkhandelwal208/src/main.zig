@@ -26,7 +26,27 @@ fn envInt(init: std.process.Init, name: []const u8, default: u32) u32 {
     return std.fmt.parseInt(u32, v, 10) catch default;
 }
 
+fn crashHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
+    _ = info;
+    _ = ctx;
+    const msg = "FATAL: server process caught crash signal\n";
+    _ = linux.write(2, msg.ptr, msg.len);
+    linux.exit(128 + @as(u8, @intCast(@intFromEnum(sig) & 0x7f)));
+}
+
 pub fn main(init: std.process.Init) !void {
+    // Install fatal signal crash handler to capture diagnostics
+    const sa: linux.Sigaction = .{
+        .handler = .{ .sigaction = crashHandler },
+        .mask = linux.sigemptyset(),
+        .flags = linux.SA.SIGINFO,
+    };
+    _ = linux.sigaction(.SEGV, &sa, null);
+    _ = linux.sigaction(.BUS, &sa, null);
+    _ = linux.sigaction(.ILL, &sa, null);
+    _ = linux.sigaction(.FPE, &sa, null);
+    _ = linux.sigaction(.ABRT, &sa, null);
+
     // Ignore SIGPIPE so disconnected clients don't kill the server process
     const ignore: linux.Sigaction = .{
         .handler = .{ .handler = linux.SIG.IGN },

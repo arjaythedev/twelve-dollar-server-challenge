@@ -205,8 +205,12 @@ proc rd {c} {
             if {$next > $len} break
         }
         if {[string first "\nconnection: close" $lh] >= 0} {set close 1}
-        if {[catch {handle $c $b $pos $he $next $lh} r]} {puts stderr $::errorInfo; set r $::E(500)}
-        puts -nonewline $c $r
+        if {[catch {handle $c $b $pos $he $next $lh} r]} {
+            # The client is gone (broken pipe, reset): skip the rest of its pipelined requests.
+            if {[lindex $::errorCode 0] eq "POSIX"} {return [drop $c]}
+            puts stderr $::errorInfo; set r $::E(500)
+        }
+        if {[catch {puts -nonewline $c $r}]} {return [drop $c]}
         set pos $next
         if {$close} break
     }

@@ -54,13 +54,14 @@ digits, positive, under 19 digits) and `username` (a string), and picks the spec
 - **No caching (rule 5):** every request runs its query; only prepared statements are kept.
 - **Durability (rule 6):** WAL, `synchronous=NORMAL`. Each write is its own autocommit statement, so the 201
   is written after its commit.
-- **Changes to zsh:** `build.sh` adds the `zsh/sqlite` module and changes two lines of `ztcp -l`
-  (`Src/Modules/tcp.c`): the listen backlog goes from 1 to 4096, and the socket gets `SO_REUSEADDR` so a
-  restart can bind while old connections are in `TIME_WAIT`. The rest is stock zsh 5.9.
+- **Changes to zsh:** `build.sh` adds the `zsh/sqlite` module and changes three lines of `ztcp -l`
+  (`Src/Modules/tcp.c`): the listen backlog goes from 1 to 4096, the socket gets `SO_REUSEADDR` so a
+  restart can bind while old connections are in `TIME_WAIT`, and it binds to `$HOST` instead of always
+  `0.0.0.0`, so behind Nginx port 3000 is not reachable from outside. The rest is stock zsh 5.9.
 
 ## Limits (shortcuts)
 
-- `ztcp -l` binds `0.0.0.0` (it takes no address), so `HOST` is not used; the port is `PORT`.
+- `HOST` must be an IPv4 address (`127.0.0.1` or `0.0.0.0`), not a hostname.
 - Connections whose descriptor would be 1,000 or more are closed at once (`select(2)` cannot watch them).
   Behind Nginx there are about 64.
 - `syswrite` blocks: a client that pipelines a lot without reading stalls the server. Nginx always reads.

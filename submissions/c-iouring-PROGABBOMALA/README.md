@@ -12,7 +12,7 @@ This replaces my earlier PR #241.
 
 ## How it works
 
-The loop waits for completions, turns what arrived into a batch of requests (max 2048), runs the
+The loop waits for completions, turns what arrived into a batch of requests (max 512), runs the
 batch in one SQLite transaction and then sends the answers.
 
 - Reads of a batch run before its writes, then `COMMIT`, then the sends. So a 201 is only sent
@@ -43,9 +43,18 @@ batch in one SQLite transaction and then sends the answers.
   away. The connection goes on a queue and gets one `MSG_DONTWAIT` read at a time, never more in
   flight on a ring than half its buffers, until its socket is empty. Then the multishot recv is
   armed again.
-- **Drain first.** Every pass reads everything that arrived but answers at most 2048 requests.
-  The rest is copied to its connection and answered by the next passes, oldest first, so a
-  backlog sits in user memory and not in kernel socket buffers.
+- **Drain first.** Every pass reads everything that arrived but answers at most 512 requests.
+  The rest is copied to its connection and answered by later passes, so a backlog sits in user
+  memory and not in kernel socket buffers.
+- **Backlog.** A waiting request is answered oldest first as long as less than one pass (512) is
+  waiting. Past that, the requests that just arrived go first and the waiting ones get what is
+  left of each pass; from 8 s of waiting on, the oldest get a share of every pass that grows
+  until at 16 s they go first again. Each connection keeps its own order. Why: at the end of the
+  ramp, about 5,000 new connections a second come on top of nearly full traffic, and for some
+  seconds there is more work than CPU. Oldest first, every request then waits about a second.
+  Newest first, most requests are answered at once and only the excess waits. A pass is short
+  (512) for the same reason: a reply that leaves more than 40 ms after its request makes the
+  kernel send a bare ACK first, so a server that is late also gets slower.
 - **Send.** The response is written once into an arena (header right before the body) and sent
   from there with `MSG_WAITALL`. An arena is reused when all its sends are done.
 - **Batching.** Ring 0 sleeps until 128 completions or 1 ms, then the other rings are collected,
@@ -115,12 +124,29 @@ With the sync at 450 ms, 250,000 users, 24k requests/s:
 |---|---:|---:|---:|
 | #430 | 88 ms | 134 ms | 2.7 GB, never restarted |
 | #439 first commit | 208 ms | 962 ms | 221 MiB |
-| this commit | 41 ms | 72 ms | 602 MiB |
+| #439 second commit | 41 ms | 72 ms | 602 MiB |
 
 The longest commit on the request thread is under 2 ms with the sync at 400 ms. With a fast disk
 this version and #430 use the same CPU (40.4% against 41.2% of a core at 22k requests/s) and the
-log restarts every 128 MiB (later after a slow hold). Killed with SIGKILL seven times under a write-heavy load, with and
-without the slow sync, `integrity_check` said ok each time.
+log restarts every 128 MiB (later after a slow hold). Killed with SIGKILL seven times under a
+write-heavy load, with and without the slow sync, `integrity_check` said ok each time.
+
+The second commit of #439 (`3be2728`) held 280k (p95 198 / p99 540 ms, 76% CPU, 860 MB) and
+failed 290k with p95 1.1 s and p99 2.0 s. A p95 that high cannot come from POSTs, they are 8% of
+the requests: the whole server was behind. I got the same numbers on my machine once the load
+generator ran in its own network namespace over a veth pair, with the server's receive softirq
+on the server's core: a new connection costs about as much as 1.3 requests (the same for this
+server, #264 and #245 built from source), so the end of the ramp carries about 20% more load
+than the hold. At a load where that is too much:
+
+| | p95 | served | core busy |
+|---|---:|---:|---:|
+| #439 second commit (oldest first, 2048 a pass) | 1.26 s, 1.60 s | 23.7k, 25.0k req/s | 100%, 86% |
+| this commit (newest first past a pass of backlog, 512 a pass) | 148 ms, 112 ms | 25.3k, 25.0k req/s | 83%, 81% |
+
+p99 is still seconds at that load, in both: the requests in excess have to wait somewhere. Newest
+first helps p99 only while they stay under 1% of all requests. At a normal load the two commits
+use the same CPU (39.1% against 39.3% of a core at 23k requests/s).
 
 ## Changes since #406 (250k)
 
@@ -172,6 +198,9 @@ Code is written from scratch, but these ideas come from other submissions:
 - #250 c-iouring-shivanshthapliyal and #404 c-iouring-jowinjestine: the first commit of a
   restarted log made by the checkpoint thread, with `user_version`
 - #394 fsharp-uring-delneg: copies of the log more often than holds
+- #398 fsharp-uring-delneg: past one pass of backlog the newest requests first, the oldest a
+  growing share from 8 s on, and short passes. #326 objc-uring-delneg's README for the bare ACK
+  after 40 ms
 
 ## Build
 

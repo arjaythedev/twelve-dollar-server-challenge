@@ -1,4 +1,4 @@
-# The feed API in Tcl 8.6, the language SQLite was born in. Run by start.sh: tclsh8.6 server.tcl
+# The feed API in Tcl, the language SQLite was born in. Run by start.sh: tclsh8.7 server.tcl NOFILE
 #
 # Every socket is in binary mode, so a Tcl string here is a string of bytes (one char per byte).
 # Text goes to SQLite as a blob (@var) and is CAST to TEXT there; JSON comes back as a blob,
@@ -7,6 +7,8 @@
 # First in auto_path, so build.sh's sha256c wins over tcllib's own sha256c.tcl, which would run
 # critcl at startup and compile into ~/.critcl.
 set auto_path [linsert $auto_path 0 [file join [file dirname [file normalize [info script]]] lib]]
+# The Debian packaged SQLite binding (an 8.6 stubs extension, which 8.7 loads).
+lappend auto_path /usr/lib/tcltk
 package require sqlite3
 package require sha256c
 if {![string match *__critcl_load__* [package ifneeded sha256c [package present sha256c]]]} {
@@ -177,6 +179,7 @@ proc handle {c buf pos he next lh} {
 }
 
 set nconn 0
+set MAXCONN [expr {[lindex $argv 0] - 64}]
 proc drop {c} {
     incr ::nconn -1
     unset -nocomplain ::B($c)
@@ -186,13 +189,10 @@ proc drop {c} {
 # Reads what has arrived, answers every complete request in it (pipelining), keeps a partial one.
 proc rd {c} {
     if {[catch {read $c} d]} {return [drop $c]}
-    if {$d eq ""} {
-        if {[eof $c]} {drop $c}
-        return
-    }
+    if {$d eq "" && [eof $c]} {return [drop $c]}
     upvar #0 B($c) b
     append b $d
-    set pos 0; set len [string length $b]; set close 0
+    set pos 0; set len [string length $b]; set close 0; set full 0
     while {[set he [string first "\r\n\r\n" $b $pos]] >= 0} {
         set lh [string tolower [string range $b $pos $he]]
         set next [expr {$he + 4}]; set cl 0
@@ -202,20 +202,34 @@ proc rd {c} {
             if {$next > $len} break
         }
         if {[string first "\nconnection: close" $lh] >= 0} {set close 1}
-        if {[catch {handle $c $b $pos $he $next $lh} r]} {puts stderr $::errorInfo; set r $::E(500)}
-        puts -nonewline $c $r
+        if {[catch {handle $c $b $pos $he $next $lh} r]} {
+            # The client is gone (broken pipe, reset): skip the rest of its pipelined requests.
+            if {[lindex $::errorCode 0] eq "POSIX"} {return [drop $c]}
+            puts stderr $::errorInfo; set r $::E(500)
+        }
+        if {[catch {puts -nonewline $c $r}]} {return [drop $c]}
         set pos $next
         if {$close} break
+        # A client that does not read its responses: stop until they drain, so its output stays bounded.
+        if {[chan pending output $c] > 1048576} {set full 1; break}
     }
     set b [string range $b $pos end]
-    if {[catch {flush $c}] || $close || [string length $b] > 1048576} {drop $c}
+    if {[catch {flush $c}] || $close || [string length $b] > 1048576} {return [drop $c]}
+    if {$full} {fileevent $c readable {}; fileevent $c writable [list resume $c]}
+}
+
+# Tcl fires this once the queued output has been written: answer the rest, then read again.
+proc resume {c} {
+    fileevent $c writable {}
+    fileevent $c readable [list rd $c]
+    rd $c
 }
 
 proc accept {c addr port} {
-    # Tcl 8.6 waits with select(): a descriptor of 1024 or more must never get a file handler.
-    if {$::nconn >= 1000} {return [close $c]}
+    # Below start.sh's descriptor limit (argv), so accept never fails with EMFILE and spins.
+    if {$::nconn >= $::MAXCONN} {return [close $c]}
     incr ::nconn
-    fconfigure $c -blocking 0 -translation binary -buffering full -buffersize 262144
+    fconfigure $c -blocking 0 -translation binary -buffering full
     fileevent $c readable [list rd $c]
 }
 

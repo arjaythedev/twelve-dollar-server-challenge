@@ -27,7 +27,7 @@ pub const bgid = 1;
 pub const pool_buf_size: usize = 4096;
 pub const pool_count: usize = 2048;
 
-pub const k_ring_count: usize = 16;
+pub const k_ring_count: usize = 8;
 pub const slots_per_ring: u32 = 65472;
 
 pub const RespPool = struct {
@@ -194,9 +194,6 @@ pub const Server = struct {
     n_pending_writes: usize = 0,
 
     pub fn init(db: Db, jwt_key: Key) !*Server {
-        const d0 = "LOG: [3.1] mapping Server\n";
-        _ = linux.write(2, d0.ptr, d0.len);
-
         const smem = try sys.mapAnon(@sizeOf(Server));
         const s: *Server = @ptrCast(@alignCast(smem.ptr));
         @memset(smem, 0);
@@ -211,29 +208,17 @@ pub const Server = struct {
         if (sys.errnoOf(ep) != .SUCCESS) return error.EpollFailed;
         s.epfd = @intCast(ep);
 
-        const d1 = "LOG: [3.2] epoll created, pre-allocating rings\n";
-        _ = linux.write(2, d1.ptr, d1.len);
-
         // Pre-allocate rings
         var n_initialized: usize = 0;
         for (0..k_ring_count) |i| {
-            var log_buf: [32]u8 = undefined;
-            const log_start = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] start\n", .{i}) catch "LOG: start\n";
-            _ = linux.write(2, log_start.ptr, log_start.len);
-
             var rw = &s.rings[i];
             rw.id = @intCast(i);
             rw.slots = slots_per_ring;
             rw.nconn = 0;
             rw.ring = initRing() catch |e| {
-                const log_err = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] initRing err\n", .{i}) catch "LOG: err\n";
-                _ = linux.write(2, log_err.ptr, log_err.len);
                 if (i == 0) return e;
                 break;
             };
-
-            const log_r = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] initRing ok\n", .{i}) catch "LOG: ok\n";
-            _ = linux.write(2, log_r.ptr, log_r.len);
 
             const qmem = try sys.mapAnon(65536 * @sizeOf(u32));
             rw.rearm_queue = @as([*]u32, @ptrCast(@alignCast(qmem.ptr)))[0..65536];
@@ -241,24 +226,14 @@ pub const Server = struct {
             rw.rearm_tail = 0;
 
             setupPbufRing(rw) catch |e| {
-                const log_pb = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] pbuf err\n", .{i}) catch "LOG: err\n";
-                _ = linux.write(2, log_pb.ptr, log_pb.len);
                 if (i == 0) return e;
                 break;
             };
-
-            const log_pb = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] pbuf ok\n", .{i}) catch "LOG: ok\n";
-            _ = linux.write(2, log_pb.ptr, log_pb.len);
 
             rw.ring.register_files_sparse(slots_per_ring) catch |e| {
-                const log_rf = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] files err\n", .{i}) catch "LOG: err\n";
-                _ = linux.write(2, log_rf.ptr, log_rf.len);
                 if (i == 0) return e;
                 break;
             };
-
-            const log_rf = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] files ok\n", .{i}) catch "LOG: ok\n";
-            _ = linux.write(2, log_rf.ptr, log_rf.len);
 
             const cmem = try sys.mapAnon(@as(usize, slots_per_ring) * @sizeOf(Conn));
             sys.madviseHuge(cmem);
@@ -270,43 +245,39 @@ pub const Server = struct {
             };
             _ = linux.epoll_ctl(s.epfd, 1, rw.ring.fd, &ev);
 
-            const log_end = std.fmt.bufPrint(&log_buf, "LOG: [3.2.{d}] done\n", .{i}) catch "LOG: done\n";
-            _ = linux.write(2, log_end.ptr, log_end.len);
-
             n_initialized += 1;
         }
-
-        const d2 = "LOG: [3.3] rings initialized, setting up scratch & pools\n";
-        _ = linux.write(2, d2.ptr, d2.len);
 
         s.active_rings = n_initialized;
         s.scratch = try Scratch.init(128 * 1024);
         s.resp_buf = try Buf.init(128 * 1024);
         s.resp_pool = try RespPool.init();
 
-        const d3 = "LOG: [3.4] init complete\n";
-        _ = linux.write(2, d3.ptr, d3.len);
-
         return s;
     }
 
     fn initRing() !IoUring {
-        const flag_sets = [_]u32{
-            linux.IORING_SETUP_CQSIZE,
-            0,
-        };
-        const sq_sizes = [_]u16{ 8192, 4096, 2048 };
-        const cq_sizes = [_]u32{ 65536, 32768, 16384 };
+        const sq_sizes = [_]u16{ 4096, 2048, 1024 };
+        const cq_sizes = [_]u32{ 32768, 16384, 8192 };
         var last: anyerror = error.ArgumentsInvalid;
+
+        // Try with IORING_SETUP_CQSIZE (cq_entries must only be set when this flag is active)
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
-                for (flag_sets) |fl| {
-                    var p = std.mem.zeroInit(linux.io_uring_params, .{ .flags = fl });
-                    p.cq_entries = cq;
-                    if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
-                }
+                var p = std.mem.zeroInit(linux.io_uring_params, .{
+                    .flags = linux.IORING_SETUP_CQSIZE,
+                });
+                p.cq_entries = cq;
+                if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
             }
         }
+
+        // Fallback without IORING_SETUP_CQSIZE (cq_entries must be 0)
+        for (sq_sizes) |sq| {
+            var p = std.mem.zeroInit(linux.io_uring_params, .{ .flags = 0 });
+            if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
+        }
+
         return last;
     }
 
@@ -406,9 +377,6 @@ pub const Server = struct {
     }
 
     pub fn run(self: *Server) !void {
-        const mr0 = "LOG: [6] run loop entered\n";
-        _ = linux.write(2, mr0.ptr, mr0.len);
-
         var ep_events: [32]linux.epoll_event = undefined;
 
         while (true) {

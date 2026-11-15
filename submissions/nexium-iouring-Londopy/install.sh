@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
-# Runs once as root on a clean Ubuntu 24.04: a C compiler, curl, and the Nexium
-# compiler (nx), pinned to one release and checked by SHA-256.
+# Runs once as root on a clean Ubuntu 24.04: a C compiler, curl and git, and
+# the Nexium compiler (nx) built from its source at one pinned commit.
 #
-# nx comes from the project's official wheel on PyPI. A wheel is a zip file
-# holding one self-contained binary, so it is unpacked directly: no pip, no
-# virtualenv, and nothing else of Python's is used.
-# Set NX_WHEEL to a local copy of the wheel to install offline.
+# Nothing prebuilt is downloaded. The compiler is written in Nexium, and its
+# repository carries a C seed (the C an earlier nx emitted for itself). The
+# bootstrap needs only gcc:
+#   gcc builds nx0 from the seed, nx0 builds the compiler's Nexium source into
+#   nx1, nx1 rebuilds that source into nx2, and the script fails unless nx1 and
+#   nx2 emit the same C for the compiler.
+# It takes two to three minutes and about 600 MB of memory.
+#
+# The commit is fetched by its full hash, so git itself checks every byte of
+# the source against the pin.
+# Set NX_SOURCE to a local tarball of that commit to install offline (testing
+# only: a tarball is not checked against the pin).
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends build-essential curl ca-certificates python3-minimal
+apt-get install -y --no-install-recommends build-essential curl ca-certificates git
 
 NX_VER=1.5.0
-NX_WHL="nexium_lang-${NX_VER}-py3-none-manylinux_2_17_x86_64.whl"
-NX_URL="https://files.pythonhosted.org/packages/2e/95/b66209c19bf2088a63460ca25bf1e36e9876ca292d8e0a4d2776ad08335b/${NX_WHL}"
-NX_SHA256=a5fa51c7040253aff1e2912cfd0d03fe09db61494a5ba2d49257dc834c8b6704
+NX_REPO=https://github.com/Londopy/nexium
+NX_COMMIT=3224bf21716c5fe072481232b2bef0938bbc5912 # the v1.5.0 tag
 NX_DIR="/opt/nexium-${NX_VER}"
 
 if [ ! -x "${NX_DIR}/bin/nx" ]; then
-  tmp="$(mktemp -d)"
-  whl="${NX_WHEEL:-${tmp}/${NX_WHL}}"
-  [ -f "$whl" ] || curl -fsSL "$NX_URL" -o "$whl"
-  echo "${NX_SHA256}  ${whl}" | sha256sum -c --quiet -
-  python3 -I -m zipfile -e "$whl" "${tmp}/wheel"
-  install -D -m 0755 "${tmp}/wheel/nexium_lang/bin/nx" "${NX_DIR}/bin/nx"
-  install -D -m 0644 "${tmp}/wheel/nexium_lang/LICENSE" "${NX_DIR}/LICENSE"
+  src="$(mktemp -d)"
+  if [ -n "${NX_SOURCE:-}" ]; then
+    tar -xzf "$NX_SOURCE" -C "$src" --strip-components=1
+  else
+    git -C "$src" init -q
+    git -C "$src" fetch -q --depth 1 "$NX_REPO" "$NX_COMMIT"
+    git -C "$src" -c advice.detachedHead=false checkout -q FETCH_HEAD
+    [ "$(git -C "$src" rev-parse HEAD)" = "$NX_COMMIT" ]
+  fi
+  (cd "$src" && CC=gcc NX_CC=gcc NX_OFFLINE=1 NX_NO_UPDATE_CHECK=1 sh bootstrap/build.sh)
+  install -D -m 0755 "$src/nx-out/bootstrap/nx2" "${NX_DIR}/bin/nx"
+  install -D -m 0644 "$src/LICENSE" "${NX_DIR}/LICENSE"
 fi
 ln -sf "${NX_DIR}/bin/nx" /usr/local/bin/nx
 NX_OFFLINE=1 NX_NO_UPDATE_CHECK=1 nx version

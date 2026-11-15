@@ -2,7 +2,7 @@
 
 Front: **direct** (serves `HOST:PORT` itself, `0.0.0.0:80` on the benchmark box)
 
-Nish 0.39.0 (a statically typed TypeScript subset compiled to native code
+Nish 0.40.0 (a statically typed TypeScript subset compiled to native code
 through LLVM), built with clang-18 and lld-18 from LLVM 18. The compiler runs
 on Node.js 22.18.0 at build time only; the server is one native binary. Every
 import is Nish's own standard library: `nish/net/http1-server` for HTTP/1.1,

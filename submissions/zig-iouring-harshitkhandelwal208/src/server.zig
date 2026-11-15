@@ -1144,10 +1144,19 @@ pub const Server = struct {
                     .cap = pool_buf_size - 128,
                 };
                 if (self.db.feed(&feed_buf)) {
-                    var hdr_buf: [128]u8 = undefined;
-                    const hdr_len = writeHeaderDirect(&hdr_buf, 200, feed_buf.len, keep_alive);
+                    const prefix = if (keep_alive)
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                    else
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
+                    const d_len = bufm.digitsU64(feed_buf.len);
+                    const hdr_len = prefix.len + d_len + 4;
                     const start_off = 128 - hdr_len;
-                    @memcpy(p.ptr[start_off..128], hdr_buf[0..hdr_len]);
+                    var h_ptr = p.ptr + start_off;
+                    @memcpy(h_ptr[0..prefix.len], prefix);
+                    h_ptr += prefix.len;
+                    _ = bufm.writeU64Direct(h_ptr[0..24], feed_buf.len);
+                    h_ptr += d_len;
+                    @memcpy(h_ptr[0..4], "\r\n\r\n");
 
                     c.out = p.ptr + start_off;
                     c.out_len = @intCast(hdr_len + feed_buf.len);
@@ -1220,39 +1229,7 @@ pub const Server = struct {
             if (rem.len > 1 and rem[0] == '/') {
                 const subpath = rem[1..];
 
-                // POST /posts/:id/like or DELETE /posts/:id/like
-                if (std.mem.endsWith(u8, subpath, "/like")) {
-                    const id_str = subpath[0 .. subpath.len - 5];
-
-                    const claims = self.authenticate(head.auth) catch |err| {
-                        self.sendAuthError(w, slot, c, err, keep_alive);
-                        return;
-                    };
-
-                    const post_id = parseId(id_str) orelse {
-                        self.sendError(w, slot, c, 400, "invalid post id", keep_alive);
-                        return;
-                    };
-
-                    if (method == .post) {
-                        switch (self.db.likePost(claims.uid, post_id, &self.resp_buf)) {
-                            .created => self.sendResponse(w, slot, c, 201, self.resp_buf.slice(), keep_alive),
-                            .already_liked => self.sendResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive),
-                            .not_found => self.sendError(w, slot, c, 404, "post not found", keep_alive),
-                            .err => self.sendError(w, slot, c, 500, "internal server error", keep_alive),
-                        }
-                        return;
-                    } else if (method == .delete) {
-                        switch (self.db.unlikePost(claims.uid, post_id, &self.resp_buf)) {
-                            .ok => self.sendResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive),
-                            .not_found => self.sendError(w, slot, c, 404, "post not found", keep_alive),
-                            .err => self.sendError(w, slot, c, 500, "internal server error", keep_alive),
-                        }
-                        return;
-                    }
-                }
-
-                // Single post: GET /posts/:id
+                // Single post: GET /posts/:id (fast path for ~46% of requests)
                 if (method == .get) {
                     const post_id = parseId(subpath) orelse {
                         self.sendError(w, slot, c, 400, "invalid post id", keep_alive);
@@ -1289,6 +1266,38 @@ pub const Server = struct {
                         .err => self.sendError(w, slot, c, 500, "internal server error", keep_alive),
                     }
                     return;
+                }
+
+                // POST /posts/:id/like or DELETE /posts/:id/like
+                if (std.mem.endsWith(u8, subpath, "/like")) {
+                    const id_str = subpath[0 .. subpath.len - 5];
+
+                    const claims = self.authenticate(head.auth) catch |err| {
+                        self.sendAuthError(w, slot, c, err, keep_alive);
+                        return;
+                    };
+
+                    const post_id = parseId(id_str) orelse {
+                        self.sendError(w, slot, c, 400, "invalid post id", keep_alive);
+                        return;
+                    };
+
+                    if (method == .post) {
+                        switch (self.db.likePost(claims.uid, post_id, &self.resp_buf)) {
+                            .created => self.sendResponse(w, slot, c, 201, self.resp_buf.slice(), keep_alive),
+                            .already_liked => self.sendResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive),
+                            .not_found => self.sendError(w, slot, c, 404, "post not found", keep_alive),
+                            .err => self.sendError(w, slot, c, 500, "internal server error", keep_alive),
+                        }
+                        return;
+                    } else if (method == .delete) {
+                        switch (self.db.unlikePost(claims.uid, post_id, &self.resp_buf)) {
+                            .ok => self.sendResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive),
+                            .not_found => self.sendError(w, slot, c, 404, "post not found", keep_alive),
+                            .err => self.sendError(w, slot, c, 500, "internal server error", keep_alive),
+                        }
+                        return;
+                    }
                 }
             }
         }
@@ -1592,14 +1601,16 @@ pub const Server = struct {
         return s[start..end];
     }
 
-    pub fn parseId(s: []const u8) ?i64 {
+    pub inline fn parseId(s: []const u8) ?i64 {
         if (s.len == 0 or s.len > 18) return null;
-        var v: i64 = 0;
+        var v: u64 = 0;
+        var bad: u8 = 0;
         for (s) |ch| {
             const d = ch -% '0';
-            if (d > 9) return null;
+            bad |= @intFromBool(d > 9);
             v = v * 10 + d;
         }
-        return if (v > 0) v else null;
+        if (bad != 0 or v == 0 or v > std.math.maxInt(i64)) return null;
+        return @intCast(v);
     }
 };

@@ -318,21 +318,20 @@ pub const Db = struct {
             rows[idx].body = text(cols[2]) catch return self.feedSql(out);
         }
 
-        // 3. Fetch authors by rowid seek (caching last author)
-        var last_uid: i64 = -1;
-        var last_author: []const u8 = "";
+        // 3. Fetch authors by rowid seek (caching recent authors in 16-entry direct table)
+        var author_cache: [16]struct { uid: i64 = -1, author: []const u8 = "" } = @splat(.{});
         for (0..n_rows) |i| {
             const uid = rows[i].user_id;
-            if (uid == last_uid) {
-                rows[i].author = last_author;
+            const slot = @as(usize, @intCast(uid)) & 15;
+            if (author_cache[slot].uid == uid) {
+                rows[i].author = author_cache[slot].author;
             } else {
                 if (td_seek(cu, uid) != 1) return self.feedSql(out);
                 const p = getPayload(cu) catch return self.feedSql(out);
                 const cols = columns(2, p) catch return self.feedSql(out);
                 const a = text(cols[1]) catch return self.feedSql(out);
                 rows[i].author = a;
-                last_uid = uid;
-                last_author = a;
+                author_cache[slot] = .{ .uid = uid, .author = a };
             }
         }
 

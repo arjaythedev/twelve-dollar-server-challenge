@@ -1,0 +1,23 @@
+% server.tex: the feed API, typeset by nobody. Run as an IniTeX job by start.sh; it never reaches \end.
+%
+% ^^A and ^^B are TeX's grouping characters here, so { } [ ] " : stay plain characters and the
+% macros below can spell JSON as is.
+\catcode`\^=7 \catcode`\^^A=1 \catcode`\^^B=2 \catcode`\#=6
+\directlua^^Atex.enableprimitives("", tex.extraprimitives())^^B
+
+% Every response body is the expansion of one of these. An @ is where server.lua puts the JSON
+% that SQLite wrote (posts are built by json_object, so they never pass through TeX's tokenizer).
+\def\feed^^A{"posts":[@]}^^B
+\def\post^^A{"post":@}^^B
+\def\liked#1#2^^A{"liked":true,"already_liked":#1,"post_id":#2}^^B
+\def\health#1^^A{"status":"ok","db":"ok","uptime_s":#1}^^B
+\def\degraded^^A{"status":"degraded","db":"unreachable","error":@}^^B
+\def\oops#1^^A{"error":"#1"}^^B
+
+% server.lua registers \luafunction1 (wait for sockets, run requests, queue their TeX),
+% \luafunction2 (take \out as the next body) and \luafunction3 (commit, then send).
+\directlua^^Adofile("server.lua")^^B
+
+% The event loop: a tail-recursive macro, so TeX's input stack stays flat forever.
+\def\serve^^A\luafunction1 \serve^^B
+\serve

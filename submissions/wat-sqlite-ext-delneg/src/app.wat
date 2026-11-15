@@ -10,24 +10,28 @@
 ;;
 ;; Memory map (one fixed size; addresses below 16 MiB keep the code's constants short):
 ;;   0x001000  API   copy of sqlite3_api_routines (2,232 bytes; offsets from SQLite 3.54.1's sqlite3ext.h)
-;;   0x002000  MISC  syscall arguments: iovecs, out-params, sockaddr, timespec, rlimit, io_uring_params
-;;   0x003000  SQES  the io_uring submission entries (64 x 64 bytes: one page)
-;;   0x004000  RINGS the io_uring head/tail words and completion entries (one page)
+;;   0x002000  MISC  syscall arguments: iovecs, out-params, sockaddr, timespec, rlimit, io_uring_params and
+;;                   register structs; RT (per-ring state) at 0x2200; OUT segment counters at 0x2400
 ;;   0x005000  ENV   /proc/self/environ (64 KiB)
+;;   0x020000  SQES/RINGS  8 rings: 64 submission entries (one page) and head/tail words and 128 completions
+;;                   (one page) each
+;;   0x030000  BUFR  8 provided-buffer rings of 1,024 entries (16 KiB each)
 ;;   0x100000  string constants and SQL, NUL-terminated
 ;;   0x284000  JWT scratch: header, payload, SHA-256 state/schedule/pad, HMAC states, tables
 ;;   0x285000  TXT   decoded POST body, 64 KiB; 0x295000 digit buffer; 0x296000 decoded username
 ;;   0x2a0000  BODYB response body being built (small bodies; post JSON is copied straight to OUT)
-;;   0x300000  OUT   the responses to one connection's requests, sent with one sendto
-;;   0x400000  CONN  32 bytes per fd (65,536): 0 bytes buffered, 4 spill block + 1, 8 spill address, 12 spill
-;;                   length, 16 close after the spill is sent
-;;   0x600000  SPILL 256 blocks of 64 KiB for output the socket did not take at once; free list at 0x1600000
-;;   0x1700000 IN    4 KiB receive buffer per fd (65,536)
+;;   0x300000  free lists: PEND blocks (4,096 x 4 bytes), SPILL blocks at 0x304000
+;;   0x400000  CONN  32 bytes per connection (8 rings x 65,536 slots)
+;;   0x1400000 RECV  receive buffers: 8 rings x 1,024 x 2 KiB
+;;   0x2400000 OUT   32 MiB, 32 segments of 1 MiB: responses, sent straight from here
+;;   0x4400000 SPILL 128 blocks of 256 KiB for output the socket did not take at once
+;;   0x6400000 PEND  4,096 blocks of 16 KiB for partial requests and bytes that came in during a send
+;;   0xa400000 READY connections to serve on the next turn (2 MiB)
 (module
   (import "host" "sys" (func $sys (param i64 i64 i64 i64 i64 i64 i64) (result i64)))
   (import "host" "call" (func $call (param i64 i64 i64 i64 i64 i64 i64) (result i64)))
   (import "host" "membase" (func $membase (param i64 i64 i64 i64 i64 i64 i64) (result i64)))
-  (memory 4464)   ;; 0x11700000 bytes; pages are only backed once touched
+  (memory 2656)   ;; 0xa600000 bytes; pages are only backed once touched
 
   ;; ---------- string constants ----------
   (data (i32.const 0x100000) "HTTP/1.1 200 OK\0d\0a")
@@ -108,7 +112,7 @@
   (global $now (mut i64) (i64.const 0))     ;; wall clock seconds, read once per loop turn
   (global $t0 (mut i64) (i64.const 0))
   (global $w (mut i32) (i32.const 0))       ;; write cursor (BODYB while building a body, OUT otherwise)
-  (global $o (mut i32) (i32.const 0x300000)) ;; end of the output in OUT
+  (global $o (mut i32) (i32.const 0x2400000)) ;; end of the output in OUT
   (global $jp (mut i32) (i32.const 0))      ;; JSON reader cursor
   (global $je (mut i32) (i32.const 0))      ;; JSON reader end
   (global $jv (mut i32) (i32.const 0))      ;; value found by $jfind
@@ -116,18 +120,6 @@
   (global $un_p (mut i32) (i32.const 0))    ;; username, raw JSON string bytes from the token
   (global $un_n (mut i32) (i32.const 0))
   (global $closeme (mut i32) (i32.const 0))
-  ;; io_uring: ring fd, listening socket, SQEs written but not submitted, SQ tail, addresses of the ring words
-  (global $rfd (mut i64) (i64.const 0))
-  (global $lfd (mut i32) (i32.const 0))
-  (global $pend (mut i32) (i32.const 0))
-  (global $sqt (mut i32) (i32.const 0))
-  (global $sq_tail (mut i32) (i32.const 0))
-  (global $cq_head (mut i32) (i32.const 0))
-  (global $cq_tail (mut i32) (i32.const 0))
-  (global $cq_mask (mut i32) (i32.const 0))
-  (global $cqes (mut i32) (i32.const 0))
-  (global $nfree (mut i32) (i32.const 0))   ;; free SPILL blocks
-
   ;; ---------- the three imports ----------
   ;; native address of offset $o in this memory
   (func $p (param $o i32) (result i64) (i64.add (global.get $mb) (i64.extend_i32_u (local.get $o))))
@@ -201,6 +193,15 @@
       (br $l)))
     (i32.sub (local.get $q) (local.get $p)))
 
+  ;; constant-time compare (for the token signature): ORs the differences of all $n bytes
+  (func $cteq (param $a i32) (param $b i32) (param $n i32) (result i32)
+    (local $d i32) (local $i i32)
+    (block $d_ (loop $l
+      (br_if $d_ (i32.ge_u (local.get $i) (local.get $n)))
+      (local.set $d (i32.or (local.get $d) (i32.xor (i32.load8_u (i32.add (local.get $a) (local.get $i))) (i32.load8_u (i32.add (local.get $b) (local.get $i))))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l)))
+    (i32.eqz (local.get $d)))
   (func $memeq (param $a i32) (param $b i32) (param $n i32) (result i32)
     (block $no (loop $l
       (if (i32.eqz (local.get $n)) (then (return (i32.const 1))))
@@ -728,7 +729,7 @@
         (br_if $bad (i32.ne (i32.sub (i32.sub (local.get $te) (local.get $d2)) (i32.const 1)) (i32.const 43)))
         (call $hmac (local.get $t) (i32.sub (local.get $d2) (local.get $t)))
         (call $b64enc32 (i32.const 0x284900) (i32.const 0x284940))
-        (br_if $bad (i32.eqz (call $memeq (i32.const 0x284940) (i32.add (local.get $d2) (i32.const 1)) (i32.const 43))))
+        (br_if $bad (i32.eqz (call $cteq (i32.const 0x284940) (i32.add (local.get $d2) (i32.const 1)) (i32.const 43))))
         ;; exp, a number later than now
         (br_if $bad (i32.ne (call $jfind (i32.const 0x284100) (local.get $pl) (i32.const 0x100f10) (i32.const 3)) (i32.const 1)))
         (local.set $v (global.get $jv))
@@ -860,8 +861,8 @@
                     (local.get $ah) (local.get $an) (i32.add (local.get $s) (local.get $hdr)) (local.get $clen))
       (local.set $pos (i32.add (local.get $pos) (i32.add (local.get $hdr) (local.get $clen))))
       (br_if $out (global.get $closeme))
-      ;; many pipelined requests: stop before OUT fills up; the rest is served once this output is sent
-      (br_if $out (i32.gt_u (global.get $o) (i32.const 0x3e0000)))
+      ;; many pipelined requests: stop after 64 KiB of output; the rest is served once this output is sent
+      (br_if $out (i32.gt_u (i32.sub (global.get $o) (global.get $ostart)) (i32.const 0x10000)))
       (br $req)))
     (local.get $pos))
 
@@ -1031,146 +1032,384 @@
     (call $reset (global.get $st_ins)))
 
   ;; ---------- io_uring ----------
-  ;; Both rings are in this memory (IORING_SETUP_NO_MMAP), one page each, so the module writes every
-  ;; submission entry and reads every completion itself. user_data: fd | kind << 32 (1 accept, 2 recv, 3 send)
-  (global $sq_head (mut i32) (i32.const 0))
-  (func $conn (param $fd i32) (result i32) (i32.add (i32.const 0x400000) (i32.shl (local.get $fd) (i32.const 5))))
-  (func $inb (param $fd i32) (result i32) (i32.add (i32.const 0x1700000) (i32.shl (local.get $fd) (i32.const 12))))
+  ;; Up to 8 rings, all in this memory (IORING_SETUP_NO_MMAP, one page of 64 entries and one of 128
+  ;; completions each), so the module writes every submission entry and reads every completion itself.
+  ;; Connections never take a process file descriptor: a multishot accept puts each one straight into a slot
+  ;; of its ring's fixed-file table (65,535 slots under LimitNOFILE=65535), and accepting moves to the
+  ;; emptiest ring when one gets near full. Each connection has one multishot receive that takes 2 KiB
+  ;; buffers from its ring's provided-buffer ring; the buffer goes back as soon as its requests are served.
+  ;; Ring 0 is the one waited on; the others signal one eventfd when work arrives, and ring 0 reads it.
+  ;;
+  ;; A connection is ci = ring << 16 | slot. user_data = kind << 24 | ci; kinds: 1 accept, 2 recv,
+  ;; 3 send from OUT, 4 send from SPILL, 5 close, 6 eventfd read, 8 shutdown.
+  ;; CONN, 32 bytes per connection: 0 flags, 4 PEND block + 1, 8 bytes in PEND, 12 SPILL block + 1,
+  ;; 16 SPILL cursor, 20 SPILL bytes left, 24 address of the send from OUT, 28 its length.
+  ;; Flags: 1 receive armed, 2 send in flight, 8 closing, 16 shut down, 32 in the ready list.
+  ;; RT, 32 bytes per ring at 0x2200: 0 ring fd, 4 SQ tail (ours), 8 connections, 12 buffer ring tail.
+  (global $nr (mut i32) (i32.const 0))      ;; rings set up
+  (global $ns (mut i32) (i32.const 0))      ;; fixed-file slots per ring
+  (global $nhi (mut i32) (i32.const 0))     ;; 7/8 of them: the accept moves on from there
+  (global $acc (mut i32) (i32.const 0))     ;; the ring that accepts
+  (global $lfd (mut i32) (i32.const 0))     ;; listening socket
+  (global $efd (mut i32) (i32.const 0))     ;; eventfd of rings 1..7
+  (global $o_sqh (mut i32) (i32.const 0))   ;; offsets in a ring page: SQ head, SQ tail, SQ flags,
+  (global $o_sqt (mut i32) (i32.const 0))   ;; CQ head, CQ tail, completion entries
+  (global $o_sqf (mut i32) (i32.const 0))
+  (global $o_cqh (mut i32) (i32.const 0))
+  (global $o_cqt (mut i32) (i32.const 0))
+  (global $o_cqes (mut i32) (i32.const 0))
+  (global $ostart (mut i32) (i32.const 0))  ;; where the current connection's output starts in OUT
+  (global $npend (mut i32) (i32.const 0))   ;; free PEND blocks
+  (global $nfree (mut i32) (i32.const 0))   ;; free SPILL blocks
+  (global $nready (mut i32) (i32.const 0))
 
-  ;; io_uring_enter: submits what is queued, then waits for $wait completions
-  (func $enter (param $wait i32)
-    (drop (call $sys (i64.const 426) (global.get $rfd)
-      (i64.extend_i32_u (i32.sub (global.get $sqt) (i32.load (global.get $sq_head))))
-      (i64.extend_i32_u (local.get $wait)) (i64.extend_i32_u (i32.ne (local.get $wait) (i32.const 0)))   ;; IORING_ENTER_GETEVENTS
-      (i64.const 0) (i64.const 0))))
+  (func $rt (param $r i32) (result i32) (i32.add (i32.const 0x2200) (i32.shl (local.get $r) (i32.const 5))))
+  (func $sqes (param $r i32) (result i32) (i32.add (i32.const 0x20000) (i32.shl (local.get $r) (i32.const 13))))
+  (func $rp (param $r i32) (result i32) (i32.add (i32.const 0x21000) (i32.shl (local.get $r) (i32.const 13))))
+  (func $conn (param $ci i32) (result i32) (i32.add (i32.const 0x400000) (i32.shl (local.get $ci) (i32.const 5))))
+  (func $pendb (param $b i32) (result i32) (i32.add (i32.const 0x6400000) (i32.shl (i32.sub (local.get $b) (i32.const 1)) (i32.const 14))))
+  (func $queued (param $r i32) (result i32)
+    (i32.sub (i32.load offset=4 (call $rt (local.get $r))) (i32.load (i32.add (call $rp (local.get $r)) (global.get $o_sqh)))))
+  (func $cq_ready (param $r i32) (result i32)
+    (local $p i32) (local.set $p (call $rp (local.get $r)))
+    (i32.ne (i32.load (i32.add (local.get $p) (global.get $o_cqh))) (i32.load (i32.add (local.get $p) (global.get $o_cqt)))))
 
-  ;; one submission entry: 0 opcode, 2 ioprio, 4 fd, 16 addr, 24 len, 28 op flags, 32 user_data
-  (func $sqe (param $op i32) (param $fd i32) (param $addr i64) (param $len i32) (param $fl i32) (param $prio i32) (param $ud i64)
-    (local $e i32)
-    (if (i32.ge_u (i32.sub (global.get $sqt) (i32.load (global.get $sq_head))) (i32.const 64)) (then (call $enter (i32.const 0))))
-    (local.set $e (i32.add (i32.const 0x3000) (i32.shl (i32.and (global.get $sqt) (i32.const 63)) (i32.const 6))))
+  ;; io_uring_enter on ring $r: submits what is queued; with $fl = 1 (GETEVENTS) also runs the ring's
+  ;; pending work and waits for $wait completions
+  (func $enter (param $r i32) (param $fl i32) (param $wait i32)
+    (drop (call $sys (i64.const 426) (i64.extend_i32_u (i32.load (call $rt (local.get $r))))
+      (i64.extend_i32_u (call $queued (local.get $r))) (i64.extend_i32_u (local.get $wait))
+      (i64.extend_i32_u (local.get $fl)) (i64.const 0) (i64.const 0))))
+
+  ;; one submission entry on ring $r: 0 opcode, 1 flags, 2 ioprio, 4 fd, 16 addr, 24 len, 28 op flags,
+  ;; 32 user_data (40 buf_group and 44 file_index stay 0 unless the caller sets them)
+  (func $sqe (param $r i32) (param $op i32) (param $sf i32) (param $fd i32) (param $addr i64) (param $len i32)
+             (param $fl i32) (param $prio i32) (param $ud i32) (result i32)
+    (local $t i32) (local $q i32) (local $e i32)
+    (local.set $t (call $rt (local.get $r)))
+    (if (i32.ge_u (call $queued (local.get $r)) (i32.const 64)) (then (call $enter (local.get $r) (i32.const 0) (i32.const 0))))
+    (local.set $q (i32.load offset=4 (local.get $t)))
+    (local.set $e (i32.add (call $sqes (local.get $r)) (i32.shl (i32.and (local.get $q) (i32.const 63)) (i32.const 6))))
     (v128.store (local.get $e) (v128.const i64x2 0 0))
     (v128.store offset=16 (local.get $e) (v128.const i64x2 0 0))
     (v128.store offset=32 (local.get $e) (v128.const i64x2 0 0))
     (v128.store offset=48 (local.get $e) (v128.const i64x2 0 0))
     (i32.store8 (local.get $e) (local.get $op))
+    (i32.store8 offset=1 (local.get $e) (local.get $sf))
     (i32.store16 offset=2 (local.get $e) (local.get $prio))
     (i32.store offset=4 (local.get $e) (local.get $fd))
     (i64.store offset=16 (local.get $e) (local.get $addr))
     (i32.store offset=24 (local.get $e) (local.get $len))
     (i32.store offset=28 (local.get $e) (local.get $fl))
-    (i64.store offset=32 (local.get $e) (local.get $ud))
-    (global.set $sqt (i32.add (global.get $sqt) (i32.const 1)))
-    (i32.store (global.get $sq_tail) (global.get $sqt)))
+    (i32.store offset=32 (local.get $e) (local.get $ud))
+    (local.set $q (i32.add (local.get $q) (i32.const 1)))
+    (i32.store offset=4 (local.get $t) (local.get $q))
+    (i32.store (i32.add (call $rp (local.get $r)) (global.get $o_sqt)) (local.get $q))
+    (local.get $e))
 
-  ;; multishot accept (IORING_ACCEPT_MULTISHOT), new sockets close-on-exec
-  (func $arm_acc
-    (call $sqe (i32.const 13) (global.get $lfd) (i64.const 0) (i32.const 0) (i32.const 0x80000) (i32.const 1) (i64.const 0x100000000)))
-  ;; recv into the rest of the fd's IN buffer
-  (func $arm_recv (param $fd i32)
-    (local $n i32)
-    (local.set $n (i32.load (call $conn (local.get $fd))))
-    (call $sqe (i32.const 27) (local.get $fd) (call $p (i32.add (call $inb (local.get $fd)) (local.get $n)))
-      (i32.sub (i32.const 4096) (local.get $n)) (i32.const 0) (i32.const 0)
-      (i64.or (i64.const 0x200000000) (i64.extend_i32_u (local.get $fd)))))
-  ;; send what is left of the fd's SPILL output (MSG_NOSIGNAL)
-  (func $send_spill (param $fd i32)
-    (local $c i32)
-    (local.set $c (call $conn (local.get $fd)))
-    (call $sqe (i32.const 26) (local.get $fd) (call $p (i32.load offset=8 (local.get $c))) (i32.load offset=12 (local.get $c))
-      (i32.const 0x4000) (i32.const 0) (i64.or (i64.const 0x300000000) (i64.extend_i32_u (local.get $fd)))))
+  ;; accept into a free fixed-file slot (file_index = IORING_FILE_INDEX_ALLOC). 16 are kept in flight, each
+  ;; re-armed on completion. (A multishot accept would need a cancel to move to another ring, and on Linux 6.8
+  ;; the cancelled one kept taking the listening socket's wake-ups.)
+  (func $arm_acc (param $r i32)
+    (i32.store offset=44 (call $sqe (local.get $r) (i32.const 13) (i32.const 0) (global.get $lfd) (i64.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0) (i32.or (i32.const 0x1000000) (i32.shl (local.get $r) (i32.const 16)))) (i32.const -1)))
+  ;; multishot receive with buffer selection (IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT, IORING_RECV_MULTISHOT)
+  (func $arm_recv (param $ci i32)
+    (local $c i32) (local.set $c (call $conn (local.get $ci)))
+    (i32.store (local.get $c) (i32.or (i32.load (local.get $c)) (i32.const 1)))
+    (drop (call $sqe (i32.shr_u (local.get $ci) (i32.const 16)) (i32.const 27) (i32.const 33) (i32.and (local.get $ci) (i32.const 0xffff))
+      (i64.const 0) (i32.const 0) (i32.const 0) (i32.const 2) (i32.or (i32.const 0x2000000) (local.get $ci)))))
+  ;; send $n bytes at $a (MSG_NOSIGNAL; from OUT also MSG_DONTWAIT, so it completes inside the next enter)
+  (func $send (param $ci i32) (param $a i32) (param $n i32) (param $kind i32)
+    (local $c i32) (local.set $c (call $conn (local.get $ci)))
+    (i32.store (local.get $c) (i32.or (i32.load (local.get $c)) (i32.const 2)))
+    (drop (call $sqe (i32.shr_u (local.get $ci) (i32.const 16)) (i32.const 26) (i32.const 1) (i32.and (local.get $ci) (i32.const 0xffff))
+      (call $p (local.get $a)) (local.get $n) (select (i32.const 0x4040) (i32.const 0x4000) (i32.eq (local.get $kind) (i32.const 3)))
+      (i32.const 0) (i32.or (i32.shl (local.get $kind) (i32.const 24)) (local.get $ci)))))
+  ;; give receive buffer $bid back to ring $r
+  (func $give (param $r i32) (param $bid i32)
+    (local $t i32) (local $n i32) (local $e i32) (local $br i32)
+    (local.set $t (call $rt (local.get $r)))
+    (local.set $br (i32.add (i32.const 0x30000) (i32.shl (local.get $r) (i32.const 14))))
+    (local.set $n (i32.load offset=12 (local.get $t)))
+    (local.set $e (i32.add (local.get $br) (i32.shl (i32.and (local.get $n) (i32.const 1023)) (i32.const 4))))
+    (i64.store (local.get $e) (call $p (i32.add (i32.const 0x1400000) (i32.shl (i32.or (i32.shl (local.get $r) (i32.const 10)) (local.get $bid)) (i32.const 11)))))
+    (i32.store offset=8 (local.get $e) (i32.const 2048))
+    (i32.store16 offset=12 (local.get $e) (local.get $bid))
+    (local.set $n (i32.add (local.get $n) (i32.const 1)))
+    (i32.store offset=12 (local.get $t) (local.get $n))
+    (i32.store16 offset=14 (local.get $br) (local.get $n)))
 
-  (func $free_spill (param $b i32)
-    (i32.store (i32.add (i32.const 0x1600000) (i32.shl (global.get $nfree) (i32.const 2))) (local.get $b))
-    (global.set $nfree (i32.add (global.get $nfree) (i32.const 1))))
-  (func $drop (param $fd i32)
-    (local $c i32) (local $b i32)
-    (local.set $c (call $conn (local.get $fd)))
+  (func $ready (param $ci i32)
+    (local $c i32) (local.set $c (call $conn (local.get $ci)))
+    (if (i32.and (i32.load (local.get $c)) (i32.const 32)) (then (return)))
+    (i32.store (local.get $c) (i32.or (i32.load (local.get $c)) (i32.const 32)))
+    (i32.store (i32.add (i32.const 0xa400000) (i32.shl (global.get $nready) (i32.const 2))) (local.get $ci))
+    (global.set $nready (i32.add (global.get $nready) (i32.const 1))))
+  ;; append $n bytes to the connection's PEND block (16 KiB, the largest request); 0 if it does not fit
+  (func $append (param $c i32) (param $s i32) (param $n i32) (result i32)
+    (local $b i32) (local $l i32)
+    (if (i32.eqz (local.tee $b (i32.load offset=4 (local.get $c))))
+      (then
+        (if (i32.eqz (global.get $npend)) (then (return (i32.const 0))))
+        (global.set $npend (i32.sub (global.get $npend) (i32.const 1)))
+        (local.set $b (i32.add (i32.load (i32.add (i32.const 0x300000) (i32.shl (global.get $npend) (i32.const 2)))) (i32.const 1)))
+        (i32.store offset=4 (local.get $c) (local.get $b))
+        (i32.store offset=8 (local.get $c) (i32.const 0))))
+    (local.set $l (i32.load offset=8 (local.get $c)))
+    (if (i32.gt_u (i32.add (local.get $l) (local.get $n)) (i32.const 16384)) (then (return (i32.const 0))))
+    (memory.copy (i32.add (call $pendb (local.get $b)) (local.get $l)) (local.get $s) (local.get $n))
+    (i32.store offset=8 (local.get $c) (i32.add (local.get $l) (local.get $n)))
+    (i32.const 1))
+  (func $free_pend (param $c i32)
+    (local $b i32)
     (if (local.tee $b (i32.load offset=4 (local.get $c)))
-      (then (call $free_spill (i32.sub (local.get $b) (i32.const 1))) (i32.store offset=4 (local.get $c) (i32.const 0))))
-    (i32.store (local.get $c) (i32.const 0))
-    (call $close (local.get $fd)))
+      (then
+        (i32.store (i32.add (i32.const 0x300000) (i32.shl (global.get $npend) (i32.const 2))) (i32.sub (local.get $b) (i32.const 1)))
+        (global.set $npend (i32.add (global.get $npend) (i32.const 1)))
+        (i32.store offset=4 (local.get $c) (i32.const 0))
+        (i32.store offset=8 (local.get $c) (i32.const 0)))))
+  (func $free_spill (param $b i32)
+    (i32.store (i32.add (i32.const 0x304000) (i32.shl (global.get $nfree) (i32.const 2))) (local.get $b))
+    (global.set $nfree (i32.add (global.get $nfree) (i32.const 1))))
 
-  ;; serve the complete requests in the fd's IN buffer, send the responses with one sendto (MSG_DONTWAIT |
-  ;; MSG_NOSIGNAL), then read on. What the socket does not take at once goes to a SPILL block and out
-  ;; through io_uring; reading resumes when that is sent.
-  (func $serve (param $fd i32)
-    (local $c i32) (local $buf i32) (local $n i32) (local $used i32) (local $len i32) (local $r i32) (local $b i32) (local $s i64)
-    (local.set $c (call $conn (local.get $fd)))
-    (local.set $buf (call $inb (local.get $fd)))
-    (loop $again
-      (local.set $n (i32.load (local.get $c)))
-      (global.set $o (i32.const 0x300000))
-      (global.set $closeme (i32.const 0))
-      (local.set $used (call $process (local.get $fd) (local.get $buf) (local.get $n)))
-      (if (local.get $used)
-        (then
-          (local.set $n (i32.sub (local.get $n) (local.get $used)))
-          (if (local.get $n) (then (memory.copy (local.get $buf) (i32.add (local.get $buf) (local.get $used)) (local.get $n))))
-          (i32.store (local.get $c) (local.get $n))))
-      (if (local.tee $len (i32.sub (global.get $o) (i32.const 0x300000)))
-        (then
-          (local.set $s (call $sys (i64.const 44) (i64.extend_i32_u (local.get $fd)) (call $p (i32.const 0x300000))
-            (i64.extend_i32_u (local.get $len)) (i64.const 0x4040) (i64.const 0) (i64.const 0)))
-          (if (i64.lt_s (local.get $s) (i64.const 0))
-            (then
-              (if (i64.ne (local.get $s) (i64.const -11)) (then (call $drop (local.get $fd)) (return)))   ;; not EAGAIN
-              (local.set $s (i64.const 0))))
-          (local.set $r (i32.wrap_i64 (local.get $s)))
-          (if (i32.lt_u (local.get $r) (local.get $len))
-            (then
-              (if (i32.or (i32.eqz (global.get $nfree)) (i32.gt_u (i32.sub (local.get $len) (local.get $r)) (i32.const 65536)))
-                (then (call $drop (local.get $fd)) (return)))
-              (global.set $nfree (i32.sub (global.get $nfree) (i32.const 1)))
-              (local.set $b (i32.load (i32.add (i32.const 0x1600000) (i32.shl (global.get $nfree) (i32.const 2)))))
-              (i32.store offset=4 (local.get $c) (i32.add (local.get $b) (i32.const 1)))
-              (i32.store offset=8 (local.get $c) (i32.add (i32.const 0x600000) (i32.shl (local.get $b) (i32.const 16))))
-              (i32.store offset=12 (local.get $c) (i32.sub (local.get $len) (local.get $r)))
-              (i32.store offset=16 (local.get $c) (global.get $closeme))
-              (memory.copy (i32.load offset=8 (local.get $c)) (i32.add (i32.const 0x300000) (local.get $r)) (i32.sub (local.get $len) (local.get $r)))
-              (call $send_spill (local.get $fd))
-              (return)))))
-      (if (global.get $closeme) (then (call $drop (local.get $fd)) (return)))
-      (br_if $again (i32.and (i32.ne (local.get $used) (i32.const 0)) (i32.ne (local.get $n) (i32.const 0)))))
-    (if (i32.ge_u (local.get $n) (i32.const 4096)) (then (call $drop (local.get $fd)) (return)))   ;; a request larger than IN
-    (call $arm_recv (local.get $fd)))
+  ;; close a connection: shut it down first if a receive or send is still in flight (their completions
+  ;; come back here); once none is, free its blocks and close its slot
+  (func $drop (param $ci i32)
+    (local $c i32) (local $f i32) (local $r i32) (local $b i32)
+    (local.set $c (call $conn (local.get $ci)))
+    (local.set $f (i32.or (i32.load (local.get $c)) (i32.const 8)))
+    (local.set $r (i32.shr_u (local.get $ci) (i32.const 16)))
+    (if (i32.and (local.get $f) (i32.const 3))
+      (then
+        (if (i32.eqz (i32.and (local.get $f) (i32.const 16)))
+          (then
+            (local.set $f (i32.or (local.get $f) (i32.const 16)))
+            (drop (call $sqe (local.get $r) (i32.const 34) (i32.const 1) (i32.and (local.get $ci) (i32.const 0xffff))   ;; SHUT_RDWR
+              (i64.const 0) (i32.const 2) (i32.const 0) (i32.const 0) (i32.or (i32.const 0x8000000) (local.get $ci))))))
+        (i32.store (local.get $c) (local.get $f))
+        (return)))
+    (call $free_pend (local.get $c))
+    (if (local.tee $b (i32.load offset=12 (local.get $c))) (then (call $free_spill (i32.sub (local.get $b) (i32.const 1)))))
+    (v128.store (local.get $c) (v128.const i64x2 0 0))
+    (v128.store offset=16 (local.get $c) (v128.const i64x2 0 0))
+    (i32.store offset=44 (call $sqe (local.get $r) (i32.const 19) (i32.const 0) (i32.const 0) (i64.const 0) (i32.const 0)
+      (i32.const 0) (i32.const 0) (i32.or (i32.const 0x5000000) (local.get $ci))) (i32.add (i32.and (local.get $ci) (i32.const 0xffff)) (i32.const 1)))
+    (local.set $b (call $rt (local.get $r)))
+    (i32.store offset=8 (local.get $b) (i32.sub (i32.load offset=8 (local.get $b)) (i32.const 1))))
 
-  ;; one completion: 0 user_data (fd, kind), 8 res, 12 flags
+  ;; room in OUT for one connection's output (64 KiB plus one response): OUT is 32 segments of 1 MiB used
+  ;; in turn, and a segment is reused only when no send from it is still in flight (counters at 0x2400)
+  (func $out_room (result i32)
+    (local $off i32) (local $s i32)
+    (local.set $off (i32.sub (global.get $o) (i32.const 0x2400000)))
+    (if (i32.le_u (i32.and (local.get $off) (i32.const 0xfffff)) (i32.const 0xcffff)) (then (return (i32.const 1))))
+    (local.set $s (i32.and (i32.add (i32.shr_u (local.get $off) (i32.const 20)) (i32.const 1)) (i32.const 31)))
+    (if (i32.load (i32.add (i32.const 0x2400) (i32.shl (local.get $s) (i32.const 2)))) (then (return (i32.const 0))))
+    (global.set $o (i32.add (i32.const 0x2400000) (i32.shl (local.get $s) (i32.const 20))))
+    (i32.const 1))
+  (func $segc (param $a i32) (param $d i32)
+    (local $p i32)
+    (local.set $p (i32.add (i32.const 0x2400) (i32.shl (i32.shr_u (i32.sub (local.get $a) (i32.const 0x2400000)) (i32.const 20)) (i32.const 2))))
+    (i32.store (local.get $p) (i32.add (i32.load (local.get $p)) (local.get $d))))
+
+  ;; serve the complete requests in $n bytes at $buf (a receive buffer; $n = 0: what is in PEND). While a
+  ;; send is in flight new bytes wait in PEND. The responses go out with one send straight from OUT; a
+  ;; partial request stays in PEND.
+  (func $serve (param $ci i32) (param $buf i32) (param $n i32)
+    (local $c i32) (local $f i32) (local $used i32) (local $left i32) (local $len i32) (local $inpend i32)
+    (local.set $c (call $conn (local.get $ci)))
+    (local.set $f (i32.load (local.get $c)))
+    (if (i32.and (local.get $f) (i32.const 8)) (then (return)))
+    (if (i32.and (i32.ne (local.get $n) (i32.const 0)) (i32.or (i32.ne (i32.load offset=8 (local.get $c)) (i32.const 0)) (i32.ne (i32.and (local.get $f) (i32.const 2)) (i32.const 0))))
+      (then
+        (if (i32.eqz (call $append (local.get $c) (local.get $buf) (local.get $n))) (then (call $drop (local.get $ci)) (return)))
+        (local.set $n (i32.const 0))))
+    (if (i32.and (local.get $f) (i32.const 2)) (then (return)))
+    (if (i32.eqz (local.get $n))
+      (then
+        (local.set $n (i32.load offset=8 (local.get $c)))
+        (if (i32.eqz (local.get $n)) (then (return)))
+        (local.set $buf (call $pendb (i32.load offset=4 (local.get $c))))
+        (local.set $inpend (i32.const 1))))
+    (if (i32.eqz (call $out_room))
+      (then
+        (if (i32.eqz (local.get $inpend))
+          (then (if (i32.eqz (call $append (local.get $c) (local.get $buf) (local.get $n))) (then (call $drop (local.get $ci)) (return)))))
+        (call $ready (local.get $ci))
+        (return)))
+    (global.set $ostart (global.get $o))
+    (global.set $closeme (i32.const 0))
+    (local.set $used (call $process (i32.const 0) (local.get $buf) (local.get $n)))
+    (local.set $left (i32.sub (local.get $n) (local.get $used)))
+    (if (local.get $inpend)
+      (then
+        (if (local.get $left)
+          (then
+            (if (local.get $used) (then (memory.copy (local.get $buf) (i32.add (local.get $buf) (local.get $used)) (local.get $left))))
+            (i32.store offset=8 (local.get $c) (local.get $left)))
+          (else (call $free_pend (local.get $c)))))
+      (else
+        (if (local.get $left)
+          (then (if (i32.eqz (call $append (local.get $c) (i32.add (local.get $buf) (local.get $used)) (local.get $left)))
+            (then (call $drop (local.get $ci)) (return)))))))
+    (if (local.tee $len (i32.sub (global.get $o) (global.get $ostart)))
+      (then
+        (i32.store offset=24 (local.get $c) (global.get $ostart))
+        (i32.store offset=28 (local.get $c) (local.get $len))
+        (call $segc (global.get $ostart) (i32.const 1))
+        (call $send (local.get $ci) (global.get $ostart) (local.get $len) (i32.const 3))
+        (if (global.get $closeme) (then (i32.store (local.get $c) (i32.or (i32.load (local.get $c)) (i32.const 8)))))
+        ;; stopped at the output limit with requests left: serve them next turn
+        (if (i32.and (i32.gt_u (local.get $len) (i32.const 0x10000)) (i32.ne (local.get $left) (i32.const 0)))
+          (then (call $ready (local.get $ci)))))
+      (else (if (global.get $closeme) (then (call $drop (local.get $ci)))))))
+
+  ;; a send finished: close if asked to, else serve what came in meanwhile
+  (func $sent (param $ci i32)
+    (local $c i32) (local.set $c (call $conn (local.get $ci)))
+    (if (i32.and (i32.load (local.get $c)) (i32.const 8)) (then (call $drop (local.get $ci)) (return)))
+    (if (i32.load offset=8 (local.get $c)) (then (call $serve (local.get $ci) (i32.const 0) (i32.const 0)))))
+
+  ;; one completion: 0 user_data, 8 res, 12 flags (1 IORING_CQE_F_BUFFER with the buffer id in the top
+  ;; 16 bits, 2 IORING_CQE_F_MORE)
   (func $on_cqe (param $e i32)
-    (local $kind i32) (local $fd i32) (local $res i32) (local $c i32)
-    (local.set $fd (i32.load (local.get $e)))
-    (local.set $kind (i32.load offset=4 (local.get $e)))
+    (local $ud i32) (local $kind i32) (local $ci i32) (local $r i32) (local $res i32) (local $fl i32)
+    (local $c i32) (local $t i32) (local $i i32) (local $m i32) (local $b i32) (local $n i32)
+    (local.set $ud (i32.load (local.get $e)))
     (local.set $res (i32.load offset=8 (local.get $e)))
+    (local.set $fl (i32.load offset=12 (local.get $e)))
+    (local.set $kind (i32.shr_u (local.get $ud) (i32.const 24)))
+    (local.set $ci (i32.and (local.get $ud) (i32.const 0x7ffff)))
+    (local.set $r (i32.shr_u (local.get $ci) (i32.const 16)))
+    (local.set $c (call $conn (local.get $ci)))
+    (if (i32.eq (local.get $kind) (i32.const 2))
+      (then
+        (if (i32.gt_s (local.get $res) (i32.const 0))
+          (then
+            (local.set $b (i32.shr_u (local.get $fl) (i32.const 16)))
+            (call $serve (local.get $ci)
+              (i32.add (i32.const 0x1400000) (i32.shl (i32.or (i32.shl (local.get $r) (i32.const 10)) (local.get $b)) (i32.const 11)))
+              (local.get $res))
+            (call $give (local.get $r) (local.get $b))))
+        (if (i32.eqz (i32.and (local.get $fl) (i32.const 2)))
+          (then
+            (i32.store (local.get $c) (i32.and (i32.load (local.get $c)) (i32.const -2)))
+            ;; out of buffers (ENOBUFS) or a receive that ended with data: receive again
+            (if (i32.and (i32.eqz (i32.and (i32.load (local.get $c)) (i32.const 8)))
+                         (i32.or (i32.gt_s (local.get $res) (i32.const 0)) (i32.eq (local.get $res) (i32.const -105))))
+              (then (call $arm_recv (local.get $ci)))
+              (else (call $drop (local.get $ci))))))
+        (return)))
+    (if (i32.eq (local.get $kind) (i32.const 3))
+      (then
+        (i32.store (local.get $c) (i32.and (i32.load (local.get $c)) (i32.const -3)))
+        (call $segc (i32.load offset=24 (local.get $c)) (i32.const -1))
+        (local.set $n (i32.load offset=28 (local.get $c)))
+        (if (i32.eq (local.get $res) (local.get $n)) (then (call $sent (local.get $ci)) (return)))
+        (if (i32.and (i32.lt_s (local.get $res) (i32.const 0)) (i32.ne (local.get $res) (i32.const -11)))
+          (then (call $drop (local.get $ci)) (return)))
+        ;; the socket took only part of it (or nothing: EAGAIN): the rest goes to a SPILL block
+        (if (i32.lt_s (local.get $res) (i32.const 0)) (then (local.set $res (i32.const 0))))
+        (local.set $n (i32.sub (local.get $n) (local.get $res)))
+        (if (i32.or (i32.eqz (global.get $nfree)) (i32.gt_u (local.get $n) (i32.const 0x40000)))
+          (then (call $drop (local.get $ci)) (return)))
+        (global.set $nfree (i32.sub (global.get $nfree) (i32.const 1)))
+        (local.set $b (i32.load (i32.add (i32.const 0x304000) (i32.shl (global.get $nfree) (i32.const 2)))))
+        (i32.store offset=12 (local.get $c) (i32.add (local.get $b) (i32.const 1)))
+        (local.set $b (i32.add (i32.const 0x4400000) (i32.shl (local.get $b) (i32.const 18))))
+        (memory.copy (local.get $b) (i32.add (i32.load offset=24 (local.get $c)) (local.get $res)) (local.get $n))
+        (i32.store offset=16 (local.get $c) (local.get $b))
+        (i32.store offset=20 (local.get $c) (local.get $n))
+        (call $send (local.get $ci) (local.get $b) (local.get $n) (i32.const 4))
+        (return)))
+    (if (i32.eq (local.get $kind) (i32.const 4))
+      (then
+        (i32.store (local.get $c) (i32.and (i32.load (local.get $c)) (i32.const -3)))
+        (if (i32.le_s (local.get $res) (i32.const 0)) (then (call $drop (local.get $ci)) (return)))
+        (i32.store offset=16 (local.get $c) (i32.add (i32.load offset=16 (local.get $c)) (local.get $res)))
+        (if (local.tee $n (i32.sub (i32.load offset=20 (local.get $c)) (local.get $res)))
+          (then
+            (i32.store offset=20 (local.get $c) (local.get $n))
+            (call $send (local.get $ci) (i32.load offset=16 (local.get $c)) (local.get $n) (i32.const 4))
+            (return)))
+        (call $free_spill (i32.sub (i32.load offset=12 (local.get $c)) (i32.const 1)))
+        (i32.store offset=12 (local.get $c) (i32.const 0))
+        (call $sent (local.get $ci))
+        (return)))
     (if (i32.eq (local.get $kind) (i32.const 1))
       (then
         (if (i32.ge_s (local.get $res) (i32.const 0))
           (then
-            (if (i32.ge_u (local.get $res) (i32.const 65536))
-              (then (call $close (local.get $res)))
-              (else
-                (local.set $c (call $conn (local.get $res)))
-                (i32.store (local.get $c) (i32.const 0))
-                (i32.store offset=4 (local.get $c) (i32.const 0))
-                (i32.store offset=16 (local.get $c) (i32.const 0))
-                (call $arm_recv (local.get $res))))))
-        (if (i32.eqz (i32.and (i32.load offset=12 (local.get $e)) (i32.const 2))) (then (call $arm_acc)))   ;; no IORING_CQE_F_MORE
+            (local.set $ci (i32.or (i32.shl (local.get $r) (i32.const 16)) (local.get $res)))
+            (local.set $t (call $rt (local.get $r)))
+            (i32.store offset=8 (local.get $t) (i32.add (i32.load offset=8 (local.get $t)) (i32.const 1)))
+            (call $arm_recv (local.get $ci))
+            ;; near full (a burst can take a whole backlog at once): the accept moves to the emptiest ring
+            (if (i32.ge_u (i32.load offset=8 (call $rt (global.get $acc))) (global.get $nhi))
+              (then
+                (local.set $m (global.get $acc))
+                (loop $l
+                  (if (i32.lt_u (i32.load offset=8 (call $rt (local.get $i))) (i32.load offset=8 (call $rt (local.get $m))))
+                    (then (local.set $m (local.get $i))))
+                  (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (global.get $nr))))
+                (if (i32.and (i32.ne (local.get $m) (global.get $acc))
+                             (i32.lt_u (i32.load offset=8 (call $rt (local.get $m))) (global.get $nhi)))
+                  (then (global.set $acc (local.get $m))))))))
+        ;; accept again, on the ring that accepts now
+        (call $arm_acc (global.get $acc))
         (return)))
-    (local.set $c (call $conn (local.get $fd)))
-    (if (i32.eq (local.get $kind) (i32.const 2))
+    (if (i32.eq (local.get $kind) (i32.const 6))
+      (then (call $arm_poll))))
+
+  ;; ring 0 reads the eventfd the other rings signal (8 bytes, which also resets it); read again on each
+  ;; completion. (A multishot poll on it stopped firing after its first completion on Linux 6.8.)
+  (func $arm_poll
+    (drop (call $sqe (i32.const 0) (i32.const 22) (i32.const 0) (global.get $efd) (call $p (i32.const 0x21f8)) (i32.const 8) (i32.const 0)
+      (i32.const 0) (i32.const 0x6000000))))
+
+  ;; one ring: 64 entries, 128 completions, in SQES/RINGS slot $r; a sparse fixed-file table of $ns slots; a
+  ;; provided-buffer ring (group 0) of 1,024 2 KiB buffers. Flags: CQSIZE, SUBMIT_ALL, COOP_TASKRUN,
+  ;; TASKRUN_FLAG, SINGLE_ISSUER, DEFER_TASKRUN, NO_MMAP, NO_SQARRAY. Returns the ring fd or -errno.
+  (func $ring (param $r i32) (result i64)
+    (local $fd i64) (local $i i32) (local $br i32) (local $t i32)
+    (memory.fill (i32.const 0x2100) (i32.const 0) (i32.const 120))
+    (i32.store offset=4 (i32.const 0x2100) (i32.const 128))
+    (i32.store offset=8 (i32.const 0x2100) (i32.const 95112))
+    (i64.store offset=72 (i32.const 0x2100) (call $p (call $sqes (local.get $r))))   ;; sq_off.user_addr
+    (i64.store offset=112 (i32.const 0x2100) (call $p (call $rp (local.get $r))))    ;; cq_off.user_addr
+    (local.set $fd (call $sys3 (i32.const 425) (i64.const 64) (call $p (i32.const 0x2100)) (i64.const 0)))
+    (if (i64.lt_s (local.get $fd) (i64.const 0)) (then (return (local.get $fd))))
+    (global.set $o_sqh (i32.load offset=40 (i32.const 0x2100)))
+    (global.set $o_sqt (i32.load offset=44 (i32.const 0x2100)))
+    (global.set $o_sqf (i32.load offset=56 (i32.const 0x2100)))
+    (global.set $o_cqh (i32.load offset=80 (i32.const 0x2100)))
+    (global.set $o_cqt (i32.load offset=84 (i32.const 0x2100)))
+    (global.set $o_cqes (i32.load offset=100 (i32.const 0x2100)))
+    (local.set $t (call $rt (local.get $r)))
+    (i32.store (local.get $t) (i32.wrap_i64 (local.get $fd)))
+    ;; IORING_REGISTER_FILES2, IORING_RSRC_REGISTER_SPARSE
+    (memory.fill (i32.const 0x2180) (i32.const 0) (i32.const 32))
+    (i32.store (i32.const 0x2180) (global.get $ns))
+    (i32.store offset=4 (i32.const 0x2180) (i32.const 1))
+    (local.set $i (i32.wrap_i64 (call $sys (i64.const 427) (local.get $fd) (i64.const 13) (call $p (i32.const 0x2180)) (i64.const 32) (i64.const 0) (i64.const 0))))
+    (if (local.get $i) (then (return (i64.extend_i32_s (local.get $i)))))
+    ;; the buffers, then IORING_REGISTER_PBUF_RING
+    (local.set $br (i32.add (i32.const 0x30000) (i32.shl (local.get $r) (i32.const 14))))
+    (local.set $i (i32.const 0))
+    (loop $l (call $give (local.get $r) (local.get $i)) (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (i32.const 1024))))
+    (memory.fill (i32.const 0x21c0) (i32.const 0) (i32.const 40))
+    (i64.store (i32.const 0x21c0) (call $p (local.get $br)))
+    (i32.store offset=8 (i32.const 0x21c0) (i32.const 1024))
+    (local.set $i (i32.wrap_i64 (call $sys (i64.const 427) (local.get $fd) (i64.const 22) (call $p (i32.const 0x21c0)) (i64.const 1) (i64.const 0) (i64.const 0))))
+    (if (local.get $i) (then (return (i64.extend_i32_s (local.get $i)))))
+    ;; rings 1..7: IORING_REGISTER_EVENTFD
+    (if (local.get $r)
       (then
-        (if (i32.le_s (local.get $res) (i32.const 0)) (then (call $drop (local.get $fd)) (return)))
-        (i32.store (local.get $c) (i32.add (i32.load (local.get $c)) (local.get $res)))
-        (call $serve (local.get $fd))
-        (return)))
-    ;; a SPILL send
-    (if (i32.le_s (local.get $res) (i32.const 0)) (then (call $drop (local.get $fd)) (return)))
-    (i32.store offset=8 (local.get $c) (i32.add (i32.load offset=8 (local.get $c)) (local.get $res)))
-    (i32.store offset=12 (local.get $c) (i32.sub (i32.load offset=12 (local.get $c)) (local.get $res)))
-    (if (i32.load offset=12 (local.get $c)) (then (call $send_spill (local.get $fd)) (return)))
-    (call $free_spill (i32.sub (i32.load offset=4 (local.get $c)) (i32.const 1)))
-    (i32.store offset=4 (local.get $c) (i32.const 0))
-    (if (i32.load offset=16 (local.get $c)) (then (call $drop (local.get $fd)) (return)))
-    (call $serve (local.get $fd)))
+        (i32.store (i32.const 0x21f0) (global.get $efd))
+        (local.set $i (i32.wrap_i64 (call $sys (i64.const 427) (local.get $fd) (i64.const 4) (call $p (i32.const 0x21f0)) (i64.const 1) (i64.const 0) (i64.const 0))))
+        (if (local.get $i) (then (return (i64.extend_i32_s (local.get $i)))))))
+    (local.get $fd))
 
   ;; ---------- start ----------
   ;; run(api, ctx), called by serve(): the shell's sqlite3_api_routines and serve()'s context
@@ -1211,11 +1450,20 @@
     (global.set $st_exists (call $prep (i32.const 0x100d00)))
     (global.set $st_like (call $prep (i32.const 0x100d40)))
     (global.set $st_ping (call $prep (i32.const 0x100dc0)))
-    (loop $l (call $free_spill (local.get $i)) (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (i32.const 256))))
-    ;; RLIMIT_NOFILE: the soft limit up to the hard one, at most 65,536 (the size of CONN and IN)
+    ;; PEND and SPILL free lists
+    (loop $l
+      (i32.store (i32.add (i32.const 0x300000) (i32.shl (local.get $i) (i32.const 2))) (local.get $i))
+      (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (i32.const 4096))))
+    (global.set $npend (i32.const 4096))
+    (local.set $i (i32.const 0))
+    (loop $l (call $free_spill (local.get $i)) (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (i32.const 128))))
+    ;; RLIMIT_NOFILE: the soft limit up to the hard one; a ring's fixed-file table may not be larger
     (drop (call $sys3 (i32.const 97) (i64.const 7) (call $p (i32.const 0x2090)) (i64.const 0)))
     (i64.store (i32.const 0x2090) (select (i64.const 65536) (i64.load (i32.const 0x2098)) (i64.gt_u (i64.load (i32.const 0x2098)) (i64.const 65536))))
     (drop (call $sys3 (i32.const 160) (i64.const 7) (call $p (i32.const 0x2090)) (i64.const 0)))
+    (drop (call $sys3 (i32.const 97) (i64.const 7) (call $p (i32.const 0x2090)) (i64.const 0)))
+    (global.set $ns (i32.wrap_i64 (select (i64.const 65536) (i64.load (i32.const 0x2090)) (i64.gt_u (i64.load (i32.const 0x2090)) (i64.const 65536)))))
+    (global.set $nhi (i32.sub (global.get $ns) (i32.shr_u (global.get $ns) (i32.const 3))))
     ;; the listening socket: SO_REUSEADDR, TCP_NODELAY (accepted sockets inherit it)
     (global.set $lfd (i32.wrap_i64 (call $sys3 (i32.const 41) (i64.const 2) (i64.const 0x80001) (i64.const 0))))   ;; AF_INET, SOCK_STREAM | SOCK_CLOEXEC
     (i32.store (i32.const 0x2080) (i32.const 1))
@@ -1228,31 +1476,75 @@
     (if (i32.or (i32.wrap_i64 (call $sys3 (i32.const 49) (i64.extend_i32_u (global.get $lfd)) (call $p (i32.const 0x2040)) (i64.const 16)))
                 (i32.wrap_i64 (call $sys3 (i32.const 50) (i64.extend_i32_u (global.get $lfd)) (i64.const 65535) (i64.const 0))))
       (then (call $fatal (i32.const 0x101140))))
-    ;; io_uring: 64 submission entries, 128 completions, rings in SQES and RINGS (they must be page aligned)
-    ;; flags: CQSIZE, SUBMIT_ALL, COOP_TASKRUN, SINGLE_ISSUER, DEFER_TASKRUN, NO_MMAP, NO_SQARRAY
+    ;; the rings (their memory must be page aligned) and the eventfd (EFD_CLOEXEC; blocking, so a read of it waits) of rings 1..7
     (if (i32.and (i32.wrap_i64 (global.get $mb)) (i32.const 4095)) (then (call $fatal (i32.const 0x1011c0))))
-    (i32.store offset=4 (i32.const 0x2100) (i32.const 128))
-    (i32.store offset=8 (i32.const 0x2100) (i32.const 94600))
-    (i64.store offset=72 (i32.const 0x2100) (call $p (i32.const 0x3000)))   ;; sq_off.user_addr: the entries
-    (i64.store offset=112 (i32.const 0x2100) (call $p (i32.const 0x4000)))  ;; cq_off.user_addr: the rings
-    (global.set $rfd (call $sys3 (i32.const 425) (i64.const 64) (call $p (i32.const 0x2100)) (i64.const 0)))
-    (if (i64.lt_s (global.get $rfd) (i64.const 0)) (then (call $fatal_e (i32.const 0x1011c0) (global.get $rfd))))
-    (global.set $sq_head (i32.add (i32.const 0x4000) (i32.load offset=40 (i32.const 0x2100))))
-    (global.set $sq_tail (i32.add (i32.const 0x4000) (i32.load offset=44 (i32.const 0x2100))))
-    (global.set $cq_head (i32.add (i32.const 0x4000) (i32.load offset=80 (i32.const 0x2100))))
-    (global.set $cq_tail (i32.add (i32.const 0x4000) (i32.load offset=84 (i32.const 0x2100))))
-    (global.set $cq_mask (i32.load (i32.add (i32.const 0x4000) (i32.load offset=88 (i32.const 0x2100)))))
-    (global.set $cqes (i32.add (i32.const 0x4000) (i32.load offset=100 (i32.const 0x2100))))
-    (call $arm_acc)
+    (global.set $efd (i32.wrap_i64 (call $sys3 (i32.const 290) (i64.const 0) (i64.const 0x80000) (i64.const 0))))
+    (local.set $i (i32.const 0))
+    (block $d (loop $l
+      (local.set $r (call $ring (local.get $i)))
+      (if (i64.lt_s (local.get $r) (i64.const 0))
+        (then (if (i32.eqz (local.get $i)) (then (call $fatal_e (i32.const 0x1011c0) (local.get $r)))) (br $d)))
+      (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (i32.const 8)))))
+    (global.set $nr (local.get $i))
+    (local.set $i (i32.const 0))
+    (loop $l (call $arm_acc (i32.const 0)) (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (i32.const 16))))
+    (call $arm_poll)
     (call $log (i32.const 0x101080))
     (loop $forever
-      (call $enter (i32.const 1))
-      (global.set $now (call $clock (i32.const 0)))
+      ;; rings 1..7: submit, and run the work that came in (SQ flags: 2 IORING_SQ_CQ_OVERFLOW, 4 IORING_SQ_TASKRUN)
+      (local.set $i (i32.const 1))
       (block $d (loop $l
-        (local.set $h (i32.load (global.get $cq_head)))
-        (br_if $d (i32.eq (local.get $h) (i32.load (global.get $cq_tail))))
-        (call $on_cqe (i32.add (global.get $cqes) (i32.shl (i32.and (local.get $h) (global.get $cq_mask)) (i32.const 4))))
-        (i32.store (global.get $cq_head) (i32.add (local.get $h) (i32.const 1)))
+        (br_if $d (i32.ge_u (local.get $i) (global.get $nr)))
+        (if (i32.or (call $queued (local.get $i)) (i32.and (i32.load (i32.add (call $rp (local.get $i)) (global.get $o_sqf))) (i32.const 6)))
+          (then (call $enter (local.get $i) (i32.const 1) (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l)))
+      ;; ring 0: submit, and wait unless there is something to do already
+      (local.set $h (i32.eqz (global.get $nready)))
+      (local.set $i (i32.const 0))
+      (loop $l
+        (if (call $cq_ready (local.get $i)) (then (local.set $h (i32.const 0))))
+        (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (global.get $nr))))
+      (call $enter (i32.const 0) (i32.const 1) (local.get $h))
+      (local.set $i (i32.const 1))
+      (block $d (loop $l
+        (br_if $d (i32.ge_u (local.get $i) (global.get $nr)))
+        (if (i32.and (i32.load (i32.add (call $rp (local.get $i)) (global.get $o_sqf))) (i32.const 6))
+          (then (call $enter (local.get $i) (i32.const 1) (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l)))
+      (global.set $now (call $clock (i32.const 0)))
+      (local.set $i (i32.const 0))
+      (loop $l
+        (call $drain (local.get $i))
+        (br_if $l (i32.lt_u (local.tee $i (i32.add (local.get $i) (i32.const 1))) (global.get $nr))))
+      (call $run_ready)
       (br $forever)))
+
+  (func $drain (param $r i32)
+    (local $p i32) (local $h i32)
+    (local.set $p (call $rp (local.get $r)))
+    (block $d (loop $l
+      (local.set $h (i32.load (i32.add (local.get $p) (global.get $o_cqh))))
+      (br_if $d (i32.eq (local.get $h) (i32.load (i32.add (local.get $p) (global.get $o_cqt)))))
+      (call $on_cqe (i32.add (i32.add (local.get $p) (global.get $o_cqes)) (i32.shl (i32.and (local.get $h) (i32.const 127)) (i32.const 4))))
+      (i32.store (i32.add (local.get $p) (global.get $o_cqh)) (i32.add (local.get $h) (i32.const 1)))
+      (br $l))))
+
+  ;; serve the connections that had to wait (OUT busy, or more requests than one turn's output)
+  (func $run_ready
+    (local $i i32) (local $n i32) (local $ci i32) (local $c i32)
+    (local.set $n (global.get $nready))
+    (block $d (loop $l
+      (br_if $d (i32.ge_u (local.get $i) (local.get $n)))
+      (local.set $ci (i32.load (i32.add (i32.const 0xa400000) (i32.shl (local.get $i) (i32.const 2)))))
+      (local.set $c (call $conn (local.get $ci)))
+      (i32.store (local.get $c) (i32.and (i32.load (local.get $c)) (i32.const -33)))
+      (call $serve (local.get $ci) (i32.const 0) (i32.const 0))
+      (local.set $i (i32.add (local.get $i) (i32.const 1)))
+      (br $l)))
+    (global.set $nready (i32.sub (global.get $nready) (local.get $n)))
+    (if (global.get $nready)
+      (then (memory.copy (i32.const 0xa400000) (i32.add (i32.const 0xa400000) (i32.shl (local.get $n) (i32.const 2)))
+              (i32.shl (global.get $nready) (i32.const 2))))))
 )

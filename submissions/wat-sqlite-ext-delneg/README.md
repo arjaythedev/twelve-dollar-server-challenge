@@ -24,7 +24,7 @@ sqlite3       the stock shell, built from the SQLite 3.54.1 amalgamation (shell.
 
 | File | Language | What it does |
 |---|---|---|
-| `src/app.wat` | WAT, hand-written, ~1,250 lines | Everything: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading, base64url, SHA-256 and HMAC for the HS256 check, and every SQL call |
+| `src/app.wat` | WAT, hand-written, ~1,500 lines | Everything: the io_uring event loop (it writes every submission entry and reads every completion itself), HTTP/1.1 parsing, routing, JSON reading, base64url, SHA-256 and HMAC for the HS256 check, and every SQL call |
 | `src/serve.s` | x86-64 assembly, 158 lines without comments (136 instructions) | A SQLite extension. Its init registers `serve()`; `serve()` creates a WasmEdge VM, gives the module three imports and runs its `run` export |
 | `start.sql` | SQL / shell commands | Pragmas for the shell's connection, `.load`, `SELECT serve(...)` |
 
@@ -61,21 +61,34 @@ them (`EXPLAIN QUERY PLAN` shows no other step). An `ORDER BY` inside `group_con
 
 ## Design
 
-- **One thread, io_uring, direct.** The rings live in wasm memory: with `IORING_SETUP_NO_MMAP` the kernel uses
-  memory the process gives it, so the module can read and write the rings without any host code. Each ring
-  is a single page (64 submission entries, 128 completions), so the memory never has to be physically
-  contiguous across pages. A multishot accept takes new connections; each connection has a 4 KiB receive
-  buffer, read with a single-shot recv.
-- **Sending.** The responses to the complete requests in a buffer go out with one `sendto(MSG_DONTWAIT)`. If
-  the socket takes only part of it, the rest is copied to a spill block and sent through io_uring, and reading
-  resumes once it is out.
+- **One thread, io_uring, direct, no file descriptor per connection.** All rings live in wasm memory: with
+  `IORING_SETUP_NO_MMAP` the kernel uses memory the process gives it, so the module reads and writes them
+  without any host code. Each ring is a single page of submission entries (64) and one of completions (128), so
+  the memory never has to be physically contiguous across pages (Linux 6.8 requires that for larger rings).
+  An accept puts each new connection straight into a slot of the ring's fixed-file table, so a connection never
+  takes a process file descriptor. A table can't be larger than `RLIMIT_NOFILE` (65,535 on the benchmark box),
+  so there are up to 8 rings, and accepting moves to the emptiest one when the current one is 7/8 full: about
+  458,000 connections in all. 16 single-shot accepts are kept in flight.
+- **Receiving.** Each connection has one multishot receive that takes 2 KiB buffers from its ring's
+  provided-buffer ring (1,024 buffers per ring, in wasm memory). Requests are parsed in place and the buffer
+  goes back at once; only a partial request (or bytes that arrive while a send is in flight) is copied to a
+  16 KiB block from a pool.
+- **Waiting.** Ring 0 is the one the loop waits on. The other rings signal one eventfd when work arrives for
+  them, and ring 0 keeps a read on that eventfd, so one `io_uring_enter` waits for all of them; after it
+  returns, the loop runs the work of every ring that has some (`IORING_SQ_TASKRUN`) and drains all completion
+  queues.
+- **Sending.** The responses to the requests in one receive go out with one send (`MSG_DONTWAIT`) straight
+  from OUT, a 32 MiB area used in 1 MiB segments in turn; all sends of a loop turn are submitted together in the
+  next `io_uring_enter`, and with `MSG_DONTWAIT` they complete inside it. If the socket takes only part, the rest
+  is copied to a spill block and sent without `MSG_DONTWAIT`. A segment of OUT is reused only when no send from it
+  is still in flight. One send in flight per connection.
 - **Writes.** Each POST is its own autocommit transaction on a WAL database with `synchronous=NORMAL`. The
   response is written only after `sqlite3_step` has returned `SQLITE_DONE`, so the row is committed when the
   201 goes out. `locking_mode=EXCLUSIVE`, since the shell's connection is the only one. Checkpoints run every
   10,000 WAL pages (`wal_autocheckpoint`), not every 1,000, so hot pages are copied back less often.
 - **Configuration.** The WAT reads `JWT_SECRET`, `HOST` and `PORT` from `/proc/self/environ`; the shell opens
-  `$SQLITE_PATH`. It raises its own soft `RLIMIT_NOFILE` to the hard limit (at most 65,536, the size of its
-  per-connection tables).
+  `$SQLITE_PATH`. It raises its own soft `RLIMIT_NOFILE` to the hard limit (at most 65,536), the size of each ring's
+  fixed-file table.
 
 ## Rules
 
@@ -103,6 +116,7 @@ them (`EXPLAIN QUERY PLAN` shows no other step). An `ORDER BY` inside `group_con
 ## Limits
 
 - x86-64 Linux only (the assembly and the syscall numbers).
-- A request larger than its 4 KiB buffer closes the connection. The test suite's largest request is about 1 KiB.
-- Up to 65,536 open connections (the per-connection tables are indexed by file descriptor).
-- The rings use `IORING_SETUP_NO_MMAP` and `IORING_SETUP_NO_SQARRAY` (Linux 6.5 and 6.6).
+- A request larger than 16 KiB closes the connection. The test suite's largest request is about 1 KiB.
+- About 458,000 open connections (8 rings of up to 65,536 fixed-file slots, accepting moves on at 7/8).
+- The rings use `IORING_SETUP_NO_MMAP` and `IORING_SETUP_NO_SQARRAY` (Linux 6.5 and 6.6), sparse fixed-file
+  tables, provided-buffer rings and multishot receive (6.0). Tested on Ubuntu 24.04's 6.8.

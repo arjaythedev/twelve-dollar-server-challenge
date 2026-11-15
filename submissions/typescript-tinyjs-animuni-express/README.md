@@ -2,13 +2,15 @@
 
 TypeScript, TinyJS (`tinyjs-fullstack` 0.1.2), Bun 1.4.4, and Bun's built-in `bun:sqlite` driver. The entry runs directly on the benchmark VM. `transport.ts` connects Bun's native HTTP server to TinyJS's built application handler. Routing and endpoint handling stay in TinyJS; the Node HTTP conversions are removed. This entry serves this API-only build, not TinyJS browser assets.
 
+The current optimization reclaims idle direct connections after three seconds to relieve the benchmark's 65,535-FD ceiling. Active handlers retain 120 seconds; the timeout is restored afterward because Bun's request override otherwise persists on the connection. Loopback hosts (`127.0.0.1`, `::1`, `localhost`) retain 120 seconds for proxies. Run direct with `HOST=0.0.0.0`; bind loopback when using Nginx. No process/host limits are raised. See [PERFORMANCE.md](PERFORMANCE.md) for the bottleneck report, measurements, regression checks and remaining official validation. **100K capacity and <300 MB at 100K have not been verified.**
+
 File-based routes use prepared statements against the challenge's existing indexes. SQLite uses WAL and synchronous NORMAL. Each like runs as a transaction, and token signatures are checked on every authenticated request.
 
 Build with `bash build.sh` and run with `bash start.sh` using the challenge environment variables.
 
 Run the local production smoke test with `bun run smoke.ts` after building.
 
-Run `bun run smoke.ts transport.ts` to check the native transport. `start.sh` defaults to native Bun; `TINYJS_TRANSPORT=node bash start.sh` selects the original published Node HTTP adapter running under Bun for comparison. Both retain a 120-second idle timeout. The framework's Node transport remains available; the submission itself requires Bun for SQLite.
+Run `bun run smoke.ts transport.ts` to check the native transport, including direct idle reclamation, slow uploads, proxy reuse and an active write during graceful shutdown. `start.sh` defaults to native Bun; `TINYJS_TRANSPORT=node bash start.sh` selects the original published Node HTTP adapter running under Bun for comparison. That adapter retains a 120-second idle timeout. The framework's Node transport remains available; the submission itself requires Bun for SQLite.
 
 On 12 November 2026, both transports passed all 42 official correctness checks on separate fresh copies of a checksum-verified seed under Ubuntu WSL2 and Bun 1.4.4. Both also passed the production smoke test, including HEAD body suppression and method rejection. Authentication, SQL, indexes and durability settings are unchanged; no response, result or JWT verification cache was added.
 

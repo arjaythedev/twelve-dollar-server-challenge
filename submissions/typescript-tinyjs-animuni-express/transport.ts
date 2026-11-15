@@ -2,15 +2,24 @@
 import { createApplication } from "./.tinyjs/server/server.mjs";
 
 const handle = createApplication({ scripts: [], styles: [] });
+const hostname = process.env.HOST ?? "0.0.0.0";
+const idleTimeout = ["127.0.0.1", "::1", "localhost"].includes(hostname) ? 120 : 3;
 const server = Bun.serve({
-  hostname: process.env.HOST ?? "0.0.0.0",
+  hostname,
   port: Number(process.env.PORT ?? 80),
-  idleTimeout: 120,
-  fetch(request) {
-    if (request.method === "TRACE" || request.method === "TRACK") {
-      return new Response("Not Implemented", { status: 501 });
+  // Reclaim idle direct sockets; loopback proxies need at least 65 seconds.
+  idleTimeout,
+  async fetch(request, server) {
+    server.timeout(request, 120);
+    try {
+      if (request.method === "TRACE" || request.method === "TRACK") {
+        return new Response("Not Implemented", { status: 501 });
+      }
+      return await handle(request);
+    } finally {
+      // Bun's request timeout persists on the keep-alive socket.
+      server.timeout(request, idleTimeout);
     }
-    return handle(request);
   },
   error(error) {
     console.error(error);

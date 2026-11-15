@@ -93,8 +93,9 @@ Without think time (wrk, 64 connections, 100 feed : 100 post : 15 like : 2 creat
 
 ## Known limits
 
-- Request bodies need `Content-Length`; chunked uploads are not parsed. A buffered request over
-  1 MB drops the connection.
+- Request bodies need `Content-Length`. A request with `Transfer-Encoding` gets
+  411 `{"error":"length required"}` and the connection is closed. A buffered request over 1 MB drops
+  the connection.
 - A trailing slash makes a path unknown (404). A query string is ignored.
 - `Connection: close` is left to the client.
 - Past 65,535 open descriptors `accept` fails and the listener stays readable, so the loop spins on it;

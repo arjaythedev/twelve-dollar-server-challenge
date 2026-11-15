@@ -71,12 +71,14 @@ function u = auth (head, lhead)
   endif
   signed = t(1:d(2)-1);
   mac = unhex (hash ("sha256", [OPAD char(unhex (hash ("sha256", [IPAD signed])))]));
-  if (! strcmp (t(d(2)+1:end), b64enc (mac)))
+  sig = t(d(2)+1:end);
+  want = b64enc (mac);
+  if (numel (sig) != numel (want) || any (sig != want))  # every byte compared: no early exit to time
     return;
   endif
   try
-    h = jsondecode (b64dec (t(1:d(1)-1)));
-    p = jsondecode (b64dec (t(d(1)+1:d(2)-1)));
+    h = jsondecode (b64dec (t(1:d(1)-1)), "makeValidName", false);
+    p = jsondecode (b64dec (t(d(1)+1:d(2)-1)), "makeValidName", false);
   catch
     return;
   end_try_catch
@@ -103,7 +105,7 @@ endfunction
 function r = create (u, body)
   r = bad ("400 Bad Request", "malformed JSON body");
   try
-    j = jsondecode (body);
+    j = jsondecode (body, "makeValidName", false);  # else the key "body " would become body
   catch
     return;
   end_try_catch
@@ -224,10 +226,17 @@ while (true)
     endif
     b = [bufs{fd+1} chunks{i}];
     out = "";
+    hangup = false;
     while (! isempty (e = strfind (b, "\r\n\r\n")))
       e = e(1);
       head = b(1:e+1);
-      k = strfind (lower (head), "\r\ncontent-length:");
+      lhead = lower (head);
+      if (! isempty (strfind (lhead, "\r\ntransfer-encoding:")))  # chunked bodies are not parsed: refuse, hang up
+        out = [out bad("411 Length Required", "length required")];
+        hangup = true;
+        break;
+      endif
+      k = strfind (lhead, "\r\ncontent-length:");
       n = 0;
       if (! isempty (k))
         n = max ([0 sscanf(head(k(1)+17:end), "%d", 1)]);
@@ -249,6 +258,9 @@ while (true)
     endif
     bufs{fd+1} = b;
     if (! isempty (out) && ! ox ("send", fd, out))
+      bufs{fd+1} = "";
+    elseif (hangup)
+      ox ("close", fd);
       bufs{fd+1} = "";
     endif
   endfor

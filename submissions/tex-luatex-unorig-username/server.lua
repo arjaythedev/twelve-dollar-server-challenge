@@ -128,7 +128,9 @@ local function unb64(s) -- base64url -> bytes, or nil
 end
 
 local function pos_int(s) -- a positive integer, or nil; one too long for SQLite becomes an id no row has
-  local n = find(s, "^%d+$") and (#s < 19 and tonumber(s) or math.maxinteger)
+  if not find(s, "^%d+$") then return nil end
+  s = match(s, "^0*(.*)") -- leading zeros first, so 0000000000000000001 is still 1
+  local n = #s < 19 and tonumber(s) or #s > 0 and math.maxinteger
   return n and n > 0 and n or nil
 end
 
@@ -138,7 +140,7 @@ local function auth(v) -- user id and username, or nil and an error message
   local hd = h and object(decode(unb64(h)))
   if not hd or hd.alg ~= "HS256" then return nil, "invalid or expired token" end
   local mac = gsub(mime.b64(digest(opad .. digest(ipad .. h .. "." .. p))), "[+/=]", URL)
-  local pl = mac == s and object(decode(unb64(p)))
+  local pl = digest(mac) == digest(s) and object(decode(unb64(p))) -- compare hashes: no timing hint about mac
   local now = os.time()
   if not pl or type(pl.exp) ~= "number" or pl.exp <= now then return nil, "invalid or expired token" end
   if pl.nbf ~= nil and (type(pl.nbf) ~= "number" or pl.nbf > now) then return nil, "invalid or expired token" end
@@ -194,7 +196,9 @@ local function write(c, buf, pos, h, body)
     local ok, v = decode(body)
     if not ok then return oops(c, B400, "malformed JSON body") end
     v = object(ok, v)
-    text = v and type(v.body) == "string" and match(v.body, "^%s*(.*%S)")
+    -- trim by scanning from each end: match(s, "^%s*(.*%S)") is quadratic on an all-whitespace body
+    local a = v and type(v.body) == "string" and find(v.body, "%S")
+    text = a and sub(v.body, a, #v.body + 1 - find(v.body:reverse(), "%S"))
     if not text then return oops(c, B400, "body is required") end
     if #text - select(2, gsub(text, "[\128-\191]", "")) > 500 then return oops(c, B400, "body must be at most 500 characters") end
   end

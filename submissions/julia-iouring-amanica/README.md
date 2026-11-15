@@ -1,10 +1,15 @@
 # julia-iouring-amanica
 
-Julia 1.13.3 · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) · **direct** (no Nginx)
+Julia 1.13.3 · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) ·
+JWT HMAC from Ubuntu's OpenSSL 3 (`libssl3t64`) · **direct** (no Nginx: serves `0.0.0.0:80`)
 
-Work in progress.
+One Julia thread runs an io_uring event loop through raw syscalls; SQLite is the pinned amalgamation,
+used through its public C API only (no B-tree reads). Locally (1 CPU / 2 GB container, wrk-based users
+with think time) it holds 225,000 users reliably and 250,000 about half the time; running two leaderboard
+entries through the same harness suggests that is roughly 225–250k on the benchmark box. See "Running
+locally" for how that was measured.
 
-## Current state
+## How it works
 
 - Single thread, no libuv, no Tasks. Transport (`TRANSPORT` in `config.sh`, default `auto`):
   - **io_uring** through raw syscalls (no liburing). Sockets are direct descriptors in the rings' file
@@ -160,6 +165,33 @@ Caveats:
   latency ≈ connections ÷ req/s. The useful blast number is the saturated req/s (a single run at
   256 connections is enough). The blast ladder's "highest passing" just marks where that queue passes 500 ms.
 
+### Calibrating against the leaderboard
+
+`ENTRY=<folder> dev/ct.sh stress ...` runs another submission through the same harness (its rows go to
+`calibration.csv`, not to the table below). With a ramp like `load.js`'s (`RAMP_UP=60s
+CONNS_PER_SHARD=2000 WRK_THREADS=2`), 1-minute `users` steps on this laptop (2026-11-15):
+
+| entry | leaderboard | passes here | fails here |
+|---|---:|---|---|
+| c-iouring-pavlyhalim (#245) | 295,000 | 275,000 | 300,000 |
+| julia-iouring-amanica (this) | – | 225,000 (2 of 2), 250,000 (1 of 2) | 250,000 (1 of 2) |
+| c-iouring-meros (#137) | 235,000 | – | 175,000, with idle CPU |
+
+pavlyhalim's local limit matches its score, so the laptop and this ramp are a fair stand-in for the box.
+meros fails here far below its score while its CPU is mostly idle, so something in this harness doesn't
+suit it, and it isn't used for calibration. With the default, burstier ramp (5,000 connections per wrk
+shard at once) both C entries fail lower still, while this entry passed 275,000: its accept path copes
+with bursts, so burst-ramp numbers flatter it. Our failures at 225–250k are single stalls (one write
+blocked for 1–4 s while the whole host stalled), not steady overload.
+
+### Tried and dropped
+
+Measured one at a time, kept only if they helped: SQLite at `-O3`, `-march=x86-64-v3`, extra
+`SQLITE_OMIT_*` options, SQLite PGO (0–7% even as an upper bound), `mmap_size=0` (no throughput change,
+worse p95), a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
+everywhere), restarting the WAL from the checkpoint thread after every catch-up (more fsyncs, worse
+latency), prefaulting buffers (moves page faults, doesn't remove them).
+
 ## Progress
 
 <!-- results:begin -->
@@ -190,4 +222,6 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P5.5: feed plain | – | 200,000 (453 MB) | 43,079 (+6%), n=6 |
 | P5.5: feed range | – | 200,000 (442 MB) | 50,609 (+17%), n=5 |
 | P7: 5 min hold | 15,000 | 175,000 (442 MB) | – |
+| P5.7: mmap 256M | – | 225,000 (467 MB) | 47,735 (-6%), n=3 |
+| P5.7: mmap off | – | 225,000 (430 MB) | 48,335 (+1%), n=3 |
 <!-- results:end -->

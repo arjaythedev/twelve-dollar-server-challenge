@@ -17,6 +17,18 @@ case "${1:-test}" in
          mkdir -p /work/data && cp /src/seed/feed.db /work/data/feed.db
          . "submissions/$SUB/config.sh"
          exec "$JULIA_HOME/bin/julia" --startup-file=no -O3 "submissions/$SUB/dev/feedbench.jl" /work/data/feed.db ;;
+  feedbench-pgo) # SQLite PGO feasibility (PLAN 5.8): plain, then instrumented + trained on feedbench, then
+         # profile-guided, each timed with feedbench. Trained and measured on the same workload: an upper bound.
+         . "submissions/$SUB/config.sh"
+         fb() { mkdir -p /work/data && cp /src/seed/feed.db /work/data/feed.db && rm -f /work/data/feed.db-wal /work/data/feed.db-shm
+                "$JULIA_HOME/bin/julia" --startup-file=no -O3 "submissions/$SUB/dev/feedbench.jl" /work/data/feed.db; }
+         P=/work/pgo; rm -rf "$P"
+         echo "#### plain -O2"; JR_SQLITE_OPT="-O2" bash "submissions/$SUB/build.sh" >/dev/null; fb
+         echo "#### training run (instrumented)"
+         JR_SQLITE_OPT="-O2 -fprofile-generate -fprofile-update=single -fprofile-dir=$P" bash "submissions/$SUB/build.sh" >/dev/null
+         fb >/dev/null; echo "profile files: $(find "$P" -name '*.gcda' | wc -l)"
+         echo "#### -O2 + PGO"
+         JR_SQLITE_OPT="-O2 -fprofile-use -fprofile-partial-training -Wno-missing-profile -fprofile-dir=$P" bash "submissions/$SUB/build.sh" >/dev/null; fb ;;
   serve) # build, then run the server on a fresh copy of the seed in the foreground (for stress)
          bash "submissions/$SUB/build.sh"
          # JR_DATA: where the database copy lives. dev/ct.sh mounts a volume (host ext4) at /data; the

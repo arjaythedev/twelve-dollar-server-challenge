@@ -6,7 +6,9 @@ cd "$(dirname "$0")"
 DL="${JR_DL_CACHE:-build/dl}"    # download cache (the dev container mounts a volume here)
 mkdir -p "$DL" build
 
-CFLAGS="-O2 -fPIC -DNDEBUG -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0
+# JR_SQLITE_OPT: optimization flags for SQLite + shim (dev A/B only; dev/ct.sh SQLITE_OPT=).
+OPT="${JR_SQLITE_OPT:--O2}"
+CFLAGS="$OPT -fPIC -DNDEBUG -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0
   -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_LOAD_EXTENSION
   -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_USE_ALLOCA -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1"
 stamp="$( { echo "$SQLITE_ID $CFLAGS"; cat csrc/shim.c; } | sha256sum | cut -c1-16)"

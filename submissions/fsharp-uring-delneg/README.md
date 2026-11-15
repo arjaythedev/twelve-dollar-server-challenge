@@ -11,8 +11,9 @@
 ## Design
 
 - **One thread drives everything** (the box has one CPU): an io_uring loop over several rings, the HTTP parser, the
-  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, at nice 19, so it takes
-  the CPU only when the loop leaves it.
+  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, at nice 10 (`CKNICE`).
+  At nice 19 it got ~1 % of the CPU whenever the loop had requests queued: at the end of a ramp a pass that needs
+  15-30 ms of CPU took seconds, holds timed out and the WAL grew past the hold mark. At nice 10 it gets up to ~10 %.
 - **io_uring in F#.** `Ring.fs` maps the rings and writes submission entries in place; the rings are
   `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN`, so completions are posted in batches when the loop enters a ring.
   Accepted sockets are fixed (direct) descriptors from multishot accepts. A table may hold up to `RLIMIT_NOFILE`
@@ -21,6 +22,16 @@
   accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues,
   so a ramp's new connections wait there instead of being refused. A connection is accepted when its handshake
   completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives).
+- **Admission at the door.** Each listener's accept queue holds 64 connections (`ADMITQ`). While 512 or more parsed
+  requests wait for an answer (`ADMITHI`), the loop cancels its accepts. It accepts again once 64 or fewer wait
+  (`ADMITLO`) or after 500 ms (`ADMITMAXMS`), and then keeps accepting for at least 50 ms (`ADMITOPENMS`). The signal is
+  the backlog's length, not the age of its oldest request: newest-first leaves a few old requests waiting through a
+  backlog, and pausing on their age kept accepts off for seconds while the connections already in the accept queues
+  waited. Meanwhile new connections wait in the accept queues; once those are full the kernel drops their SYNs and the
+  client sends them again (after 1 s, then 3 s). Part of the gain comes from where that wait is counted: a load
+  generator that times a request from the moment its connection is up (mload leaves the dial out) doesn't count a
+  resent SYN as request time. The idea, and this note, come from [c-iouring-jowinjestine](../c-iouring-jowinjestine)
+  (#435).
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -50,7 +61,9 @@
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
-  waits without bound.
+  waits without bound. Among the newest 4,096, the requests other than feeds whose connection has nothing else queued
+  go first (`CHEAP`). Feeds are the largest answers (20 posts each), so answering the rest first should leave fewer
+  requests waiting for the same backlog of work.
 - **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
@@ -59,10 +72,9 @@
   lets writes in, but the next hold starts at once on the same pass, and the writes it lets in keep the WAL from
   rewinding when that pass ends. Without the exception, no hold would complete and the WAL would grow. So the hold that
   starts on a pass an earlier hold already timed out on waits up to 1.5 s for it (`HOLDRIDE`), and the pass after it
-  gets the usual 250 ms. The checkpoint thread runs at nice 19, so when the loop has requests queued every pass it
-  gets about 1.5 % of the CPU, and a pass that needs 15-30 ms of CPU takes seconds. That happens at the end of a ramp,
-  when new connections add their setup cost to a full load. So once a hold has waited 10 ms for a running pass, the
-  loop sleeps 400 µs per pass until it ends (`HOLDYIELD`), which leaves the checkpoint thread a share of the CPU. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  gets the usual 250 ms. A hold pass needs more CPU than that share
+  gives it at once, so once a hold has waited 20 ms for a running pass, the loop also sleeps 200 µs per pass until it
+  ends (`HOLDYIELD`). After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
   them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
   reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
   of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes
@@ -140,7 +152,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `ADMITQ` (64; 0: no admission control), `CHEAP` (4096; 0: newest-first only), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
 line a second on stderr).
 

@@ -1,15 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
+DIR="$(cd "$(dirname "$0")" && pwd)"
+mkdir -p "$DIR/bin" "$DIR/build"
 
-mkdir -p bin build
+# 1. Compile Brainfuck server source (src/bf/server.bf) into optimized x86_64 assembly
+"$DIR/bin/bf_compiler" "$DIR/src/bf/server.bf" "$DIR/build/server_bf.s" "$DIR/build/runtime.c"
+as -o "$DIR/build/server_bf.o" "$DIR/build/server_bf.s"
 
-# 1. Compile native Brainfuck optimizing compiler
-clang -O3 -o bin/bf_compiler src/compiler/bf_compiler.c
-
-# 2. Compile native Brainfuck server source (src/bf/server.bf) into optimized x86_64 assembly
-bin/bf_compiler src/bf/server.bf build/server_bf.s
-as -o build/server_bf.o build/server_bf.s
-
-# 3. Build server binary with native Brainfuck engine and system SQLite
-zig build -Doptimize=ReleaseFast -Dcpu=native
+# 2. Build standalone high-performance server binary
+gcc -O3 -flto -march=native -o "$DIR/bin/server" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto

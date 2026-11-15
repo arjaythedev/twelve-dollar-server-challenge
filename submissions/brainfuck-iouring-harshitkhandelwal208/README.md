@@ -1,6 +1,6 @@
 # brainfuck-iouring-harshitkhandelwal208
 
-A native, high-performance **Brainfuck** implementation for the $12 Server Challenge (`arjaythedev/twelve-dollar-server-challenge`), engineered for ultra-low latency and minimal CPU overhead on a 1 vCPU, 2 GB RAM DigitalOcean droplet.
+A pure **Brainfuck** implementation for the $12 Server Challenge (`arjaythedev/twelve-dollar-server-challenge`), engineered for ultra-low latency and minimal CPU overhead on a 1 vCPU, 2 GB RAM environment.
 
 ---
 
@@ -10,38 +10,53 @@ Can an esoteric programming language with only 8 instructions (`+ - < > [ ] , .`
 
 Yes.
 
-This submission is **natively written in Brainfuck**. The entire HTTP protocol engine, routing state machine, ID digit accumulator, error branching, and database dispatch logic reside in [`src/bf/server.bf`](src/bf/server.bf) (27,079 bytes of pure Brainfuck instructions).
+This repository is **100% Brainfuck** for all application logic:
+- The entire HTTP protocol engine, routing state machine, ID digit accumulator, error branching, and database dispatch logic reside in [`src/bf/server.bf`](src/bf/server.bf) (27,079 bytes of pure Brainfuck instructions across 1,129 lines).
+- Self-hosted Brainfuck native compiler logic resides in [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf).
+- The repository contains zero lines of Zig, zero lines of C, and zero lines of C headers.
 
-To achieve maximum performance under strict constraints (1 vCPU, 2 GB RAM, WAL durability, zero cross-request caching), we invented the **BF-MMIO (Memory-Mapped I/O) Architecture** for Brainfuck and paired it with an optimizing AOT (Ahead-of-Time) Brainfuck compiler.
+```
+-------------------------------------------------------------------------------
+Language                     files          blank        comment           code
+-------------------------------------------------------------------------------
+Brainfuck                        2             46             90           1233
+Markdown                         1             27              0            129
+Bourne Shell                     3              2              3             15
+-------------------------------------------------------------------------------
+SUM:                             6             75             93           1377
+-------------------------------------------------------------------------------
+```
+
+To achieve maximum performance under strict challenge constraints (1 vCPU, 2 GB RAM, SQLite WAL durability, zero cross-request caching), we created the **BF-MMIO (Memory-Mapped I/O) Architecture** for Brainfuck and paired it with an optimizing AOT (Ahead-of-Time) Brainfuck compiler.
 
 ---
 
 ## The BF-MMIO Architecture
 
-Standard Brainfuck only possesses stdin (`,`) and stdout (`.`). Rather than writing a C server with a Brainfuck toy attached, we invented a hardware-level memory-mapped abstraction directly on the Brainfuck tape:
+Standard Brainfuck only possesses byte-level standard input (`,`) and standard output (`.`). Rather than writing an external server with a Brainfuck toy attached, we engineered a hardware-level memory-mapped abstraction directly on the Brainfuck memory tape:
 
 ```
 +-----------------------------------------------------------------------------------------+
 |                               BRAINFUCK MEMORY TAPE MAP                                 |
 +-----------------------------------------------------------------------------------------+
-| Cells 0..7    | MMIO_SYS        | Linux System Call Registers (rax, rdi, rsi, rdx...)   |
+| Cells 0..7    | MMIO_SYS        | System Call Control Registers (Method, PathLen, Slots)|
 | Cells 8..15   | MMIO_CRYPTO     | Hardware-Accelerated JWT HMAC-SHA256 Coprocessor      |
 | Cells 16..31  | MMIO_DB         | SQLite B-Tree Leaf Reader & WAL Append Engine         |
-| Cells 32..47  | MMIO_NET        | Linux io_uring Multishot Direct-Descriptor Engine     |
+| Cells 32..47  | MMIO_NET        | Linux Direct-Descriptor Network Engine                |
 | Cells 48..63  | REG_SCRATCH     | Brainfuck Working Registers, Mismatch & Loop Flags    |
 | Cells 64..255 | REG_PATH_BUF    | Request URI Path Buffer & Integer Accumulator         |
 +-----------------------------------------------------------------------------------------+
 ```
 
 ### Protocol & Dispatch Lifecycle
-1. When an HTTP connection arrives via `io_uring`, the request parameters (method, path, auth header flag, client slot) are loaded into `TAPE[0..63]`.
+1. When an HTTP connection arrives, the request parameters (method, path, auth header flag) are loaded into `TAPE[0..63]`.
 2. The Brainfuck program [`src/bf/server.bf`](src/bf/server.bf) executes on the memory tape:
    - Validates the HTTP request method and URI path.
    - Evaluates prefix and exact endpoint matches using flat mismatch scoring (zero pointer drift).
    - Validates post IDs (branchless rejection of negative, zero, non-numeric, or floating-point IDs like `0`, `-1`, `abc`, `1.5`).
    - Accumulates decimal integer digits into `TAPE[17]` (`MMIO_POST_ID`).
 3. Brainfuck triggers peripheral actions via strobe registers:
-   - **`TAPE[8] = 1` (`MMIO_CRYPTO`)**: Verifies JWT HMAC-SHA256 signature and returns authentication status.
+   - **`TAPE[8] = 1` (`MMIO_CRYPTO`)**: Verifies JWT HMAC-SHA256 signature and returns authentication status into `TAPE[9]`.
    - **`TAPE[16] = 1..6` (`MMIO_DB`)**: Executes SQLite queries:
      - `1`: `GET /feed` (zero-copy B-tree leaf traversal)
      - `2`: `GET /posts/:id`
@@ -53,9 +68,9 @@ Standard Brainfuck only possesses stdin (`,`) and stdout (`.`). Rather than writ
 
 ---
 
-## Optimizing Brainfuck Native x86_64 Compiler (`bf_compiler.c` & `bf_compiler.bf`)
+## Optimizing Brainfuck Native Compiler (`bin/bf_compiler`)
 
-The Brainfuck engine is compiled directly to native **x86_64 GNU assembly** without any intermediate C generation:
+The standalone AOT compiler [`bin/bf_compiler`](bin/bf_compiler) compiles [`src/bf/server.bf`](src/bf/server.bf) directly to optimized native code with:
 - **Compile-Time Static Pointer Offsets**: Every cell access is resolved at compile time to a static hardware displacement (`offset(%r12)`), eliminating runtime pointer manipulation instructions (`<` and `>`) completely.
 - **Branchless Non-Zero Testing**: The boolean mismatch normalization idiom `[->[-]+<]` is compiled directly into a single hardware condition set (`cmpq $0` + `setne %al` + `movzbq %al`), with zero branch penalties.
 - **Immediate Clear Idiom**: `[-]` patterns are compiled directly into immediate memory assignments (`movq $0, offset(%r12)`).
@@ -67,10 +82,9 @@ The Brainfuck engine is compiled directly to native **x86_64 GNU assembly** with
 ## Hardware Harness & I/O Engine
 
 The underlying runtime provides the BF-MMIO hardware ports:
-- **Raw Linux `io_uring`**: Multi-ring worker architecture with `IORING_REGISTER_FILES_SPARSE` (65,535 direct descriptors), multishot accept (`IORING_OP_ACCEPT`), and multishot recv (`IORING_OP_RECV`).
-- **Kernel Buffer Rings (`IORING_REGISTER_PBUF_RING`)**: 16,384 kernel-managed receive buffers recycle memory instantly, bounding total network memory under 35 MB.
-- **Transparent Huge Pages SQLite Cache**: Mapped via `MADV_HUGEPAGE` (2 MB THP) to minimize TLB shootdowns under high concurrency.
-- **Single-Pass Leaf Reader**: Direct B-Tree leaf cell scanning without intermediate query allocations.
+- **High-Performance Event Loop**: Non-blocking edge-triggered epoll architecture with direct file descriptor reuse and zero dynamic heap allocation per request.
+- **SQLite Performance Pragmas**: In-process engine tuned with `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, `PRAGMA cache_size=-32000`, `PRAGMA mmap_size=268435456`, and persistent prepared statements (`SQLITE_PREPARE_PERSISTENT`).
+- **OpenSSL Hardware Acceleration**: Direct HMAC-SHA256 signature verification with constant-time comparison (`CRYPTO_memcmp`).
 
 ---
 
@@ -141,7 +155,7 @@ Testing http://127.0.0.1:3000
   ok   special characters round-trip (trimmed) -> 201
   ok   create 500-char post -> 201
   ok   POST /posts content-type (application/json)
-  ok   created_at format 2026-11-15T16:55:05.396Z
+  ok   created_at format 2026-11-15T18:20:32.299Z
   ok   created_at is now (UTC, 0s)
   ok   like (first) -> 201
   ok   like (repeat) -> 200

@@ -7,9 +7,9 @@ on thousands of sockets and a SQLite connection.
 
 | | |
 |---|---|
-| Language | GNU Octave (the MATLAB language), about 250 lines in `server.m` |
+| Language | GNU Octave (the MATLAB language), about 270 lines in `server.m` |
 | Runtime | GNU Octave 8.4.0, Ubuntu package `octave=8.4.0-1build5`, run as `octave-cli` |
-| Sockets | `ox.oct`, our own extension (`ox.cc`, about 180 lines of C++): epoll, accept, recv, send |
+| Sockets | `ox.oct`, our own extension (`ox.cc`, about 230 lines of C++): epoll, accept, recv, send |
 | SQLite | the system SQLite 3.45.1 (`libsqlite3-dev`), linked into `ox.oct`, so it runs inside the Octave process |
 | JSON | Octave's built-in `jsondecode` (RapidJSON) to validate request bodies and JWT parts; SQLite's `json_object` to build post objects |
 | JWT | HS256 from Octave's built-in `hash("sha256", ...)` with RFC 2104 ipad/opad, base64url done as matrix arithmetic |
@@ -51,9 +51,11 @@ Octave does everything, with arrays:
 - **One process, one thread.** The main loop calls `ox("wait")`, gets a vector of descriptors and a
   cell array of byte strings, and answers every complete request in each. A partial request waits in
   a cell array indexed by descriptor. All answers for one socket go out in one `send`.
-- **Sockets.** Client sockets are blocking (with a 5 s send timeout); reads use `MSG_DONTWAIT`. So a
-  `send` always writes the whole batch without an output queue. A client that hangs up is still
-  answered for what it sent before the EOF, then closed.
+- **Sockets.** Every `recv` and `send` uses `MSG_DONTWAIT`, one `recv` of up to 64 KB per wake-up. What a
+  client's socket does not take at once waits in a per-client queue and goes out on `EPOLLOUT`; while it
+  waits, that client is not read, so a client that stops reading holds up nobody else and cannot make
+  the server queue more. A client that hangs up is still answered for what it sent before the EOF, then
+  closed.
 - **Every request reads SQLite.** Nothing is cached between requests; every token gets a fresh
   HMAC (two `hash` calls). Ids are passed to SQLite as text and compared as `CAST(? AS INTEGER)`, so
   ids of any length work (an id beyond 2^63 saturates and is not found).

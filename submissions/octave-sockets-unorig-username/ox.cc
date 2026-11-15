@@ -3,8 +3,9 @@
 //   ox("listen", host, port)          bind and listen; set up epoll
 //   [fds, chunks] = ox("wait", ms)    accept new clients, return the bytes each ready socket sent
 //                                      (a negative fd: that client hung up, close it)
-//   ok = ox("send", fd, bytes)        write a whole response batch (false: the client is gone)
-//   ox("close", fd)                   drop a client
+//   ok = ox("send", fd, bytes)        send a response batch; what the socket does not take now is
+//                                      queued and sent on EPOLLOUT (false: the client is gone)
+//   ox("close", fd)                   drop a client (after its queued bytes are sent)
 //   ox("open", path)                  open the SQLite database
 //   [row, changes] = ox("q", sql, ...) run one statement to completion with text/integer args;
 //                                      row is a cell of the first row's columns as text, or {}
@@ -22,11 +23,40 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 static int ep = -1, lfd = -1;
 static sqlite3 *db = nullptr;
 static std::unordered_map<std::string, sqlite3_stmt *> stmts; // prepared once, reused (plans, not data)
 static char rbuf[65536];
+// Replies a client has not taken yet. While it has some, it is not read (so it cannot pile up more),
+// and no other client waits for it.
+static std::unordered_map<int, std::string> outq;
+static std::unordered_set<int> closing; // close once its queue is sent
+
+static void watch (int fd, uint32_t events)
+{
+  epoll_event ev {};
+  ev.events = events;
+  ev.data.fd = fd;
+  epoll_ctl (ep, EPOLL_CTL_MOD, fd, &ev);
+}
+
+// Send what the socket takes without blocking and drop it from S. false: the client is gone.
+static bool push (int fd, std::string& s)
+{
+  size_t off = 0;
+  while (off < s.size ())
+    {
+      ssize_t w = send (fd, s.data () + off, s.size () - off, MSG_NOSIGNAL | MSG_DONTWAIT);
+      if (w > 0) off += w;
+      else if (w < 0 && errno == EINTR) continue;
+      else if (w < 0 && errno == EAGAIN) break;
+      else return false;
+    }
+  s.erase (0, off);
+  return true;
+}
 
 static void do_listen (const std::string& host, int port)
 {
@@ -65,14 +95,12 @@ static void do_wait (int ms, octave_value_list& out)
       int fd = evs[i].data.fd;
       if (fd == lfd)
         {
-          // Client sockets stay blocking so a send always finishes; reads use MSG_DONTWAIT.
+          // Client sockets stay blocking; every recv and send uses MSG_DONTWAIT.
           int c;
           while ((c = accept4 (lfd, nullptr, nullptr, SOCK_CLOEXEC)) >= 0)
             {
               int one = 1;
               setsockopt (c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-              timeval tv { 5, 0 }; // shortcut: a peer that stops reading for 5 s loses its connection
-              setsockopt (c, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
               epoll_event ev {};
               ev.events = EPOLLIN;
               ev.data.fd = c;
@@ -80,16 +108,31 @@ static void do_wait (int ms, octave_value_list& out)
             }
           continue;
         }
+      auto q = outq.find (fd);
+      if (q != outq.end ()) // writable (or failed) while replies are queued
+        {
+          if (! push (fd, q->second))
+            {
+              outq.erase (q);
+              closing.erase (fd);
+              put (-fd, ""); // server.m closes it
+            }
+          else if (q->second.empty ())
+            {
+              outq.erase (q);
+              if (closing.erase (fd)) close (fd);
+              else watch (fd, EPOLLIN);
+            }
+          continue;
+        }
+      // One read per wake-up: a client that pipelines a lot is served a slice at a time.
       std::string got;
       bool gone = false;
-      for (;;)
-        {
-          ssize_t r = recv (fd, rbuf, sizeof rbuf, MSG_DONTWAIT);
-          if (r > 0) { got.append (rbuf, r); if (r < (ssize_t) sizeof rbuf) break; continue; }
-          if (r < 0 && (errno == EAGAIN || errno == EINTR)) break;
-          gone = true; // EOF or a hard error
-          break;
-        }
+      ssize_t r;
+      while ((r = recv (fd, rbuf, sizeof rbuf, MSG_DONTWAIT)) < 0 && errno == EINTR)
+        ;
+      if (r > 0) got.assign (rbuf, r);
+      else if (! (r < 0 && errno == EAGAIN)) gone = true; // EOF or a hard error
       if (! got.empty ()) put (fd, got);
       if (gone) put (-fd, ""); // server.m answers what came before the EOF, then closes it
     }
@@ -99,15 +142,13 @@ static void do_wait (int ms, octave_value_list& out)
   out(1) = chunks;
 }
 
-static bool do_send (int fd, const std::string& s)
+static bool do_send (int fd, std::string s)
 {
-  size_t off = 0;
-  while (off < s.size ())
+  if (! push (fd, s)) { close (fd); return false; }
+  if (! s.empty ())
     {
-      ssize_t w = send (fd, s.data () + off, s.size () - off, MSG_NOSIGNAL);
-      if (w < 0 && errno == EINTR) continue;
-      if (w <= 0) { close (fd); return false; }
-      off += w;
+      outq[fd] = std::move (s);
+      watch (fd, EPOLLOUT); // stop reading it until the rest is sent
     }
   return true;
 }
@@ -167,7 +208,11 @@ DEFUN_DLD (ox, args, nargout, "ox (VERB, ...): sockets and SQLite for server.m")
   else if (verb == "send")
     out(0) = do_send (args(1).int_value (), args(2).string_value ());
   else if (verb == "close")
-    close (args(1).int_value ());
+    {
+      int fd = args(1).int_value ();
+      if (outq.count (fd)) closing.insert (fd);
+      else close (fd);
+    }
   else if (verb == "listen")
     do_listen (args(1).string_value (), args(2).int_value ());
   else if (verb == "open")

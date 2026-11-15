@@ -46,13 +46,4 @@ target("server")
             add_ldflags("-fuse-ld=mold")
         end
         add_syslinks("uring", "pthread", "m")
-        if os.getenv("PGO_GEN") then
-            add_cflags("-fprofile-generate")
-            add_cxxflags("-fprofile-generate")
-            add_ldflags("-fprofile-generate")
-        elseif os.getenv("PGO_USE") then
-            add_cflags("-fprofile-use", "-fprofile-correction")
-            add_cxxflags("-fprofile-use", "-fprofile-correction")
-            add_ldflags("-fprofile-use")
-        end
     end

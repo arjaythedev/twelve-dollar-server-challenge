@@ -37,7 +37,7 @@
 
 **微架构与构建。** 编译用 `-O3 -march=native -fno-plt -fno-semantic-interposition -flto`，另加 `-falign-functions=32 -falign-loops=32`、`-fipa-pta`、`-flto-partition=one`；io_uring 的 ring 启用 `COOP_TASKRUN`/`TASKRUN_FLAG`，连接表和接收缓冲用 `MADV_HUGEPAGE` + `MADV_POPULATE_READ` 预触；有 mold 时用 `-fuse-ld=mold` 并行链接。
 
-**来源说明。** io_uring 的 multishot receive、direct descriptor 多 ring 以及 SQLite B-tree 游标的用法参考了公开的 io_uring/SQLite 实践，包括 #264 的实现思路；事件循环、状态机、批处理、SQLite 访问层和协议层（HTTP/JSON/SHA-256）是本实现独立编写的。
+**来源说明。** io_uring 的 multishot receive 与 direct descriptor 多 ring 参考了 rust-iouring-kensac (#264) 的实现思路。`src/shim.c` 里的批量作者 seek（`bt_cell_key`、`bt_lower_bound`、`dbx_users_seek_many`：每层共享页、页内插值二分、`findCell` + `CellInfo` 解析 record）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`（`bt_seek_many`、`bt_lower_bound`、`bt_hit_record`），record 的变长整数与列头解码沿用同一套写法；c-iouring-jowinjestine (#404) 把同一段代码记在 #245 名下，这里也一样记。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
 
 ## 读取走 SQLite 的 B-tree，而不是 SQL 引擎
 

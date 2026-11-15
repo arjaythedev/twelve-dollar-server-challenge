@@ -180,6 +180,208 @@ void dbx_close(dbx *h) {
   sqlite3_free(h);
 }
 
+/* ---- WAL write coalescing ------------------------------------------------------------
+ * SQLite writes a transaction's frames one after another, each as two calls (the 24-byte frame
+ * header, then the page: walWriteOneFrame), so a 6-frame commit is ~13 pwrites. This is the VFS
+ * shim over unix-excl that c-iouring-pavlyhalim #245 uses (same code, renamed): writes that
+ * continue exactly where the previous write on that file ended are buffered, and the buffer is
+ * written with one pwrite when the commit frame's page arrives, so a commit is one system call.
+ * Every other call flushes first and then goes straight through, so what reaches the kernel and
+ * its order are unchanged; the commit frame is in the kernel before SQLite updates the wal-index
+ * and before COMMIT returns. Readers find frames only through the wal-index, so a buffered frame
+ * of an uncommitted transaction is invisible to them.
+ * Measured on #245 at 120k users: pwrites per request 0.24 -> 0.095.
+ */
+#define WAL_FRAME_HDR 24
+#define WAL_BUF_CAP 0x1ffff /* the unix VFS passes at most 17 bits of a write's length */
+#define VFS_NAME "tdsc-wal"
+
+struct wfile {
+  sqlite3_file base; /* must be first */
+  sqlite3_file *real;
+  int is_wal;
+  int commit;              /* the buffer ends with a commit frame's header: write it after the page */
+  int len;                 /* bytes in buf */
+  sqlite3_int64 off;       /* file offset of buf[0] */
+  sqlite3_int64 last_end;  /* where the previous write on this file ended */
+  unsigned char *buf;
+};
+static sqlite3_vfs *vfs_real;
+static int vfs_state; /* 0 = not tried, 1 = registered, -1 = failed */
+
+static int wf_flush(struct wfile *f) {
+  if (!f->len) return SQLITE_OK;
+  int n = f->len;
+  f->len = 0;
+  return f->real->pMethods->xWrite(f->real, f->buf, n, f->off);
+}
+#define WF(p) ((struct wfile *)(p))
+#define WF_FLUSH(p) do { int rc_ = wf_flush(WF(p)); if (rc_ != SQLITE_OK) return rc_; } while (0)
+
+static int wf_close(sqlite3_file *p) {
+  struct wfile *f = WF(p);
+  int rc = wf_flush(f);
+  int rc2 = f->real->pMethods ? f->real->pMethods->xClose(f->real) : SQLITE_OK;
+  sqlite3_free(f->buf);
+  f->buf = NULL;
+  return rc != SQLITE_OK ? rc : rc2;
+}
+static int wf_read(sqlite3_file *p, void *b, int n, sqlite3_int64 off) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xRead(WF(p)->real, b, n, off);
+}
+static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
+  struct wfile *f = WF(p);
+  if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
+  int append = off == f->last_end;
+  f->last_end = off + n;
+  if (f->len + n > WAL_BUF_CAP) WF_FLUSH(p);
+  if (!append || n > WAL_BUF_CAP || (!f->buf && !(f->buf = sqlite3_malloc(WAL_BUF_CAP)))) {
+    WF_FLUSH(p);
+    f->commit = 0;
+    return f->real->pMethods->xWrite(f->real, b, n, off);
+  }
+  if (!f->len) f->off = off;
+  memcpy(f->buf + f->len, b, (size_t)n);
+  f->len += n;
+  if (n == WAL_FRAME_HDR) { /* bytes 4-7: the database size after a commit, 0 on other frames */
+    const unsigned char *h = b;
+    f->commit = (h[4] | h[5] | h[6] | h[7]) != 0;
+    return SQLITE_OK;
+  }
+  if (f->commit) {
+    f->commit = 0;
+    return wf_flush(f);
+  }
+  return SQLITE_OK;
+}
+static int wf_truncate(sqlite3_file *p, sqlite3_int64 size) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xTruncate(WF(p)->real, size);
+}
+static int wf_sync(sqlite3_file *p, int flags) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xSync(WF(p)->real, flags);
+}
+static int wf_filesize(sqlite3_file *p, sqlite3_int64 *size) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xFileSize(WF(p)->real, size);
+}
+static int wf_lock(sqlite3_file *p, int l) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xLock(WF(p)->real, l);
+}
+static int wf_unlock(sqlite3_file *p, int l) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xUnlock(WF(p)->real, l);
+}
+static int wf_check_reserved(sqlite3_file *p, int *out) {
+  return WF(p)->real->pMethods->xCheckReservedLock(WF(p)->real, out);
+}
+static int wf_file_control(sqlite3_file *p, int op, void *arg) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xFileControl(WF(p)->real, op, arg);
+}
+static int wf_sector_size(sqlite3_file *p) { return WF(p)->real->pMethods->xSectorSize(WF(p)->real); }
+static int wf_device_chars(sqlite3_file *p) {
+  return WF(p)->real->pMethods->xDeviceCharacteristics(WF(p)->real);
+}
+static int wf_shm_map(sqlite3_file *p, int pg, int sz, int extend, void volatile **out) {
+  return WF(p)->real->pMethods->xShmMap(WF(p)->real, pg, sz, extend, out);
+}
+static int wf_shm_lock(sqlite3_file *p, int off, int n, int flags) {
+  return WF(p)->real->pMethods->xShmLock(WF(p)->real, off, n, flags);
+}
+static void wf_shm_barrier(sqlite3_file *p) { WF(p)->real->pMethods->xShmBarrier(WF(p)->real); }
+static int wf_shm_unmap(sqlite3_file *p, int del) { return WF(p)->real->pMethods->xShmUnmap(WF(p)->real, del); }
+static int wf_fetch(sqlite3_file *p, sqlite3_int64 off, int n, void **pp) {
+  WF_FLUSH(p);
+  return WF(p)->real->pMethods->xFetch(WF(p)->real, off, n, pp);
+}
+static int wf_unfetch(sqlite3_file *p, sqlite3_int64 off, void *pg) {
+  return WF(p)->real->pMethods->xUnfetch(WF(p)->real, off, pg);
+}
+
+static const sqlite3_io_methods wf_methods = {
+    3,           wf_close,         wf_read,     wf_write,         wf_truncate,    wf_sync,
+    wf_filesize, wf_lock,          wf_unlock,   wf_check_reserved, wf_file_control, wf_sector_size,
+    wf_device_chars, wf_shm_map,   wf_shm_lock, wf_shm_barrier,   wf_shm_unmap,   wf_fetch,
+    wf_unfetch};
+
+#define WF_REAL_OFFSET ((sizeof(struct wfile) + 7) & ~(size_t)7)
+
+static int wv_open(sqlite3_vfs *vfs, sqlite3_filename name, sqlite3_file *p, int flags,
+                   int *out_flags) {
+  (void)vfs;
+  struct wfile *f = WF(p);
+  memset(f, 0, sizeof *f);
+  f->last_end = -1;
+  f->real = (sqlite3_file *)((char *)p + WF_REAL_OFFSET);
+  int rc = vfs_real->xOpen(vfs_real, name, f->real, flags, out_flags);
+  if (f->real->pMethods == NULL) return rc; /* the open failed: SQLite will not call xClose */
+  f->is_wal = (flags & SQLITE_OPEN_WAL) != 0;
+  if (f->real->pMethods->iVersion < 3) { /* unix-excl is version 3; anything else is not expected */
+    f->real->pMethods->xClose(f->real);
+    return SQLITE_CANTOPEN;
+  }
+  p->pMethods = &wf_methods;
+  return rc;
+}
+static int wv_delete(sqlite3_vfs *v, const char *z, int sync) { (void)v; return vfs_real->xDelete(vfs_real, z, sync); }
+static int wv_access(sqlite3_vfs *v, const char *z, int flags, int *out) {
+  (void)v;
+  return vfs_real->xAccess(vfs_real, z, flags, out);
+}
+static int wv_full_pathname(sqlite3_vfs *v, const char *z, int n, char *out) {
+  (void)v;
+  return vfs_real->xFullPathname(vfs_real, z, n, out);
+}
+static void *wv_dlopen(sqlite3_vfs *v, const char *z) { (void)v; return vfs_real->xDlOpen(vfs_real, z); }
+static void wv_dlerror(sqlite3_vfs *v, int n, char *z) { (void)v; vfs_real->xDlError(vfs_real, n, z); }
+static void (*wv_dlsym(sqlite3_vfs *v, void *h, const char *z))(void) {
+  (void)v;
+  return vfs_real->xDlSym(vfs_real, h, z);
+}
+static void wv_dlclose(sqlite3_vfs *v, void *h) { (void)v; vfs_real->xDlClose(vfs_real, h); }
+static int wv_randomness(sqlite3_vfs *v, int n, char *z) { (void)v; return vfs_real->xRandomness(vfs_real, n, z); }
+static int wv_sleep(sqlite3_vfs *v, int us) { (void)v; return vfs_real->xSleep(vfs_real, us); }
+static int wv_current_time(sqlite3_vfs *v, double *t) { (void)v; return vfs_real->xCurrentTime(vfs_real, t); }
+static int wv_last_error(sqlite3_vfs *v, int n, char *z) { (void)v; return vfs_real->xGetLastError(vfs_real, n, z); }
+static int wv_current_time64(sqlite3_vfs *v, sqlite3_int64 *t) {
+  (void)v;
+  return vfs_real->xCurrentTimeInt64(vfs_real, t);
+}
+
+/* 0 when the shim is registered (the caller should open with VFS_NAME), -1 to stay on unix-excl */
+static int vfs_install(void) {
+  if (vfs_state) return vfs_state > 0 ? 0 : -1;
+  vfs_state = -1;
+  vfs_real = sqlite3_vfs_find("unix-excl");
+  if (!vfs_real || vfs_real->iVersion < 2) return -1;
+  static sqlite3_vfs v;
+  memset(&v, 0, sizeof v);
+  v.iVersion = 2;
+  v.szOsFile = (int)(WF_REAL_OFFSET + (size_t)vfs_real->szOsFile);
+  v.mxPathname = vfs_real->mxPathname;
+  v.zName = VFS_NAME;
+  v.xOpen = wv_open;
+  v.xDelete = wv_delete;
+  v.xAccess = wv_access;
+  v.xFullPathname = wv_full_pathname;
+  v.xDlOpen = wv_dlopen;
+  v.xDlError = wv_dlerror;
+  v.xDlSym = wv_dlsym;
+  v.xDlClose = wv_dlclose;
+  v.xRandomness = wv_randomness;
+  v.xSleep = wv_sleep;
+  v.xCurrentTime = wv_current_time;
+  v.xGetLastError = wv_last_error;
+  v.xCurrentTimeInt64 = wv_current_time64;
+  if (sqlite3_vfs_register(&v, 0) != SQLITE_OK) return -1;
+  vfs_state = 1;
+  return 0;
+}
+
 dbx *dbx_open(const char *path, char *err, int n) {
   if (sqlite3_initialize()) {
     snprintf(err, (size_t)n, "sqlite init failed");
@@ -192,7 +394,10 @@ dbx *dbx_open(const char *path, char *err, int n) {
   }
   memset(h, 0, sizeof *h);
 
-  if (sqlite3_open_v2(path, &h->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl")) {
+  const char *vfs = (getenv("WAL_COALESCE") && strcmp(getenv("WAL_COALESCE"), "0") == 0)
+                        ? "unix-excl"
+                        : (vfs_install() == 0 ? VFS_NAME : "unix-excl");
+  if (sqlite3_open_v2(path, &h->db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, vfs)) {
     fail(h->db, err, n, "open");
     dbx_close(h);
     return 0;
@@ -268,7 +473,7 @@ dbx *dbx_open(const char *path, char *err, int n) {
     return 0;
   }
 
-  if (sqlite3_open_v2(path, &h->ckdb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, "unix-excl")) {
+  if (sqlite3_open_v2(path, &h->ckdb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, vfs)) {
     fail(h->db, err, n, "checkpoint connection");
     dbx_close(h);
     return 0;

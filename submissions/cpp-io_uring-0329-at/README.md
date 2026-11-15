@@ -37,7 +37,7 @@
 
 **微架构与构建。** 编译用 `-O3 -march=native -fno-plt -fno-semantic-interposition -flto`，另加 `-falign-functions=32 -falign-loops=32`、`-fipa-pta`、`-flto-partition=one`；io_uring 的 ring 启用 `COOP_TASKRUN`/`TASKRUN_FLAG`，连接表和接收缓冲用 `MADV_HUGEPAGE` + `MADV_POPULATE_READ` 预触；有 mold 时用 `-fuse-ld=mold` 并行链接。
 
-**来源说明。** io_uring 的 multishot receive 与 direct descriptor 多 ring 参考了 rust-iouring-kensac (#264) 的实现思路。`src/shim.c` 里的批量作者 seek（`bt_cell_key`、`bt_lower_bound`、`dbx_users_seek_many`：每层共享页、页内插值二分、`findCell` + `CellInfo` 解析 record）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`（`bt_seek_many`、`bt_lower_bound`、`bt_hit_record`），record 的变长整数与列头解码沿用同一套写法；c-iouring-jowinjestine (#404) 把同一段代码记在 #245 名下，这里也一样记。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
+**来源说明。** io_uring 的 multishot receive 与 direct descriptor 多 ring 参考了 rust-iouring-kensac (#264) 的实现思路。`src/shim.c` 里的批量作者 seek（`bt_cell_key`、`bt_lower_bound`、`dbx_users_seek_many`：每层共享页、页内插值二分、`findCell` + `CellInfo` 解析 record）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`（`bt_seek_many`、`bt_lower_bound`、`bt_hit_record`），record 的变长整数与列头解码沿用同一套写法；c-iouring-jowinjestine (#404) 把同一段代码记在 #245 名下，这里也一样记。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）同样改写自 #245 的 `src/db.h`（同一段 shim over `unix-excl`，改了命名），`WAL_COALESCE=0` 可关掉它做 A/B（仅供测试，规则里没这条）。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
 
 ## 读取走 SQLite 的 B-tree，而不是 SQL 引擎
 
@@ -49,7 +49,7 @@
 
 ## 持久化与批处理
 
-- WAL + `synchronous=NORMAL`，通过 `unix-excl` VFS 打开；WAL 索引在进程内共享，没有 `-shm` 文件。
+- WAL + `synchronous=NORMAL`，通过 `unix-excl` VFS 打开；WAL 索引在进程内共享，没有 `-shm` 文件。WAL 文件上再套一层写合并 shim：帧头和页连续写时先攒进缓冲，commit 帧的页到达时一次 `pwrite` 落地（写序不变，commit 帧在 COMMIT 返回前已在内核里）。本地 A/B 里它没量出差别（本实现已按 pass 组提交，每请求 WAL 写只有 ~0.2 次，合并的理论收益约 0.6%），保留是因为它已被 #245 在基准机上量到 0.24 → 0.095 pwrite/请求。
 - 每个事件循环 pass 是一个 SQLite 事务：读共享快照，写入组提交（规则 6）。**COMMIT 返回之前，pass 的任何响应都不会交给内核。** commit 失败时该 pass 的每个响应都变成 500。
 - Auto-checkpoint 关掉。WAL 到 4,096 帧（16 MB）时**只挂写、不挂循环**：写请求的响应留到下一个 pass（请求字节留在连接上，最多重放 1,024 个），读照常答；独立的 nice 19 线程在自己的连接上做 `PASSIVE` 检查点，把帧拷回主库（`PASSIVE` 从不等读者，所以它不会把循环挡住）。**每一帧都拷完之后**下一次写会让日志从第 1 帧重新开始，文件就停在那里——不需要 `TRUNCATE`，也不需要 `RESTART`。线程连不上的情况有兜底：hold 超过 400 ms 就放行，让日志长大一点，下次再收。
 - 事件循环的等待是有条件的：只要还有待发的读、待写的响应或上一 pass 收到的完成，就 `min_complete=0` 直接 `enter`，**不睡那 1 ms**；只有在完全没事干时才等（1 ms）。这一条是 220k 时 29% CPU 空转的来源。

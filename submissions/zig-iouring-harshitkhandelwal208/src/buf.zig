@@ -9,6 +9,35 @@ pub const digits: *const [200]u8 =
     "6061626364656667686970717273747576777879" ++
     "8081828384858687888990919293949596979899";
 
+pub inline fn digitsU64(val: u64) usize {
+    if (val < 10) return 1;
+    if (val < 100) return 2;
+    if (val < 1000) return 3;
+    if (val < 10000) return 4;
+    if (val < 100000) return 5;
+    if (val < 1000000) return 6;
+    if (val < 10000000) return 7;
+    if (val < 100000000) return 8;
+    if (val < 1000000000) return 9;
+    if (val < 10000000000) return 10;
+    var v = val;
+    var len: usize = 0;
+    while (v > 0) : (v /= 10) len += 1;
+    return len;
+}
+
+pub inline fn escapedLen(s: []const u8) usize {
+    var extra: usize = 0;
+    for (s) |ch| {
+        if (ch == '"' or ch == '\\') {
+            extra += 1;
+        } else if (ch < 0x20) {
+            extra += if (ch == '\n' or ch == '\r' or ch == '\t') 1 else 5;
+        }
+    }
+    return s.len + extra;
+}
+
 pub inline fn writeU64Direct(buf: []u8, val: u64) usize {
     var v = val;
     var b: [24]u8 = undefined;
@@ -32,6 +61,61 @@ pub inline fn writeU64Direct(buf: []u8, val: u64) usize {
     const len = 24 - i;
     @memcpy(buf[0..len], b[i..24]);
     return len;
+}
+
+pub inline fn writeJsonStringDirect(dest: [*]u8, s: []const u8) usize {
+    var d: usize = 0;
+    var start: usize = 0;
+    var i: usize = 0;
+    const hex = "0123456789abcdef";
+    while (i < s.len) : (i += 1) {
+        const ch = s[i];
+        if (ch == '"' or ch == '\\' or ch < 0x20) {
+            if (i > start) {
+                const chunk = s[start..i];
+                @memcpy(dest[d..][0..chunk.len], chunk);
+                d += chunk.len;
+            }
+            switch (ch) {
+                '"' => {
+                    @memcpy(dest[d..][0..2], "\\\"");
+                    d += 2;
+                },
+                '\\' => {
+                    @memcpy(dest[d..][0..2], "\\\\");
+                    d += 2;
+                },
+                '\n' => {
+                    @memcpy(dest[d..][0..2], "\\n");
+                    d += 2;
+                },
+                '\r' => {
+                    @memcpy(dest[d..][0..2], "\\r");
+                    d += 2;
+                },
+                '\t' => {
+                    @memcpy(dest[d..][0..2], "\\t");
+                    d += 2;
+                },
+                else => {
+                    dest[d] = '\\';
+                    dest[d + 1] = 'u';
+                    dest[d + 2] = '0';
+                    dest[d + 3] = '0';
+                    dest[d + 4] = hex[ch >> 4];
+                    dest[d + 5] = hex[ch & 0xf];
+                    d += 6;
+                },
+            }
+            start = i + 1;
+        }
+    }
+    if (i > start) {
+        const chunk = s[start..i];
+        @memcpy(dest[d..][0..chunk.len], chunk);
+        d += chunk.len;
+    }
+    return d;
 }
 
 pub const Buf = struct {
@@ -82,52 +166,7 @@ pub const Buf = struct {
 
     pub fn writeJsonString(self: *Buf, s: []const u8) void {
         self.ensure(s.len * 6 + 2) catch @panic("OOM");
-        var start: usize = 0;
-        var i: usize = 0;
-        while (i < s.len) : (i += 1) {
-            const ch = s[i];
-            if (ch == '"' or ch == '\\' or ch < 0x20) {
-                if (i > start) {
-                    const chunk = s[start..i];
-                    @memcpy(self.ptr[self.len..][0..chunk.len], chunk);
-                    self.len += chunk.len;
-                }
-                switch (ch) {
-                    '"' => {
-                        @memcpy(self.ptr[self.len..][0..2], "\\\"");
-                        self.len += 2;
-                    },
-                    '\\' => {
-                        @memcpy(self.ptr[self.len..][0..2], "\\\\");
-                        self.len += 2;
-                    },
-                    '\n' => {
-                        @memcpy(self.ptr[self.len..][0..2], "\\n");
-                        self.len += 2;
-                    },
-                    '\r' => {
-                        @memcpy(self.ptr[self.len..][0..2], "\\r");
-                        self.len += 2;
-                    },
-                    '\t' => {
-                        @memcpy(self.ptr[self.len..][0..2], "\\t");
-                        self.len += 2;
-                    },
-                    else => {
-                        var esc: [6]u8 = undefined;
-                        _ = std.fmt.bufPrint(&esc, "\\u00{x:0>2}", .{ch}) catch unreachable;
-                        @memcpy(self.ptr[self.len..][0..6], &esc);
-                        self.len += 6;
-                    },
-                }
-                start = i + 1;
-            }
-        }
-        if (i > start) {
-            const chunk = s[start..i];
-            @memcpy(self.ptr[self.len..][0..chunk.len], chunk);
-            self.len += chunk.len;
-        }
+        self.len += writeJsonStringDirect(self.ptr + self.len, s);
     }
 
     pub fn slice(self: *const Buf) []const u8 {

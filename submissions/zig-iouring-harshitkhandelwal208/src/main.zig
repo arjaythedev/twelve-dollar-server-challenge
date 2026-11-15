@@ -26,6 +26,13 @@ fn envInt(init: std.process.Init, name: []const u8, default: u32) u32 {
     return std.fmt.parseInt(u32, v, 10) catch default;
 }
 
+fn termHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
+    _ = sig;
+    _ = info;
+    _ = ctx;
+    server.Server.running.store(false, .monotonic);
+}
+
 fn crashHandler(sig: linux.SIG, info: *const linux.siginfo_t, ctx: ?*anyopaque) callconv(.c) void {
     _ = ctx;
     const name: []const u8 = switch (sig) {
@@ -62,6 +69,14 @@ pub fn main(init: std.process.Init) !void {
     _ = linux.sigaction(.FPE, &sa, null);
     _ = linux.sigaction(.ABRT, &sa, null);
 
+    const term_sa: linux.Sigaction = .{
+        .handler = .{ .sigaction = termHandler },
+        .mask = linux.sigemptyset(),
+        .flags = linux.SA.SIGINFO,
+    };
+    _ = linux.sigaction(.INT, &term_sa, null);
+    _ = linux.sigaction(.TERM, &term_sa, null);
+
     // Ignore SIGPIPE so disconnected clients don't kill the server process
     const ignore: linux.Sigaction = .{
         .handler = .{ .handler = linux.SIG.IGN },
@@ -83,12 +98,9 @@ pub fn main(init: std.process.Init) !void {
     const host = try parseHost(host_str);
     const port: u16 = @intCast(envInt(init, "PORT", 3000));
 
-    // Initialize database and JWT key
-    const db = try dbm.Db.init(sqlite_path);
+    // Initialize JWT key and multi-ring server (10 rings x 65,472 = 654,720 direct descriptors)
     const jwt_key = jwt.Key.init(jwt_secret);
-
-    // Initialize multi-ring server (8 rings x 65,472 = 523,776 direct descriptors)
-    const s = try server.Server.init(db, jwt_key);
+    const s = try server.Server.init(sqlite_path, jwt_key);
     try s.makeListeners(host, port);
 
     // Lock all pre-allocated structures into RAM to eliminate page faults during benchmark

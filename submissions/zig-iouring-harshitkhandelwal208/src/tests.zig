@@ -112,25 +112,31 @@ test "resp pool acquire and release" {
     try std.testing.expectEqual(@as(usize, server.pool_count), pool.top);
 }
 
-test "ring worker rearm and close queues" {
-    var qmem: [64]u32 = undefined;
-    var cqmem: [64]u32 = undefined;
-    var w = server.RingWorker{
-        .rearm_queue = &qmem,
-        .close_queue = &cqmem,
-    };
+test "fifo queue operations" {
+    var q = try server.FifoQueue.init(64);
+    defer q.deinit();
 
-    w.pushRearm(10);
-    w.pushRearm(20);
-    try std.testing.expectEqual(@as(?u32, 10), w.popRearm());
-    try std.testing.expectEqual(@as(?u32, 20), w.popRearm());
-    try std.testing.expectEqual(@as(?u32, null), w.popRearm());
+    try std.testing.expect(q.isEmpty());
+    try std.testing.expectEqual(@as(usize, 0), q.count());
 
-    w.pushClose(42);
-    w.pushClose(99);
-    try std.testing.expectEqual(@as(?u32, 42), w.popClose());
-    try std.testing.expectEqual(@as(?u32, 99), w.popClose());
-    try std.testing.expectEqual(@as(?u32, null), w.popClose());
+    _ = q.push(.{ .slot = 10, .gen = 1, .ring_idx = 0 });
+    _ = q.push(.{ .slot = 20, .gen = 2, .ring_idx = 1 });
+    try std.testing.expectEqual(@as(usize, 2), q.count());
+
+    const item1 = q.pop();
+    try std.testing.expect(item1 != null);
+    try std.testing.expectEqual(@as(u32, 10), item1.?.slot);
+    try std.testing.expectEqual(@as(u24, 1), item1.?.gen);
+    try std.testing.expectEqual(@as(u8, 0), item1.?.ring_idx);
+
+    const item2 = q.pop();
+    try std.testing.expect(item2 != null);
+    try std.testing.expectEqual(@as(u32, 20), item2.?.slot);
+    try std.testing.expectEqual(@as(u24, 2), item2.?.gen);
+    try std.testing.expectEqual(@as(u8, 1), item2.?.ring_idx);
+
+    try std.testing.expect(q.isEmpty());
+    try std.testing.expect(q.pop() == null);
 }
 
 extern "c" fn access(path: [*c]const u8, mode: c_int) c_int;
@@ -138,7 +144,8 @@ extern "c" fn access(path: [*c]const u8, mode: c_int) c_int;
 test "native zig db operations on seed database" {
     if (access("../../seed/feed.db", 0) != 0) return;
 
-    var db = dbm.Db.init("../../seed/feed.db") catch return;
+    var db: dbm.Db = .{};
+    try db.open("../../seed/feed.db");
     defer db.deinit();
 
     var out = try bufm.Buf.init(65536);
@@ -163,6 +170,36 @@ test "native zig db operations on seed database" {
     try db.feed(&out);
     try std.testing.expect(out.len > 0);
     try std.testing.expect(std.mem.startsWith(u8, out.slice(), "{\"posts\":["));
+
+    // Benchmark 1,000 feed queries
+    var t_start: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &t_start);
+    var n: usize = 0;
+    while (n < 1000) : (n += 1) {
+        out.reset();
+        try db.feed(&out);
+    }
+    var t_end: std.os.linux.timespec = undefined;
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &t_end);
+    const ns_total = (@as(i64, t_end.sec) - @as(i64, t_start.sec)) * 1_000_000_000 + (@as(i64, t_end.nsec) - @as(i64, t_start.nsec));
+    std.debug.print("\n=== FEED QUERY BENCHMARK: 1,000 queries in {d:.2} ms ({d:.2} us/query) ===\n", .{
+        @as(f64, @floatFromInt(ns_total)) / 1_000_000.0,
+        @as(f64, @floatFromInt(ns_total)) / 1_000_000.0,
+    });
+
+    // Benchmark 1,000 getPost queries
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &t_start);
+    n = 0;
+    while (n < 1000) : (n += 1) {
+        out.reset();
+        _ = db.getPost(1, &out);
+    }
+    _ = std.os.linux.clock_gettime(.MONOTONIC, &t_end);
+    const ns_post = (@as(i64, t_end.sec) - @as(i64, t_start.sec)) * 1_000_000_000 + (@as(i64, t_end.nsec) - @as(i64, t_start.nsec));
+    std.debug.print("=== GET_POST BENCHMARK: 1,000 queries in {d:.2} ms ({d:.2} us/query) ===\n", .{
+        @as(f64, @floatFromInt(ns_post)) / 1_000_000.0,
+        @as(f64, @floatFromInt(ns_post)) / 1_000_000.0,
+    });
 }
 
 test "parseId validation" {
@@ -222,5 +259,57 @@ test "writeHeaderDirect formatting" {
     const s500 = buf[0..len500];
     try std.testing.expect(std.mem.startsWith(u8, s500, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: 15\r\n\r\n"));
 }
+
+test "escapedLen and digitsU64" {
+    try std.testing.expectEqual(@as(usize, 1), bufm.digitsU64(0));
+    try std.testing.expectEqual(@as(usize, 1), bufm.digitsU64(9));
+    try std.testing.expectEqual(@as(usize, 2), bufm.digitsU64(10));
+    try std.testing.expectEqual(@as(usize, 2), bufm.digitsU64(99));
+    try std.testing.expectEqual(@as(usize, 3), bufm.digitsU64(100));
+    try std.testing.expectEqual(@as(usize, 4), bufm.digitsU64(9999));
+
+    const s1 = "hello world";
+    try std.testing.expectEqual(s1.len, bufm.escapedLen(s1));
+
+    const s2 = "hello \"world\"\n";
+    // 2 quotes (+2), 1 newline (+1) -> len + 3
+    try std.testing.expectEqual(s2.len + 3, bufm.escapedLen(s2));
+
+    var direct_buf: [128]u8 = undefined;
+    const written = bufm.writeJsonStringDirect(&direct_buf, s2);
+    try std.testing.expectEqual(bufm.escapedLen(s2), written);
+}
+
+test "getPostDirect single post serialization" {
+    if (access("../../seed/feed.db", 0) != 0) return;
+
+    var db: dbm.Db = .{};
+    try db.open("../../seed/feed.db");
+    defer db.deinit();
+
+    var direct_dest: [1024]u8 = undefined;
+    const res = db.getPostDirect(1, &direct_dest, true);
+    switch (res) {
+        .ok => |total_len| {
+            const out = direct_dest[0..total_len];
+            try std.testing.expect(std.mem.startsWith(u8, out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "));
+            try std.testing.expect(std.mem.indexOf(u8, out, "\"id\":1") != null);
+            try std.testing.expect(std.mem.indexOf(u8, out, "\"body\":") != null);
+            try std.testing.expect(std.mem.indexOf(u8, out, "\"author\":") != null);
+            try std.testing.expect(std.mem.indexOf(u8, out, "\"like_count\":") != null);
+            try std.testing.expect(std.mem.endsWith(u8, out, "}}"));
+
+            // Verify Content-Length header matches exact JSON body length
+            const sep = "\r\n\r\n";
+            const sep_idx = std.mem.indexOf(u8, out, sep).?;
+            const body = out[sep_idx + sep.len ..];
+            var cl_hdr: [64]u8 = undefined;
+            const cl_str = try std.fmt.bufPrint(&cl_hdr, "Content-Length: {}\r\n", .{body.len});
+            try std.testing.expect(std.mem.indexOf(u8, out[0..sep_idx + 2], cl_str) != null);
+        },
+        else => unreachable,
+    }
+}
+
 
 

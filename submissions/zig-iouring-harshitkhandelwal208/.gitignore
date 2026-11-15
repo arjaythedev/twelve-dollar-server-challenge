@@ -2,3 +2,4 @@
 /deps/
 /.zig-cache/
 /zig-out/
+src/c/*.o

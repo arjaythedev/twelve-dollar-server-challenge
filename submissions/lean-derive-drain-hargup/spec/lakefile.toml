@@ -1,0 +1,10 @@
+name = "feedspec"
+version = "0.1.0"
+defaultTargets = ["Feed", "derive"]
+
+[[lean_lib]]
+name = "Feed"
+
+[[lean_exe]]
+name = "derive"
+root = "Main"

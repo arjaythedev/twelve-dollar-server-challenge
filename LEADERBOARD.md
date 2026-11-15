@@ -135,10 +135,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 56 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
 | 56 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
 | 56 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
-| 59 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 59 | cpp-io_uring-0329-at | #442 | C++ (io_uring, SQLite B-tree reads) | **219,000** ᴹ | 21,372 | 29.8 | 154.1 | 0.48 | 71 | 31 | 1,130 | 2026-11-14 |
-| 59 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
-| 59 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **219,000** | 21,373 | 20.6 | 396.6 | 0.00 | 79 | 34 | 566 | 2026-11-15 |
+| 56 | cpp-io_uring-0329-at | #442 | C++ (io_uring, SQLite B-tree reads) | **220,000** ᴹ | 21,320 | 341.6 | 465.0 | 0.00 | 71 | 31 | 777 | 2026-11-15 |
+| 60 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 60 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
+| 60 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **219,000** | 21,373 | 20.6 | 396.6 | 0.00 | 79 | 34 | 566 | 2026-11-15 |
 | 63 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
 | 63 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
 | 63 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
@@ -940,11 +940,15 @@ passed the 2-minute probe but failed the 5-minute hold on p99 (1.01 s, 0 errors,
 a second connection) held **199,000** (19,576 req/s, p95 15.0 / p99 80.7 ms, 0 errors, 64 % CPU, 30 µs/req, 1,170 MB,
 2026-11-14). The 2-minute probes passed up to 220,000 (230,000 failed on p99 1.07 s), but the 5-minute holds at
 220,000 and 209,000 failed on HTTP 500s on every route (2.41 % and 1.06 %) that never showed in a 2-minute probe. The
-head moved to `3c73fa6` during that run. **The row is now scored at `3c73fa6`** (the 20 feed authors read in one pass
-over the `users` B-tree, see the rule flags): it held **219,000** (21,372 req/s, p95 29.8 / p99 154.1 ms, 0.48 %
+head moved to `3c73fa6` during that run. `3c73fa6` (the 20 feed authors read in one pass
+over the `users` B-tree, see the rule flags) held **219,000** (21,372 req/s, p95 29.8 / p99 154.1 ms, 0.48 %
 errors, 71 % CPU, 31 µs/req, 1,130 MB, 2026-11-14). The 2-minute probes passed up to 230,000 (240,000 failed on p99
 2.47 s); the 5-minute hold at 230,000 failed on HTTP 500s again (3.35 %, with connect p99 7.2 s), and the 219,000 hold
-still had 37,218 HTTP 500s (0.48 %, under the 1 % line). Held, not merged yet: one review question for Arjay.
+still had 37,218 HTTP 500s (0.48 %, under the 1 % line). **The row is now scored at `0d958c4`** (eventfd wakeups,
+COMMIT retry on BUSY, RESTART checkpoints through `sqlite3_wal_checkpoint_v2` that keep the WAL small): it held
+**220,000** (21,320 req/s, p95 341.6 / p99 465.0 ms, 0 errors, 71 % CPU, 31 µs/req, 777 MB, 2026-11-15), so the HTTP
+500s are gone. 230,000 and 240,000 failed the 2-minute probe on p99 (1.91 s and 2.40 s, 0 errors); 320,000 failed on
+`connection refused` (79.4 %). Held, not merged yet: one review question for Arjay.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute
@@ -1277,7 +1281,7 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `3c73fa6`) finds the 20 feed authors by walking the `users` B-tree pages itself with SQLite's internal page functions
   (`getAndInitPage`, `xParseCell`, `findCell`) instead of a B-tree cursor. Read-only, stock amalgamation, nothing cached
   or written. Open question for Arjay: ruling 1 allows B-tree/cursor reads; this is one step past the cursor. Scored
-  as submitted (219k at `3c73fa6`); held open.
+  as submitted (220k at `0d958c4`, where the walk is unchanged); held open.
 - **zig-iouring-harshitkhandelwal208 #460 (follow-up to #454) reuses rust-iouring-kensac #264's SQLite shim without
   credit**: `src/shim.c` (517 lines: B-tree open/layout/seek/`td_count_likes` helpers and the checkpoint state machine)
   is #264's `csrc/shim.c` with the comments removed and small edits; the Zig server, HTTP, JSON and JWT code are the

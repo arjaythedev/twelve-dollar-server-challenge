@@ -1,6 +1,6 @@
 //! The io_uring multi-ring event loop for the $12 server challenge.
-//! Uses direct descriptors, 10 SO_REUSEPORT listeners (one per ring),
-//! 10 io_uring rings (654,720 connection capacity),
+//! Uses direct descriptors, 8 SO_REUSEPORT listeners (one per ring),
+//! 8 io_uring rings (523,776 connection capacity),
 //! 32-byte packed connection state, provided-buffer rings with ENOBUFS burst recovery,
 //! hugepage allocations, SIMD HTTP routing, read-first group commit batching, and epoll wakeup.
 const std = @import("std");
@@ -29,6 +29,7 @@ pub const pool_count: usize = 2048;
 
 pub const k_ring_count: usize = 8;
 pub const slots_per_ring: u32 = 65472;
+pub const max_pending_size: usize = 65535;
 
 pub const RespPool = struct {
     mem: [*]u8 = undefined,
@@ -53,6 +54,13 @@ pub const RespPool = struct {
         };
     }
 
+    pub fn deinit(self: *RespPool) void {
+        const total_bytes = pool_count * pool_buf_size;
+        sys.unmap(@alignCast(self.mem[0..total_bytes]));
+        sys.unmap(@alignCast(std.mem.sliceAsBytes(self.free_stack)));
+        self.* = .{};
+    }
+
     pub inline fn acquire(self: *RespPool) ?[]u8 {
         if (self.top == 0) return null;
         self.top -= 1;
@@ -69,9 +77,10 @@ pub const RespPool = struct {
 };
 
 const Tag = enum(u8) { accept = 1, recv, send, shut, close, timer };
+pub const gen_mask: u32 = 0x00ffffff;
 
 inline fn ud(tag: Tag, gen: u32, idx: u32) u64 {
-    return (@as(u64, @intFromEnum(tag)) << 56) | (@as(u64, gen & 0xffffff) << 32) | idx;
+    return (@as(u64, @intFromEnum(tag)) << 56) | (@as(u64, gen & gen_mask) << 32) | idx;
 }
 
 pub const Conn = struct {
@@ -161,8 +170,11 @@ pub const RingWorker = struct {
     rearm_queue: []u32 = &.{},
     rearm_head: u32 = 0,
     rearm_tail: u32 = 0,
+    close_queue: []u32 = &.{},
+    close_head: u32 = 0,
+    close_tail: u32 = 0,
 
-    inline fn pushRearm(self: *RingWorker, slot: u32) void {
+    pub inline fn pushRearm(self: *RingWorker, slot: u32) void {
         const next: u32 = @truncate((self.rearm_tail + 1) % self.rearm_queue.len);
         if (next != self.rearm_head) {
             self.rearm_queue[self.rearm_tail] = slot;
@@ -170,10 +182,26 @@ pub const RingWorker = struct {
         }
     }
 
-    inline fn popRearm(self: *RingWorker) ?u32 {
+    pub inline fn popRearm(self: *RingWorker) ?u32 {
         if (self.rearm_head == self.rearm_tail) return null;
         const slot = self.rearm_queue[self.rearm_head];
         self.rearm_head = @truncate((self.rearm_head + 1) % self.rearm_queue.len);
+        return slot;
+    }
+
+    pub inline fn pushClose(self: *RingWorker, slot: u32) void {
+        if (self.close_queue.len == 0) return;
+        const next: u32 = @truncate((self.close_tail + 1) % self.close_queue.len);
+        if (next != self.close_head) {
+            self.close_queue[self.close_tail] = slot;
+            self.close_tail = next;
+        }
+    }
+
+    pub inline fn popClose(self: *RingWorker) ?u32 {
+        if (self.close_head == self.close_tail or self.close_queue.len == 0) return null;
+        const slot = self.close_queue[self.close_head];
+        self.close_head = @truncate((self.close_head + 1) % self.close_queue.len);
         return slot;
     }
 };
@@ -225,30 +253,30 @@ pub const Server = struct {
 
         // Pre-allocate rings
         var n_initialized: usize = 0;
+        errdefer {
+            s.active_rings = n_initialized;
+            s.deinit();
+        }
+
         for (0..k_ring_count) |i| {
             var rw = &s.rings[i];
             rw.id = @intCast(i);
             rw.slots = slots_per_ring;
             rw.nconn = 0;
-            rw.ring = initRing() catch |e| {
-                if (i == 0) return e;
-                break;
-            };
+            rw.ring = try initRing();
 
             const qmem = try sys.mapAnon(65536 * @sizeOf(u32));
             rw.rearm_queue = @as([*]u32, @ptrCast(@alignCast(qmem.ptr)))[0..65536];
             rw.rearm_head = 0;
             rw.rearm_tail = 0;
 
-            setupPbufRing(rw) catch |e| {
-                if (i == 0) return e;
-                break;
-            };
+            const cqmem = try sys.mapAnon(65536 * @sizeOf(u32));
+            rw.close_queue = @as([*]u32, @ptrCast(@alignCast(cqmem.ptr)))[0..65536];
+            rw.close_head = 0;
+            rw.close_tail = 0;
 
-            rw.ring.register_files_sparse(slots_per_ring) catch |e| {
-                if (i == 0) return e;
-                break;
-            };
+            try setupPbufRing(rw);
+            try rw.ring.register_files_sparse(slots_per_ring);
 
             const cmem = try sys.mapAnon(@as(usize, slots_per_ring) * @sizeOf(Conn));
             sys.madviseHuge(cmem);
@@ -258,7 +286,8 @@ pub const Server = struct {
                 .events = linux.EPOLL.IN,
                 .data = .{ .u32 = @intCast(i) },
             };
-            _ = linux.epoll_ctl(s.epfd, 1, rw.ring.fd, &ev);
+            const eprc = linux.epoll_ctl(s.epfd, 1, rw.ring.fd, &ev);
+            if (sys.errnoOf(eprc) != .SUCCESS) return error.EpollFailed;
 
             n_initialized += 1;
         }
@@ -269,6 +298,38 @@ pub const Server = struct {
         s.resp_pool = try RespPool.init();
 
         return s;
+    }
+
+    pub fn deinit(self: *Server) void {
+        for (0..self.active_rings) |i| {
+            if (self.listeners[i] >= 0) {
+                _ = linux.close(self.listeners[i]);
+                self.listeners[i] = -1;
+            }
+            var rw = &self.rings[i];
+            if (rw.conns.len > 0) {
+                sys.unmap(@alignCast(std.mem.sliceAsBytes(rw.conns)));
+                rw.conns = &.{};
+            }
+            if (rw.rearm_queue.len > 0) {
+                sys.unmap(@alignCast(std.mem.sliceAsBytes(rw.rearm_queue)));
+                rw.rearm_queue = &.{};
+            }
+            if (rw.close_queue.len > 0) {
+                sys.unmap(@alignCast(std.mem.sliceAsBytes(rw.close_queue)));
+                rw.close_queue = &.{};
+            }
+            teardownPbufRing(rw);
+            rw.ring.deinit();
+        }
+        if (self.epfd >= 0) {
+            _ = linux.close(self.epfd);
+            self.epfd = -1;
+        }
+        self.scratch.deinit();
+        self.resp_buf.deinit();
+        self.resp_pool.deinit();
+        self.db.deinit();
     }
 
     fn initRing() !IoUring {
@@ -333,6 +394,18 @@ pub const Server = struct {
         w.pbuf_tail = 0;
         for (0..n_bufs_per_ring) |i| returnBuf(w, @intCast(i));
         publishBufs(w);
+    }
+
+    fn teardownPbufRing(w: *RingWorker) void {
+        var reg = std.mem.zeroInit(linux.io_uring_buf_reg, .{
+            .bgid = bgid,
+        });
+        _ = linux.io_uring_register(w.ring.fd, .UNREGISTER_PBUF_RING, &reg, 1);
+        const ring_bytes = n_bufs_per_ring * @sizeOf(linux.io_uring_buf);
+        const rbytes: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(w.pbuf_ring)))[0..ring_bytes];
+        sys.unmap(rbytes);
+        const bbytes: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(w.pbuf_mem)))[0 .. n_bufs_per_ring * buf_size];
+        sys.unmap(bbytes);
     }
 
     inline fn returnBuf(w: *RingWorker, bid: u16) void {
@@ -462,7 +535,7 @@ pub const Server = struct {
         while (cur != tail) : (cur +%= 1) {
             const cqe = &w.ring.cq.cqes[cur & mask];
             const tag: Tag = @enumFromInt(@as(u8, @truncate(cqe.user_data >> 56)));
-            const gen: u32 = @truncate((cqe.user_data >> 32) & 0xffffff);
+            const gen: u32 = @truncate((cqe.user_data >> 32) & gen_mask);
             const slot: u32 = @truncate(cqe.user_data);
 
             switch (tag) {
@@ -498,6 +571,24 @@ pub const Server = struct {
             }
         }
 
+        // Re-arm multishot accept if it was dropped or exhausted SQEs
+        if (!w.accept_live) {
+            self.armAccept(w, w.id);
+        }
+
+        // Process deferred close retries
+        var closes: usize = 0;
+        while (w.popClose()) |s| {
+            if (s < w.slots) {
+                const conn = &w.conns[s];
+                if (conn.isClosing() and !conn.isRecvLive() and !conn.isSendLive() and !conn.isShutLive()) {
+                    self.maybeFinishClose(w, s, conn);
+                    closes += 1;
+                    if (closes >= 256) break;
+                }
+            }
+        }
+
         return count;
     }
 
@@ -514,7 +605,7 @@ pub const Server = struct {
 
         const c = &w.conns[slot];
         c.* = .{
-            .gen = c.gen +% 1,
+            .gen = (c.gen +% 1) & gen_mask,
             .flags = Conn.FLAG_OPEN,
             .ring_idx = @intCast(w.id),
         };
@@ -560,10 +651,27 @@ pub const Server = struct {
             if (data.len > 0) {
                 if (c.pend_buf) |pbuf| {
                     const total = @as(usize, c.pend_len) + data.len;
+                    if (total > max_pending_size) {
+                        self.closeConn(w, slot, c);
+                        return;
+                    }
                     if (total > c.pend_cap) {
                         var new_cap: usize = if (c.pend_cap > 0) @as(usize, c.pend_cap) * 2 else 4096;
-                        while (new_cap < total) new_cap *= 2;
-                        const new_mem = gpa.alloc(u8, new_cap) catch return;
+                        while (new_cap < total) {
+                            if (new_cap > max_pending_size / 2) {
+                                new_cap = max_pending_size;
+                                break;
+                            }
+                            new_cap *= 2;
+                        }
+                        if (new_cap < total) {
+                            self.closeConn(w, slot, c);
+                            return;
+                        }
+                        const new_mem = gpa.alloc(u8, new_cap) catch {
+                            self.closeConn(w, slot, c);
+                            return;
+                        };
                         @memcpy(new_mem[0..c.pend_len], pbuf[0..c.pend_len]);
                         gpa.free(pbuf[0..c.pend_cap]);
                         c.pend_buf = new_mem.ptr;
@@ -588,14 +696,19 @@ pub const Server = struct {
                     const req_len = head.head_len + head.content_length;
                     if (offset + req_len > input.len) {
                         // Incomplete body
-                        self.savePending(c, rem);
+                        if (!self.savePending(c, rem)) {
+                            self.closeConn(w, slot, c);
+                        }
                         return;
                     }
                     const body = rem[head.head_len..req_len];
 
                     // Check write-hold during active checkpoint tail
                     if ((head.method == .post or head.method == .delete) and self.db.writesHeld()) {
-                        self.savePending(c, rem);
+                        if (!self.savePending(c, rem)) {
+                            self.closeConn(w, slot, c);
+                            return;
+                        }
                         self.pushHeldWrite(w, slot, c.gen, c);
                         return;
                     }
@@ -605,7 +718,9 @@ pub const Server = struct {
                     self.serve(w, slot, c, &head, body);
                 },
                 .need_more => {
-                    self.savePending(c, rem);
+                    if (!self.savePending(c, rem)) {
+                        self.closeConn(w, slot, c);
+                    }
                     return;
                 },
                 .bad => |status| {
@@ -624,28 +739,38 @@ pub const Server = struct {
             }
             c.pend_len = 0;
         } else {
-            self.savePending(c, input[offset..]);
+            if (!self.savePending(c, input[offset..])) {
+                self.closeConn(w, slot, c);
+            }
         }
     }
 
-    fn savePending(self: *Server, c: *Conn, remaining: []const u8) void {
+    pub fn savePending(self: *Server, c: *Conn, remaining: []const u8) bool {
         _ = self;
+        if (remaining.len > max_pending_size) return false;
         if (c.pend_buf == null) {
-            const cap: usize = 4096;
-            const mem = gpa.alloc(u8, cap) catch return;
+            const cap: usize = @min(max_pending_size, @max(@as(usize, 4096), remaining.len));
+            const mem = gpa.alloc(u8, cap) catch return false;
             c.pend_buf = mem.ptr;
             c.pend_cap = @intCast(cap);
-        }
-        if (remaining.len > c.pend_cap) {
+        } else if (remaining.len > c.pend_cap) {
             var new_cap: usize = @as(usize, c.pend_cap) * 2;
-            while (new_cap < remaining.len) new_cap *= 2;
-            const new_mem = gpa.alloc(u8, new_cap) catch return;
+            while (new_cap < remaining.len) {
+                if (new_cap > max_pending_size / 2) {
+                    new_cap = max_pending_size;
+                    break;
+                }
+                new_cap *= 2;
+            }
+            if (new_cap < remaining.len) return false;
+            const new_mem = gpa.alloc(u8, new_cap) catch return false;
             gpa.free(c.pend_buf.?[0..c.pend_cap]);
             c.pend_buf = new_mem.ptr;
             c.pend_cap = @intCast(new_cap);
         }
         std.mem.copyForwards(u8, c.pend_buf.?[0..remaining.len], remaining);
         c.pend_len = @intCast(remaining.len);
+        return true;
     }
 
     fn isJsWhitespace(s: []const u8) ?usize {
@@ -751,7 +876,10 @@ pub const Server = struct {
                     return;
                 }
 
-                self.ensureTx();
+                if (!self.ensureTx()) {
+                    self.sendError(w, slot, c, 500, "internal server error", keep_alive);
+                    return;
+                }
                 self.db.createPost(claims.uid, claims.name, trimmed, &self.resp_buf) catch {
                     self.sendError(w, slot, c, 500, "internal server error", keep_alive);
                     return;
@@ -778,7 +906,10 @@ pub const Server = struct {
                     };
 
                     if (method == .post) {
-                        self.ensureTx();
+                        if (!self.ensureTx()) {
+                            self.sendError(w, slot, c, 500, "internal server error", keep_alive);
+                            return;
+                        }
                         switch (self.db.likePost(claims.uid, post_id, &self.resp_buf)) {
                             .created => self.queueWriteResponse(w, slot, c, 201, self.resp_buf.slice(), keep_alive),
                             .already_liked => self.queueWriteResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive),
@@ -787,7 +918,10 @@ pub const Server = struct {
                         }
                         return;
                     } else if (method == .delete) {
-                        self.ensureTx();
+                        if (!self.ensureTx()) {
+                            self.sendError(w, slot, c, 500, "internal server error", keep_alive);
+                            return;
+                        }
                         switch (self.db.unlikePost(claims.uid, post_id, &self.resp_buf)) {
                             .ok => self.queueWriteResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive),
                             .not_found => self.sendError(w, slot, c, 404, "post not found", keep_alive),
@@ -912,11 +1046,17 @@ pub const Server = struct {
                 out_ptr = p.ptr;
                 is_pool = true;
             } else {
-                const mem = gpa.alloc(u8, total_len) catch return;
+                const mem = gpa.alloc(u8, total_len) catch {
+                    self.closeConn(w, slot, c);
+                    return;
+                };
                 out_ptr = mem.ptr;
             }
         } else {
-            const mem = gpa.alloc(u8, total_len) catch return;
+            const mem = gpa.alloc(u8, total_len) catch {
+                self.closeConn(w, slot, c);
+                return;
+            };
             out_ptr = mem.ptr;
         }
 
@@ -931,15 +1071,17 @@ pub const Server = struct {
         self.armSend(w, slot, c);
     }
 
-    inline fn ensureTx(self: *Server) void {
-        if (!self.in_tx) {
-            _ = self.db.beginTx();
-            self.in_tx = true;
+    inline fn ensureTx(self: *Server) bool {
+        if (!self.in_tx or !self.db.inBatch()) {
+            const ok = self.db.beginTx();
+            self.in_tx = ok;
+            return ok;
         }
+        return true;
     }
 
     fn commitPendingWrites(self: *Server) void {
-        if (!self.in_tx) return;
+        if (!self.in_tx and !self.db.inBatch()) return;
         if (self.db.commitTx()) {
             for (self.pending_writes[0..self.n_pending_writes]) |pw| {
                 const c = &pw.w.conns[pw.slot];
@@ -978,7 +1120,9 @@ pub const Server = struct {
         }
         c.setHeldWrite(false);
         self.drainHeldWrites();
-        self.handleData(w, slot, c, &.{});
+        if (c.isOpen() and !c.isClosing() and c.gen == gen) {
+            self.handleData(w, slot, c, &.{});
+        }
     }
 
     fn drainHeldWrites(self: *Server) void {
@@ -1008,11 +1152,17 @@ pub const Server = struct {
                 out_ptr = p.ptr;
                 is_pool = true;
             } else {
-                const mem = gpa.alloc(u8, total_len) catch return;
+                const mem = gpa.alloc(u8, total_len) catch {
+                    self.sendError(w, slot, c, 500, "internal server error", false);
+                    return;
+                };
                 out_ptr = mem.ptr;
             }
         } else {
-            const mem = gpa.alloc(u8, total_len) catch return;
+            const mem = gpa.alloc(u8, total_len) catch {
+                self.sendError(w, slot, c, 500, "internal server error", false);
+                return;
+            };
             out_ptr = mem.ptr;
         }
 
@@ -1027,7 +1177,7 @@ pub const Server = struct {
         if (self.n_pending_writes >= self.pending_writes.len) {
             // Queue full: commit the batch immediately and start a fresh transaction
             self.commitPendingWrites();
-            self.ensureTx();
+            _ = self.ensureTx();
         }
 
         self.pending_writes[self.n_pending_writes] = .{ .w = w, .slot = slot };
@@ -1051,7 +1201,22 @@ pub const Server = struct {
 
         c.setSendLive(false);
         if (res <= 0) {
-            self.closeConn(w, slot, c);
+            if (c.out) |m| {
+                if (c.isOutPool()) {
+                    self.resp_pool.release(m);
+                } else {
+                    gpa.free(m[0..c.out_len]);
+                }
+                c.out = null;
+            }
+            c.out_len = 0;
+            c.out_off = 0;
+            c.setOutPool(false);
+            if (c.isClosing()) {
+                self.maybeFinishClose(w, slot, c);
+            } else {
+                self.closeConn(w, slot, c);
+            }
             return;
         }
 
@@ -1075,7 +1240,7 @@ pub const Server = struct {
         c.setOutPool(false);
 
         if (c.isClosing()) {
-            self.closeConn(w, slot, c);
+            self.maybeFinishClose(w, slot, c);
         } else if (c.pend_len > 0) {
             self.handleData(w, slot, c, &.{});
         }
@@ -1094,17 +1259,20 @@ pub const Server = struct {
         c.setClosing(true);
         c.setHeldWrite(false);
 
-        if (c.out) |m| {
-            if (c.isOutPool()) {
-                self.resp_pool.release(m);
-            } else {
-                gpa.free(m[0..c.out_len]);
+        if (!c.isSendLive()) {
+            if (c.out) |m| {
+                if (c.isOutPool()) {
+                    self.resp_pool.release(m);
+                } else {
+                    gpa.free(m[0..c.out_len]);
+                }
+                c.out = null;
             }
-            c.out = null;
+            c.out_len = 0;
+            c.out_off = 0;
+            c.setOutPool(false);
         }
-        c.out_len = 0;
-        c.out_off = 0;
-        c.setOutPool(false);
+
         if (c.pend_buf) |p| {
             gpa.free(p[0..c.pend_cap]);
             c.pend_buf = null;
@@ -1128,7 +1296,10 @@ pub const Server = struct {
     fn maybeFinishClose(self: *Server, w: *RingWorker, slot: u32, c: *Conn) void {
         _ = self;
         if (!c.isClosing() or c.isRecvLive() or c.isSendLive() or c.isShutLive()) return;
-        const s = getSqe(w) orelse return;
+        const s = getSqe(w) orelse {
+            w.pushClose(slot);
+            return;
+        };
         c.setClosing(false);
         c.setOpen(false);
         w.nconn -%= 1;

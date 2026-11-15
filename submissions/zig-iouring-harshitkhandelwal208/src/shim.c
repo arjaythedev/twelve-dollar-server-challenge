@@ -38,8 +38,11 @@ static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
 static int writes_held;
 static struct timespec hold_t0;
 
+void td_close(void);
+
 static int fail(char *err, int n, const char *what) {
   snprintf(err, n, "%s: %s", what, db ? sqlite3_errmsg(db) : "no database");
+  td_close();
   return -1;
 }
 
@@ -118,17 +121,22 @@ static void *ck_main(void *arg) {
 static int ck_start(const char *path, char *err, int n) {
   if (sqlite3_open_v2(path, &ckdb, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, 0)) {
     snprintf(err, n, "ck sqlite3_open_v2: %s", sqlite3_errmsg(ckdb));
+    if (ckdb) { sqlite3_close(ckdb); ckdb = NULL; }
     return -1;
   }
   sqlite3_busy_timeout(ckdb, 5000);
   if (sqlite3_exec(ckdb, "PRAGMA synchronous = NORMAL; PRAGMA wal_autocheckpoint = 0; PRAGMA cache_size = 16", 0, 0, 0)) {
     snprintf(err, n, "ck sqlite3_exec: %s", sqlite3_errmsg(ckdb));
+    sqlite3_close(ckdb);
+    ckdb = NULL;
     return -1;
   }
   pthread_t t;
   int rc = pthread_create(&t, NULL, ck_main, 0);
   if (rc != 0) {
     snprintf(err, n, "ck pthread_create: %d (%s)", rc, strerror(rc));
+    sqlite3_close(ckdb);
+    ckdb = NULL;
     return -1;
   }
   return 0;
@@ -278,7 +286,10 @@ void td_tick(void) {
     ck_set(CK_IDLE);
     break;
   default:
-    if (writes_held && ms_since(&hold_t0) > HOLD_MAX_MS) writes_held = 0;
+    if (writes_held && ms_since(&hold_t0) > HOLD_MAX_MS) {
+      writes_held = 0;
+      ck_set(CK_IDLE);
+    }
     break;
   }
 }
@@ -331,6 +342,7 @@ int td_seek_ge(BtCursor *c, i64 k) {
 }
 
 int td_count_likes(BtCursor *c, i64 lo, i64 hi, unsigned *n) {
+  if (hi < lo || (hi - lo) > 1000) return 1;
   int r = td_seek_ge(c, lo);
   if (r <= 0) return r;
   for (;;) {
@@ -377,7 +389,7 @@ int td_count_likes(BtCursor *c, i64 lo, i64 hi, unsigned *n) {
         return 1;
       }
       if (v > hi) return 0;
-      if (v >= lo) n[v - lo]++;
+      if (v >= lo && (v - lo) <= (hi - lo)) n[v - lo]++;
     }
     c->ix = (u16)(last - 1);
     int rc = sqlite3BtreeNext(c, 0);
@@ -478,4 +490,28 @@ int td_feed_sql_step(i64 *id, const u8 **body, int *blen, const u8 **ca, int *cl
 
 void td_feed_sql_reset(void) {
   sqlite3_reset(st_feed);
+}
+
+void td_close(void) {
+  close_cursors();
+  for (int i = 0; i < NCUR; i++) {
+    if (cur[i]) { sqlite3_free(cur[i]); cur[i] = NULL; }
+  }
+  if (st_begin) { sqlite3_finalize(st_begin); st_begin = NULL; }
+  if (st_commit) { sqlite3_finalize(st_commit); st_commit = NULL; }
+  if (st_rollback) { sqlite3_finalize(st_rollback); st_rollback = NULL; }
+  if (st_post) { sqlite3_finalize(st_post); st_post = NULL; }
+  if (st_like) { sqlite3_finalize(st_like); st_like = NULL; }
+  if (st_unlike) { sqlite3_finalize(st_unlike); st_unlike = NULL; }
+  if (st_check) { sqlite3_finalize(st_check); st_check = NULL; }
+  if (st_health) { sqlite3_finalize(st_health); st_health = NULL; }
+  if (st_feed) { sqlite3_finalize(st_feed); st_feed = NULL; }
+  if (ki_feed) { sqlite3KeyInfoUnref(ki_feed); ki_feed = NULL; }
+  if (ki_likes) { sqlite3KeyInfoUnref(ki_likes); ki_likes = NULL; }
+  if (spill) { sqlite3_free(spill); spill = NULL; spill_cap = 0; }
+  if (ckdb) { sqlite3_close(ckdb); ckdb = NULL; }
+  if (db) { sqlite3_close(db); db = NULL; }
+  in_batch = 0;
+  batch_broken = 0;
+  writes_held = 0;
 }

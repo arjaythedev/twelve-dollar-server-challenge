@@ -37,8 +37,16 @@ pub fn madviseHuge(mem: []const u8) void {
 
 pub fn lockMemory() void {
     var ml: linux.rlimit = .{ .cur = std.math.maxInt(usize), .max = std.math.maxInt(usize) };
-    _ = linux.setrlimit(.MEMLOCK, &ml);
-    _ = linux.syscall1(.mlockall, 3); // MCL_CURRENT (1) | MCL_FUTURE (2)
+    const rc_rl = linux.setrlimit(.MEMLOCK, &ml);
+    if (rc_rl != 0) {
+        std.log.warn("setrlimit(MEMLOCK, unlimited) returned {d}; proceeding with existing limit", .{rc_rl});
+    }
+    const rc_mlock = linux.syscall1(.mlockall, 3); // MCL_CURRENT (1) | MCL_FUTURE (2)
+    if (rc_mlock != 0) {
+        std.log.warn("mlockall(MCL_CURRENT | MCL_FUTURE) returned {d}; running without locked memory", .{rc_mlock});
+    } else {
+        std.log.info("mlockall successfully locked pre-allocated memory into RAM", .{});
+    }
 }
 
 pub fn unshareFiles() void {

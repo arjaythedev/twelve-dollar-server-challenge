@@ -42,6 +42,7 @@ extern "c" fn td_feed_sql_step(
     likes: *i64,
 ) c_int;
 extern "c" fn td_feed_sql_reset() void;
+extern "c" fn td_close() void;
 
 pub const DbError = error{
     Corrupt,
@@ -49,7 +50,7 @@ pub const DbError = error{
     DbFailed,
 };
 
-inline fn varint(p: []const u8, i: *usize) !u64 {
+pub inline fn varint(p: []const u8, i: *usize) !u64 {
     if (i.* >= p.len) return DbError.Corrupt;
     const b0 = p[i.*];
     if (b0 < 0x80) {
@@ -59,7 +60,7 @@ inline fn varint(p: []const u8, i: *usize) !u64 {
     return varintLong(p, i);
 }
 
-fn varintLong(p: []const u8, i: *usize) !u64 {
+pub fn varintLong(p: []const u8, i: *usize) !u64 {
     var v: u64 = 0;
     var k: usize = 0;
     while (k < 9) : (k += 1) {
@@ -167,20 +168,28 @@ pub const Db = struct {
     }
 
     pub inline fn beginTx(self: *Db) bool {
-        self.in_tx = true;
-        return td_begin() == 0;
+        if (td_in_batch() != 0) {
+            self.in_tx = true;
+            return true;
+        }
+        const ok = (td_begin() == 0);
+        self.in_tx = ok;
+        return ok;
     }
 
     pub inline fn commitTx(self: *Db) bool {
-        if (!self.in_tx) return true;
         self.in_tx = false;
         return td_commit() == 0;
     }
 
     pub inline fn rollbackTx(self: *Db) void {
-        if (!self.in_tx) return;
         self.in_tx = false;
         td_rollback();
+    }
+
+    pub fn deinit(self: *Db) void {
+        self.in_tx = false;
+        td_close();
     }
 
     pub inline fn tick(self: *Db) void {
@@ -221,7 +230,7 @@ pub const Db = struct {
     }
 
     pub fn feed(self: *Db, out: *Buf) !void {
-        _ = self.beginTx();
+        if (!self.beginTx()) return self.feedSql(out);
 
         const cp = td_cursor(POSTS);
         const cu = td_cursor(USERS);
@@ -294,12 +303,12 @@ pub const Db = struct {
                 }
             } else {
                 for (0..n_rows) |i| {
-                    rows[i].likes = countLikes(cl, rows[i].id) catch 0;
+                    rows[i].likes = countLikes(cl, rows[i].id) catch return self.feedSql(out);
                 }
             }
         } else {
             for (0..n_rows) |i| {
-                rows[i].likes = countLikes(cl, rows[i].id) catch 0;
+                rows[i].likes = countLikes(cl, rows[i].id) catch return self.feedSql(out);
             }
         }
 
@@ -358,13 +367,15 @@ pub const Db = struct {
     }
 
     pub fn getPost(self: *Db, id: i64, out: *Buf) enum { ok, not_found, err } {
-        _ = self.beginTx();
+        if (!self.beginTx()) return .err;
 
         const cp = td_cursor(POSTS);
         const cu = td_cursor(USERS);
         const cl = td_cursor(LIKES_IDX);
 
-        if (td_seek(cp, id) != 1) return .not_found;
+        const seek_post = td_seek(cp, id);
+        if (seek_post < 0) return .err;
+        if (seek_post == 0) return .not_found;
 
         const p = getPayload(cp) catch return .err;
         const cols = columns(4, p) catch return .err;
@@ -372,7 +383,9 @@ pub const Db = struct {
         const body = text(cols[2]) catch return .err;
         const created = text(cols[3]) catch return .err;
 
-        if (td_seek(cu, user_id) != 1) return .not_found;
+        const seek_user = td_seek(cu, user_id);
+        if (seek_user < 0) return .err;
+        if (seek_user == 0) return .not_found;
         const up = getPayload(cu) catch return .err;
         const ucols = columns(2, up) catch return .err;
         const author = text(ucols[1]) catch return .err;
@@ -394,7 +407,7 @@ pub const Db = struct {
     }
 
     pub fn checkPostExists(self: *Db, id: i64) enum { exists, not_found, err } {
-        _ = self.beginTx();
+        if (!self.beginTx()) return .err;
         const cp = td_cursor(POSTS);
         const res = td_seek(cp, id);
         if (res == 1) return .exists;
@@ -403,7 +416,7 @@ pub const Db = struct {
     }
 
     pub fn likePost(self: *Db, uid: i64, post_id: i64, out: *Buf) enum { created, already_liked, not_found, err } {
-        _ = self.beginTx();
+        if (!self.beginTx()) return .err;
         const exists = self.checkPostExists(post_id);
         if (exists == .not_found) return .not_found;
         if (exists == .err) return .err;
@@ -424,7 +437,7 @@ pub const Db = struct {
     }
 
     pub fn unlikePost(self: *Db, uid: i64, post_id: i64, out: *Buf) enum { ok, not_found, err } {
-        _ = self.beginTx();
+        if (!self.beginTx()) return .err;
         const exists = self.checkPostExists(post_id);
         if (exists == .not_found) return .not_found;
         if (exists == .err) return .err;
@@ -439,7 +452,7 @@ pub const Db = struct {
     }
 
     pub fn createPost(self: *Db, uid: i64, author: []const u8, body: []const u8, out: *Buf) !void {
-        _ = self.beginTx();
+        if (!self.beginTx()) return error.InsertFailed;
         var id: i64 = 0;
         var created_buf: [64]u8 = undefined;
         var clen: c_int = 0;

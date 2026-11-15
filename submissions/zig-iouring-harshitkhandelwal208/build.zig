@@ -56,4 +56,24 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "../bin" } },
     });
     b.getInstallStep().dependOn(&install_exe.step);
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .single_threaded = false,
+        }),
+    });
+    tests.root_module.addImport("c", c_mod);
+    tests.root_module.addIncludePath(b.path("deps/sqlite-amalgamation-3540100"));
+    tests.root_module.addCSourceFile(.{
+        .file = b.path("src/shim.c"),
+        .flags = &sqlite_flags,
+    });
+    tests.root_module.link_libc = true;
+
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
 }

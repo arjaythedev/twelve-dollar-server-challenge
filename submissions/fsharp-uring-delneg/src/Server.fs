@@ -48,8 +48,8 @@ let private holdRideMs = int64 (env "HOLDRIDE" 1500)
 // A hold that has waited HOLDYIELDAFTER ms for a running checkpoint pass, while requests are queued (so the loop never
 // waits in the kernel), sleeps HOLDYIELD us each pass: the checkpoint thread runs at nice 19 and otherwise gets ~1.5 %
 // of the CPU, so at saturation the 15-30 ms of CPU its pass needs would take seconds (0: off)
-let private holdYieldUs = uint32 (env "HOLDYIELD" 200)
-let private holdYieldAfter = int64 (env "HOLDYIELDAFTER" 20)
+let private holdYieldUs = uint32 (env "HOLDYIELD" 400)
+let private holdYieldAfter = int64 (env "HOLDYIELDAFTER" 10)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------

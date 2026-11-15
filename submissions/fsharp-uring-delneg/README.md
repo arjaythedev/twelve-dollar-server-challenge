@@ -61,8 +61,8 @@
   starts on a pass an earlier hold already timed out on waits up to 1.5 s for it (`HOLDRIDE`), and the pass after it
   gets the usual 250 ms. The checkpoint thread runs at nice 19, so when the loop has requests queued every pass it
   gets about 1.5 % of the CPU, and a pass that needs 15-30 ms of CPU takes seconds. That happens at the end of a ramp,
-  when new connections add their setup cost to a full load. So once a hold has waited 20 ms for a running pass, the
-  loop sleeps 200 µs per pass until it ends (`HOLDYIELD`), which leaves the checkpoint thread a share of the CPU. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
+  when new connections add their setup cost to a full load. So once a hold has waited 10 ms for a running pass, the
+  loop sleeps 400 µs per pass until it ends (`HOLDYIELD`), which leaves the checkpoint thread a share of the CPU. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
   them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
   reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
   of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes

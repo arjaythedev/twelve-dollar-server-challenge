@@ -29,16 +29,23 @@ local MAX_RINGS = env("TD_MAX_RINGS", 16)
 local PRE_RINGS = env("TD_RINGS", 6)              -- rings made at startup (60,535 connections each)
 local SQ_ENTRIES = env("TD_SQ_ENTRIES", 4096)
 local CQ_ENTRIES = env("TD_CQ_ENTRIES", 32768)
-local NBUF = env("TD_NBUF", 4096)                 -- provided receive buffers per ring (power of 2)
+local NBUF = env("TD_NBUF", 16384)                -- provided receive buffers per ring (power of 2): 16 MB
+                                                  -- each; 4,096 ran dry in bursts (ENOBUFS) and receives stopped
 local BUFSZ = env("TD_BUFSZ", 1024)
 local MAX_CQE = env("TD_MAX_CQE", 16384)          -- completions handled per ring per pass
 local ANSWER_CAP = env("TD_ANSWER_CAP", 2048)     -- requests answered per pass; the rest are read and queued
-local CKPT_BOOST = env("TD_CKPT_BOOST", 16384)    -- WAL frames past which the checkpoint thread gets normal priority
-local BATCH = env("TD_BATCH", 4096)                -- completions to wait for ...
-local WAIT_US = env("TD_WAIT_US", 2000)           -- ... or this long, whichever comes first. At 265k users 2, 4 and 8 ms
-                                                  -- cost about the same CPU; the WAL peaked at 23k, 48k and 65k frames
+local PASS_US = env("TD_PASS_US", 0)              -- ... or until this much time has gone into the pass (0: no limit;
+                                                  -- 10 ms cost capacity in a crush and failed 265k)
+local READS_FIRST = env("TD_READS_FIRST", 1) ~= 0 -- answer a pass's reads, send them, then its writes and COMMIT
+local WRITE_US = env("TD_WRITE_US", 10000)        -- run the held writes (and commit them) at most this often
+local LIFO = env("TD_LIFO", 1) ~= 0               -- backlog: new arrivals first, then queued requests newest first ...
+local AGE_CAP_MS = env("TD_LIFO_AGE_MS", 8000)    -- ... except those waiting longer than this, which go first
+local KEEP_READ = env("TD_KEEP_READ", 50)         -- a read-only pass's transaction stays open for up to this many passes
+local BATCH = env("TD_BATCH", 256)                 -- completions to wait for ...
+local WAIT_US = env("TD_WAIT_US", 1000)           -- ... or this long, whichever comes first. A pass's responses wait for
+                                                  -- its end: 1 ms / 256 held 20-60x fewer replies past 40 ms than 2 ms /
+                                                  -- 4,096 at the same CPU. Writes commit every WRITE_US anyway.
 local CACHE_KB = env("TD_CACHE_KB", 65536)
-local AUTOCKPT = env("TD_AUTOCKPT", 1000)
 local BACKLOG = env("TD_BACKLOG", 4096)
 local CKPT_FRAMES = env("TD_CKPT_FRAMES", 4096)   -- WAL frames (4 KB each) that start a checkpoint
 local HOLD_MS = env("TD_HOLD_MS", 250)            -- how long writes wait for a checkpoint to finish, at first
@@ -80,7 +87,8 @@ local QMASK = 65535                               -- queues hold a connection at
 local st = {
   accepts = 0, closes = 0, reqs = 0, passes = 0, cqes = 0, enobufs = 0, sends = 0, short_sends = 0,
   stash = 0, commits = 0, commit_max = 0, commit_sum = 0, pass_max = 0, busy = 0, flushes = 0,
-  enter = 0, errors = 0, max_batch = 0, held = 0, holds = 0, hold_max = 0, ckpts = 0, enter_max = 0, reap_max = 0, flush_max = 0, deferred = 0, rearms = 0, hold_fail = 0,
+  enter = 0, errors = 0, max_batch = 0, held = 0, holds = 0, hold_max = 0, ckpts = 0, enter_max = 0, reap_max = 0, flush_max = 0, deferred = 0, rearms = 0, hold_fail = 0, rflush_max = 0,
+  lat40 = 0, lat500 = 0, lat1s = 0,
 }
 
 local ts = ffi.new("td_timespec")
@@ -143,15 +151,38 @@ local function out_append(r, slot, src, n)
   c.outlen = need
 end
 
--- input left over from a receive (a request split across packets, or pipelined behind a send)
+-- Input left over from a receive (a request split across packets, pipelined behind a send, or
+-- read but not answered yet). Every deferred request passes through here, so buffers of 1 KB
+-- (a request is a few hundred bytes) come from a pool instead of malloc and free each time.
+local SPOOL_SZ, SPOOL_MAX = 1024, 8192
+local spool = ffi.new("uint8_t *[?]", SPOOL_MAX)
+local nspool = 0
+
+local function inbuf_put(b, cap)
+  if cap == SPOOL_SZ and nspool < SPOOL_MAX then
+    spool[nspool] = b; nspool = nspool + 1
+  else
+    C.free(b)
+  end
+end
+
 local function stash_append(r, slot, p, n)
   local c = r.conns[slot]
   local need = c.inlen + n
   if need > c.incap then
-    local cap = 512
+    local cap = SPOOL_SZ
     while cap < need do cap = cap * 2 end
-    local nb = ffi.cast("uint8_t *", C.realloc(c.inb, cap))
-    if nb == nil then die("out of memory") end
+    local nb
+    if cap == SPOOL_SZ and nspool > 0 then
+      nspool = nspool - 1; nb = spool[nspool]
+    else
+      nb = ffi.cast("uint8_t *", C.malloc(cap))
+      if nb == nil then die("out of memory") end
+    end
+    if c.inb ~= nil then
+      if c.inlen > 0 then ffi.copy(nb, c.inb, c.inlen) end
+      inbuf_put(c.inb, c.incap)
+    end
     c.inb = nb; c.incap = cap
   end
   ffi.copy(c.inb + c.inlen, p, n)
@@ -161,7 +192,7 @@ end
 
 local function stash_free(r, slot)
   local c = r.conns[slot]
-  if c.inb ~= nil then C.free(c.inb); c.inb = nil end
+  if c.inb ~= nil then inbuf_put(c.inb, c.incap); c.inb = nil end
   c.inlen = 0; c.incap = 0
 end
 
@@ -240,6 +271,7 @@ local function ring_new()
     heldq = ffi.new("uint32_t[?]", table_size), nheld = 0,
     rearmq = ffi.new("uint32_t[?]", QMASK + 1), rq_head = 0, rq_tail = 0,
     readyq = ffi.new("uint32_t[?]", QMASK + 1), yq_head = 0, yq_tail = 0,
+    readyt = ffi.new("uint32_t[?]", QMASK + 1),     -- when each queued connection was queued (ms)
   }
   rings[nrings] = r
   return r
@@ -386,15 +418,21 @@ local resp = app.resp
 local req = app.req
 local STASH_MAX = app.REQ_CAP - 4096
 local pass_reqs = 0              -- requests answered in this pass
+local pass_full = false          -- the pass has answered ANSWER_CAP requests or used PASS_US
+local pass_deadline = 0
+local pass_ms = 0                -- start of this pass, ms since the server started
 
--- Past ANSWER_CAP answers in a pass, a request is only read: it waits in its connection's buffer
--- and the connection in this first-in, first-out queue, which later passes answer first. Reading
--- is a copy of a few hundred bytes; an unread request holds a 3-4 KB kernel buffer.
+-- Once a pass is full (ANSWER_CAP answers, or PASS_US spent: a pass's responses only go out at
+-- its end, so a long pass delays all of them), a request is only read: it waits in its
+-- connection's buffer and the connection in this first-in, first-out queue, which later passes
+-- answer first. Reading is a copy of a few hundred bytes; an unread request holds a 3-4 KB
+-- kernel buffer.
 local function ready_push(r, slot)
   local c = r.conns[slot]
   if band(c.flags, F_READYQ) == 0 then
     c.flags = bor(c.flags, F_READYQ)
-    r.readyq[band(r.yq_tail, QMASK)] = slot; r.yq_tail = r.yq_tail + 1
+    local idx = band(r.yq_tail, QMASK)
+    r.readyq[idx] = slot; r.readyt[idx] = pass_ms; r.yq_tail = r.yq_tail + 1
     st.deferred = st.deferred + 1
   end
 end
@@ -408,7 +446,11 @@ local function process(r, slot, n)
     local used = handle(len)
     if used == 0 then break end
     if used == -2 then
-      -- a write during a hold: it stays in the connection's input until the hold ends
+      -- A read behind a write in the write phase stays in the input; it is answered when the
+      -- write's response has been sent (on_send), after the COMMIT.
+      if app.defer_reads then break end
+      -- a write in the read phase or during a hold: it waits in the connection's input for the
+      -- write phase (release_held)
       if band(c.flags, F_HELD) == 0 then
         c.flags = bor(c.flags, F_HELD)
         r.heldq[r.nheld] = slot; r.nheld = r.nheld + 1
@@ -419,6 +461,21 @@ local function process(r, slot, n)
     out_append(r, slot, resp, app.rlen)
     st.reqs = st.reqs + 1
     pass_reqs = pass_reqs + 1
+    -- how long the request waited in the server, from the pass that received it to this one:
+    -- a reply later than 40 ms costs the kernel an extra ACK; 500 ms and 1 s are the thresholds
+    local age = pass_ms - c.t_in
+    if age >= 40 then
+      st.lat40 = st.lat40 + 1
+      if age >= 500 then
+        st.lat500 = st.lat500 + 1
+        if age >= 1000 then st.lat1s = st.lat1s + 1 end
+      end
+    end
+    if pass_reqs >= ANSWER_CAP then
+      pass_full = true
+    elseif band(pass_reqs, 31) == 0 and PASS_US > 0 and mono() >= pass_deadline then
+      pass_full = true
+    end
     if used < 0 or app.close then
       c.flags = bor(c.flags, F_CLOSING)
       done = n
@@ -453,16 +510,17 @@ local function on_recv(r, slot, res, fl, gen)
   if band(fl, CQE_F_BUFFER) ~= 0 then
     local bid = rshift(fl, 16)
     if live and res > 0 and band(c.flags, F_CLOSING) == 0 then
+      if c.inlen == 0 then c.t_in = pass_ms end   -- the oldest unanswered input arrived now
       if c.inlen > 0 or band(c.flags, F_SENDING) ~= 0 or c.outlen > 0 then
         if c.inlen + res > STASH_MAX then
           c.flags = bor(c.flags, F_CLOSING)        -- far more input than any request allows
         else
           stash_append(r, slot, r.bufbase + bid * BUFSZ, res)
           if band(c.flags, F_SENDING) == 0 and c.outlen == 0 then
-            if pass_reqs >= ANSWER_CAP then ready_push(r, slot) else process_stash(r, slot) end
+            if pass_full then ready_push(r, slot) else process_stash(r, slot) end
           end
         end
-      elseif pass_reqs >= ANSWER_CAP then
+      elseif pass_full then
         stash_append(r, slot, r.bufbase + bid * BUFSZ, res)
         ready_push(r, slot)
       else
@@ -516,17 +574,38 @@ local function on_send(r, slot, res, gen)
   if band(c.flags, F_CLOSING) ~= 0 then
     advance_close(r, slot)
   elseif c.inlen > 0 then
-    if pass_reqs >= ANSWER_CAP then ready_push(r, slot) else process_stash(r, slot) end
+    if pass_full then ready_push(r, slot) else process_stash(r, slot) end
   end
 end
 
 
--- answers queued requests, oldest first, until the pass's cap
+-- Answers queued requests until the pass is full. Without LIFO: oldest first. With LIFO (the
+-- pass has already answered the new arrivals): first those that have waited longer than
+-- AGE_CAP_MS, oldest first, then the rest newest first. In a backlog, oldest first makes every
+-- request wait the whole queue, so tens of thousands cross 1 s; newest first answers most of the
+-- queue quickly and leaves a few to wait longer, and the age cap bounds that wait. A request
+-- answered within 40 ms also spares the kernel an ACK of its own. Two plain loops, no mode
+-- switch inside one (a mode branch inside one loop made LuaJIT's traces unstable).
 local function drain_ready(r)
-  local q, conns = r.readyq, r.conns
-  while r.yq_head < r.yq_tail and pass_reqs < ANSWER_CAP do
-    local slot = q[band(r.yq_head, QMASK)]
+  local q, qt, conns = r.readyq, r.readyt, r.conns
+  while r.yq_head < r.yq_tail and not pass_full do
+    local idx = band(r.yq_head, QMASK)
+    if LIFO and pass_ms - qt[idx] < AGE_CAP_MS then break end
     r.yq_head = r.yq_head + 1
+    local slot = q[idx]
+    local c = conns[slot]
+    if band(c.flags, F_READYQ) ~= 0 then
+      c.flags = band(c.flags, bnot(F_READYQ))
+      if band(c.flags, F_OPEN) ~= 0 and band(c.flags, F_CLOSING + F_SENDING + F_HELD) == 0
+        and c.inlen > 0 and c.outlen == 0 then
+        process_stash(r, slot)
+      end
+    end
+  end
+  if not LIFO then return end
+  while r.yq_head < r.yq_tail and not pass_full do
+    r.yq_tail = r.yq_tail - 1
+    local slot = q[band(r.yq_tail, QMASK)]
     local c = conns[slot]
     if band(c.flags, F_READYQ) ~= 0 then
       c.flags = band(c.flags, bnot(F_READYQ))
@@ -592,6 +671,7 @@ local function on_close(r, slot)
 end
 
 -- the hold is over: answer the writes that waited
+-- the write phase (or, without READS_FIRST, the end of a hold): answer the writes that waited
 local function release_held(r)
   local q, conns = r.heldq, r.conns
   local n = r.nheld
@@ -692,7 +772,7 @@ local function main()
   if MARGIN * 4 > table_size then MARGIN = math.floor(table_size / 4) end
 
   local shim = ffi.load(SRC .. "/../libtdshim.so")
-  if shim.td_open(SQLITE_PATH, CACHE_KB, AUTOCKPT) ~= 0 then
+  if shim.td_open(SQLITE_PATH, CACHE_KB) ~= 0 then
     die("database " .. SQLITE_PATH .. ": " .. ffi.string(shim.td_errmsg()))
   end
   app.init(shim, JWT_SECRET)
@@ -722,9 +802,11 @@ local function main()
     prof_until = mono() + tonumber(secs)
   end
   local last_stats = mono()
+  local started = last_stats         -- pass_ms counts from here
+  local last_write = 0
+  local kept, end_read = 0, false    -- read-only passes the open transaction has lasted
   local idle = false
   local ck_phase, ck_mark, hold_start = 0, 0, 0
-  local ck_boost = false
   local hold_ms = HOLD_MS
   local cpu_prev = 0
   while true do
@@ -734,22 +816,34 @@ local function main()
     local r1 = rings[1]
     local wait = WAIT_US
     if r1.more then wait = 0 end
+    local held = false
     for i = 1, nrings do
       local r = rings[i]
       if r.more or r.yq_head < r.yq_tail or r.rq_head < r.rq_tail then wait = 0 end
+      if r.nheld > 0 then held = true end
     end
-    -- nothing came in last pass: sleep until the first completion instead of polling every ms
+    -- nothing came in last pass: sleep until the first completion instead of polling every ms,
+    -- unless writes are waiting for their write phase (they would wait for the next request)
     local batch = BATCH
-    if wait > 0 and idle then wait = 1000000; batch = 1 end
+    if wait > 0 and idle and not held then wait = 1000000; batch = 1 end
     local te = STATS and mono() or 0
     ring_enter(r1, wait, batch)
     local t0 = mono()
     if STATS and wait <= WAIT_US and t0 - te > st.enter_max then st.enter_max = t0 - te end
     app.now = wall()
-    pass_reqs = 0
-    for i = 1, nrings do drain_ready(rings[i]) end
+    pass_reqs = 0; pass_full = false; pass_deadline = t0 + PASS_US * 1e-6
+    pass_ms = math.floor((t0 - started) * 1000)
+    -- Read phase: answer reads; writes wait in their connections' input (heldq). With LIFO the
+    -- new arrivals come first and the queue gets what is left of the pass.
+    app.defer_writes = READS_FIRST
     local n = 0
-    for i = 1, nrings do n = n + reap(rings[i]) end
+    if LIFO then
+      for i = 1, nrings do n = n + reap(rings[i]) end
+      for i = 1, nrings do drain_ready(rings[i]) end
+    else
+      for i = 1, nrings do drain_ready(rings[i]) end
+      for i = 1, nrings do n = n + reap(rings[i]) end
+    end
     if n > st.max_batch then st.max_batch = n end
     if STATS then
       local d = mono() - t0
@@ -757,8 +851,51 @@ local function main()
     end
     idle = (n == 0 and r1.sqtail == r1.sqsub)
 
+    if READS_FIRST then
+      app.defer_writes = false
+      -- The reads saw only committed data (no write has run in this transaction yet), so their
+      -- responses go to the kernel now instead of after the writes and the COMMIT.
+      local trf = STATS and mono() or 0
+      for i = 1, nrings do
+        local r = rings[i]
+        if r.nsend > 0 then
+          flush_sends(r, false)
+          ring_enter(r, 0, 0)
+        end
+      end
+      if STATS then
+        local d = mono() - trf
+        if d > st.rflush_max then st.rflush_max = d end
+      end
+      -- Write phase: the writes, then the COMMIT. A read behind a write on the same connection
+      -- waits until the write's response is out, so no read sees an uncommitted write.
+      -- Writes run at most every WRITE_US (group commit over several passes: fewer WAL frames
+      -- per write, so fewer checkpoint rounds and holds). Each write's response still waits for
+      -- its COMMIT. A lone write after a quiet spell runs at once.
+      if not app.hold and (t0 - last_write) * 1e6 >= WRITE_US then
+        local any = false
+        app.defer_reads = true
+        for i = 1, nrings do
+          if rings[i].nheld > 0 then release_held(rings[i]); any = true end
+        end
+        app.defer_reads = false
+        if any then last_write = t0 end
+      end
+    end
+
+    -- A pass that wrote nothing leaves its transaction open for the next pass (no COMMIT, no
+    -- BEGIN, the cursors stay open and positioned). Its snapshot is still the latest committed
+    -- state: this loop is SQLite's only writer, and a pass that writes commits. It ends after
+    -- KEEP_READ passes, and when a checkpoint has copied the whole log, so that the next
+    -- transaction starts on the database file alone and the next write can restart the log
+    -- (a reader that started with frames in the log prevents that).
     local failed = false
-    if app.in_txn then
+    local keep = app.in_txn and not app.wrote and not app.db_error and not end_read
+      and kept < KEEP_READ
+    if keep then
+      kept = kept + 1
+    elseif app.in_txn then
+      kept = 0; end_read = false
       local tc = STATS and mono() or 0
       if shim.td_commit() ~= 0 or app.db_error then
         if not app.db_error then io.stderr:write("commit failed: ", ffi.string(shim.td_errmsg()), "\n") end
@@ -800,8 +937,8 @@ local function main()
     -- When the loop is busy the thread gets no CPU at idle priority and the rounds do not finish.
     -- Giving up on the hold at a fixed limit then lets the log grow, the next round has more to
     -- copy than the last, and it never catches up (a 280k run reached 258k frames, commits took
-    -- 300 ms, and the server ran out of memory). So: the thread has normal priority while a
-    -- round runs, a hold that was too short makes the next one longer, and past CKPT_FORCE
+    -- 300 ms, and the server ran out of memory). So: the thread has normal priority (shim.c),
+    -- a hold that was too short makes the next one longer, and past CKPT_FORCE
     -- frames writes stay held until the log has been copied.
     local wf = shim.td_wal_frames()
     if ck_phase == 0 then
@@ -823,6 +960,15 @@ local function main()
         if shim.td_wal_frames() <= shim.td_ckpt_done() then
           if ck_phase == 2 then end_hold = true; hold_ms = HOLD_MS end
           ck_phase = 3; ck_mark = shim.td_wal_frames()
+          -- End a kept read-only transaction now: it began with frames in the log, and a write
+          -- running inside it could not restart the log (the log then grew for 30-60 s at a
+          -- time, to 250k frames). The next transaction starts on the database file
+          -- alone, and the next write restarts the log.
+          if app.in_txn and not app.wrote then
+            shim.td_commit()
+            app.in_txn = false; app.db_error = false
+          end
+          kept = 0; end_read = false
         elseif (ck_phase == 1 and not end_hold) or (ck_phase == 1 and wf >= CKPT_FORCE) then
           end_hold = false
           app.hold = true; hold_start = t0; ck_phase = 2
@@ -838,15 +984,11 @@ local function main()
         app.hold = false
         local d = mono() - hold_start
         if d > st.hold_max then st.hold_max = d end
-        for i = 1, nrings do release_held(rings[i]) end
+        -- with READS_FIRST the next pass's write phase answers them, after its reads
+        if not READS_FIRST then
+          for i = 1, nrings do release_held(rings[i]) end
+        end
       end
-    end
-    -- Normal priority while a round runs or the log is long, idle priority otherwise. A round is
-    -- some tens of milliseconds of CPU every second or two; at idle priority it gets none of it
-    -- from a busy loop, and the work only piles up.
-    local want = ck_phase == 1 or ck_phase == 2 or wf >= CKPT_BOOST
-    if want ~= ck_boost then
-      ck_boost = want; shim.td_ckpt_boost(want and 1 or 0)
     end
 
     st.passes = st.passes + 1
@@ -865,13 +1007,14 @@ local function main()
         io.stderr:write(string.format(
           "conns=%d rings=%d req/s=%d (feed %d post %d like %d create %d other %d) passes=%d cqe=%d maxbatch=%d "
           .. "cpu=%.0f%% us/req=%.1f busy=%.0f%% pass_max=%.1fms enter_max=%.1fms reap_max=%.1fms flush_max=%.1fms commits=%d commit_avg=%.0fus commit_max=%.1fms wal=%d "
-          .. "ckpt=%d holds=%d held=%d hold_max=%.0fms hold_fail=%d enobufs=%d rearm=%d deferred=%d stash=%d short=%d sqflush=%d acc=%d close=%d err=%d lua_kb=%.0f\n",
+          .. "ckpt=%d holds=%d held=%d hold_max=%.0fms hold_fail=%d enobufs=%d rearm=%d deferred=%d stash=%d short=%d sqflush=%d acc=%d close=%d err=%d lua_kb=%.0f pc_skip=%d pc_fwd=%d lat40=%d lat500=%d lat1s=%d rflush_max=%.1fms\n",
           conns, nrings, st.reqs, app.n_feed, app.n_post, app.n_like, app.n_create, app.n_other,
           st.passes, st.cqes, st.max_batch, (cputime() - cpu_prev) / (t1 - last_stats) * 100,
           st.reqs > 0 and (cputime() - cpu_prev) / st.reqs * 1e6 or 0, st.busy / (t1 - last_stats) * 100, st.pass_max * 1000, st.enter_max * 1000, st.reap_max * 1000, st.flush_max * 1000,
           st.commits, st.commits > 0 and st.commit_sum / st.commits * 1e6 or 0, st.commit_max * 1000,
           shim.td_wal_frames(), st.ckpts, st.holds, st.held, st.hold_max * 1000, st.hold_fail, st.enobufs, st.rearms, st.deferred, st.stash, st.short_sends, st.flushes, st.accepts, st.closes,
-          st.errors, collectgarbage("count")))
+          st.errors, collectgarbage("count"), tonumber(shim.td_pcache_skipped()), tonumber(shim.td_pcache_forwarded()),
+          st.lat40, st.lat500, st.lat1s, st.rflush_max * 1000))
         for k in pairs(st) do st[k] = 0 end
         app.n_feed, app.n_post, app.n_like, app.n_create, app.n_other = 0, 0, 0, 0, 0
         last_stats = t1

@@ -24,6 +24,8 @@ M.in_txn = false      -- a pass's transaction is open
 M.wrote = false       -- this pass wrote to the database
 M.db_error = false
 M.hold = false        -- hold write requests (the event loop sets this around a checkpoint)
+M.defer_writes = false  -- a pass's read phase: writes wait for its write phase
+M.defer_reads = false   -- a pass's write phase: reads wait for the next pass
 
 -- stats
 M.n_feed, M.n_post, M.n_like, M.n_create, M.n_other = 0, 0, 0, 0, 0
@@ -89,8 +91,6 @@ local function head(status)
   return { b = b, n = #s }
 end
 local H_200, H_201 = head("200 OK"), head("201 Created")
-local HN = H_200.n
-assert(H_201.n + 0 == H_201.n)
 
 local function begin_resp(h)
   ffi.copy(resp, h.b, h.n)
@@ -628,7 +628,8 @@ end
 
 -- Reads one request from req[0 .. n). Returns the number of bytes it used, 0 if the request is not
 -- complete yet, -1 if it can't be parsed (a 400 is in M.resp and the connection must close), or
--- -2 if it is a write and writes are on hold (nothing was done; ask again later).
+-- -2 if it has to wait (nothing was done; ask again later): a write while writes are on hold or
+-- deferred to the write phase, or a read in the write phase.
 function M.handle(n)
   local p = req
   M.close = false
@@ -728,6 +729,7 @@ function M.handle(n)
   -- routes
   local plen = pe - ps
   if is_get then
+    if M.defer_reads then return -2 end      -- behind a write on this connection: next pass
     if plen == 5 and C.memcmp(p + ps, "/feed", 5) == 0 then
       M.n_feed = M.n_feed + 1
       get_feed()
@@ -750,8 +752,8 @@ function M.handle(n)
         if p[k] == 47 then is_like = false; break end
       end
     end
-    if M.hold and (is_create or is_like) then
-      return -2                              -- writes are held while a checkpoint finishes
+    if (M.hold or M.defer_writes) and (is_create or is_like) then
+      return -2                              -- held for a checkpoint, or deferred to the write phase
     elseif not (is_create or is_like) then
       M.n_other = M.n_other + 1
       fixed(R_NOT_FOUND)

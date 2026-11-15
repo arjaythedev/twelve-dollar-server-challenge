@@ -28,7 +28,37 @@ pub inline fn digitsU64(val: u64) usize {
 
 pub inline fn escapedLen(s: []const u8) usize {
     var extra: usize = 0;
-    for (s) |ch| {
+    var i: usize = 0;
+
+    const V = @Vector(16, u8);
+    const quote_v: V = @splat('"');
+    const slash_v: V = @splat('\\');
+    const space_v: V = @splat(0x20);
+
+    while (i + 16 <= s.len) {
+        const chunk: V = s[i..][0..16].*;
+        const has_quote = chunk == quote_v;
+        const has_slash = chunk == slash_v;
+        const has_ctrl = chunk < space_v;
+        const needs_escape = has_quote | has_slash | has_ctrl;
+
+        if (!@reduce(.Or, needs_escape)) {
+            i += 16;
+        } else {
+            const end = i + 16;
+            while (i < end) : (i += 1) {
+                const ch = s[i];
+                if (ch == '"' or ch == '\\') {
+                    extra += 1;
+                } else if (ch < 0x20) {
+                    extra += if (ch == '\n' or ch == '\r' or ch == '\t') 1 else 5;
+                }
+            }
+        }
+    }
+
+    while (i < s.len) : (i += 1) {
+        const ch = s[i];
         if (ch == '"' or ch == '\\') {
             extra += 1;
         } else if (ch < 0x20) {
@@ -65,17 +95,72 @@ pub inline fn writeU64Direct(buf: []u8, val: u64) usize {
 
 pub inline fn writeJsonStringDirect(dest: [*]u8, s: []const u8) usize {
     var d: usize = 0;
-    var start: usize = 0;
     var i: usize = 0;
     const hex = "0123456789abcdef";
+
+    const V = @Vector(16, u8);
+    const quote_v: V = @splat('"');
+    const slash_v: V = @splat('\\');
+    const space_v: V = @splat(0x20);
+
+    while (i + 16 <= s.len) {
+        const chunk: V = s[i..][0..16].*;
+        const has_quote = chunk == quote_v;
+        const has_slash = chunk == slash_v;
+        const has_ctrl = chunk < space_v;
+        const needs_escape = has_quote | has_slash | has_ctrl;
+
+        if (!@reduce(.Or, needs_escape)) {
+            @memcpy(dest[d..][0..16], s[i..][0..16]);
+            d += 16;
+            i += 16;
+        } else {
+            const end = i + 16;
+            while (i < end) : (i += 1) {
+                const ch = s[i];
+                if (ch == '"' or ch == '\\' or ch < 0x20) {
+                    switch (ch) {
+                        '"' => {
+                            @memcpy(dest[d..][0..2], "\\\"");
+                            d += 2;
+                        },
+                        '\\' => {
+                            @memcpy(dest[d..][0..2], "\\\\");
+                            d += 2;
+                        },
+                        '\n' => {
+                            @memcpy(dest[d..][0..2], "\\n");
+                            d += 2;
+                        },
+                        '\r' => {
+                            @memcpy(dest[d..][0..2], "\\r");
+                            d += 2;
+                        },
+                        '\t' => {
+                            @memcpy(dest[d..][0..2], "\\t");
+                            d += 2;
+                        },
+                        else => {
+                            dest[d] = '\\';
+                            dest[d + 1] = 'u';
+                            dest[d + 2] = '0';
+                            dest[d + 3] = '0';
+                            dest[d + 4] = hex[ch >> 4];
+                            dest[d + 5] = hex[ch & 0xf];
+                            d += 6;
+                        },
+                    }
+                } else {
+                    dest[d] = ch;
+                    d += 1;
+                }
+            }
+        }
+    }
+
     while (i < s.len) : (i += 1) {
         const ch = s[i];
         if (ch == '"' or ch == '\\' or ch < 0x20) {
-            if (i > start) {
-                const chunk = s[start..i];
-                @memcpy(dest[d..][0..chunk.len], chunk);
-                d += chunk.len;
-            }
             switch (ch) {
                 '"' => {
                     @memcpy(dest[d..][0..2], "\\\"");
@@ -107,13 +192,10 @@ pub inline fn writeJsonStringDirect(dest: [*]u8, s: []const u8) usize {
                     d += 6;
                 },
             }
-            start = i + 1;
+        } else {
+            dest[d] = ch;
+            d += 1;
         }
-    }
-    if (i > start) {
-        const chunk = s[start..i];
-        @memcpy(dest[d..][0..chunk.len], chunk);
-        d += chunk.len;
     }
     return d;
 }

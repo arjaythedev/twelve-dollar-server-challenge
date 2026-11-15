@@ -278,6 +278,33 @@ test "escapedLen and digitsU64" {
     var direct_buf: [128]u8 = undefined;
     const written = bufm.writeJsonStringDirect(&direct_buf, s2);
     try std.testing.expectEqual(bufm.escapedLen(s2), written);
+
+    // SIMD vector boundary and escape tests (>16 bytes, multi-chunk)
+    const long_clean = "This is a clean long string without any escapes that exceeds sixteen bytes completely.";
+    var long_buf: [256]u8 = undefined;
+    const written_clean = bufm.writeJsonStringDirect(&long_buf, long_clean);
+    try std.testing.expectEqual(long_clean.len, written_clean);
+    try std.testing.expectEqual(long_clean.len, bufm.escapedLen(long_clean));
+    try std.testing.expectEqualStrings(long_clean, long_buf[0..written_clean]);
+
+    const long_escaped = "First 16 bytes! \"quoted\" and \\slashed\\ plus \n newline in long string.";
+    const written_escaped = bufm.writeJsonStringDirect(&long_buf, long_escaped);
+    try std.testing.expectEqual(bufm.escapedLen(long_escaped), written_escaped);
+
+    // Varint fast decoding verification
+    const varint_samples = [_]struct { bytes: []const u8, expected: u64 }{
+        .{ .bytes = &[_]u8{0x00}, .expected = 0 },
+        .{ .bytes = &[_]u8{0x7f}, .expected = 127 },
+        .{ .bytes = &[_]u8{ 0x81, 0x00 }, .expected = 128 },
+        .{ .bytes = &[_]u8{ 0x81, 0x23 }, .expected = (1 << 7) | 0x23 },
+        .{ .bytes = &[_]u8{ 0x82, 0x84, 0x35 }, .expected = (2 << 14) | (4 << 7) | 0x35 },
+    };
+    for (varint_samples) |tc| {
+        var idx: usize = 0;
+        const decoded = try dbm.varint(tc.bytes, &idx);
+        try std.testing.expectEqual(tc.expected, decoded);
+        try std.testing.expectEqual(tc.bytes.len, idx);
+    }
 }
 
 test "getPostDirect single post serialization" {

@@ -65,6 +65,21 @@ pub inline fn varint(p: []const u8, i: *usize) !u64 {
 }
 
 pub fn varintLong(p: []const u8, i: *usize) !u64 {
+    const b0 = p[i.*];
+    if (i.* + 1 < p.len) {
+        const b1 = p[i.* + 1];
+        if (b1 < 0x80) {
+            i.* += 2;
+            return (@as(u64, b0 & 0x7f) << 7) | b1;
+        }
+        if (i.* + 2 < p.len) {
+            const b2 = p[i.* + 2];
+            if (b2 < 0x80) {
+                i.* += 3;
+                return (@as(u64, b0 & 0x7f) << 14) | (@as(u64, b1 & 0x7f) << 7) | b2;
+            }
+        }
+    }
     var v: u64 = 0;
     var k: usize = 0;
     while (k < 9) : (k += 1) {

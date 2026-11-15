@@ -258,7 +258,6 @@ pub const Server = struct {
 
     fn initRing() !IoUring {
         const flag_sets = [_]u32{
-            linux.IORING_SETUP_COOP_TASKRUN | linux.IORING_SETUP_CQSIZE,
             linux.IORING_SETUP_CQSIZE,
             0,
         };

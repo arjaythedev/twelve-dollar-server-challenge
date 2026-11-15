@@ -189,13 +189,10 @@ proc drop {c} {
 # Reads what has arrived, answers every complete request in it (pipelining), keeps a partial one.
 proc rd {c} {
     if {[catch {read $c} d]} {return [drop $c]}
-    if {$d eq ""} {
-        if {[eof $c]} {drop $c}
-        return
-    }
+    if {$d eq "" && [eof $c]} {return [drop $c]}
     upvar #0 B($c) b
     append b $d
-    set pos 0; set len [string length $b]; set close 0
+    set pos 0; set len [string length $b]; set close 0; set full 0
     while {[set he [string first "\r\n\r\n" $b $pos]] >= 0} {
         set lh [string tolower [string range $b $pos $he]]
         set next [expr {$he + 4}]; set cl 0
@@ -213,9 +210,19 @@ proc rd {c} {
         if {[catch {puts -nonewline $c $r}]} {return [drop $c]}
         set pos $next
         if {$close} break
+        # A client that does not read its responses: stop until they drain, so its output stays bounded.
+        if {[chan pending output $c] > 1048576} {set full 1; break}
     }
     set b [string range $b $pos end]
-    if {[catch {flush $c}] || $close || [string length $b] > 1048576} {drop $c}
+    if {[catch {flush $c}] || $close || [string length $b] > 1048576} {return [drop $c]}
+    if {$full} {fileevent $c readable {}; fileevent $c writable [list resume $c]}
+}
+
+# Tcl fires this once the queued output has been written: answer the rest, then read again.
+proc resume {c} {
+    fileevent $c writable {}
+    fileevent $c readable [list rd $c]
+    rd $c
 }
 
 proc accept {c addr port} {

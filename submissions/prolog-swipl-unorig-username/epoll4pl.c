@@ -29,11 +29,12 @@ static foreign_t pl_epoll_wait(term_t list)
   return PL_unify_nil(l);
 }
 
-// epoll_watch(+Fd, +What): What is in (wait for requests) or out (wait until the socket takes more output).
+// epoll_watch(+Fd, +What): What is in (wait for requests), out (wait until the socket takes more output)
+// or none (stay in the set, report nothing).
 static foreign_t pl_epoll_watch(term_t tf, term_t tw)
 { int fd; char *w;
   if ( !PL_get_integer_ex(tf, &fd) || !PL_get_atom_chars(tw, &w) ) return FALSE;
-  struct epoll_event e = { .events = w[0] == 'o' ? EPOLLOUT : EPOLLIN, .data.fd = fd };
+  struct epoll_event e = { .events = w[0] == 'o' ? EPOLLOUT : w[0] == 'i' ? EPOLLIN : 0, .data.fd = fd };
   return epoll_ctl(ep, EPOLL_CTL_MOD, fd, &e) == 0;
 }
 

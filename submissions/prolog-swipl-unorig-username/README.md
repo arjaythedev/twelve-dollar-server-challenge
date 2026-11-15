@@ -71,7 +71,7 @@ idle connections cost the loop nothing.
 ## What is in C
 
 `epoll4pl.c` gives Prolog four predicates: `epoll_add/1`, `epoll_wait/1` (level-triggered, up to 1,024 ready
-descriptors per call), `epoll_watch/2` (wait for input or for room to write) and `fd_send/3` (a non-blocking
+descriptors per call), `epoll_watch/2` (wait for input, for room to write, or for neither) and `fd_send/3` (a non-blocking
 `send()` that returns what the socket did not take). It parses nothing and decides nothing. Accepting,
 reading, HTTP, routing, JWT, JSON, SQL, the group commit and every status code stay in Prolog.
 
@@ -125,7 +125,9 @@ On a fresh ubuntu:24.04 amd64 after `install.sh`: `test/run.sh` passed=42 failed
 third closed before reading the answer) the open descriptor count is back to its idle value; with 300 idle
 sockets open, health and feed answer 200, and the count drops back when they close. Keep-alive and pipelined
 requests answer every request. With 10 clients pipelining `GET /feed` and never reading, `/health` still
-answers in under 1 ms and RSS stays at about 36 MB.
+answers in under 1 ms and RSS stays at about 36 MB (each such client holds up to one read's worth of answers,
+about 2 MB of `/feed`: 200 of them took RSS to 440 MB). Out of descriptors, the server stops waking up for the
+listening socket (one log line instead of one per attempt) and accepts again as soon as a connection closes.
 
 ## Not handled
 

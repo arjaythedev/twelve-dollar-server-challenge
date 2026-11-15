@@ -11,7 +11,7 @@
 
 :- initialization(main, main).
 
-:- dynamic conn/2, fd/2, rest/2, pending/2, dirty/0, stmt/2, started/1.
+:- dynamic conn/2, fd/2, rest/2, pending/2, full/1, dirty/0, stmt/2, started/1.
 
 % ---------------------------------------------------------------- SQL
 % A post object is built by SQLite's json_object, in the spec's key order.
@@ -299,7 +299,15 @@ ready(Fd, Outs0, Outs) :-
 
 accept_all(Sock, Listen, N) :- % what the backlog holds, at most N per turn
     (   N > 0, wait_for_input([Listen], [_], 0)
-    ->  catch(accept(Sock), E, print_message(error, E)), N1 is N - 1, accept_all(Sock, Listen, N1)
+    ->  catch(accept(Sock), E, true),
+        (   var(E) -> N1 is N - 1, accept_all(Sock, Listen, N1)
+        ;   E = error(socket_error(Code, _), _), memberchk(Code, [emfile, enfile])
+        ->  (   full(_) -> true            % out of descriptors: stop waking up for the listening socket
+            ;   print_message(error, E), stream_property(Listen, file_no(LFd)),
+                epoll_watch(LFd, none), assertz(full(LFd))   % until drop/1 frees one
+            )
+        ;   print_message(error, E), N1 is N - 1, accept_all(Sock, Listen, N1)
+        )
     ;   true
     ).
 
@@ -329,7 +337,8 @@ readable(Fd, I, Outs0, Outs) :- % adds Fd-Responses for the requests that arrive
 
 drop(I) :-
     retract(conn(I, O)), retract(fd(Fd, I)), retractall(rest(I, _)), retractall(pending(Fd, _)),
-    close(I, [force(true)]), close(O, [force(true)]).
+    close(I, [force(true)]), close(O, [force(true)]),
+    ( retract(full(LFd)) -> epoll_watch(LFd, in) ; true ).
 
 % Group commit: one COMMIT for every write of this turn, then the responses. A 201 never leaves first.
 % If the COMMIT fails, nothing of this turn was written, and those clients get no answer at all.

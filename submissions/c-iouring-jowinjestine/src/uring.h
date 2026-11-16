@@ -13,6 +13,7 @@
 #include <linux/io_uring.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -38,6 +39,9 @@
 #endif
 #ifndef IORING_RECV_MULTISHOT
 #define IORING_RECV_MULTISHOT (1U << 1)
+#endif
+#ifndef IORING_POLL_ADD_MULTI
+#define IORING_POLL_ADD_MULTI (1U << 0)
 #endif
 #ifndef IORING_ACCEPT_MULTISHOT
 #define IORING_ACCEPT_MULTISHOT (1U << 0)
@@ -275,6 +279,17 @@ static inline void sqe_recv_multishot(struct io_uring_sqe *s, unsigned slot, uin
   s->buf_group = 0;
   s->user_data = ud;
 }
+/* Low-memory idle mode: a multishot poll has no pending receive buffer and, on
+ * Linux 6.8, uses less per-socket kernel state than a multishot recv.  A poll
+ * completion queues a separate nonblocking read for this socket. */
+static inline void sqe_poll_multishot_conn(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
+  s->opcode = IORING_OP_POLL_ADD;
+  s->flags = IOSQE_FIXED_FILE;
+  s->fd = (int)slot;
+  s->len = IORING_POLL_ADD_MULTI;
+  s->poll32_events = POLLIN | POLLRDHUP;
+  s->user_data = ud;
+}
 /* One read, MSG_DONTWAIT: if nothing is left it ends with EAGAIN instead of waiting. */
 static inline void sqe_recv_once(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
   s->opcode = IORING_OP_RECV;
@@ -313,6 +328,17 @@ static inline void sqe_cancel_ud(struct io_uring_sqe *s, uint64_t target, uint64
   s->opcode = IORING_OP_ASYNC_CANCEL;
   s->addr = target;
   s->user_data = ud;
+}
+/* For polled sockets, cancel by poll user_data before shutdown and close.
+ * Hard-linking allows the close to proceed even when the poll already ended
+ * (ASYNC_CANCEL returns -ENOENT), and avoids O(n) cancellation by fd. */
+static inline void sqe_shutdown_close_poll(struct ring *r, unsigned slot, uint64_t poll_ud,
+                                           uint64_t ud_cancel, uint64_t ud_shutdown, uint64_t ud_close) {
+  struct io_uring_sqe *s = ring_sqe(r);
+  sqe_cancel_ud(s, poll_ud, ud_cancel);
+  s->fd = -1;
+  s->flags = IOSQE_IO_HARDLINK;
+  sqe_shutdown_close(r, slot, ud_shutdown, ud_close);
 }
 /* A listening socket on host:port: SO_REUSEPORT (several share the port), TCP_NODELAY (inherited
  * by accepted sockets). */

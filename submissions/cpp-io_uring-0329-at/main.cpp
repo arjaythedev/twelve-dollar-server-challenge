@@ -179,8 +179,9 @@ class Server {
     }
   }
 
-  /* Answer the requests the WAL gate held, once the checkpoint thread has caught up. A pass
-   * takes at most kHeldPerPass so a long hold cannot turn one pass into a long stall. */
+  /* Answer the requests the WAL gate held. Hold-once: a request that was held is executed here
+   * unconditionally, so its latency is bounded by one extra pass instead of a new 400 ms window.
+   * kHeldPerPass bounds the work a single pass does. */
   void retry_held() {
     size_t budget = kHeldPerPass;
     for (uint32_t wi = 0; wi < workers_.size() && budget; wi++) {
@@ -278,12 +279,13 @@ class Server {
         if (p5 - stat_at >= 1000000000ULL) {
           std::fprintf(stderr,
                        "stats: pass=%llu/s cqes=%llu req=%llu gated=%llu/%llu wait=%.1f%% drain=%.1f%% "
-                       "read=%.1f%% commit=%.1f%% sweep=%.1f%%\n",
+                       "read=%.1f%% commit=%.1f%% sweep=%.1f%% pool_miss=%lu\n",
                        (unsigned long long)(pass - stat_pass), (unsigned long long)cqes_sum,
                        (unsigned long long)requests_sum, (unsigned long long)held_gate,
                        (unsigned long long)(pass - stat_pass), 100.0 * t_wait / (p5 - stat_at),
                        100.0 * t_drain / (p5 - stat_at), 100.0 * t_read / (p5 - stat_at),
-                       100.0 * t_commit / (p5 - stat_at), 100.0 * t_sweep / (p5 - stat_at));
+                       100.0 * t_commit / (p5 - stat_at), 100.0 * t_sweep / (p5 - stat_at),
+                       app::pool_misses());
           stat_at = p5;
           stat_pass = pass;
           t_wait = t_drain = t_read = t_commit = t_sweep = 0;
@@ -671,15 +673,17 @@ class Server {
   size_t sweep_off_ = 0;
 };
 
-uint32_t descriptor_slots() {
+/* Direct-descriptor slots per ring, and therefore the connection table per ring. Sized for the
+ * target connection count (6 x 131,072 = 786,432, against a scored peak of ~320,000), not by
+ * RLIMIT_NOFILE: the old 1M-per-ring tables were 288 MB of preallocated, pre-faulted memory that
+ * the box cannot spare at 300k connections. */
+constexpr uint32_t kSlotsPerRing = 131072;
+
+void raise_nofile() {
   struct rlimit rl {};
   getrlimit(RLIMIT_NOFILE, &rl);
   rl.rlim_cur = rl.rlim_max;
   setrlimit(RLIMIT_NOFILE, &rl);
-  getrlimit(RLIMIT_NOFILE, &rl);
-  rlim_t n = rl.rlim_cur;
-  if (n > (1u << 20)) n = 1u << 20;
-  return static_cast<uint32_t>(n);
 }
 
 const char* env_or(const char* k, const char* d) {
@@ -723,12 +727,13 @@ int main() {
                                         reinterpret_cast<const uint8_t*>(secret),
                                         std::strlen(secret));
   constexpr unsigned cq = kCqEntries;
-  Server server(app.get(), descriptor_slots(), cq);
+  raise_nofile();
+  Server server(app.get(), kSlotsPerRing, cq);
   if (!server.init(host, static_cast<uint16_t>(std::atoi(port_s)))) {
     std::fprintf(stderr, "server init failed\n");
     return 1;
   }
   std::fprintf(stderr, "listening on %s:%s; %u rings x %u slots, cq=%u\n", host, port_s, kRingCount,
-               descriptor_slots(), cq);
+               kSlotsPerRing, cq);
   server.run();
 }

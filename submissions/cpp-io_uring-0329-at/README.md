@@ -29,7 +29,7 @@
 
 **批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 等待 256 个完成或 500 µs，其余非阻塞）→ 每个 ring 最多处理 256 个完成 → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。
 
-**ring 模型。** 固定 6 个 ring，每个 ring 有自己的一张 65,535 项文件表和**一个专属的** `SO_REUSEPORT` listener。ring 接近满时关闭自己的 listener（连接由其他 ring 接收），不做运行期扩容或跨 ring 迁移。
+**ring 模型。** 固定 6 个 ring，每个 ring 的 direct-descriptor 表是 **131,072 项**（6 × 131,072 = 786,432 连接上限），**按目标连接数定尺寸，不按 `RLIMIT_NOFILE`**——按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上是 300k 连接装不装得下的区别。每个 ring 有**一个专属的** `SO_REUSEPORT` listener，ring 接近满时关闭自己的 listener（连接由其他 ring 接收），不做运行期扩容或跨 ring 迁移。
 
 **数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数把 20 个 id 排序后沿 `likes_post_id_idx` 走一遍（merge），一次遍历统计全部 20 个；20 个作者用一次批量 seek（每层共享页、页内插值二分、`CellInfo` 解析 record），不是 20 次独立查找。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译。
 
@@ -51,7 +51,7 @@
 
 - WAL + `synchronous=NORMAL`，通过 `unix-excl` VFS 打开；WAL 索引在进程内共享，没有 `-shm` 文件。WAL 文件上再套一层写合并 shim：帧头和页连续写时先攒进缓冲，commit 帧的页到达时一次 `pwrite` 落地（写序不变，commit 帧在 COMMIT 返回前已在内核里）。本地 A/B 里它没量出差别（本实现已按 pass 组提交，每请求 WAL 写只有 ~0.2 次，合并的理论收益约 0.6%），保留是因为它已被 #245 在基准机上量到 0.24 → 0.095 pwrite/请求。
 - 每个事件循环 pass 是一个 SQLite 事务：读共享快照，写入组提交（规则 6）。**COMMIT 返回之前，pass 的任何响应都不会交给内核。** commit 失败时该 pass 的每个响应都变成 500。
-- Auto-checkpoint 关掉。WAL 到 4,096 帧（16 MB）时**只挂写、不挂循环**：写请求的响应留到下一个 pass（请求字节留在连接上，最多重放 1,024 个），读照常答；独立的 nice 19 线程在自己的连接上做 `PASSIVE` 检查点，把帧拷回主库（`PASSIVE` 从不等读者，所以它不会把循环挡住）。**每一帧都拷完之后**下一次写会让日志从第 1 帧重新开始，文件就停在那里——不需要 `TRUNCATE`，也不需要 `RESTART`。线程连不上的情况有兜底：hold 超过 400 ms 就放行，让日志长大一点，下次再收。
+- Auto-checkpoint 关掉。WAL 到 8,192 帧（32 MB）时**只挂写、不挂循环**：写请求的响应留到下一个 pass（请求字节留在连接上，最多重放 1,024 个），读照常答；独立的 nice 19 线程在自己的连接上做 `PASSIVE` 检查点，把帧拷回主库（`PASSIVE` 从不等读者，所以它不会把循环挡住）；一次 pass 没拷动任何帧就停手，不在单核上空转。**每一帧都拷完之后**下一次写会让日志从第 1 帧重新开始，文件就停在那里——不需要 `TRUNCATE`，也不需要 `RESTART`。线程连不上的情况有兜底：hold 超过 120 ms 就放行，让日志长大一点，下次再收。
 - 事件循环的等待是有条件的：只要还有待发的读、待写的响应或上一 pass 收到的完成，就 `min_complete=0` 直接 `enter`，**不睡那 1 ms**；只有在完全没事干时才等（1 ms）。这一条是 220k 时 29% CPU 空转的来源。
 - 空闲连接清扫按时间切片（每 50 ms 扫一个 ring 的 1/32），不在 pass 里整表扫 6 M 个槽位——一次整扫在 1 vCPU 上是 25–70 ms，正好是 p99 悬崖。
 - No `mmap`: reads go through SQLite's page cache (64 MB).

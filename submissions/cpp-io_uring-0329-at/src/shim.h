@@ -15,7 +15,7 @@ int dbx_begin(dbx *h);
 int dbx_commit(dbx *h);
 int dbx_health(dbx *h, char *err, int n);
 int dbx_users_seek_many(dbx *h, const long long *ids, int n, unsigned char *buf, unsigned *lens);
-int dbx_checkpoint(dbx *h);
+int dbx_checkpoint(dbx *h, int *copied);
 int dbx_writes_held(dbx *h);
 int dbx_wal_frames(dbx *h);
 

@@ -8,7 +8,7 @@
 
 namespace app {
 
-inline constexpr uint32_t kOutCap = 32768;
+inline constexpr uint32_t kOutCap = 8192; /* a feed response is ~5.5 KB; posts ~300 B */
 
 struct ByteBuf {
   uint8_t* p = nullptr;
@@ -68,6 +68,18 @@ inline void buf_release(ByteBuf& b) {
 
 using Pool = std::vector<ByteBuf*>;
 
+/* Response buffers are per-connection and only live until the response's send completes, so the
+ * pool is what bounds in-flight memory: 4,096 recycled buffers of <= 2 x kOutCap bytes.  When the
+ * pool runs dry (in-flight above the cap, e.g. during a checkpoint stall) a fresh buffer is
+ * allocated and counted, so the miss rate is visible in the STATS line instead of silently
+ * turning into a 32 KB malloc per response. */
+inline unsigned long& pool_misses() {
+  static unsigned long misses = 0;
+  return misses;
+}
+
+constexpr size_t kPoolCap = 4096;
+
 inline ByteBuf* take_buf(Pool& pool) {
   if (!pool.empty()) {
     ByteBuf* b = pool.back();
@@ -75,6 +87,7 @@ inline ByteBuf* take_buf(Pool& pool) {
     b->len = 0;
     return b;
   }
+  pool_misses()++;
   auto* b = new ByteBuf;
   buf_reserve(*b, kOutCap);
   return b;
@@ -82,7 +95,7 @@ inline ByteBuf* take_buf(Pool& pool) {
 
 inline void give_buf(Pool& pool, ByteBuf*& b) {
   if (!b) return;
-  if (pool.size() < 2048 && b->cap <= 2 * kOutCap) {
+  if (pool.size() < kPoolCap && b->cap <= 2 * kOutCap) {
     b->len = 0;
     pool.push_back(b);
   } else {

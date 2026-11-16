@@ -30,12 +30,18 @@ void checkpoint_loop(dbx* h, CkState* st) {
     lk.unlock();
     /* PASSIVE, so it never waits for the loop's readers: copy what it can, and once every frame
      * is copied the gate opens and the next write restarts the log at frame 1 (no truncate).
-     * While the gate is closed, keep passing: each pass can copy up to where the loop's last
-     * reader stopped, so a few passes converge and the hold ends in milliseconds instead of
-     * waiting for the next wake-up. */
+     * While the gate is held, keep passing only as long as each pass actually copies something:
+     * a pass that copies nothing (the loop's reader is still in the way) must not be retried in a
+     * loop, or the thread burns the single core for no progress. */
     if (dbx_wal_frames(h) >= 1024) {
-      int r = dbx_checkpoint(h);
-      for (int k = 0; r == 1 && k < 256 && dbx_writes_held(h); k++) r = dbx_checkpoint(h);
+      int copied = 0;
+      int r = dbx_checkpoint(h, &copied);
+      int last = copied;
+      for (int k = 0; r == 1 && k < 64 && dbx_writes_held(h); k++) {
+        r = dbx_checkpoint(h, &copied);
+        if (copied == last) break;
+        last = copied;
+      }
     }
     lk.lock();
   }

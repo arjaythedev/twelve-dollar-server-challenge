@@ -361,6 +361,9 @@ def build_compiler():
                 pat1_asm = (
                     "    cmpq $0, (%r12)\n"
                     "    je 1f\n"
+                    "    leaq 8(%r12), %rax\n"
+                    "    cmpq %r15, %rax\n"
+                    "    jae .L_tape_overflow\n"
                     "    movq $1, 8(%r12)\n"
                     "    movq $0, (%r12)\n"
                     "1:\n"

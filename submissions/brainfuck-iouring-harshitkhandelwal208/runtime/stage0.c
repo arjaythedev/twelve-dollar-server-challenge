@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
             queue[0] == '[' && queue[1] == '-' && queue[2] == '>' &&
             queue[3] == '[' && queue[4] == '-' && queue[5] == ']' &&
             queue[6] == '+' && queue[7] == '<' && queue[8] == ']') {
-            fprintf(out, "    cmpq $0, (%%r12)\n    je 1f\n    movq $1, 8(%%r12)\n    movq $0, (%%r12)\n1:\n");
+            fprintf(out, "    cmpq $0, (%%r12)\n    je 1f\n    leaq 8(%%r12), %%rax\n    cmpq %%r15, %%rax\n    jae .L_tape_overflow\n    movq $1, 8(%%r12)\n    movq $0, (%%r12)\n1:\n");
             pop_queue(9);
             fill_queue(in);
             continue;

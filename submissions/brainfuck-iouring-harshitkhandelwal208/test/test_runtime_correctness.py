@@ -167,16 +167,21 @@ def run_tests():
         ]
         for bad_req in malformed_inputs:
             s = socket.create_connection(("127.0.0.1", PORT))
+            s.settimeout(2.0)
             s.sendall(bad_req)
-            r = b""
             try:
-                s.settimeout(1.0)
                 r = s.recv(4096)
             except socket.timeout:
-                pass
-            s.close()
+                s.close()
+                raise AssertionError(
+                    f"Server timed out on malformed request {bad_req!r} instead of returning 4xx or cleanly closing connection"
+                )
+            finally:
+                s.close()
             # Server must either close connection cleanly (EOF: b"") or return 40x error
-            assert (r == b"" or b"HTTP/1.1 40" in r), f"Expected connection close or 40x error for {bad_req!r}, got {r!r}"
+            assert (r == b"" or b"HTTP/1.1 40" in r), (
+                f"Expected clean connection close (EOF) or 40x error for {bad_req!r}, got: {r!r}"
+            )
 
         # Verify that after handling malformed inputs, the server remains healthy
         s = socket.create_connection(("127.0.0.1", PORT))

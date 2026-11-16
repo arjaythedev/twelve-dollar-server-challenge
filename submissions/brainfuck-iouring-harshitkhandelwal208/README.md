@@ -279,6 +279,6 @@ passed=42 failed=0
 # Build the self-hosted compiler and production server
 bash build.sh
 
-# Run the complete test suite (Self-hosting diff + 96 differential tests + 7 runtime correctness tests + 42 challenge tests)
+# Run the complete test suite (Self-hosting diff + 99 differential tests + 7 runtime correctness tests + 42 challenge tests)
 bash test/run_tests.sh
 ```

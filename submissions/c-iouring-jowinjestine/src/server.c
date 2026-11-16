@@ -867,10 +867,11 @@ int main(int argc, char **argv) {
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 16384);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
-  /* Ring 0 waits for 64 completions or 2 ms: fewer, fuller passes (each pass enters every ring).
-   * Measured at 300k connections: ~4 % less loop CPU than 256 / 1 ms, p99 unchanged. */
-  wait_min = (unsigned)env_long("WAIT_MIN", 64);
-  wait_ns = (uint64_t)env_long("WAIT_US", 2000) * 1000ULL;
+  /* 1 ms batches. Longer ones (4 ms) would cut the WAL ~40 % (one set of hot-page frames per
+   * commit), but measured under a CPU quota they add 25-50 ms to p95 at high load: bigger
+   * service bursts, more queueing variance. The tail is what the score is made of. */
+  wait_min = (unsigned)env_long("WAIT_MIN", 256);
+  wait_ns = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
   ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
   ckpt_urgent = (int)env_long("CKPT_URGENT", 32768);
   db_drop_ms = env_long("DB_DROP_MS", 2000);

@@ -43,11 +43,10 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
-  ring 0 waits for 64 completions or 2 ms, whichever comes first, so bigger batches share one
-  commit and a pass never spins. Every pass enters every ring, so fewer, fuller passes are less
-  CPU: measured at 300k connections, ~4 % less loop CPU than 256 completions / 1 ms, with p99
-  unchanged. (4 ms batches were tried: they cut the WAL ~40 %, one set of hot-page frames per
-  commit, but under a CPU quota they add 25-50 ms to p95 at high load.)
+  ring 0 waits for 256 completions or 1 ms, whichever comes first, so bigger batches share one
+  commit and a pass never spins. (4 ms batches were tried: they cut the WAL ~40 %, one set of
+  hot-page frames per commit, but under a CPU quota they add 25-50 ms to p95 at high load, so
+  the batches stay short.)
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per
@@ -172,8 +171,11 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - **The log stays bounded.** A nice-19 thread gets ~1.5 % of a saturated core, and nothing else
   stopped the log from growing (short of the 4 GB last resort below), each frame staying in the
   page cache at the box's memory wall. Past 32,768 frames (128 MB, `CKPT_URGENT`) the passes go to
-  a third checkpoint thread at the normal priority until the log restarts. (A thread of its own
-  because an unprivileged thread can raise its nice value but never lower it again.)
+  a third checkpoint thread at nice 10 until the log restarts: ~10 % of the core against the loop,
+  enough to catch up (a checkpoint that keeps up needs ~1 %). (`297c8ea` had such a thread at the
+  normal priority, and on the box it ran against the loop as an equal minutes into a hold. A
+  thread of its own because an unprivileged thread can raise its nice value but never lower it
+  again.)
 - A hold starts and ends only between batches and lasts at most 400 ms (writes only, once per
   cycle: under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the
   next cycle waits for half a log more, so a slow disk never gives back-to-back holds; for a log

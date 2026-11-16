@@ -21,7 +21,7 @@
 
 #define VFS_NAME "feed-wal"
 static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
-static int ckpt_urgent = 32768;  /* past this many frames (128 MB) the passes run on a normal-priority thread: the log stays bounded */
+static int ckpt_urgent = 32768;  /* past this many frames (128 MB) the passes run on a nice-10 thread: the log stays bounded */
 #define HOLD_GROW_FRAMES 32768   /* a log this long has missed restarts: the hold limit grows (to 2x at most) */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
 static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
@@ -43,6 +43,7 @@ static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback t
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
 #define CKPT_NICE 19
+#define CKPT_URGENT_NICE 10 /* ~10 % of a core against the loop: enough to catch up, not enough to stall it */
 
 enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 
@@ -66,7 +67,7 @@ struct db {
   int ck_passes;
   int ck_tail_frames;
   int ck_min_frames; /* the next cycle starts at this many frames: CKPT_FRAMES, or more after a slow tail */
-  int ck_urgent;     /* the current bulk pass goes to the normal-priority thread (the log is past ckpt_urgent) */
+  int ck_urgent;     /* the current bulk pass goes to the nice-10 thread (the log is past ckpt_urgent) */
   const char *path;
   int wal_frames;  /* from the wal hook, on the loop thread */
   int writes_held; /* the tail is being copied: writes wait (reads go on) */
@@ -352,7 +353,7 @@ struct ck_thread {
   int wal_fd;        /* the bulk thread's own descriptor on the log, for writeback kicks */
   int64_t wb_kicked; /* log offset up to which writeback has been started */
   int uv;            /* the tail thread's user_version toggle: its restart transactions */
-  int urgent;        /* bulk threads: 1 = the normal-priority one, for a log past ckpt_urgent */
+  int urgent;        /* bulk threads: 1 = the nice-10 one, for a log past ckpt_urgent */
   int db_fd;         /* the bulk thread's descriptor on the database file, for DB_DROP_MS */
   uint64_t dropped_at;
   int last_frames;   /* log size after the tail thread's last commit (1 = it restarted the log) */
@@ -635,7 +636,7 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
   sqlite3_wal_hook(d->c, db_wal_hook, d);
   pthread_mutex_init(&d->mu, NULL);
   pthread_cond_init(&d->cv, NULL);
-  if (ck_start(d, path, CK_BULK, CKPT_NICE, 0) || ck_start(d, path, CK_BULK, 0, 1) || ck_start(d, path, CK_TAIL, 0, 0)) {
+  if (ck_start(d, path, CK_BULK, CKPT_NICE, 0) || ck_start(d, path, CK_BULK, CKPT_URGENT_NICE, 1) || ck_start(d, path, CK_TAIL, 0, 0)) {
     fprintf(stderr, "checkpoint threads: %s\n", strerror(errno));
     return -1;
   }

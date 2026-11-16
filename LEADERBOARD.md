@@ -69,9 +69,10 @@ next commit `2e1163d` (512 answers per pass, newest waiting requests first in a 
 p95 20.4 / p99 122.6 ms, 0 err, 72 % CPU, 25 µs/req, 1,041 MB, 2026-11-16; 280,000 failed the 2-minute probe on p99
 2.09 s), below the merged row, so it isn't merged either. asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
 #414 code (`7c9e722`, thread per connection behind Nginx) held 24,000. zig-iouring-harshitkhandelwal208 is scored at
-its follow-up PR #460 (`122da96`: 8 io_uring rings, SQLite B-tree cursor reads; held, not merged yet: the README's
-credit to #264 doesn't match the code and it commits a PGO profile, see the rule flags; its earlier `7c2ebfb` held
-219,000); its merged #454 code (`ede8d01`) held 65,000 (connection-capped, see ᶜ).
+its follow-up PR #460 (`b118b95`, merged: 8 io_uring rings, SQLite B-tree cursor reads, #264's shim credited, PGO
+profile recorded on the box; that step fell back to the plain Zig build on the box, so it was scored without PGO;
+its earlier `122da96` held 260,000 and `7c2ebfb` 219,000); its first merged #454 code (`ede8d01`) held 65,000
+(connection-capped, see ᶜ).
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -98,22 +99,22 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 10 | asm-btree-ninhnv | #388 | x86-64 asm (NASM, io_uring, SQLite B-tree reads) | **280,000** ᴮ | 26,699 | 195.7 | 396.6 | 0.00 | 82 | 28 | 794 | 2026-11-10 |
 | 10 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** ᵁ | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
 | 10 | c-iouring-PROGABBOMALA | #430 | C (io_uring, SQLite B-tree reads) | **280,000** | 26,712 | 151.1 | 479.1 | 0.00 | 78 | 26 | 1,550 | 2026-11-14 |
-| 16 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
-| 16 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
-| 18 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
-| 19 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 19 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
-| 19 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
-| 19 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
-| 19 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
-| 19 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
-| 19 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
-| 19 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
-| 19 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
-| 28 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 29 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 29 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **260,000** | 25,010 | 39.4 | 163.6 | 0.00 | 80 | 29 | 638 | 2026-11-15 |
-| 29 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **260,000** | 25,003 | 53.1 | 193.7 | 0.00 | 76 | 28 | 1,268 | 2026-11-16 |
+| 10 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **280,000** | 26,674 | 114.3 | 369.9 | 0.00 | 90 | 30 | 910 | 2026-11-16 |
+| 17 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
+| 17 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
+| 19 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
+| 20 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
+| 20 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
+| 20 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
+| 20 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
+| 20 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
+| 20 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
+| 20 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
+| 20 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
+| 20 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
+| 29 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 30 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
+| 30 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **260,000** | 25,003 | 53.1 | 193.7 | 0.00 | 76 | 28 | 1,268 | 2026-11-16 |
 | 32 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 32 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 32 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
@@ -965,8 +966,10 @@ Its follow-up #460 (`7c2ebfb`, 8 rings with their own descriptor tables) is no l
 it held **219,000** (21,373 req/s, p95 20.6 / p99 396.6 ms, 0 errors, 79 % CPU, 34 µs/req, 566 MB, 2026-11-15). 230,000
 passed the 2-minute probe but failed the 5-minute hold on p99 (1.01 s, 0 errors, 82 % CPU); 240,000 failed on p99
 (13.2 s, 0 errors) and 320,000 on `connection refused` (80.7 %). Its later commit `122da96` held **260,000** (25,010 req/s, p95 39.4 / p99 163.6 ms, 0 errors, 80 %
-CPU, 29 µs/req, 638 MB, 2026-11-15) and is the row now; 270,000 and 280,000 failed the 2-minute probe on p99 (2.35 s,
-2.65 s) and 320,000 on p95 (38 s).
+CPU, 29 µs/req, 638 MB, 2026-11-15); 270,000 and 280,000 failed the 2-minute probe on p99 (2.35 s,
+2.65 s) and 320,000 on p95 (38 s). Its merged commit `b118b95` (all 8 rings accepting from the start, larger response
+pool, shorter idle wait) held **280,000** (26,674 req/s, p95 114.3 / p99 369.9 ms, 0 errors, 90 % CPU, 30 µs/req,
+910 MB, 2026-11-16) and is the row now; 290,000 failed the 2-minute probe on p99 (4.45 s) and 300,000 on p95 (22.8 s).
 
 ᴹ **C++ io_uring #442** (`8512d44`, follow-up to the merged #412's 65,000 ᶜ: rewrite into `src/`, PASSIVE checkpoints on
 a second connection) held **199,000** (19,576 req/s, p95 15.0 / p99 80.7 ms, 0 errors, 64 % CPU, 30 µs/req, 1,170 MB,
@@ -1254,10 +1257,8 @@ committed in this repo.
   until the author generates the profile in `build.sh` or drops it; it gets re-run then.
   go-fasthttp-savak1990 #106 does the same (committed Go `default.pgo` + gcc `sqlite#sqlite3.gcda` from the author's
   own k6 runs, used by the default build); scored as submitted (65k, `71acb19`), held on the same ruling.
-  zig-iouring-harshitkhandelwal208 #460 (`122da96`) commits a clang profile for its SQLite shim
-  (`src/c/sqlite.proftext`) that build.sh uses when `clang` and `llvm-profdata` are installed; on the challenge box
-  that step was skipped ("Clang PGO build skipped; falling back to native Zig build"), so its 260k was scored without
-  the profile. The committed profile still has to go before it can be merged.
+  zig-iouring-harshitkhandelwal208 #460 committed a clang profile at `122da96`; since `b118b95` build.sh records it
+  on the box with a training run on a scratch database instead (settled, merged).
   go-gnet-kaikegm (merged #48 / #180, 88k) also carries a committed Go `default.pgo` "captured under realistic load"
   (its README), which `go build` picks up by default; it was merged before the ruling, and whether its row needs a
   re-run without the profile is open for Arjay.
@@ -1361,14 +1362,11 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   (`getAndInitPage`, `xParseCell`, `findCell`) instead of a B-tree cursor. Read-only, stock amalgamation, nothing cached
   or written. Open question for Arjay: ruling 1 allows B-tree/cursor reads; this is one step past the cursor. Scored
   as submitted (220k at `0d958c4`, where the walk is unchanged); held open.
-- **zig-iouring-harshitkhandelwal208 #460 (follow-up to #454) reuses rust-iouring-kensac #264's SQLite shim without
-  credit**: `src/shim.c` (517 lines: B-tree open/layout/seek/`td_count_likes` helpers and the checkpoint state machine)
-  is #264's `csrc/shim.c` with the comments removed and small edits; the Zig server, HTTP, JSON and JWT code are the
-  author's own. Arjay ruled 2026-11-04 that reusing another entry's helpers is fine when the README credits it; the
-  README didn't credit #264 at `7c2ebfb` (219k). At `122da96` (260k, the row) the README credits #264 as inspiration
-  but says the database layer is all Zig with prepared statements, while the build still ships and uses the
-  #264-derived `src/shim.c`; held until the README says plainly that shim.c is adapted from #264. `122da96` also
-  commits a PGO profile (see the #91 line above).
+- **zig-iouring-harshitkhandelwal208 #460 (follow-up to #454) reuses rust-iouring-kensac #264's SQLite shim**:
+  `src/shim.c` (B-tree open/layout/seek/`td_count_likes` helpers and the checkpoint state machine) is adapted from
+  #264's `csrc/shim.c`; the Zig server, HTTP, JSON and JWT code are the author's own. Arjay ruled 2026-11-04 that
+  credited reuse is fine; the README says so plainly since `b118b95` → merged at `b118b95` (280k). Earlier runs:
+  260k at `122da96`, 219k at `7c2ebfb`.
 - **goose-iouring-anthknee #473 reuses goose-iouring-ahmadsh2007 #291's helpers (and through them #264's) with the
   credit only in code comments**: `json.goose`, `jwt.goose`, `record.goose` and about half of `native/sqlite.c`
   (open, cursors, like counts, checkpoint thread, writes) match #291; the transport, database plan, HTTP, handlers,

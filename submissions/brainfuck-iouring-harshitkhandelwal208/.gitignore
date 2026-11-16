@@ -1,4 +1,2 @@
 bin/
 build/
-.zig-cache/
-zig-out/

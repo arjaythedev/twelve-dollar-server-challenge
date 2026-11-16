@@ -1905,4 +1905,5 @@ else
     echo "==> Linking high-performance server binary (bin/server)..."
     gcc -O3 -flto -march=native -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
 fi
+rm -rf "$DIR/build"
 echo "==> Build complete! Output: bin/server"

@@ -7,6 +7,8 @@ typedef struct HpBt {
     sqlite3 *db;
     Btree *pBt;
     BtCursor cur;
+    BtCursor *multiCur; /* reusable rowid positions for this read batch */
+    int multiN;
     KeyInfo *pKey;      /* owned by this cursor when it is an index cursor */
     Pgno root;
     int isIndex;
@@ -19,7 +21,93 @@ typedef struct HpBtMulti {
     MemPage *page[HP_BT_MULTI_MAX];
     int ix[HP_BT_MULTI_MAX];
     unsigned char found[HP_BT_MULTI_MAX];
+    sqlite3_int64 key[HP_BT_MULTI_MAX];
 } HpBtMulti;
+
+/* A multi-seek result (~1.3 KiB) is just above glibc's tcache limit, so a
+ * fresh malloc/free per batch lookup went through the slower bins (and
+ * malloc_consolidate). Keep a few released results per thread for reuse.
+ * Only the storage is reused; every result is fully reinitialised. */
+#define HP_BT_MULTI_POOL 64
+static _Thread_local HpBtMulti *hp_bt_multi_pool[HP_BT_MULTI_POOL];
+static _Thread_local int hp_bt_multi_pool_n;
+static HpBtMulti *hp_bt_multi_alloc(void) {
+    if (hp_bt_multi_pool_n > 0) return hp_bt_multi_pool[--hp_bt_multi_pool_n];
+    return (HpBtMulti *)sqlite3_malloc(sizeof(HpBtMulti));
+}
+static void hp_bt_multi_free(HpBtMulti *m) {
+    if (!m) return;
+    if (hp_bt_multi_pool_n < HP_BT_MULTI_POOL) { hp_bt_multi_pool[hp_bt_multi_pool_n++] = m; return; }
+    sqlite3_free(m);
+}
+
+static int hp_bt_multi_cursors_enabled = -1;
+
+static int hp_bt_multi_cursor_opt_in(void) {
+    if (hp_bt_multi_cursors_enabled < 0) {
+        const char *e = getenv("HPHP_BT_MULTI_CURSORS");
+        hp_bt_multi_cursors_enabled = (e && e[0] == '1' && e[1] == '\0') ? 1 : 0;
+    }
+    return hp_bt_multi_cursors_enabled;
+}
+
+static void hp_bt_multi_cursor_close(HpBt *h) {
+    if (!h || !h->multiCur) return;
+    for (int i = 0; i < h->multiN; i++)
+        sqlite3BtreeCloseCursor(&h->multiCur[i]);
+    sqlite3_free(h->multiCur);
+    h->multiCur = 0;
+    h->multiN = 0;
+}
+
+static int hp_bt_multi_cursor_open(HpBt *h, int n) {
+    if (h->multiCur && h->multiN == n) return SQLITE_OK;
+    hp_bt_multi_cursor_close(h);
+    h->multiCur = (BtCursor *)sqlite3_malloc64((sqlite3_uint64)n * sizeof(BtCursor));
+    if (!h->multiCur) return SQLITE_NOMEM;
+    memset(h->multiCur, 0, (size_t)n * sizeof(BtCursor));
+    for (int i = 0; i < n; i++) {
+        int rc = sqlite3BtreeCursor(h->pBt, h->root, 0, 0, &h->multiCur[i]);
+        if (rc != SQLITE_OK) {
+            h->multiN = i;
+            hp_bt_multi_cursor_close(h);
+            return rc;
+        }
+        h->multiN = i + 1;
+    }
+    return SQLITE_OK;
+}
+
+/* Reuse SQLite cursor positions only for the current batch transaction.
+ * TableMoveto itself re-reads the requested key and payload; no row data is
+ * retained. The owning B-tree handle is closed at the end of every batch and
+ * before writes, so cursor pages cannot survive a mutation. */
+static void *hp_bt_multi_seek_cursors(HpBt *h,
+                                      const sqlite3_int64 *keys, int n) {
+    if (hp_bt_multi_cursor_open(h, n) != SQLITE_OK) return 0;
+    HpBtMulti *out = hp_bt_multi_alloc();
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    out->n = n;
+    for (int i = 0; i < n; i++) {
+        int res = 1;
+        BtCursor *c = &h->multiCur[i];
+        if (sqlite3BtreeTableMoveto(c, (i64)keys[i], 0, &res) != SQLITE_OK) {
+            for (int j = 0; j < i; j++)
+                if (out->page[j]) releasePage(out->page[j]);
+            hp_bt_multi_free(out);
+            return 0;
+        }
+        out->key[i] = keys[i];
+        out->found[i] = (unsigned char)(res == 0);
+        if (c->pPage) {
+            sqlite3PagerRef(c->pPage->pDbPage);
+            out->page[i] = c->pPage;
+            out->ix[i] = c->ix;
+        }
+    }
+    return out;
+}
 
 
 static inline i64 hp_bt_multi_cell_key(MemPage *pg, int i) {
@@ -82,7 +170,11 @@ void *hp_bt_multi_seek_impl(void *v, const sqlite3_int64 *keys_in, int n) {
     int rc;
     if (!h || !h->isOpen || h->isIndex || !keys_in || n < 1 || n > HP_BT_MULTI_MAX)
         return 0;
-    out = (HpBtMulti *)sqlite3_malloc(sizeof *out);
+    if (hp_bt_multi_cursor_opt_in()) {
+        out = (HpBtMulti *)hp_bt_multi_seek_cursors(h, keys_in, n);
+        if (out) return out;
+    }
+    out = hp_bt_multi_alloc();
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     out->n = n;
@@ -156,18 +248,60 @@ void *hp_bt_multi_seek_impl(void *v, const sqlite3_int64 *keys_in, int n) {
     for (int i = 0; i < n; i++) {
         MemPage *pg = cur[i];
         int lb = hp_bt_multi_lower_bound(pg, keys[i]);
-        int found = 0;
-        if (lb < pg->nCell) found = hp_bt_multi_cell_key(pg, lb) == keys[i];
+        int found = lb < pg->nCell && hp_bt_multi_cell_key(pg, lb) == keys[i];
         out->page[ord[i]] = pg;
         out->ix[ord[i]] = lb;
         out->found[ord[i]] = (unsigned char)found;
+        out->key[ord[i]] = keys_in[ord[i]];
         cur[i] = 0;
     }
     return out;
 fail:
     for (int i = 0; i < n; i++) if (cur[i]) releasePage(cur[i]);
-    sqlite3_free(out);
+    hp_bt_multi_free(out);
     return 0;
+}
+
+/* Collect the last n rows from a generic integer-key table cursor in one
+ * runtime crossing. The result owns references to each leaf page until
+ * hp_bt_multi_release_impl(), so payload pointers remain valid while callers
+ * perform independent lookups and render the response. */
+void hp_bt_multi_release_impl(void *v);
+void *hp_bt_tail_impl(void *v, int n) {
+    HpBt *h = (HpBt *)v;
+    HpBtMulti *out;
+    int res = 1, rc;
+    if (!h || !h->isOpen || h->isIndex || n < 1 || n > HP_BT_MULTI_MAX) return 0;
+    out = hp_bt_multi_alloc();
+    if (!out) return 0;
+    memset(out, 0, sizeof *out);
+    if ((rc = sqlite3BtreeLast(&h->cur, &res)) != SQLITE_OK) goto fail;
+    if (res) return out;
+    for (int i = 0; i < n; i++) {
+        MemPage *pg = h->cur.pPage;
+        if (!pg || h->cur.eState != CURSOR_VALID) break;
+        sqlite3PagerRef(pg->pDbPage);
+        out->page[i] = pg;
+        out->ix[i] = h->cur.ix;
+        out->found[i] = 1;
+        out->key[i] = sqlite3BtreeIntegerKey(&h->cur);
+        out->n = i + 1;
+        if (i + 1 == n) break;
+        rc = sqlite3BtreePrevious(&h->cur, 0);
+        if (rc == SQLITE_DONE) break;
+        if (rc != SQLITE_OK) goto fail;
+    }
+    return out;
+fail:
+    hp_bt_multi_release_impl(out);
+    return 0;
+}
+
+int hp_bt_multi_keys_impl(void *v, sqlite3_int64 *dst, sqlite3_int64 cap) {
+    HpBtMulti *r = (HpBtMulti *)v;
+    if (!r || !dst || cap < r->n) return -1;
+    for (int i = 0; i < r->n; i++) dst[i] = r->key[i];
+    return r->n;
 }
 
 int hp_bt_multi_payloads_impl(void *v, sqlite3_int64 *dst, sqlite3_int64 cap) {
@@ -193,7 +327,7 @@ void hp_bt_multi_release_impl(void *v) {
     HpBtMulti *r = (HpBtMulti *)v;
     if (!r) return;
     for (int i = 0; i < r->n; i++) if (r->page[i]) releasePage(r->page[i]);
-    sqlite3_free(r);
+    hp_bt_multi_free(r);
 }
 
 #ifndef HP_BT_SEEK_WALK_MAX
@@ -358,6 +492,7 @@ void hp_bt_close_impl(void *v) {
     HpBt *h = (HpBt *)v;
     HpBtTxn *txn;
     if (!h) return;
+    hp_bt_multi_cursor_close(h);
     if (h->isOpen) {
         sqlite3BtreeCloseCursor(&h->cur);
         h->isOpen = 0;

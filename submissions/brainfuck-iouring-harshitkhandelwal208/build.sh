@@ -240,30 +240,45 @@ static void optimize_asm(AsmBuf *b) {
             }
         }
 
-        // Pattern: 17 instructions of digit parsing arithmetic
-        if (i + 16 < p2_cnt &&
-            strcmp(p2[i], "    movq $0, 392(%r12)") == 0 &&
-            strcmp(p2[i+1], "    movq $0, 400(%r12)") == 0 &&
-            strcmp(p2[i+2], "    movq 136(%r12), %rax") == 0 &&
-            strcmp(p2[i+3], "    addq %rax, 392(%r12)") == 0 &&
-            strcmp(p2[i+4], "    movq $0, 136(%r12)") == 0 &&
-            strcmp(p2[i+5], "    movq 392(%r12), %rax") == 0 &&
-            strcmp(p2[i+6], "    leaq (%rax,%rax,4), %rcx") == 0 &&
-            strcmp(p2[i+7], "    leaq (%rcx,%rcx), %rcx") == 0 &&
-            strcmp(p2[i+8], "    addq %rcx, 136(%r12)") == 0 &&
-            strcmp(p2[i+9], "    movq $0, 392(%r12)") == 0 &&
-            strcmp(p2[i+10], "    movq $0, 400(%r12)") == 0 &&
-            strncmp(p2[i+11], "    movq ", 9) == 0 && strstr(p2[i+11], "(%r12), %rax") &&
-            strcmp(p2[i+12], "    addq %rax, 392(%r12)") == 0 &&
-            strcmp(p2[i+13], "    subq $48, 392(%r12)") == 0 &&
-            strcmp(p2[i+14], "    movq 392(%r12), %rax") == 0 &&
-            strcmp(p2[i+15], "    addq %rax, 136(%r12)") == 0 &&
-            strcmp(p2[i+16], "    movq $0, 392(%r12)") == 0) {
+        // Pattern: digit condition collapse (cmpq $0, 440(%r12); je ...)
+        if (i + 5 < p2_cnt &&
+            strcmp(p2[i], "    movq $0, 448(%r12)") == 0 &&
+            strcmp(p2[i+1], "    movq $0, 392(%r12)") == 0 &&
+            strcmp(p2[i+2], "    movq 440(%r12), %rax") == 0 &&
+            strcmp(p2[i+3], "    addq %rax, 448(%r12)") == 0 &&
+            strcmp(p2[i+4], "    cmpq $0, 448(%r12)") == 0 &&
+            strncmp(p2[i+5], "    je .L_loop_end_", 19) == 0) {
+            p3[p3_cnt++] = strdup("    cmpq $0, 440(%r12)");
+            p3[p3_cnt++] = strdup(p2[i+5]);
+            for (int k = 0; k < 6; k++) free(p2[i+k]);
+            i += 6;
+            continue;
+        }
+
+        // Pattern: digit parsing arithmetic
+        int d_off = (strcmp(p2[i], "    movq $0, 392(%r12)") == 0) ? 1 : 0;
+        if (i + d_off + 14 < p2_cnt &&
+            strcmp(p2[i+d_off], "    movq $0, 400(%r12)") == 0 &&
+            strcmp(p2[i+d_off+1], "    movq 136(%r12), %rax") == 0 &&
+            strcmp(p2[i+d_off+2], "    addq %rax, 392(%r12)") == 0 &&
+            strcmp(p2[i+d_off+3], "    movq $0, 136(%r12)") == 0 &&
+            strcmp(p2[i+d_off+4], "    movq 392(%r12), %rax") == 0 &&
+            strcmp(p2[i+d_off+5], "    leaq (%rax,%rax,4), %rcx") == 0 &&
+            strcmp(p2[i+d_off+6], "    leaq (%rcx,%rcx), %rcx") == 0 &&
+            strcmp(p2[i+d_off+7], "    addq %rcx, 136(%r12)") == 0 &&
+            strcmp(p2[i+d_off+8], "    movq $0, 392(%r12)") == 0 &&
+            strncmp(p2[i+d_off+9], "    movq ", 9) == 0 && strstr(p2[i+d_off+9], "(%r12), %rax") &&
+            strcmp(p2[i+d_off+10], "    addq %rax, 392(%r12)") == 0 &&
+            strcmp(p2[i+d_off+11], "    subq $48, 392(%r12)") == 0 &&
+            strcmp(p2[i+d_off+12], "    movq 392(%r12), %rax") == 0 &&
+            strcmp(p2[i+d_off+13], "    addq %rax, 136(%r12)") == 0 &&
+            strcmp(p2[i+d_off+14], "    movq $0, 392(%r12)") == 0) {
 
             char digit_mem[64];
-            sscanf(p2[i+11], "    movq %63[^,], %%rax", digit_mem);
+            sscanf(p2[i+d_off+9], "    movq %63[^,], %%rax", digit_mem);
 
-            for (int k = 0; k < 17; k++) free(p2[i + k]);
+            int total = d_off + 15;
+            for (int k = 0; k < total; k++) free(p2[i + k]);
 
             char buf[256];
             p3[p3_cnt++] = strdup("    movq 136(%r12), %rax");
@@ -272,8 +287,36 @@ static void optimize_asm(AsmBuf *b) {
             snprintf(buf, sizeof(buf), "    movq %s, %%rax", digit_mem); p3[p3_cnt++] = strdup(buf);
             p3[p3_cnt++] = strdup("    leaq -48(%rcx,%rax), %rax");
             p3[p3_cnt++] = strdup("    movq %rax, 136(%r12)");
-            i += 17;
+            i += total;
             continue;
+        }
+
+        // Pattern: test cell != 0 and jump
+        if (i + 5 < p2_cnt &&
+            strcmp(p2[i], "    movq $0, 392(%r12)") == 0 &&
+            strcmp(p2[i+1], "    movq $0, 400(%r12)") == 0 &&
+            strncmp(p2[i+2], "    movq ", 9) == 0 && strstr(p2[i+2], "(%r12), %rax") &&
+            strcmp(p2[i+3], "    addq %rax, 392(%r12)") == 0 &&
+            strcmp(p2[i+4], "    cmpq $0, 392(%r12)") == 0 &&
+            strcmp(p2[i+5], "    movq $0, 392(%r12)") == 0) {
+
+            int target_idx = i + 6;
+            if (i + 7 < p2_cnt && strncmp(p2[i+6], "    movq $0, ", 13) == 0 && strstr(p2[i+6], "(%r12)") &&
+                strncmp(p2[i+7], "    jne .L_loop_end_", 20) == 0) {
+                target_idx = i + 7;
+            }
+
+            if (target_idx < p2_cnt && strncmp(p2[target_idx], "    jne .L_loop_end_", 20) == 0) {
+                char src[64];
+                sscanf(p2[i+2], "    movq %63[^,], %%rax", src);
+                char buf[128];
+                snprintf(buf, sizeof(buf), "    cmpq $0, %s", src);
+                p3[p3_cnt++] = strdup(buf);
+                p3[p3_cnt++] = strdup(p2[target_idx]);
+                for (int k = i; k <= target_idx; k++) free(p2[k]);
+                i = target_idx + 1;
+                continue;
+            }
         }
 
         p3[p3_cnt++] = p2[i++];
@@ -752,14 +795,10 @@ typedef struct {
     uint32_t gen;
     uint16_t flags;
     uint8_t ring_idx;
-    uint8_t pad;
+    uint8_t keep_alive;
     char *out_buf;
     uint32_t out_len;
     uint32_t out_off;
-    char *pend_buf;
-    uint16_t pend_len;
-    uint16_t pend_cap;
-    int keep_alive;
 } Conn;
 
 typedef struct {
@@ -960,15 +999,26 @@ static inline char* write_u64(char *p, uint64_t v) {
 }
 
 static inline char* escape_json_str(char *p, const char *src, int len) {
+    static const char hex[] = "0123456789abcdef";
     for (int i = 0; i < len; i++) {
         unsigned char c = (unsigned char)src[i];
-        if (c == '\"') { *p++ = '\\'; *p++ = '\"'; }
-        else if (c == '\\') { *p++ = '\\'; *p++ = '\\'; }
-        else if (c == '\n') { *p++ = '\\'; *p++ = 'n'; }
-        else if (c == '\r') { *p++ = '\\'; *p++ = 'r'; }
-        else if (c == '\t') { *p++ = '\\'; *p++ = 't'; }
-        else if (c < 0x20) { p += sprintf(p, "\\u%04x", c); }
-        else { *p++ = c; }
+        if (__builtin_expect(c >= 0x20 && c != '\"' && c != '\\', 1)) {
+            *p++ = c;
+        } else if (c == '\"') {
+            *p++ = '\\'; *p++ = '\"';
+        } else if (c == '\\') {
+            *p++ = '\\'; *p++ = '\\';
+        } else if (c == '\n') {
+            *p++ = '\\'; *p++ = 'n';
+        } else if (c == '\r') {
+            *p++ = '\\'; *p++ = 'r';
+        } else if (c == '\t') {
+            *p++ = '\\'; *p++ = 't';
+        } else {
+            *p++ = '\\'; *p++ = 'u'; *p++ = '0'; *p++ = '0';
+            *p++ = hex[c >> 4];
+            *p++ = hex[c & 0xF];
+        }
     }
     return p;
 }
@@ -1000,7 +1050,9 @@ void bf_mmio_crypto(int64_t *tape) {
     }
     int res = verify_jwt(curr_conn->auth_header, &curr_conn->auth_uid, curr_conn->auth_uname, sizeof(curr_conn->auth_uname));
     curr_conn->auth_status = res;
-    if (res == 1) { tape[8] = 1; tape[9] = 0; } else { tape[8] = 0; tape[9] = 1; }
+    if (res == 1) { tape[8] = 1; tape[9] = 0; }
+    else if (res == -2) { tape[8] = 0; tape[9] = 2; }
+    else { tape[8] = 0; tape[9] = 1; }
 }
 
 void bf_mmio_db(int64_t *tape) {
@@ -1078,9 +1130,6 @@ void bf_mmio_db(int64_t *tape) {
         return;
     }
     if (op == 3) {
-        if (curr_conn->body_len == 0) {
-            curr_conn->status_code = 400; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"body is required\"}"); return;
-        }
         char *p = curr_conn->body;
         while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
         if (*p != '{') { curr_conn->status_code = 400; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"malformed JSON body\"}"); return; }
@@ -1185,43 +1234,59 @@ void bf_mmio_db(int64_t *tape) {
     }
 }
 
+#define APPEND_STR(ptr, lit) do { \
+    memcpy(ptr, lit, sizeof(lit) - 1); \
+    ptr += sizeof(lit) - 1; \
+} while(0)
+
+static inline char* write_http_header(char *p, int status, int body_len, int keep_alive) {
+    if (status == 200) {
+        APPEND_STR(p, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ");
+    } else if (status == 201) {
+        APPEND_STR(p, "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: ");
+    } else if (status == 400) {
+        APPEND_STR(p, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ");
+    } else if (status == 401) {
+        APPEND_STR(p, "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ");
+    } else if (status == 404) {
+        APPEND_STR(p, "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: ");
+    } else {
+        APPEND_STR(p, "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: ");
+    }
+    p = write_u64(p, (uint64_t)body_len);
+    if (keep_alive) {
+        APPEND_STR(p, "\r\nConnection: keep-alive\r\n\r\n");
+    } else {
+        APPEND_STR(p, "\r\nConnection: close\r\n\r\n");
+    }
+    return p;
+}
+
 void bf_mmio_net(int64_t *tape) {
     if (!curr_conn) return;
     int resp_type = tape[34];
-    if (resp_type == 1) {
-        curr_conn->status_code = 404;
-        memcpy(curr_conn->out_body, "{\"error\":\"not found\"}", 21);
-        curr_conn->out_body_len = 21;
-    } else if (resp_type == 2) {
-        curr_conn->status_code = 400;
-        memcpy(curr_conn->out_body, "{\"error\":\"invalid post id\"}", 27);
-        curr_conn->out_body_len = 27;
-    } else if (resp_type == 3) {
-        curr_conn->status_code = 401;
-        if (curr_conn->auth_status == -2) {
-            memcpy(curr_conn->out_body, "{\"error\":\"invalid token payload\"}", 33);
-            curr_conn->out_body_len = 33;
-        } else if (curr_conn->auth_status == 0) {
-            memcpy(curr_conn->out_body, "{\"error\":\"missing bearer token\"}", 32);
-            curr_conn->out_body_len = 32;
-        } else {
-            memcpy(curr_conn->out_body, "{\"error\":\"invalid or expired token\"}", 36);
-            curr_conn->out_body_len = 36;
+    if (resp_type != 0) {
+        curr_conn->status_code = tape[33];
+        char *p = curr_conn->out_body;
+        if (resp_type == 1) {
+            APPEND_STR(p, "{\"error\":\"not found\"}");
+        } else if (resp_type == 2) {
+            APPEND_STR(p, "{\"error\":\"invalid post id\"}");
+        } else if (resp_type == 3) {
+            APPEND_STR(p, "{\"error\":\"missing bearer token\"}");
+        } else if (resp_type == 4) {
+            APPEND_STR(p, "{\"error\":\"invalid or expired token\"}");
+        } else if (resp_type == 5) {
+            APPEND_STR(p, "{\"error\":\"invalid token payload\"}");
+        } else if (resp_type == 6) {
+            APPEND_STR(p, "{\"error\":\"body is required\"}");
         }
+        curr_conn->out_body_len = p - curr_conn->out_body;
     }
-    const char *status_text = "OK";
-    if (curr_conn->status_code == 201) status_text = "Created";
-    else if (curr_conn->status_code == 400) status_text = "Bad Request";
-    else if (curr_conn->status_code == 401) status_text = "Unauthorized";
-    else if (curr_conn->status_code == 404) status_text = "Not Found";
-    else if (curr_conn->status_code == 500) status_text = "Internal Server Error";
     
     char hdr[256];
-    int hdr_len = sprintf(hdr,
-        "HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %d\r\nConnection: %s\r\n\r\n",
-        curr_conn->status_code, status_text,
-        curr_conn->content_type[0] ? curr_conn->content_type : "application/json",
-        curr_conn->out_body_len, curr_conn->keep_alive ? "keep-alive" : "close");
+    char *hend = write_http_header(hdr, curr_conn->status_code, curr_conn->out_body_len, curr_conn->keep_alive);
+    int hdr_len = hend - hdr;
     
     char *send_start = curr_conn->out_body - hdr_len;
     memcpy(send_start, hdr, hdr_len);
@@ -1353,40 +1418,59 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     req_ctx.resp_len = 0;
     req_ctx.method = raw_data[0];
 
-    const char *path_start = memchr(raw_data, ' ', head_len);
+    const char *line_end = memmem(raw_data, head_len, "\r\n", 2);
+    if (!line_end) return;
+
+    const char *path_start = memchr(raw_data, ' ', line_end - raw_data);
     if (!path_start) return;
     path_start++;
-    const char *path_end = memchr(path_start, ' ', head_len - (path_start - raw_data));
+    const char *path_end = memchr(path_start, ' ', line_end - path_start);
     if (!path_end) return;
     req_ctx.path_len = path_end - path_start;
     if (req_ctx.path_len >= (int)sizeof(req_ctx.path)) req_ctx.path_len = sizeof(req_ctx.path) - 1;
     memcpy(req_ctx.path, path_start, req_ctx.path_len);
     req_ctx.path[req_ctx.path_len] = 0;
 
-    const char *auth = memmem(raw_data, head_len, "\r\nAuthorization: Bearer ", 24);
-    if (!auth) auth = memmem(raw_data, head_len, "\r\nauthorization: bearer ", 24);
-    if (auth) {
-        auth += 24;
-        const char *aend = memmem(auth, head_len - (auth - raw_data), "\r\n", 2);
-        if (aend) {
-            int alen = aend - auth;
-            while (alen > 0 && (auth[alen-1] == ' ' || auth[alen-1] == '\t')) alen--;
-            if (alen > 0 && alen < (int)sizeof(req_ctx.auth_header)) {
-                memcpy(req_ctx.auth_header, auth, alen);
-                req_ctx.auth_header[alen] = 0;
-                req_ctx.has_auth = 1;
-            }
-        }
+    if (memmem(raw_data, line_end - raw_data, "HTTP/1.0", 8)) {
+        req_ctx.keep_alive = 0;
     } else {
-        const char *any_auth = memmem(raw_data, head_len, "\r\nAuthorization:", 16);
-        if (!any_auth) any_auth = memmem(raw_data, head_len, "\r\nauthorization:", 16);
-        if (any_auth) { req_ctx.has_auth = 0; req_ctx.auth_status = 0; }
+        req_ctx.keep_alive = 1;
     }
 
-    req_ctx.keep_alive = 1;
-    const char *conn_hdr = memmem(raw_data, head_len, "\r\nConnection: close", 19);
-    if (!conn_hdr) conn_hdr = memmem(raw_data, head_len, "\r\nconnection: close", 19);
-    if (conn_hdr) req_ctx.keep_alive = 0;
+    // Single-pass header scan line-by-line
+    const char *cur = line_end + 2;
+    while (cur < end_head) {
+        const char *next_line = memmem(cur, end_head - cur + 2, "\r\n", 2);
+        if (!next_line) break;
+        int line_len = next_line - cur;
+        if (line_len == 0) break;
+
+        if ((cur[0] == 'A' || cur[0] == 'a') && line_len >= 14 && strncasecmp(cur, "Authorization:", 14) == 0) {
+            const char *val = cur + 14;
+            while (val < next_line && (*val == ' ' || *val == '\t')) val++;
+            if (next_line - val >= 7 && strncasecmp(val, "Bearer ", 7) == 0) {
+                val += 7;
+                while (val < next_line && (*val == ' ' || *val == '\t')) val++;
+                const char *vend = next_line;
+                while (vend > val && (*(vend-1) == ' ' || *(vend-1) == '\t')) vend--;
+                int tlen = vend - val;
+                if (tlen > 0 && tlen < (int)sizeof(req_ctx.auth_header)) {
+                    memcpy(req_ctx.auth_header, val, tlen);
+                    req_ctx.auth_header[tlen] = 0;
+                    req_ctx.has_auth = 1;
+                }
+            }
+        } else if ((cur[0] == 'C' || cur[0] == 'c') && line_len >= 11 && strncasecmp(cur, "Connection:", 11) == 0) {
+            const char *val = cur + 11;
+            while (val < next_line && (*val == ' ' || *val == '\t')) val++;
+            if (next_line - val >= 5 && strncasecmp(val, "close", 5) == 0) {
+                req_ctx.keep_alive = 0;
+            } else if (next_line - val >= 10 && strncasecmp(val, "keep-alive", 10) == 0) {
+                req_ctx.keep_alive = 1;
+            }
+        }
+        cur = next_line + 2;
+    }
 
     req_ctx.body_len = raw_len - head_len;
     if (req_ctx.body_len > 0) {

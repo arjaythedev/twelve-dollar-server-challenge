@@ -15,11 +15,11 @@ High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/t
 
 ## Key Optimizations & Engineering Design
 
-### 1. Multi-Ring Architecture with 654,720 Direct Descriptors & Accepting-Ring Wait
-- Pre-allocates **10 independent `io_uring` instances**, each configured with 65,472 direct file slots registered via `IORING_REGISTER_FILES_SPARSE`, providing **654,720 total connection capacity** (comfortably exceeding the 500,000 concurrent user objective with a 154,720 connection safety cushion while bounding kernel locked memory and CQ drain overhead for a single vCPU).
-- Uses 8 independent listener sockets configured with `SO_REUSEPORT` and `TCP_DEFER_ACCEPT`, allowing the Linux kernel to distribute incoming connections across listeners and defer accepts until the first request payload arrives.
-- **Accepting-Ring Wait Scheduling**: Eliminates multi-ring accept starvation by dynamically routing wait-with-timeout syscalls strictly to the ring actively accepting incoming handshakes, while checking `hasCqes()` across all active rings in 0 CPU cycles.
-- Connections are tracked via an ultra-compact **32-byte packed `Conn` struct** fitting two descriptors per 64-byte L1 cache line, keeping connection state memory across all 654k descriptors under 21 MB.
+### 1. Multi-Ring Architecture with 523,776 Direct Descriptors & Balanced Accept Distribution
+- Pre-allocates **8 active `io_uring` instances**, each configured with 65,472 direct file slots registered via `IORING_REGISTER_FILES_SPARSE`, providing **523,776 total direct descriptor capacity**.
+- Uses 8 independent listener sockets configured with `SO_REUSEPORT` and `TCP_DEFER_ACCEPT`. All 8 rings arm accepts across listeners, enabling the Linux kernel to distribute incoming connections evenly via 4-tuple TCP hash.
+- **Microsecond Idle Wait Scheduling**: Active rings flush SQEs and drain CQEs without blocking while busy. When completely idle, the event loop waits with a microsecond timeout rotating across active rings, avoiding multi-ring accept stalls and eliminating epoll overhead.
+- Connections are tracked via an ultra-compact **32-byte packed `Conn` struct** fitting two descriptors per 64-byte L1 cache line, keeping connection state memory across all 523k descriptors under 17 MB.
 - Expanded 65,536-entry touched flush array and 65,536-entry held write buffer to guarantee zero connection drops during peak concurrency bursts.
 
 ### 2. High-Performance SQLite B-Tree Engine & Direct Cursor Decoding
@@ -62,10 +62,11 @@ High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/t
 - Emits the HTTP header and JSON body sequentially in a single linear pass directly into the `RespPool` buffer (`dest[0..total_len]`).
 - Completely eliminates temporary stack buffers, headroom pointer offsets, and duplicate length scanning passes, shaving ~0.4 µs per single-post request.
 
-### 8. Profile-Guided Optimization (PGO) on SQLite Amalgamation
-- Pre-trained with 10,000 realistic benchmark queries (92% reads / 8% writes) against `seed/feed.db` to generate `src/c/sqlite.profdata`.
-- Inlines hot SQLite B-tree leaf traversal branches, aligns inner cursor seek loops to 32-byte cache line boundaries, and optimizes branch predictors for real workload distribution.
-- Seamless fallback: `build.sh` automatically compiles `src/c/shim_pgo.o` with `-fprofile-use` when `clang` is available, falling back to pure Zig build if missing.
+### 8. Dynamic On-Box Profile-Guided Optimization (PGO) on SQLite Amalgamation
+- Generates a machine-native PGO profile dynamically during `build.sh` on the runner itself (Rule 10 compliant), without any committed binary or profile text files.
+- Compiles an instrumented training driver (`src/c/pgo_train.c`) against a temporary scratch SQLite database, merges profile counters using `llvm-profdata`, and compiles `src/c/shim_pgo.o` using `clang` with `-fprofile-use`.
+- Inlines hot SQLite B-tree leaf traversal branches, aligns inner cursor seek loops to cache line boundaries, and optimizes branch predictors for real workload distribution.
+- Seamless fallback: `build.sh` automatically compiles `src/c/shim_pgo.o` with `-fprofile-use` when `clang` and `llvm-profdata` are available, falling back cleanly to native Zig compilation if unavailable.
 
 ### 9. AVX2 SIMD HTTP Header Parser & Strict Pipelining Protection
 - HTTP request lines and header delimiters (`\r\n\r\n`) are scanned using 32-byte AVX2 SIMD vector registers (`@Vector(32, u8)`).
@@ -170,7 +171,7 @@ Measured under identical challenge environment conditions (k6 workload matching 
 
 ## Attribution & Acknowledgements
 
-- **`submissions/rust-iouring-kensac #264`**: We gratefully credit and acknowledge the SQLite B-tree shim exploration in `csrc/shim.c` from submission #264, which provided valuable inspiration and architectural reference during early database optimization exploration. In this implementation, the entire database subsystem has been cleanly migrated into 100% native Zig (`src/db.zig`) using persistent prepared statements (`sqlite3_prepare_v3`) and Linux futex signaling.
+- **`submissions/rust-iouring-kensac #264`**: We gratefully credit and acknowledge `submissions/rust-iouring-kensac #264`. The SQLite B-tree shim in `src/shim.c` (direct B-tree leaf cell traversal, `unix-excl` VFS setup, and futex-coordinated checkpoint thread) is adapted directly from `rust-iouring-kensac #264`'s `csrc/shim.c`, with C ABI bindings called from `src/db.zig`.
 
 ---
 

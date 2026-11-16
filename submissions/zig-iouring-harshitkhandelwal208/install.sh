@@ -9,7 +9,7 @@ if [ -x /opt/zig/zig ] && [ "$(/opt/zig/zig version)" = "$ZIG_VERSION" ]; then
   echo "zig $ZIG_VERSION already installed"
 else
   export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y -q curl xz-utils ca-certificates unzip build-essential >/dev/null
+  apt-get install -y -q curl xz-utils ca-certificates unzip build-essential clang llvm >/dev/null
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   curl -fsSL --retry 5 -o "$tmp/zig.tar.xz" "$ZIG_URL"

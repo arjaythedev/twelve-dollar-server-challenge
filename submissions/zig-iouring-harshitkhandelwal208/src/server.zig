@@ -1,13 +1,13 @@
 //! The io_uring multi-ring event loop for the $12 server challenge.
 //! Architecture:
-//! - 8 io_uring rings (523,776 direct descriptor capacity) with dynamic ring spill
-//! - 8 SO_REUSEPORT listeners on host:port, 512 single-shot accepts in flight across listeners
+//! - 8 active io_uring rings (523,776 direct descriptor capacity) with balanced accept distribution
+//! - 8 SO_REUSEPORT listeners on host:port, 1024 accepts armed per ring across listeners
 //! - Provided buffer rings (1024 x 2KB) per ring
 //! - Bounded single-shot MSG_DONTWAIT reads on ENOBUFS burst recovery (eliminates ENOBUFS storm)
-//! - Drain-first policy: up to 16,384 reads, at most 2,048 answers per pass (keeps TCP memory ~600 pages)
+//! - Drain-first policy: up to 16,384 reads, at most 4,096 answers per pass
 //! - Zero-yield backpressure on WAL checkpoint hold: held writes queue without CPU spin loops
-//! - 100% native Zig database engine with futex-coordinated background checkpoint thread
-//! - Direct io_uring_enter with 1ms timeout on ring 0 (zero epoll overhead)
+//! - Direct SQLite B-tree cursor shim (src/shim.c adapted from #264) with futex-coordinated background checkpoint thread
+//! - Direct io_uring_enter with rotating microsecond sleep when idle (zero epoll overhead)
 const std = @import("std");
 const linux = std.os.linux;
 const IoUring = linux.IoUring;
@@ -30,7 +30,7 @@ pub const n_bufs_per_ring: u16 = 1024;
 pub const bgid: u16 = 1;
 
 pub const pool_buf_size: usize = 16384;
-pub const pool_count: usize = 2048;
+pub const pool_count: usize = 16384;
 
 pub const k_ring_count: usize = 8;
 pub const k_listener_count: usize = 8;
@@ -41,7 +41,7 @@ pub const ACCEPT_DEPTH: u32 = 1024;
 pub const READS_PER_PASS: usize = 16384;
 pub const ANSWERS_PER_PASS: u32 = 4096;
 pub const WAIT_MIN: u32 = 1;
-pub const WAIT_NS: i64 = 500_000; // 0.5 ms
+pub const WAIT_NS: i64 = 50_000; // 50 us
 
 pub const RespPool = struct {
     mem: [*]u8 = undefined,
@@ -344,8 +344,7 @@ pub const Server = struct {
     rq: FifoQueue = undefined,
     ready: FifoQueue = undefined,
     answers_left: u32 = 0,
-    need_ring: bool = false,
-    spill_after: i64 = 0,
+    wait_ri: usize = 0,
 
     held: [65536]QEntry = undefined,
     n_held: usize = 0,
@@ -371,11 +370,11 @@ pub const Server = struct {
         s.resp_buf = try Buf.init(128 * 1024);
         s.resp_pool = try RespPool.init();
 
-        // Pre-allocate all 8 rings so there are zero allocation / syscall pauses when spilling under load
+        // Pre-allocate and activate all 8 rings for uniform load distribution
         for (0..k_ring_count) |i| {
             try s.initWorker(@intCast(i));
         }
-        s.active_rings = 1;
+        s.active_rings = k_ring_count;
 
         return s;
     }
@@ -564,8 +563,10 @@ pub const Server = struct {
             self.listeners[i] = fd;
         }
 
-        // Arm accepts on Ring 0
-        self.armAccepts(&self.rings[0]);
+        // Arm accepts across all 8 rings for balanced connection distribution
+        for (0..k_ring_count) |i| {
+            self.armAccepts(&self.rings[i]);
+        }
     }
 
     fn armAccepts(self: *Server, w: *RingWorker) void {
@@ -632,15 +633,17 @@ pub const Server = struct {
                     break;
                 }
             }
-            const busy = (!self.rq.isEmpty() or !self.ready.isEmpty() or any_cqes);
-
-            var accept_ri: usize = 0;
+            var any_to_submit = false;
             for (0..self.active_rings) |i| {
-                if (self.rings[i].accepting) {
-                    accept_ri = i;
+                if (self.rings[i].ring.sq.sqe_head != self.rings[i].ring.sq.sqe_tail) {
+                    any_to_submit = true;
                     break;
                 }
             }
+            const busy = (!self.rq.isEmpty() or !self.ready.isEmpty() or any_cqes or any_to_submit);
+
+            const wait_ri = self.wait_ri % self.active_rings;
+            self.wait_ri +%= 1;
 
             // Iterate active rings in reverse order (highest down to 0)
             var ri: usize = self.active_rings;
@@ -649,7 +652,7 @@ pub const Server = struct {
                 const w = &self.rings[ri];
                 const to_submit = w.ring.flush_sq();
 
-                if (ri == accept_ri and !busy) {
+                if (ri == wait_ri and !busy) {
                     _ = enterWithTimeout(w.ring.fd, to_submit, WAIT_MIN, WAIT_NS);
                 } else if (to_submit > 0 or (w.ring.flags & (1 << 13) != 0)) {
                     _ = linux.io_uring_enter(w.ring.fd, to_submit, 0, linux.IORING_ENTER_GETEVENTS, null);
@@ -728,7 +731,6 @@ pub const Server = struct {
         if (w.accepting) {
             if (w.full) {
                 w.accepting = false;
-                self.need_ring = true;
             } else {
                 self.fillAccepts(w);
             }
@@ -958,34 +960,6 @@ pub const Server = struct {
                 self.armClose(w, te.slot, c);
             }
         }
-
-        if (self.need_ring) {
-            const now_ms = milliTimestamp();
-            if (now_ms >= self.spill_after) {
-                self.need_ring = !self.spill();
-                if (self.need_ring) {
-                    self.spill_after = now_ms + 1000;
-                }
-            }
-        }
-    }
-
-    fn spill(self: *Server) bool {
-        for (0..self.active_rings) |i| {
-            if (self.rings[i].accepting) return true;
-        }
-        for (0..self.active_rings) |i| {
-            if (!self.rings[i].full) {
-                self.armAccepts(&self.rings[i]);
-                return true;
-            }
-        }
-        if (self.active_rings >= k_ring_count) return false;
-
-        const next_id: u32 = @intCast(self.active_rings);
-        self.active_rings += 1;
-        self.armAccepts(&self.rings[next_id]);
-        return true;
     }
 
     fn markTouched(self: *Server, ring_idx: u8, slot: u32, c: *Conn) void {

@@ -268,21 +268,114 @@ static void optimize_asm(AsmBuf *b) {
     free(p2);
 
     // -------------------------------------------------------------
-    // Pass 4: Duplicate zero-store elimination
+    // Pass 4: Dead Store Elimination (DSE) of redundant zero stores
     // -------------------------------------------------------------
-    char **out = malloc(p3_cnt * sizeof(char*));
-    size_t out_cnt = 0;
+    char **p4 = malloc(p3_cnt * sizeof(char*));
+    size_t p4_cnt = 0;
+    bool zero_known[1024] = {false};
     i = 0;
     while (i < p3_cnt) {
-        if (i + 1 < p3_cnt && strncmp(p3[i], "    movq $0, ", 13) == 0 &&
-            strcmp(p3[i], p3[i+1]) == 0) {
-            free(p3[i]);
+        char *line = p3[i];
+        if (strncmp(line, "    movq $0, ", 13) == 0 && strstr(line, "(%r12)")) {
+            int disp = -1;
+            sscanf(line, "    movq $0, %d(%%r12)", &disp);
+            if (disp >= 0 && disp < 1024 && zero_known[disp]) {
+                free(line);
+                i++;
+                continue;
+            }
+            if (disp >= 0 && disp < 1024) zero_known[disp] = true;
+            p4[p4_cnt++] = line;
+            i++;
+            continue;
+        } else if (strstr(line, ":") || strstr(line, "call ")) {
+            memset(zero_known, 0, sizeof(zero_known));
+            p4[p4_cnt++] = line;
+            i++;
+            continue;
+        } else if (strstr(line, ", ") && strstr(line, "(%r12)")) {
+            char *comma = strstr(line, ", ");
+            int disp = -1;
+            if (sscanf(comma + 2, "%d(%%r12)", &disp) == 1 && disp >= 0 && disp < 1024) {
+                zero_known[disp] = false;
+            }
+            p4[p4_cnt++] = line;
             i++;
             continue;
         }
-        out[out_cnt++] = p3[i++];
+        p4[p4_cnt++] = line;
+        i++;
     }
     free(p3);
+
+    // -------------------------------------------------------------
+    // Pass 5: Short-Circuit Route Comparisons
+    // -------------------------------------------------------------
+    char **out = malloc(p4_cnt * sizeof(char*));
+    size_t out_cnt = 0;
+    i = 0;
+    while (i < p4_cnt) {
+        if (i + 3 < p4_cnt &&
+            strncmp(p4[i], "    cmpq $", 10) == 0 &&
+            strcmp(p4[i+1], "    setne %al") == 0 &&
+            strcmp(p4[i+2], "    movzbq %al, %rax") == 0 &&
+            strcmp(p4[i+3], "    addq %rax, 384(%r12)") == 0) {
+
+            size_t j = i;
+            char cmps[16][128];
+            int cmp_cnt = 0;
+            char end_lbl[64] = {0};
+
+            while (j < p4_cnt && cmp_cnt < 16) {
+                if (j + 3 < p4_cnt &&
+                    strncmp(p4[j], "    cmpq $", 10) == 0 &&
+                    strcmp(p4[j+1], "    setne %al") == 0 &&
+                    strcmp(p4[j+2], "    movzbq %al, %rax") == 0 &&
+                    strcmp(p4[j+3], "    addq %rax, 384(%r12)") == 0) {
+                    strncpy(cmps[cmp_cnt++], p4[j], 127);
+                    j += 4;
+                } else if ((strncmp(p4[j], "    movq 552(%r12), %rax", 24) == 0 ||
+                            strncmp(p4[j], "    movq 560(%r12), %rax", 24) == 0 ||
+                            strncmp(p4[j], "    movq 568(%r12), %rax", 24) == 0)) {
+                    int disp = 0;
+                    sscanf(p4[j], "    movq %d(%%r12), %%rax", &disp);
+                    snprintf(cmps[cmp_cnt++], 127, "    cmpq $0, %d(%%r12)", disp);
+                    while (j < p4_cnt && strcmp(p4[j], "    addq %rax, 384(%r12)") != 0) j++;
+                    if (j < p4_cnt) j++;
+                } else if (strcmp(p4[j], "    cmpq $0, 384(%r12)") == 0) {
+                    if (j + 3 < p4_cnt && strncmp(p4[j+3], "    jne .L_loop_end_", 20) == 0) {
+                        sscanf(p4[j+3], "    jne %63s", end_lbl);
+                        j += 4;
+                        break;
+                    } else if (j + 2 < p4_cnt && strncmp(p4[j+2], "    jne .L_loop_end_", 20) == 0) {
+                        sscanf(p4[j+2], "    jne %63s", end_lbl);
+                        j += 3;
+                        break;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            if (end_lbl[0] && cmp_cnt > 0) {
+                for (int k = i; k < j; k++) free(p4[k]);
+                for (int k = 0; k < cmp_cnt; k++) {
+                    out[out_cnt++] = strdup(cmps[k]);
+                    char jne_buf[128];
+                    snprintf(jne_buf, sizeof(jne_buf), "    jne %s", end_lbl);
+                    out[out_cnt++] = strdup(jne_buf);
+                }
+                out[out_cnt++] = strdup("    movq $0, 384(%r12)");
+                i = j;
+                continue;
+            }
+        }
+
+        out[out_cnt++] = p4[i++];
+    }
+    free(p4);
 
     b->lines = out;
     b->count = out_cnt;
@@ -784,6 +877,10 @@ static int b64url_decode(const char *in, int in_len, unsigned char *out) {
     return o;
 }
 
+
+static HMAC_CTX *base_hmac_ctx = NULL;
+static HMAC_CTX *req_hmac_ctx = NULL;
+
 static int verify_jwt(const char *token, int64_t *uid, char *uname, size_t uname_sz) {
     if (!token || !*token) return 0;
     const char *p1 = strchr(token, '.');
@@ -799,7 +896,13 @@ static int verify_jwt(const char *token, int64_t *uid, char *uname, size_t uname
     if (strstr((char*)header_buf, "\"none\"")) return -1;
     unsigned char expected_sig[32];
     unsigned int md_len = 0;
-    HMAC(EVP_sha256(), jwt_secret, strlen(jwt_secret), (const unsigned char*)token, p2 - token, expected_sig, &md_len);
+    if (base_hmac_ctx && req_hmac_ctx) {
+        HMAC_CTX_copy(req_hmac_ctx, base_hmac_ctx);
+        HMAC_Update(req_hmac_ctx, (const unsigned char*)token, p2 - token);
+        HMAC_Final(req_hmac_ctx, expected_sig, &md_len);
+    } else {
+        HMAC(EVP_sha256(), jwt_secret, strlen(jwt_secret), (const unsigned char*)token, p2 - token, expected_sig, &md_len);
+    }
     unsigned char decoded_sig[40];
     int dec_sig_len = b64url_decode(p2 + 1, sig_len, decoded_sig);
     if (dec_sig_len != 32 || CRYPTO_memcmp(expected_sig, decoded_sig, 32) != 0) return -1;
@@ -1257,19 +1360,24 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     req_ctx.resp_buf = acquire_pool(&resp_pool);
     req_ctx.out_body = req_ctx.resp_buf + 512;
 
-    int64_t tape[256];
-    memset(tape, 0, sizeof(tape));
-    tape[0] = req_ctx.method;
-    tape[2] = req_ctx.path_len;
-    tape[3] = req_ctx.keep_alive;
-    tape[4] = req_ctx.has_auth;
-    tape[5] = req_ctx.body_len;
-    int copy_len = (req_ctx.path_len < 120) ? req_ctx.path_len : 120;
-    for (int i = 0; i < copy_len; i++) tape[64 + i] = req_ctx.path[i];
-    tape[64 + copy_len] = 0;
+    static int64_t bf_tape[96];
+    bf_tape[0] = req_ctx.method;
+    bf_tape[2] = req_ctx.path_len;
+    bf_tape[3] = req_ctx.keep_alive;
+    bf_tape[4] = req_ctx.has_auth;
+    bf_tape[5] = req_ctx.body_len;
+    bf_tape[8] = 0;
+    bf_tape[9] = 0;
+    bf_tape[16] = 0;
+    bf_tape[17] = 0;
+    bf_tape[32] = 0;
+    memset(&bf_tape[48], 0, 16 * sizeof(int64_t));
+    int copy_len = (req_ctx.path_len < 24) ? req_ctx.path_len : 24;
+    for (int i = 0; i < copy_len; i++) bf_tape[64 + i] = req_ctx.path[i];
+    bf_tape[64 + copy_len] = 0;
 
     curr_conn = &req_ctx;
-    bf_execute(tape);
+    bf_execute(bf_tape);
 
     c->out_buf = req_ctx.resp_buf;
     c->out_len = req_ctx.resp_len;
@@ -1497,8 +1605,15 @@ static int init_worker(uint32_t id) {
     return 0;
 }
 
+static void sig_handler(int sig) {
+    (void)sig;
+    exit(0);
+}
+
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
         rl.rlim_cur = rl.rlim_max;
@@ -1515,6 +1630,9 @@ int main(int argc, char **argv) {
     const char *db_path = getenv("SQLITE_PATH"); if (!db_path) db_path = "feed.db";
     const char *secret = getenv("JWT_SECRET"); if (!secret) secret = "twelve-dollar-challenge";
     strncpy(jwt_secret, secret, sizeof(jwt_secret)-1);
+    base_hmac_ctx = HMAC_CTX_new();
+    HMAC_Init_ex(base_hmac_ctx, jwt_secret, strlen(jwt_secret), EVP_sha256(), NULL);
+    req_hmac_ctx = HMAC_CTX_new();
 
     if (sqlite3_open_v2(db_path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) return 1;
     sqlite3_exec(db, "PRAGMA journal_mode=WAL;", NULL, NULL, NULL);
@@ -1623,8 +1741,41 @@ int main(int argc, char **argv) {
 EOF
 
 # ==============================================================================
-# FINAL COMPILATION & LINKING
+# PROFILE-GUIDED OPTIMIZATION (PGO) PIPELINE
 # ==============================================================================
-echo "==> Linking high-performance server binary (bin/server)..."
-gcc -O3 -flto -march=native -o "$DIR/bin/server" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+PGO_DIR="$DIR/build/pgo"
+rm -rf "$PGO_DIR"
+mkdir -p "$PGO_DIR"
+
+SEED_DB="$DIR/../../seed/feed.db"
+SCRATCH_PGO_DB="/tmp/feed_pgo_scratch_$$.db"
+
+if [ -f "$SEED_DB" ]; then
+    echo "==> [PGO Stage 1] Building instrumented server for profile generation..."
+    if gcc -O3 -march=native -Wno-deprecated-declarations -fprofile-generate="$PGO_DIR" -o "$DIR/build/server_pgo" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto 2>/dev/null; then
+        echo "==> [PGO Stage 2] Training profile on scratch database copy (Rule 10 compliant)..."
+        cp "$SEED_DB" "$SCRATCH_PGO_DB"
+        PORT=19860 SQLITE_PATH="$SCRATCH_PGO_DB" "$DIR/build/server_pgo" >/dev/null 2>&1 &
+        PGO_PID=$!
+        sleep 0.8
+        for i in $(seq 1 40); do
+            curl -s "http://127.0.0.1:19860/feed" >/dev/null 2>&1 || true
+            curl -s "http://127.0.0.1:19860/health" >/dev/null 2>&1 || true
+            curl -s "http://127.0.0.1:19860/posts/1" >/dev/null 2>&1 || true
+            curl -s "http://127.0.0.1:19860/posts/250000" >/dev/null 2>&1 || true
+        done
+        kill -INT "$PGO_PID" 2>/dev/null || true
+        wait "$PGO_PID" 2>/dev/null || true
+        rm -f "$SCRATCH_PGO_DB"*
+        echo "==> [PGO Stage 3] Recompiling final production server with profile feedback..."
+        gcc -O3 -flto -march=native -Wno-deprecated-declarations -fprofile-use="$PGO_DIR" -fprofile-correction -o "$DIR/bin/server" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto 2>/dev/null ||             gcc -O3 -flto -march=native -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+        rm -rf "$PGO_DIR"
+    else
+        echo "==> Linking high-performance server binary (bin/server)..."
+        gcc -O3 -flto -march=native -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+    fi
+else
+    echo "==> Linking high-performance server binary (bin/server)..."
+    gcc -O3 -flto -march=native -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/build/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+fi
 echo "==> Build complete! Output: bin/server"

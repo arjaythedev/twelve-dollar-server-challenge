@@ -37,7 +37,7 @@
 
 **微架构与构建。** 编译用 `-O3 -march=native -fno-plt -fno-semantic-interposition -flto`，另加 `-falign-functions=32 -falign-loops=32`、`-fipa-pta`、`-flto-partition=one`；io_uring 的 ring 启用 `COOP_TASKRUN`/`TASKRUN_FLAG`，连接表和接收缓冲用 `MADV_HUGEPAGE` + `MADV_POPULATE_READ` 预触；有 mold 时用 `-fuse-ld=mold` 并行链接。
 
-**来源说明。** io_uring 的 multishot receive 与 ring 模型参考了 rust-iouring-kensac (#264) 的实现思路。数据层只用 B-tree 游标 API（`sqlite3BtreeFirst/Next/TableMoveto/IndexMoveto/Payload*`），不碰 `MemPage`/`findCell`/`getAndInitPage`/`xParseCell`，也不读写 `BtCursor` 私有字段——之前那版批量作者 seek（每层共享页、页内插值二分）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`，因为走的是 SQLite 内部页函数、落在「B-tree cursor reads are fine」这条裁定之外，已经删掉换成 20 次 `TableMoveto`（实测 handler 8.86 → 8.34 µs，反而更快）。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）同样改写自 #245 的 `src/db.h`（同一段 shim over `unix-excl`，改了命名），`WAL_COALESCE=0` 可关掉它做 A/B（仅供测试，规则里没这条）。record 的变长整数与列头解码沿用 #245 的写法。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
+**来源说明。** io_uring 的 multishot receive 与 ring 模型参考了 rust-iouring-kensac (#264) 的实现思路；**direct-descriptor 表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144）也是 #264 的做法**——固定大表在 `NOFILE` 较小的 CI runner 上会被 `io_uring_register_files_sparse` 以 `EMFILE` 拒绝，这一点是照着他们改的。数据层只用 B-tree 游标 API（`sqlite3BtreeFirst/Next/TableMoveto/IndexMoveto/Payload*`），不碰 `MemPage`/`findCell`/`getAndInitPage`/`xParseCell`，也不读写 `BtCursor` 私有字段——之前那版批量作者 seek（每层共享页、页内插值二分）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`，因为走的是 SQLite 内部页函数、落在「B-tree cursor reads are fine」这条裁定之外，已经删掉换成 20 次 `TableMoveto`（实测 handler 8.86 → 8.34 µs，反而更快）。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）与 page-cache 的 `SQLITE_CONFIG_PCACHE2` shim（`wc_*`）同样改写自 #245 的 `src/db.h`（同一段代码，改了命名），`WAL_COALESCE=0` 可关掉 VFS 做 A/B（仅供测试，规则里没这条）。record 的变长整数与列头解码沿用 #245 的写法。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
 
 ## 读取走 SQLite 的 B-tree，而不是 SQL 引擎
 
@@ -54,17 +54,19 @@
 - Auto-checkpoint 关掉。WAL 到 8,192 帧（32 MB）时**只挂写、不挂循环**：写请求的响应留到下一个 pass（请求字节留在连接上，最多重放 1,024 个），读照常答；独立的 nice 19 线程在自己的连接上做 `PASSIVE` 检查点，把帧拷回主库（`PASSIVE` 从不等读者，所以它不会把循环挡住）；一次 pass 没拷动任何帧就停手，不在单核上空转。**每一帧都拷完之后**下一次写会让日志从第 1 帧重新开始，文件就停在那里——不需要 `TRUNCATE`，也不需要 `RESTART`。线程连不上的情况有兜底：hold 超过 120 ms 就放行，让日志长大一点，下次再收。
 - 事件循环的等待是有条件的：只要还有待发的读、待写的响应或上一 pass 收到的完成，就 `min_complete=0` 直接 `enter`，**不睡那 1 ms**；只有在完全没事干时才等（1 ms）。这一条是 220k 时 29% CPU 空转的来源。
 - 空闲连接清扫按时间切片（每 50 ms 扫一个 ring 的 1/32），不在 pass 里整表扫 6 M 个槽位——一次整扫在 1 vCPU 上是 25–70 ms，正好是 p99 悬崖。
-- No `mmap`: reads go through SQLite's page cache (64 MB).
+- **page cache 外面套一层 `SQLITE_CONFIG_PCACHE2` shim**（来自 #245）：`pcache1` 记住"曾经持有过的最大页号"且从不调低，而 B-tree split 会把一页临时改名到 lock-byte 页号再改回来，于是此后**每次 COMMIT** 的 `xTruncate` 都以为文件尾之外可能有页、把整个 hash 表扫一遍（#245 量到 ~350 µs、~30 次/秒）。shim 记录进入缓存的最大 key（停在 lock-byte 页号的页单独计数），确定不可能有越界页时直接跳过扫描。本地饱和 `/feed`：50.0 → **44.5 µs/请求（−11 %）**。
+- **页缓存 16 MB**（`cache_size=-16384`）：2 GB 机器上要给内核的 socket 内存留位置；16 MB 仍然装得下 feed 的工作集（users 表 + 最新的 posts 页）。64 MB 时的本地 5 分钟保持 p99 是 2.1 ms、16 MB 是 4.2 ms，都远在 1 s 阈值内，换来 RSS 少 14 MB。
+- No `mmap`: reads go through SQLite's page cache (16 MB).
 
 ## 连接
 
 每个 k6 用户持有一个 keep-alive 连接，所以高分意味着在 `LimitNOFILE=65535` 下数十万个 socket。
 
-- 接受的 socket 是 io_uring **直接描述符**：它们位于 ring 的文件表，不占进程 fd 表。表大小跟随 `RLIMIT_NOFILE` 的硬限制。
-- 8 个 ring 各有一个 `SO_REUSEPORT` listener；每个 ring 保持 32 个单发 accept 在途。ring 接近满时关闭自己的 listener，其余 ring 继续接收。
+- 接受的 socket 是 io_uring **直接描述符**：它们位于 ring 的文件表，不占进程 fd 表。表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144），所以同一个二进制在 `NOFILE=65535` 的 CI runner 上会注册 65,535 项并正常起来，在基准机上拿满 262,144。
+- ring 按需增长（1 → 最多 2），每个 ring 一个 `SO_REUSEPORT` listener；每个 ring 保持 `2048 / ring 数` 个单发 accept 在途。ring 接近满时关闭自己的 listener，其余 ring 继续接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.
 - 突发之后 multishot receive 会耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。
-- 每个连接同一时间最多一个发送在途；流水线响应排在它后面。输出缓冲来自池，发送完成后归还。
+- 每个连接同一时间最多一个发送在途；流水线响应排在它后面。输出缓冲来自池（8 KB，启动预填 256 个），发送完成后归还；一次 feed 响应的 JSON 上界约 24 KB，所以回收阈值放到 `8 × 8 KB`，否则每个 feed 缓冲都会被丢掉重分配（实测：每请求一次 24 KB `malloc`，`brk` 37,738 次/10 s）。
 - 关闭是 `SHUTDOWN` 硬链接到 fixed-file `CLOSE`；每个 `user_data` 里的 generation 号会丢弃复用槽位的完成。
 
 ## 请求路径

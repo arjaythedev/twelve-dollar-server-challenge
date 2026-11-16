@@ -347,3 +347,47 @@ These changes are **not validated by a successful build, CI, or load test yet**.
 only, (4) slicing only, and then the combined defaults. Restore
 `PRE_CONNS=430000` only for the 400K ramp. Do not infer a score from
 an allocation bound or a low-concurrency microbenchmark.
+
+
+---
+
+## Follow-up: software SHA-256 and optional LTO (separate PR)
+
+This experiment follows #479. Its performance hypothesis is **not yet verified**.
+
+- **SHA256_ROLLING16=1 (default)**: compute SHA-256's schedule in 16
+  circular words instead of a 64-word array, reducing stack footprint and
+  potentially benefiting short JWT HMAC messages. The unchanged HMAC key
+  precomputation and signature verification are still required for every
+  authenticated request. **SHA256_ROLLING16=0** restores the previous
+  compression function; both modes run NIST and RFC 4231 test vectors on
+  every build.
+- **LTO=1 (opt-in)**: adds GCC link-time optimization to the existing
+  profile-guided compilation. Keep **LTO=0** for the control build.
+  Most of SQLite and the server already compile as a single C translation
+  unit, so the incremental benefit may be very small. Compare builds
+  using identical PGO training and five-minute test conditions.
+
+Suggested isolated experiments:
+1. `SHA256_ROLLING16=0 LTO=0`: #479 crypto/build control.
+2. `SHA256_ROLLING16=1 LTO=0`: rolling SHA schedule only.
+3. `SHA256_ROLLING16=0 LTO=1`: LTO only.
+4. `SHA256_ROLLING16=1 LTO=1`: combined after validation.
+
+**Not copied from the 400K blueprint:**
+
+- `SQLITE_THREADSAFE=0`: #479 runs multiple checkpoint threads
+  with their own SQLite connections; keep `THREADSAFE=2`.
+- Long-lived read snapshots: #479 already opens a transaction once per
+  batch, and keeps B-tree cursors alive within that transaction. Keeping
+  snapshots across write batches risks WAL retention and stale visibility.
+- SIMD JSON escapes and fast decimal formatting: already implemented
+  in `src/json.h` (AVX2 and two-digit table). Duplicating them adds no value.
+- SHA-NI: Xeon Platinum 8260 is Cascade Lake, which does not normally
+  expose the SHA extensions; do not make hardware SHA mandatory.
+- `SEND_ZC` for short replies: pin/unpin or notification costs can exceed
+  copying the payload. Requires a controlled test before implementation.
+- Sub-1.5-KiB TCP sockets: #479's user-space `struct conn` is already
+  compact; Linux's kernel per-socket slab is substantially larger.
+
+Only the official 1-vCPU/2-GB five-minute benchmark establishes a score.

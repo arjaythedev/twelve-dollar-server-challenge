@@ -87,7 +87,11 @@ The build system employs a verified multi-stage bootstrap pipeline modeled on se
 ## Hardware Harness & I/O Engine
 
 The underlying runtime provides the BF-MMIO hardware ports:
-- **High-Performance Event Loop**: Non-blocking edge-triggered epoll architecture with direct file descriptor reuse and zero dynamic heap allocation per request.
+- **8-Ring `io_uring` Direct Descriptor Engine**: 523,776 direct descriptor slots ($8 \times 65,472$) registered via `IORING_REGISTER_FILES2`, completely bypassing standard Linux file descriptor limits (`RLIMIT_NOFILE`) and descriptor table spinlocks.
+- **Compact Connection State**: Fixed 32-byte `Conn` state struct tracking generation, flags, and ring indexes, requiring under 19 MB total memory across all 523k capacity slots.
+- **Zero-Copy Provided Buffer Rings**: Kernel-selected buffer management (`IORING_REGISTER_PBUF_RING`) with 1,024 buffers of 2 KB per ring, recycling packet buffers directly inside the kernel completion ring.
+- **Recycled Response Buffer Pool**: Dedicated 16,384-slot buffer pool (256 MB) operating with lock-free index recycling, eliminating heap allocations during burst concurrency.
+- **Tight Microsecond Polling Loop**: Rotating idle wait using `IORING_ENTER_EXT_ARG` with a 50 µs timeout, ensuring sub-millisecond wakeup while preventing CPU thermal throttling.
 - **SQLite Performance Pragmas**: In-process engine tuned with `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, `PRAGMA cache_size=-32000`, `PRAGMA mmap_size=268435456`, and persistent prepared statements (`SQLITE_PREPARE_PERSISTENT`).
 - **OpenSSL Hardware Acceleration**: Direct HMAC-SHA256 signature verification with constant-time comparison (`CRYPTO_memcmp`).
 

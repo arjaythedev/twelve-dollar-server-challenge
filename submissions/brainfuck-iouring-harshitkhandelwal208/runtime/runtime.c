@@ -55,6 +55,9 @@ typedef struct {
     char *out_buf;
     uint32_t out_len;
     uint32_t out_off;
+    char *in_buf;
+    uint32_t in_len;
+    uint32_t in_cap;
 } Conn;
 
 typedef struct {
@@ -652,6 +655,23 @@ static void arm_close(RingWorker *w, uint32_t slot, Conn *c) {
     c->flags &= ~FLAG_OPEN;
 }
 
+static inline int parse_content_length(const char *headers, int head_len) {
+    const char *p = headers;
+    const char *end = headers + head_len;
+    while (p < end) {
+        const char *next_line = memmem(p, end - p, "\r\n", 2);
+        if (!next_line) break;
+        int line_len = next_line - p;
+        if (line_len >= 15 && strncasecmp(p, "Content-Length:", 15) == 0) {
+            const char *val = p + 15;
+            while (val < next_line && (*val == ' ' || *val == '\t')) val++;
+            return atoi(val);
+        }
+        p = next_line + 2;
+    }
+    return 0;
+}
+
 static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const char *raw_data, int raw_len) {
     char *end_head = memmem(raw_data, raw_len, "\r\n\r\n", 4);
     if (!end_head) {
@@ -660,6 +680,7 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     }
     int head_len = end_head - raw_data + 4;
 
+    memset(&req_ctx, 0, sizeof(req_ctx));
     req_ctx.slot = slot;
     req_ctx.gen = c->gen;
     req_ctx.ring_idx = w->id;
@@ -675,13 +696,22 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     req_ctx.method = raw_data[0];
 
     const char *line_end = memmem(raw_data, head_len, "\r\n", 2);
-    if (!line_end) return;
+    if (!line_end) {
+        arm_close(w, slot, c);
+        return;
+    }
 
     const char *path_start = memchr(raw_data, ' ', line_end - raw_data);
-    if (!path_start) return;
+    if (!path_start) {
+        arm_close(w, slot, c);
+        return;
+    }
     path_start++;
     const char *path_end = memchr(path_start, ' ', line_end - path_start);
-    if (!path_end) return;
+    if (!path_end) {
+        arm_close(w, slot, c);
+        return;
+    }
     req_ctx.path_len = path_end - path_start;
     if (req_ctx.path_len >= (int)sizeof(req_ctx.path)) req_ctx.path_len = sizeof(req_ctx.path) - 1;
     memcpy(req_ctx.path, path_start, req_ctx.path_len);
@@ -742,6 +772,7 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
 
     curr_conn = &req_ctx;
     static int64_t bf_tape[96];
+    memset(bf_tape, 0, sizeof(bf_tape));
     bf_tape[0] = req_ctx.method;
     bf_tape[2] = req_ctx.path_len;
     bf_tape[3] = req_ctx.keep_alive;
@@ -759,12 +790,6 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
         bf_tape[9] = 1;
         req_ctx.auth_status = 0;
     }
-    bf_tape[16] = 0;
-    bf_tape[17] = 0;
-    bf_tape[32] = 0;
-    bf_tape[33] = 0;
-    bf_tape[34] = 0;
-    memset(&bf_tape[48], 0, 16 * sizeof(int64_t));
     int copy_len = (req_ctx.path_len < 32) ? req_ctx.path_len : 32;
     for (int i = 0; i < copy_len; i++) bf_tape[64 + i] = req_ctx.path[i];
     bf_tape[64 + copy_len] = 0;
@@ -783,6 +808,85 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     arm_send(w, slot, c);
 }
 
+static void handle_incoming_data(RingWorker *w, uint32_t slot, Conn *c, const char *data, int data_len) {
+    if (c->in_buf != NULL) {
+        if (data && data_len > 0) {
+            if (c->in_len + data_len > c->in_cap) {
+                uint32_t new_cap = c->in_cap * 2;
+                if (new_cap < c->in_len + data_len) new_cap = c->in_len + data_len + 1024;
+                if (new_cap > 65536) {
+                    if (c->in_buf) {
+                        free(c->in_buf);
+                        c->in_buf = NULL;
+                        c->in_len = 0;
+                        c->in_cap = 0;
+                    }
+                    arm_close(w, slot, c);
+                    return;
+                }
+                c->in_buf = realloc(c->in_buf, new_cap);
+                c->in_cap = new_cap;
+            }
+            memcpy(c->in_buf + c->in_len, data, data_len);
+            c->in_len += data_len;
+        }
+
+        char *end_head = memmem(c->in_buf, c->in_len, "\r\n\r\n", 4);
+        if (!end_head) {
+            arm_recv(w, slot, c);
+            return;
+        }
+        int head_len = (end_head - c->in_buf) + 4;
+        int clen = parse_content_length(c->in_buf, head_len);
+        int total_req = head_len + clen;
+        if ((int)c->in_len < total_req) {
+            arm_recv(w, slot, c);
+            return;
+        }
+
+        process_http_request(w, slot, c, c->in_buf, total_req);
+
+        int leftover = c->in_len - total_req;
+        if (leftover > 0) {
+            memmove(c->in_buf, c->in_buf + total_req, leftover);
+            c->in_len = leftover;
+        } else {
+            free(c->in_buf);
+            c->in_buf = NULL;
+            c->in_len = 0;
+            c->in_cap = 0;
+        }
+        return;
+    }
+
+    if (data && data_len > 0) {
+        char *end_head = memmem(data, data_len, "\r\n\r\n", 4);
+        if (end_head) {
+            int head_len = (end_head - data) + 4;
+            int clen = parse_content_length(data, head_len);
+            int total_req = head_len + clen;
+            if (data_len >= total_req) {
+                process_http_request(w, slot, c, data, total_req);
+
+                int leftover = data_len - total_req;
+                if (leftover > 0) {
+                    c->in_cap = (leftover > 2048 ? leftover + 2048 : 4096);
+                    c->in_buf = malloc(c->in_cap);
+                    memcpy(c->in_buf, data + total_req, leftover);
+                    c->in_len = leftover;
+                }
+                return;
+            }
+        }
+
+        c->in_cap = (data_len > 2048 ? data_len + 2048 : 4096);
+        c->in_buf = malloc(c->in_cap);
+        memcpy(c->in_buf, data, data_len);
+        c->in_len = data_len;
+        arm_recv(w, slot, c);
+    }
+}
+
 static void on_accept(RingWorker *w, int res, uint32_t listener_idx) {
     if (listener_idx < K_LISTENER_COUNT) {
         w->accepts[listener_idx]--;
@@ -795,6 +899,12 @@ static void on_accept(RingWorker *w, int res, uint32_t listener_idx) {
         c->flags = FLAG_OPEN;
         c->ring_idx = (uint8_t)w->id;
         c->keep_alive = 1;
+        c->out_buf = NULL;
+        c->out_len = 0;
+        c->out_off = 0;
+        c->in_buf = NULL;
+        c->in_len = 0;
+        c->in_cap = 0;
         w->nconn++;
         arm_recv(w, slot, c);
     }
@@ -808,7 +918,7 @@ static void on_recv(RingWorker *w, uint32_t slot, uint32_t gen, int res, uint32_
     if (res > 0) {
         uint16_t bid = (uint16_t)(flags >> IORING_CQE_BUFFER_SHIFT);
         char *data = w->pbuf_mem + (bid * BUF_SIZE);
-        process_http_request(w, slot, c, data, res);
+        handle_incoming_data(w, slot, c, data, res);
         return_pbuf(w, bid);
     } else {
         arm_close(w, slot, c);
@@ -826,6 +936,12 @@ static void on_send(RingWorker *w, uint32_t slot, uint32_t gen, int res) {
             c->out_buf = NULL;
             c->out_len = 0;
             c->out_off = 0;
+        }
+        if (c->in_buf) {
+            free(c->in_buf);
+            c->in_buf = NULL;
+            c->in_len = 0;
+            c->in_cap = 0;
         }
         arm_close(w, slot, c);
         return;
@@ -847,7 +963,11 @@ static void on_send(RingWorker *w, uint32_t slot, uint32_t gen, int res) {
     if (!c->keep_alive) {
         arm_close(w, slot, c);
     } else {
-        arm_recv(w, slot, c);
+        if (c->in_buf && c->in_len > 0) {
+            handle_incoming_data(w, slot, c, NULL, 0);
+        } else {
+            arm_recv(w, slot, c);
+        }
     }
 }
 
@@ -861,6 +981,12 @@ static void on_close(RingWorker *w, uint32_t slot, uint32_t gen) {
         c->out_buf = NULL;
         c->out_len = 0;
         c->out_off = 0;
+    }
+    if (c->in_buf) {
+        free(c->in_buf);
+        c->in_buf = NULL;
+        c->in_len = 0;
+        c->in_cap = 0;
     }
     if (w->nconn > 0) w->nconn--;
 }

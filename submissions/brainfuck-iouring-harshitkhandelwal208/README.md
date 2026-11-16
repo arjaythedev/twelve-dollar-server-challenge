@@ -32,7 +32,8 @@ The Brainfuck dialect implemented by both the reference interpreter (`test/inter
 | **EOF Behavior** | Cell is set to `0` upon reaching EOF (`xorl %eax, %eax`) |
 | **Output Semantics** | Byte-level output via `putchar((int)(tape[ptr] & 0xFF))` |
 | **Loop Jump Semantics** | `[` jumps past matching `]` if cell == 0; `]` jumps to matching `[` if cell != 0 |
-| **Error Handling** | Unmatched opening or closing brackets trigger compile-time `.error` assembly failure |
+| **Loop Nesting Limit** | Maximum loop nesting depth of 16 levels, strictly enforced across all stages (`.error "loop nesting depth exceeded"`) |
+| **Error Handling** | Unmatched opening/closing brackets and excessive nesting trigger compile-time `.error` assembly failure |
 
 ---
 
@@ -123,6 +124,8 @@ And asserts 100% equivalence of outputs, exit codes, and compile-time error reje
 * `empty.bf`: Empty program boundary handling.
 * `single_inc_dec.bf`: Cell increment/decrement operations.
 * `pointer_movement.bf`: Pointer shifting and relative indexing.
+* `boundary_movement.bf`: Large bidirectional pointer movement across both halves of the memory tape.
+* `loop_depth_16.bf`: Valid 16-level deeply nested loops (at maximum depth limit).
 * `nested_loops.bf`: Multi-level nested loops.
 * `multiply.bf`: Arithmetic multiplication loop ($7 \times 8 = 56$).
 * `copy_loop.bf`: Non-destructive cell copy idiom.
@@ -139,7 +142,10 @@ And asserts 100% equivalence of outputs, exit codes, and compile-time error reje
 * `independent_loops.bf`: Multiple non-nested sequential loops.
 * `err_unmatched_open.bf`: Verification of compilation rejection on missing `]`.
 * `err_unmatched_close.bf`: Verification of compilation rejection on unexpected `]`.
-* **20 Pseudo-Random Programs**: Deterministically seeded random Brainfuck programs exercising loops, RLE runs, and clear idioms.
+* `err_mismatched_brackets.bf`: Verification of rejection on mismatched bracket sequences.
+* `err_loop_depth_17.bf`: Verification of compilation rejection when loop depth exceeds 16.
+* **50 Deterministic Pseudo-Random Valid Programs**: Randomly synthesized valid Brainfuck programs exercising loops, boundary pointer movements, arithmetic RLE, comments, and clear idioms.
+* **20 Deterministic Pseudo-Random Malformed Programs**: Randomly synthesized invalid Brainfuck programs verifying consistent compile-time and runtime error rejection.
 
 Run the test suite:
 ```bash
@@ -154,7 +160,16 @@ The runtime ([`runtime/runtime.c`](file:///home/harshit/Projects/mcsc-research/t
 
 * **Execution Model**: The server runs on a **single OS thread** executing a single-threaded reactor event loop.
 * **8 io_uring Rings**: 8 separate `io_uring` instances are initialized to spread descriptor queues across 523,776 direct descriptor slots ($8 \times 65,472$). The single event loop polls and drains CQEs across all 8 rings in round-robin sequence. Describing these rings as "8 parallel worker threads" would be inaccurate: they are 8 kernel completion queues serviced cooperatively by one thread.
-* **Shared Request State Safety**: Because all request parsing, Brainfuck execution (`bf_execute`), and MMIO dispatch (`bf_mmio_sys`, `bf_mmio_db`, `bf_mmio_net`) execute synchronously to completion on the main event loop thread before yielding back to `sys_io_uring_enter`, the shared `req_ctx`, `curr_conn`, and `bf_tape` structures are never accessed concurrently by multiple threads.
+* **TCP Fragmentation & Request Body Accumulation**:
+  * Packet buffers use raw kernel-managed buffer rings (`IORING_REGISTER_PBUF_RING`) of 2 KB.
+  * For requests arriving unfragmented in a single buffer, requests are dispatched directly with zero allocations.
+  * For fragmented headers, chunked TCP packets, or `POST` requests whose `Content-Length` extends beyond the initial packet buffer, bytes are safely accumulated in connection-scoped dynamic storage (`c->in_buf`) until the full request length (`head_len + content_length`) is received.
+  * Pipelined HTTP/1.1 requests are handled sequentially from connection buffers without head-of-line stall or data loss.
+* **Connection Lifecycle & Resource Safety**:
+  * Incomplete or malformed request lines trigger immediate connection closure (`arm_close`), preventing descriptor exhaustion.
+  * Connection slots track a generation counter (`c->gen`) preventing stale CQE completion callbacks from corrupting reused slots.
+  * All allocated connection buffers (`c->in_buf`, `c->out_buf`) are systematically released in `on_send` completion and `on_close`.
+* **Shared Request State Safety**: Because all request parsing, Brainfuck execution (`bf_execute`), and MMIO dispatch (`bf_mmio_sys`, `bf_mmio_db`, `bf_mmio_net`) execute synchronously to completion on the main event loop thread before yielding back to `sys_io_uring_enter`, the shared `req_ctx`, `curr_conn`, and `bf_tape` structures are never accessed concurrently by multiple threads. Both `req_ctx` and `bf_tape` are explicitly re-zeroed (`memset`) on every incoming request.
 * **Zero-Allocation Buffer Pools**:
   * Packet buffers: 1,024 buffers of 2 KB managed via kernel-managed buffer rings (`IORING_REGISTER_PBUF_RING`).
   * Response buffers: 16,384 buffers of 16 KB managed via a fixed LIFO free-stack.
@@ -167,30 +182,31 @@ The runtime ([`runtime/runtime.c`](file:///home/harshit/Projects/mcsc-research/t
 
 ## 6. Real Measured Benchmarks
 
-Benchmarked locally using `ab` (ApacheBench) under concurrency $C = 50$:
+Measured on standard Linux test environment using `ab` (ApacheBench) under concurrency $C = 50$:
 
 ```
 Endpoint: GET /health
+Benchmark command: ab -n 10000 -c 50 http://127.0.0.1:19890/health
 ------------------------------------------------------------
 Completed Requests:     10,000
 Concurrency Level:      50
-Requests per second:    123,076.92 [#/sec]
-Time per request (mean):0.406 ms
-Latency p50:            0 ms
-Latency p95:            1 ms
-Latency p99:            1 ms
+Requests per second:    29,034.57 [#/sec]
+Time per request (mean):1.722 ms
+Latency p50:            2 ms
+Latency p95:            2 ms
+Latency p99:            3 ms
 Failed requests:        0
 
 Endpoint: GET /feed (Live SQLite B-Tree Leaf Traversal)
+Benchmark command: ab -n 5000 -c 50 http://127.0.0.1:19890/feed
 ------------------------------------------------------------
 Completed Requests:     5,000
 Concurrency Level:      50
-Requests per second:    42,799.79 [#/sec]
-Transfer rate:          217.3 MB/sec
-Time per request (mean):1.168 ms
-Latency p50:            1 ms
-Latency p95:            2 ms
-Latency p99:            2 ms
+Requests per second:    26,958.83 [#/sec]
+Time per request (mean):1.855 ms
+Latency p50:            2 ms
+Latency p95:            3 ms
+Latency p99:            3 ms
 Failed requests:        0
 ```
 

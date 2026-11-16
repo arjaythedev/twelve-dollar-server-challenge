@@ -4,9 +4,10 @@
 
 static int queue[16];
 static int q_len = 0;
-static int next_label_id = 0;
+#define MAX_LOOP_DEPTH 16
+static int stack[MAX_LOOP_DEPTH];
 static int stack_top = 0;
-static int stack[65536];
+static int next_label_id = 0;
 static int in_eof = 0;
 
 static int next_bf_char(FILE *in) {
@@ -110,6 +111,11 @@ int main(int argc, char **argv) {
         }
 
         if (op == '[') {
+            if (stack_top >= MAX_LOOP_DEPTH) {
+                fprintf(out, ".error \"loop nesting depth exceeded\"\n");
+                fprintf(stderr, "Error: loop nesting depth exceeded\n");
+                return 1;
+            }
             next_label_id++;
             stack[stack_top++] = next_label_id;
             fprintf(out, "    cmpq $0, (%%r12)\n    je .L_e_%d\n.L_s_%d:\n", next_label_id, next_label_id);

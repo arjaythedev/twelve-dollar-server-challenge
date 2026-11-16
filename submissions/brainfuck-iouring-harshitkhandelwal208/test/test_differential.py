@@ -143,7 +143,7 @@ def run_differential_test(test_name, source_path, input_data=b"", expect_error=F
         print(f"  stage2: {out_s2[:50]}")
         return False
 
-def generate_random_bf(seed, num_blocks=8):
+def generate_random_bf(seed, num_blocks=12):
     rng = random.Random(seed)
     tokens = []
     ptr = 0
@@ -157,29 +157,44 @@ def generate_random_bf(seed, num_blocks=8):
             tokens.append('<' * (-diff))
         ptr = target
 
+    # Words for inserting arbitrary comments between instructions (must not contain BF tokens: ><+-.,[])
+    comment_words = [" loop", " cell", " ignore_me", " temp_val", " /* note */", " # bf_comment\n", " !@$%^&* "]
+
     for _ in range(num_blocks):
-        btype = rng.choice(["linear", "linear", "clear", "loop", "nested_loop", "bool_norm", "print"])
+        if rng.random() < 0.3:
+            tokens.append(rng.choice(comment_words))
+
+        btype = rng.choice(["linear", "linear", "clear", "loop", "nested_loop", "deep_nest", "boundary", "repeated", "bool_norm", "print"])
         if btype == "linear":
-            target = rng.randint(-5, 5)
+            target = rng.randint(-15, 15)
             move_to(target)
-            # Add small positive value so cell doesn't underflow to 2^64-1
-            tokens.append("+" * rng.randint(1, 10))
+            tokens.append("+" * rng.randint(1, 15))
+        elif btype == "repeated":
+            target = rng.randint(-10, 10)
+            move_to(target)
+            tokens.append("+" * rng.randint(20, 50))
+            tokens.append("-" * rng.randint(5, 15))
+        elif btype == "boundary":
+            target = rng.choice([-80, -50, 50, 80])
+            move_to(target)
+            tokens.append("+" * rng.randint(1, 5))
+            move_to(0)
         elif btype == "clear":
-            target = rng.randint(-5, 5)
+            target = rng.randint(-15, 15)
             move_to(target)
             tokens.append("[-]")
         elif btype == "loop":
-            counter_cell = rng.randint(-5, 5)
+            counter_cell = rng.randint(-10, 10)
             move_to(counter_cell)
             tokens.append("[-]" + "+" * rng.randint(1, 4) + "[")
-            other_cell = rng.randint(-5, 5)
+            other_cell = rng.randint(-10, 10)
             if other_cell != counter_cell:
                 move_to(other_cell)
                 tokens.append("+" * rng.randint(1, 3))
             move_to(counter_cell)
             tokens.append("-]")
         elif btype == "nested_loop":
-            c1 = rng.randint(-4, 4)
+            c1 = rng.randint(-8, 8)
             c2 = c1 + 1
             c3 = c1 + 2
             move_to(c1)
@@ -192,22 +207,39 @@ def generate_random_bf(seed, num_blocks=8):
             tokens.append("-]")
             move_to(c1)
             tokens.append("-]")
+        elif btype == "deep_nest":
+            depth = rng.randint(5, 14)
+            base = rng.randint(-5, 0)
+            move_to(base)
+            tokens.append("[-]+" + "[" * depth + "-" + "]" * depth)
         elif btype == "bool_norm":
-            target = rng.randint(-5, 4)
+            target = rng.randint(-10, 10)
             move_to(target)
             tokens.append("[-]" + "+" * rng.randint(0, 3))
             tokens.append("[->[-]+<]")
         elif btype == "print":
-            target = rng.randint(-5, 5)
+            target = rng.randint(-10, 10)
             move_to(target)
             tokens.append(".")
 
     # Finish with one print so output is verified
-    target = rng.randint(-5, 5)
+    target = rng.randint(-10, 10)
     move_to(target)
     tokens.append(".")
 
     return "".join(tokens)
+
+def generate_malformed_bf(seed):
+    rng = random.Random(seed)
+    mtype = rng.choice(["unmatched_open", "unmatched_close", "excessive_depth", "mismatched_mixed"])
+    if mtype == "unmatched_open":
+        return "+" * rng.randint(1, 5) + "[" + ">+" * rng.randint(1, 5)
+    elif mtype == "unmatched_close":
+        return "+" * rng.randint(1, 5) + "]" + ">+" * rng.randint(1, 5)
+    elif mtype == "excessive_depth":
+        return "[" * 17 + "]" * 17
+    else:
+        return "++[>++[<]-" + "]" * rng.randint(2, 4)
 
 def main():
     ensure_binaries()
@@ -230,15 +262,26 @@ def main():
         if run_differential_test(f, path, inp, expect_err):
             passed += 1
 
-    print("\n-- Deterministic Pseudo-Random Brainfuck Programs --")
+    print("\n-- Deterministic Pseudo-Random Brainfuck Programs (50 seeds) --")
     with tempfile.TemporaryDirectory() as tmpdir:
-        for seed in range(101, 121): # 20 randomized tests
+        for seed in range(101, 151): # 50 randomized valid tests
             total += 1
             code = generate_random_bf(seed, num_blocks=12)
             rand_file = os.path.join(tmpdir, f"rand_{seed}.bf")
             with open(rand_file, "w") as rf:
                 rf.write(code + "\n")
-            if run_differential_test(f"random_seed_{seed}", rand_file, b""):
+            if run_differential_test(f"random_valid_seed_{seed}", rand_file, b""):
+                passed += 1
+
+    print("\n-- Deterministic Pseudo-Random Malformed Programs (20 seeds) --")
+    with tempfile.TemporaryDirectory() as tmpdir:
+        for seed in range(201, 221): # 20 randomized malformed tests
+            total += 1
+            code = generate_malformed_bf(seed)
+            rand_file = os.path.join(tmpdir, f"rand_malformed_{seed}.bf")
+            with open(rand_file, "w") as rf:
+                rf.write(code + "\n")
+            if run_differential_test(f"random_malformed_seed_{seed}", rand_file, b"", expect_error=True):
                 passed += 1
 
     print("\n================================================================================")

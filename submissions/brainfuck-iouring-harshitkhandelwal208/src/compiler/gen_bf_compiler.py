@@ -335,6 +335,11 @@ def build_compiler():
     fill_queue()
 
     def dispatch_loop():
+        def check_stop():
+            pop_queue(9)
+            g.set("is_eof", 1)
+        g.if_nonzero("err_flag", check_stop, level=1)
+
         g.clear("handled")
 
         # Pattern 1: [->[-]+<]
@@ -486,17 +491,30 @@ def build_compiler():
             # Op 7: '['
             g.check_eq_const("q0_op", 7, "is_match")
             def emit_loop_start():
-                g.add("next_label_id", 1)
-                stack_push("next_label_id")
-                g.print_str("    cmpq $0, (%r12)\n    je .L_e_", "str_acc")
-                g.copy("next_label_id", "num_to_print")
-                print_num()
-                g.print_str("\n.L_s_", "str_acc")
-                g.copy("next_label_id", "num_to_print")
-                print_num()
-                g.print_str(":\n", "str_acc")
-                pop_queue(1)
-                fill_queue()
+                g.check_eq_const("stack_depth", 16, "is_match")
+                def on_depth_err():
+                    g.print_str(".error \"loop nesting depth exceeded\"\n", "str_acc")
+                    g.set("err_flag", 1)
+                    pop_queue(9)
+                    g.set("is_eof", 1)
+
+                g.if_nonzero("is_match", on_depth_err, level=4)
+
+                def on_depth_ok():
+                    g.add("next_label_id", 1)
+                    stack_push("next_label_id")
+                    g.print_str("    cmpq $0, (%r12)\n    je .L_e_", "str_acc")
+                    g.copy("next_label_id", "num_to_print")
+                    print_num()
+                    g.print_str("\n.L_s_", "str_acc")
+                    g.copy("next_label_id", "num_to_print")
+                    print_num()
+                    g.print_str(":\n", "str_acc")
+                    pop_queue(1)
+                    fill_queue()
+
+                g.if_zero("err_flag", on_depth_ok, level=4)
+
             g.if_nonzero("is_match", emit_loop_start, level=3)
 
             # Op 8: ']'
@@ -505,8 +523,9 @@ def build_compiler():
                 g.check_eq_const("stack_depth", 0, "is_match")
                 def on_close_err():
                     g.print_str(".error \"unmatched closing bracket\"\n", "str_acc")
-                    pop_queue(9)
                     g.set("err_flag", 1)
+                    pop_queue(9)
+                    g.set("is_eof", 1)
 
                 g.if_nonzero("is_match", on_close_err, level=4)
 
@@ -531,11 +550,14 @@ def build_compiler():
     g.while_nonzero("q_len", dispatch_loop)
 
     # After loop: check stack_depth == 0
-    g.check_eq_const("stack_depth", 0, "is_match")
-    def on_open_err():
-        g.print_str(".error \"unmatched opening bracket\"\n", "str_acc")
-        g.set("err_flag", 1)
-    g.if_zero("is_match", on_open_err, level=1)
+    def check_final_stack():
+        g.check_eq_const("stack_depth", 0, "is_match")
+        def on_open_err():
+            g.print_str(".error \"unmatched opening bracket\"\n", "str_acc")
+            g.set("err_flag", 1)
+        g.if_zero("is_match", on_open_err, level=2)
+
+    g.if_zero("err_flag", check_final_stack, level=1)
 
     # If no error, emit Footer:
     def emit_footer():

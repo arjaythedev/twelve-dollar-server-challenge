@@ -13,10 +13,15 @@ echo "==> 1. Verifying Self-Hosting Compiler Build Pipeline..."
 echo "==> 2. Running Differential Compiler Testing (Interpreter vs Stage0 vs Stage1 vs Stage2)..."
 python3 "$DIR/test_differential.py"
 
-echo "==> 3. Checking for Challenge Database to Run Server Integration Tests..."
+echo "==> 3. Running HTTP Runtime Correctness Tests (Fragmentation, Pipelining, Isolation)..."
+python3 "$DIR/test_runtime_correctness.py"
+
+echo "==> 4. Checking for Challenge Database to Run Server Integration Tests..."
 SEED_DB=""
 if [ -f "$SUB_ROOT/../../seed/feed.db" ]; then
     SEED_DB="$SUB_ROOT/../../seed/feed.db"
+elif [ -f "/tmp/feed_seed.db" ]; then
+    SEED_DB="/tmp/feed_seed.db"
 elif [ -f "/tmp/twelve-challenge/seed/feed.db" ]; then
     SEED_DB="/tmp/twelve-challenge/seed/feed.db"
 fi

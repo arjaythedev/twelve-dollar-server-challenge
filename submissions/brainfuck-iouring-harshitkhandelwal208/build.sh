@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
+rm -rf "$DIR/build"
 mkdir -p "$DIR/bin" "$DIR/build"
 
 # ==============================================================================

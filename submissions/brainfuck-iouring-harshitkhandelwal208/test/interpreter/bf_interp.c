@@ -4,7 +4,7 @@
 #include <string.h>
 
 #define TAPE_SIZE 1000000
-#define STACK_SIZE 65536
+#define STACK_SIZE 16
 
 int main(int argc, char **argv) {
     if (argc < 2) {

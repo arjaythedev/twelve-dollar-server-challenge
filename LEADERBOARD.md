@@ -766,7 +766,10 @@ merged: 300,000 passed the 2-minute probe but failed the 5-minute hold on p99 (1
 receive buffers; PGO build worked) held **280,000** (26,698 req/s, p95 60.5 / p99 706.3 ms, 0 err, 75 % CPU,
 25 µs/req, 1,256 MB, 2026-11-15), below the merged row, so not merged: 290,000 failed the 2-minute probe on p99
 (1.55 s at 80 % CPU, 0 errors), 300,000 on p95/p99 (3.24 / 4.41 s at 84 % CPU, 0 errors) and 320,000 collapsed (73 %
-errors, nearly all `connection refused`). #450 stays open.
+errors, nearly all `connection refused`). Its next head, **`e508cc0`** (#441's `e487a70` code with the ring-0 wait
+defaults changed to 256 completions / 1 ms) held **270,000** (25,883 req/s, p95 29.3 / p99 186.2 ms, 0 err, 73 % CPU,
+26 µs/req, 1,087 MB, 2026-11-16), below the merged row, so not merged: 280,000 failed the 2-minute probe on p95/p99
+(2.43 / 3.02 s at 86 % CPU) and 320,000 on p95/p99 (2.50 / 3.40 s at 92 % CPU), all with 0 errors. #450 stays open.
 **#452** (`8193037`: #450's code plus own `mmap` arenas, a smaller buffer pool and freed wait buffers) held
 **280,000** (26,710 req/s, p95 120.2 / p99 341.6 ms, 0 err, 77 % CPU, 26 µs/req, 810 MB, 2026-11-15), below the
 merged row, so not merged: 290,000 failed the 2-minute probe on p99 (2.22 s at 78 % CPU), 300,000 on p95/p99

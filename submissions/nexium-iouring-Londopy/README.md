@@ -9,7 +9,7 @@ Nexium is a systems language with checked effects, bounds-checked slices and thr
 
 | | |
 |---|---|
-| Language | Nexium 1.5.0. `install.sh` builds its compiler, `nx`, from source at a pinned commit with gcc alone; `nx` then compiles the server through gcc from Ubuntu 24.04's `build-essential` |
+| Language | Nexium 1.5.0. `build.sh` builds its compiler, `nx`, from source at a pinned commit with gcc alone, as the normal build user; `nx` then compiles the server through gcc from Ubuntu 24.04's `build-essential` |
 | Framework | none: raw `io_uring` syscalls (no liburing) |
 | Database | SQLite 3.54.1 amalgamation, compiled in (SHA-256 pinned in `build.sh`) |
 | Front | **Front: direct** (serves `0.0.0.0:80` itself; no Nginx) |
@@ -92,12 +92,12 @@ Under load, on a replica of the box (Ubuntu 24.04, kernel 6.8.0-147, 1 vCPU, 2 G
 ## Building from source
 
 ```bash
-sudo bash install.sh   # build-essential, curl, git, and nx 1.5.0 built from source into /opt/nexium-1.5.0
-bash build.sh          # fetches and verifies SQLite, then: nx build main.nx --mode fast --cpu x86-64-v3
+sudo bash install.sh   # build-essential, curl, git: apt packages only
+bash build.sh          # bootstraps nx 1.5.0 from source, fetches and verifies SQLite, then: nx build main.nx --mode fast --cpu x86-64-v3
 SQLITE_PATH=/path/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
-Nothing prebuilt is downloaded. `install.sh` fetches Nexium's source at one commit, by its full hash, so git checks every byte against the pin. It then bootstraps the compiler with gcc alone: a C seed in the repository builds a first compiler, that one builds the compiler's own Nexium source, and the result must rebuild itself to the same C or the install fails. This takes two to three minutes and about 600 MB of memory. `nx` makes no network request when it builds the server.
+Nothing prebuilt is downloaded, and nothing of Nexium's runs as root: `install.sh` installs apt packages and stops there. `build.sh`, run as the normal build user, fetches Nexium's source at one commit, by its full hash, so git checks every byte against the pin. It then bootstraps the compiler with gcc alone: a C seed in the repository builds a first compiler, that one builds the compiler's own Nexium source, and the result must rebuild itself to the same C or the build stops. The steps are written out in `build.sh` itself. The first build takes about three minutes and 600 MB of memory; later builds reuse the compiler in `deps/`. `nx` makes no network request when it builds the server.
 
 ## Layout
 

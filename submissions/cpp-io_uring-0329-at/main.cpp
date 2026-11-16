@@ -25,7 +25,7 @@
 
 namespace {
 
-constexpr uint32_t kRingCount = 6;
+constexpr uint32_t kRingCount = 2;
 constexpr uint32_t kAcceptDepth = 2048;
 constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 4096;
@@ -677,7 +677,7 @@ class Server {
  * target connection count (6 x 131,072 = 786,432, against a scored peak of ~320,000), not by
  * RLIMIT_NOFILE: the old 1M-per-ring tables were 288 MB of preallocated, pre-faulted memory that
  * the box cannot spare at 300k connections. */
-constexpr uint32_t kSlotsPerRing = 131072;
+constexpr uint32_t kSlotsPerRing = 262144;
 
 void raise_nofile() {
   struct rlimit rl {};

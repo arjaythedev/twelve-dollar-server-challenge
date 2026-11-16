@@ -29,7 +29,7 @@
 
 **批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 等待 256 个完成或 500 µs，其余非阻塞）→ 每个 ring 最多处理 256 个完成 → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。
 
-**ring 模型。** 固定 6 个 ring，每个 ring 的 direct-descriptor 表是 **131,072 项**（6 × 131,072 = 786,432 连接上限），**按目标连接数定尺寸，不按 `RLIMIT_NOFILE`**——按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上是 300k 连接装不装得下的区别。每个 ring 有**一个专属的** `SO_REUSEPORT` listener，ring 接近满时关闭自己的 listener（连接由其他 ring 接收），不做运行期扩容或跨 ring 迁移。
+**ring 模型。** 固定 **2 个 ring**，每个 ring 的 direct-descriptor 表是 **262,144 项**（合计 524,288 连接上限，目标是 320k），**按目标连接数定尺寸，不按 `RLIMIT_NOFILE`**——按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上是 300k 连接装不装得下的区别。ring 数从 6 降到 2 也是量出来的：每 pass 的 `io_uring_enter` 从 6 次降到 2 次，同机同库饱和 `/feed` 容量 15.9k → **22.5k req/s**，每请求 CPU 57.6 → **40.2 µs**（同一测试里 rust-iouring-kensac #264 是 19.3k / 55.7 µs）。再降到 1 个 ring 反而退（19.2k / 48.8 µs），2 是最优点。每个 ring 有**一个专属的** `SO_REUSEPORT` listener，ring 接近满时关闭自己的 listener（连接由其他 ring 接收），不做运行期扩容或跨 ring 迁移。
 
 **数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数把 20 个 id 排序后沿 `likes_post_id_idx` 走一遍（merge），一次遍历统计全部 20 个；20 个作者用一次批量 seek（每层共享页、页内插值二分、`CellInfo` 解析 record），不是 20 次独立查找。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译。
 

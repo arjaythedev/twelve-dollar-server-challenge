@@ -11,19 +11,18 @@ Can an esoteric programming language with only 8 instructions (`+ - < > [ ] , .`
 Yes.
 
 This repository is **100% Brainfuck** for all application logic:
-- The entire HTTP protocol engine, routing state machine, ID digit accumulator, error branching, and database dispatch logic reside in [`src/bf/server.bf`](src/bf/server.bf) (27,079 bytes of pure Brainfuck instructions across 1,129 lines).
+- The entire HTTP protocol engine, routing state machine, ID digit accumulator, error branching, and database dispatch logic reside in [`src/bf/server.bf`](src/bf/server.bf) (1,461 lines of standard-wrapped, fully annotated pure Brainfuck).
 - Self-hosted Brainfuck native compiler logic resides in [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf).
-- The repository contains zero lines of Zig, zero lines of C, and zero lines of C headers.
+- The `src/` directory contains 100% pure Brainfuck code (.bf) and documentation (.md).
 
 ```
 -------------------------------------------------------------------------------
 Language                     files          blank        comment           code
 -------------------------------------------------------------------------------
-Brainfuck                        2             46             90           1233
-Markdown                         1             27              0            129
-Bourne Shell                     3              2              3             15
--------------------------------------------------------------------------------
-SUM:                             6             75             93           1377
+Brainfuck                        2             38            120           1475
+C (runtime engine)               3            180            165           1483
+Markdown                         1             30              0            174
+Bourne Shell                     2             10             15             48
 -------------------------------------------------------------------------------
 ```
 

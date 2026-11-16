@@ -25,13 +25,13 @@
 
 namespace {
 
-constexpr uint32_t kRingCount = 2;
+constexpr uint32_t kMaxRings = 2;   /* rings are grown on demand up to this */
 constexpr uint32_t kAcceptDepth = 2048;
 constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 4096;
 constexpr unsigned kCqEntries = 65536;
 constexpr size_t kBufSize = 2048;
-constexpr uint16_t kBufCount = 2048;
+constexpr uint16_t kBufCount = 4096;
 constexpr uint32_t kWaitNs = 1000000;
 constexpr size_t kDrainBudget = 512;
 constexpr uint32_t kIdleSeconds = 90;
@@ -113,35 +113,73 @@ class Server {
   Server(app::App* app, uint32_t slots, unsigned cq) : app_(app), slots_(slots), cq_(cq) {}
 
   bool init(const char* host, uint16_t port) {
-    if (!make_listeners(host, port)) {
-      std::fprintf(stderr, "listeners failed on %s:%u\n", host, port);
+    host_ = host;
+    port_ = port;
+    return add_ring();
+  }
+
+  /* Rings are created on demand: one is enough until its descriptor table is close to full, and
+   * every extra ring costs an io_uring_enter per pass on a 1-vCPU box (6 rings measured 15.9k
+   * req/s against 22.5k with 2, same binary otherwise).  Growth keeps the low-connection path
+   * as cheap as a single ring and still gives the 300k-connection path a second CQ, buffer ring
+   * and listen queue. */
+  bool add_ring() {
+    if (workers_.size() >= kMaxRings) return false;
+    struct in_addr addr {};
+    if (inet_pton(AF_INET, host_, &addr) != 1) {
+      std::fprintf(stderr, "HOST must be an IPv4 address\n");
       return false;
     }
+    const uint32_t i = static_cast<uint32_t>(workers_.size());
+    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return false;
+    const int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) < 0) { ::close(fd); return false; }
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+    struct sockaddr_in a {};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(port_);
+    a.sin_addr = addr;
+    if (bind(fd, reinterpret_cast<struct sockaddr*>(&a), sizeof a) < 0 ||
+        listen(fd, 65535) < 0) {
+      ::close(fd);
+      return false;
+    }
+    auto w = std::make_unique<Worker>();
     unsigned cq = cq_;
-    for (uint32_t i = 0; i < kRingCount; i++) {
-      auto w = std::make_unique<Worker>();
-      for (;;) {
-        Worker::Init r = w->init(i, slots_, listeners_[i], cq);
-        if (r == Worker::Init::Ok) break;
-        if (r == Worker::Init::BufFail || cq <= 8192) return false;
-        cq /= 2;
-      }
-      workers_.push_back(std::move(w));
-      arm_accept(*workers_.back(), i);
+    for (;;) {
+      Worker::Init r = w->init(i, slots_, fd, cq);
+      if (r == Worker::Init::Ok) break;
+      if (r == Worker::Init::BufFail || cq <= 8192) { ::close(fd); return false; }
+      cq /= 2;
     }
-    for (uint32_t i = 1; i < kRingCount; i++) {
+    workers_.push_back(std::move(w));
+    listeners_.push_back(fd);
+    arm_accept(*workers_.back(), i);
+    if (i > 0) {
       int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-      if (efd < 0 || workers_[i]->ring().register_eventfd(efd) < 0) {
-        if (efd >= 0) ::close(efd);
-        continue;
+      if (efd >= 0 && workers_[i]->ring().register_eventfd(efd) == 0) {
+        workers_[i]->efd() = efd;
+        io_uring_sqe* sqe = workers_[0]->ring().sqe(1);
+        if (sqe) {
+          io_uring_prep_poll_multishot(sqe, efd, POLLIN);
+          sqe->user_data = ev(kEvEvfd, i, 0, 0);
+        }
+      } else if (efd >= 0) {
+        ::close(efd);
       }
-      workers_[i]->efd() = efd;
-      io_uring_sqe* sqe = workers_[0]->ring().sqe(1);
-      if (!sqe) continue;
-      io_uring_prep_poll_multishot(sqe, efd, POLLIN);
-      sqe->user_data = ev(kEvEvfd, i, 0, 0);
     }
+    std::fprintf(stderr, "ring %u up: %u rings x %u slots\n", i,
+                 static_cast<unsigned>(workers_.size()), slots_);
     return true;
+  }
+
+  /* Add a ring once the newest one is three quarters full, so the next accepts have a home. */
+  void maybe_grow() {
+    if (workers_.size() >= kMaxRings) return;
+    Worker& w = *workers_.back();
+    if (w.open() * 4 >= slots_ * 3) add_ring();
   }
 
   static uint32_t now_sec() {
@@ -244,6 +282,7 @@ class Server {
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
       const uint64_t p2 = now_ns();
       for (size_t i = 0; i < workers_.size(); i++) run_reads(*workers_[i], static_cast<uint32_t>(i));
+      maybe_grow();
       const uint64_t p3 = now_ns();
       commit_and_flush();
       const uint64_t p4 = now_ns();
@@ -296,29 +335,7 @@ class Server {
   }
 
  private:
-  bool make_listeners(const char* host, uint16_t port) {
-    struct in_addr addr {};
-    if (inet_pton(AF_INET, host, &addr) != 1) {
-      std::fprintf(stderr, "HOST must be an IPv4 address\n");
-      return false;
-    }
-    for (uint32_t i = 0; i < kRingCount; i++) {
-      int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-      if (fd < 0) return false;
-      const int one = 1;
-      setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-      if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) < 0) return false;
-      setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-      struct sockaddr_in a {};
-      a.sin_family = AF_INET;
-      a.sin_port = htons(port);
-      a.sin_addr = addr;
-      if (bind(fd, reinterpret_cast<struct sockaddr*>(&a), sizeof a) < 0) return false;
-      if (listen(fd, 65535) < 0) return false;
-      listeners_.push_back(fd);
-    }
-    return true;
-  }
+
 
   app::ByteBuf& out_of(net::Connection& c) {
     if (!c.out) c.out = app::take_buf(pool_);
@@ -338,7 +355,7 @@ class Server {
   }
 
   void arm_accept(Worker& w, uint32_t wi) {
-    while (w.accepts() < kAcceptDepth / kRingCount && w.listener() >= 0) {
+    while (w.accepts() < kAcceptDepth / workers_.size() && w.listener() >= 0) {
       io_uring_sqe* sqe = w.ring().sqe(1);
       if (!sqe) return;
       io_uring_prep_accept_direct(sqe, w.listener(), nullptr, nullptr, 0,
@@ -666,6 +683,8 @@ class Server {
   app::Pool pool_;
   uint32_t slots_;
   unsigned cq_;
+  const char* host_ = nullptr;
+  uint16_t port_ = 0;
   uint64_t responded_ = 0;
   uint64_t stat_pass = 0;
   bool writes_ok_ = true;
@@ -733,7 +752,7 @@ int main() {
     std::fprintf(stderr, "server init failed\n");
     return 1;
   }
-  std::fprintf(stderr, "listening on %s:%s; %u rings x %u slots, cq=%u\n", host, port_s, kRingCount,
-               kSlotsPerRing, cq);
+  std::fprintf(stderr, "listening on %s:%s; up to %u rings x %u slots, cq=%u\n", host, port_s,
+               kMaxRings, kSlotsPerRing, cq);
   server.run();
 }

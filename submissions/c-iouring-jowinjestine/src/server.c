@@ -26,6 +26,7 @@
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
 static unsigned answers_per_pass = 16384, wait_min = 256;
+static int poll_idle = 1; /* experimental; IDLE_POLL=0 uses original multishot receives */
 /* Optional soft wall-clock budget for processing a pre-existing ready backlog.
  * Experimental: 0 disables it. Does not interrupt a SQLite transaction or send. */
 static unsigned backlog_slice_us = 75000;
@@ -34,7 +35,7 @@ static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
 
-enum { UD_ACCEPT = 1, UD_RECV, UD_READ, UD_SEND, UD_SHUTDOWN, UD_CLOSE, UD_CANCEL };
+enum { UD_ACCEPT = 1, UD_RECV, UD_READ, UD_SEND, UD_SHUTDOWN, UD_CLOSE, UD_CANCEL, UD_POLL };
 #define UD(op, ring, gen, slot) (((uint64_t)(op) << 56) | ((uint64_t)(ring) << 48) | ((uint64_t)(gen) << 32) | (uint64_t)(slot))
 #define UD_OP(u) ((unsigned)((u) >> 56))
 #define UD_RING(u) ((unsigned)((u) >> 48) & 0xff)
@@ -53,7 +54,9 @@ enum {
   CF_READY = 64,       /* bytes read but not yet answered (on the ready list) */
   CF_RQ = 128,         /* on the read queue */
   CF_RECVING = 256,    /* a single-shot read in flight */
-  CF_MULTI = 512       /* the multishot receive is armed */
+  CF_MULTI = 512,      /* the multishot receive is armed */
+  CF_POLL = 1024,      /* a multishot POLL_ADD is armed */
+  CF_POLL_REARM = 2048 /* a poll ended: rearm after this batch */
 };
 
 struct arena {
@@ -102,12 +105,14 @@ static struct arena *batch_arenas[512];
 static unsigned n_batch_arenas;
 static struct reply *replies;
 static unsigned nrep, rep_cap;
-static uint64_t *ready, *held, *rq;
+static uint64_t *ready, *held, *rq, *poll_rearms;
+static unsigned n_poll_rearms, poll_rearms_cap;
 static unsigned nready, ready_cap, nheld, held_cap, nrq, rq_head, rq_cap;
 static unsigned answers_left;
 
 static struct {
   uint64_t batches, cqes, reqs, accepts, closes, enobufs, reads, deferred, rq_max, ready_max, max_batch, cq_overflow, cancels;
+  uint64_t poll_events, poll_ends, poll_rearmed;
   uint64_t max_turn_ns, max_commit_ns, max_gap_ns; /* longest batch, longest commit, longest time outside a batch while busy */
 } S;
 static uint64_t reads_done; /* single-shot reads that returned data or EAGAIN */
@@ -203,7 +208,12 @@ static inline int ref_live(uint64_t ref, struct conn *c) {
 static void conn_close(unsigned ri, uint32_t slot, struct conn *c) {
   if ((c->flags & (CF_OPEN | CF_CLOSING)) != CF_OPEN) return;
   c->flags |= CF_CLOSING;
-  sqe_shutdown_close(&R[ri].r, slot, UD(UD_SHUTDOWN, ri, c->gen, slot), UD(UD_CLOSE, ri, c->gen, slot));
+  if (poll_idle)
+    sqe_shutdown_close_poll(&R[ri].r, slot, UD(UD_POLL, ri, c->gen, slot),
+                            UD(UD_CANCEL, ri, c->gen, slot), UD(UD_SHUTDOWN, ri, c->gen, slot),
+                            UD(UD_CLOSE, ri, c->gen, slot));
+  else
+    sqe_shutdown_close(&R[ri].r, slot, UD(UD_SHUTDOWN, ri, c->gen, slot), UD(UD_CLOSE, ri, c->gen, slot));
   S.closes++;
 }
 
@@ -223,6 +233,15 @@ static void conn_freed(unsigned ri, struct conn *c) {
 static inline void arm_multishot(unsigned ri, uint32_t slot, struct conn *c) {
   sqe_recv_multishot(ring_sqe(&R[ri].r), slot, UD(UD_RECV, ri, c->gen, slot));
   c->flags |= CF_MULTI;
+}
+
+/* Mode-selecting idle registration.  POLL_ADD stays armed while a nonblocking
+ * one-shot recv drains the input, so idle sockets avoid an armed recv request. */
+static inline void arm_idle(unsigned ri, uint32_t slot, struct conn *c) {
+  if (!poll_idle) { arm_multishot(ri, slot, c); return; }
+  if (c->flags & (CF_POLL | CF_POLL_REARM)) return;
+  sqe_poll_multishot_conn(ring_sqe(&R[ri].r), slot, UD(UD_POLL, ri, c->gen, slot));
+  c->flags |= CF_POLL;
 }
 
 static inline void queue_read(unsigned ri, uint32_t slot, struct conn *c) {
@@ -408,7 +427,30 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   c->send_arena = NULL;
   rs->open++;
   S.accepts++;
-  arm_multishot(ri, slot, c);
+  arm_idle(ri, slot, c);
+}
+
+/* A poll completion is a readiness hint, not request data.  The queued
+ * MSG_DONTWAIT read is issued in read_rounds.  Delay rearm until the batch
+ * ends if the kernel ended the multishot poll. */
+static void on_poll(unsigned ri, struct io_uring_cqe *cqe) {
+  unsigned slot = UD_SLOT(cqe->user_data);
+  struct conn *c = &R[ri].conns[slot];
+  if (!ref_live(cqe->user_data, c)) return;
+  S.poll_events++;
+  if (!(cqe->flags & IORING_CQE_F_MORE)) {
+    c->flags &= (uint16_t)~CF_POLL;
+    S.poll_ends++;
+    if (!(c->flags & CF_POLL_REARM)) {
+      c->flags |= CF_POLL_REARM;
+      list_push(&poll_rearms, &n_poll_rearms, &poll_rearms_cap, REF(ri, c->gen, slot));
+    }
+  }
+  if (cqe->res < 0) {
+    if (cqe->res != -ECANCELED) finish_conn(ri, slot, c);
+    return;
+  }
+  queue_read(ri, slot, c); /* POLLIN or POLLRDHUP: recv determines data or EOF */
 }
 
 static void on_recv(unsigned ri, struct io_uring_cqe *cqe, int multishot) {
@@ -433,12 +475,12 @@ static void on_recv(unsigned ri, struct io_uring_cqe *cqe, int multishot) {
     } else if ((unsigned)cqe->res == rs->r.buf_size) {
       queue_read(ri, slot, c); /* the buffer filled: there may be more */
     } else {
-      arm_multishot(ri, slot, c); /* drained */
+      arm_idle(ri, slot, c); /* drained; poll mode already has a persistent poll */
     }
     return;
   }
   if (cqe->res == -ENOBUFS) { S.enobufs++; queue_read(ri, slot, c); return; }
-  if (cqe->res == -EAGAIN) { arm_multishot(ri, slot, c); return; }
+  if (cqe->res == -EAGAIN) { arm_idle(ri, slot, c); return; }
   finish_conn(ri, slot, c); /* EOF or an error */
 }
 
@@ -473,6 +515,7 @@ static unsigned reap(unsigned ri) {
     struct io_uring_cqe *cqe = &r->cqes[head & r->cq_mask];
     switch (UD_OP(cqe->user_data)) {
     case UD_RECV: on_recv(ri, cqe, 1); break;
+    case UD_POLL: on_poll(ri, cqe); break;
     case UD_READ: on_recv(ri, cqe, 0); break;
     case UD_SEND: on_send(ri, cqe); break;
     case UD_ACCEPT: on_accept(ri, cqe); break;
@@ -489,6 +532,20 @@ static unsigned reap(unsigned ri) {
   STORE_REL(r->cq_head, head);
   ring_buf_publish(r); /* returned buffers are usable by the kernel at once (the read rounds need them) */
   return n;
+}
+
+/* Avoid rearming a terminal poll from inside the CQE drain.  A stale entry
+ * is ignored by the socket generation guard when its slot is reused. */
+static void rearm_ended_polls(void) {
+  for (unsigned i = 0; i < n_poll_rearms; i++) {
+    uint64_t ref = poll_rearms[i];
+    struct conn *c = ref_conn(ref);
+    if (!ref_live(ref, c) || !(c->flags & CF_POLL_REARM)) continue;
+    c->flags &= (uint16_t)~CF_POLL_REARM;
+    arm_idle(UD_RING(ref), UD_SLOT(ref), c);
+    S.poll_rearmed++;
+  }
+  n_poll_rearms = 0;
 }
 
 static unsigned reap_all(void) {
@@ -650,7 +707,8 @@ static void stats(uint64_t dt_ns) {
           "deferred=%llu rq_max=%llu ready_max=%llu cq_overflow=%llu cancels=%llu wal=%d ckpt_passes=%llu cycles=%llu force=%llu "
           "fallback=%llu errors=%llu cache_miss=%d maxrss=%ldMB cpu=%.2fs max_turn=%.1fms max_commit=%.1fms wal_pwrites=%llu "
           "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu "
-          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu heap=%zuMB heap_free=%zuMB arenas=%u trims=%llu slices=%llu\n",
+          "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu heap=%zuMB heap_free=%zuMB arenas=%u trims=%llu slices=%llu "
+          "poll_events=%llu poll_ends=%llu poll_rearms=%llu\n",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
@@ -661,7 +719,8 @@ static void stats(uint64_t dt_ns) {
           (double)A.db.hold_total_ns / 1e6, (unsigned long long)A.db.n_hold_timeout, (unsigned long long)A.db.tail_frames_max,
           (unsigned long long)A.db.n_tail_short, (unsigned long long)A.db.n_passes_max, (double)S.max_gap_ns / 1e6, ru.ru_majflt - majflt_prev,
           (unsigned long long)A.db.n_tail_restart, (unsigned long long)A.db.n_begin_busy, mi.arena >> 20, mi.fordblks >> 20, arenas_mapped, n_trims,
-          (unsigned long long)sliced_ready_passes);
+          (unsigned long long)sliced_ready_passes, (unsigned long long)S.poll_events,
+          (unsigned long long)S.poll_ends, (unsigned long long)S.poll_rearmed);
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -881,6 +940,7 @@ int main(int argc, char **argv) {
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 16384);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
+  poll_idle = env_long("IDLE_POLL", 1) != 0;
   backlog_slice_us = (unsigned)env_long("BACKLOG_SLICE_US", 75000); /* 0 restores #441's unlimited ready turn */
   /* Ring 0 waits for 64 completions or 2 ms: fewer, fuller passes (each pass enters every ring).
    * Measured at 300k connections: ~4 % less loop CPU than 256 / 1 ms, p99 unchanged. */
@@ -913,7 +973,7 @@ int main(int argc, char **argv) {
   /* The rings a full load needs are made now, while the box is idle: a ring is ~1 MB of
    * physically contiguous kernel memory, and asking for that mid-ramp, with a gigabyte of socket
    * slab fragmenting the memory, can stall the loop in compaction. */
-  long pre = env_long("PRE_CONNS", 330000);
+  long pre = env_long("PRE_CONNS", 430000); /* 400k: allocate all seven rings before the ramp */
   while (NR < NR_MAX && (long)NR * (long)nslots < pre && ring_create(NR) == 0) NR++;
   prewarm();
   fprintf(stderr, "listening on %s:%s: up to %u rings x %u direct descriptors; cache %d KiB; code locked %zu KiB\n", host, port, NR_MAX,
@@ -953,6 +1013,7 @@ int main(int argc, char **argv) {
     A.db.wrote = 0;
     db_tick(&A.db); /* no transaction is open: the only point where a hold starts or ends */
     for (unsigned i = 0; i < NR; i++) ring_buf_publish(&R[i].r);
+    rearm_ended_polls();
     accept_policy();
     last_cqes = ncq;
     S.batches++;

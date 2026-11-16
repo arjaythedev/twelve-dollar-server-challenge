@@ -125,15 +125,32 @@ pub struct Db {
 impl Db {
     pub fn open(path: &str) -> Result<Self, String> {
         let cpath = CString::new(path).map_err(|_| "bad sqlite path".to_string())?;
+        // unix-excl keeps the WAL index in this process's heap instead of a
+        // shared -shm file, so the two connections stop exchanging WAL-index
+        // state through mapped shared memory and no -shm file is created. It
+        // also takes the file's lock once for the process rather than per
+        // transaction. Plain SQLite if the VFS is not registered.
+        const VFS_UNIX_EXCL: &[u8] = b"unix-excl\0";
         let mut raw = ptr::null_mut();
-        let rc = unsafe {
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX;
+        let mut rc = unsafe {
             sqlite3_open_v2(
                 cpath.as_ptr(),
                 &mut raw,
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_NOMUTEX,
-                ptr::null(),
+                flags,
+                VFS_UNIX_EXCL.as_ptr() as *const c_char,
             )
         };
+        if rc != SQLITE_OK {
+            if !raw.is_null() {
+                unsafe {
+                    sqlite3_close(raw);
+                }
+            }
+            raw = ptr::null_mut();
+            eprintln!("unix-excl unavailable ({}), opening the default VFS", errmsg(raw));
+            rc = unsafe { sqlite3_open_v2(cpath.as_ptr(), &mut raw, flags, ptr::null()) };
+        }
         if rc != SQLITE_OK || raw.is_null() {
             let msg = errmsg(raw);
             if !raw.is_null() {
@@ -641,6 +658,10 @@ fn load_roots(db: &Db) -> Option<(u32, u32, u32, u32)> {
 }
 
 pub struct WriteDb {
+    // Declared before `db` so the statements are finalized while the
+    // connection is still open (fields drop in declaration order).
+    begin_stmt: Option<Stmt<'static>>,
+    commit_stmt: Option<Stmt<'static>>,
     db: Db,
 }
 
@@ -648,7 +669,15 @@ impl WriteDb {
     pub fn open(path: &str) -> Result<Self, String> {
         let db = Db::open(path)?;
         db.exec("PRAGMA foreign_keys=ON")?;
-        Ok(Self { db })
+        // One compile per connection instead of one per batch: sqlite3_exec
+        // re-parses "BEGIN IMMEDIATE"/"COMMIT" on every transaction.
+        let begin_stmt = Some(unsafe {
+            std::mem::transmute::<Stmt<'_>, Stmt<'static>>(db.prepare("BEGIN IMMEDIATE")?)
+        });
+        let commit_stmt = Some(unsafe {
+            std::mem::transmute::<Stmt<'_>, Stmt<'static>>(db.prepare("COMMIT")?)
+        });
+        Ok(Self { begin_stmt, commit_stmt, db })
     }
 
     pub fn prepare(&self, sql: &str) -> Result<Stmt<'_>, String> {
@@ -677,12 +706,22 @@ impl WriteDb {
         matches!(st.step(), Ok(true))
     }
 
-    pub fn begin(&self) -> Result<(), String> {
-        self.db.exec("BEGIN IMMEDIATE")
+    pub fn begin(&mut self) -> Result<(), String> {
+        let st = self
+            .begin_stmt
+            .as_mut()
+            .ok_or_else(|| "begin statement unavailable".to_string())?;
+        st.reset();
+        st.step().map(|_| ())
     }
 
-    pub fn commit(&self) -> Result<(), String> {
-        self.db.exec("COMMIT")
+    pub fn commit(&mut self) -> Result<(), String> {
+        let st = self
+            .commit_stmt
+            .as_mut()
+            .ok_or_else(|| "commit statement unavailable".to_string())?;
+        st.reset();
+        st.step().map(|_| ())
     }
 
     pub fn rollback(&self) -> Result<(), String> {

@@ -323,7 +323,13 @@ def build_compiler():
         "    pushq %rbp\n"
         "    subq $8, %rsp\n"
         "    movq %rdi, %r12\n"
-        "    movq %rdi, %r13\n"
+        "    testq %rsi, %rsi\n"
+        "    jnz 1f\n"
+        "    leaq -4000000(%rdi), %rsi\n"
+        "    leaq 4000000(%rdi), %rdx\n"
+        "1:\n"
+        "    movq %rsi, %r14\n"
+        "    movq %rdx, %r15\n"
     )
     g.print_str(header, "str_acc")
 
@@ -432,6 +438,7 @@ def build_compiler():
                             print_num()
                             g.print_str(", %r12\n", "str_acc")
                         g.if_zero("is_match", emit_multi, level=4)
+                        g.print_str("    cmpq %r15, %r12\n    jae .L_tape_overflow\n", "str_acc")
 
                     elif op == 2: # <
                         g.check_eq_const("run_count", 1, "is_match")
@@ -449,6 +456,7 @@ def build_compiler():
                             print_num()
                             g.print_str(", %r12\n", "str_acc")
                         g.if_zero("is_match", emit_multi, level=4)
+                        g.print_str("    cmpq %r14, %r12\n    jb .L_tape_underflow\n", "str_acc")
 
                     elif op == 3: # +
                         g.check_eq_const("run_count", 1, "is_match")
@@ -570,6 +578,24 @@ def build_compiler():
             "    popq %r13\n"
             "    popq %r12\n"
             "    ret\n"
+            ".L_tape_underflow:\n"
+            "    movq $1, %rax\n"
+            "    movq $2, %rdi\n"
+            "    leaq .L_msg_underflow(%rip), %rsi\n"
+            "    movq $30, %rdx\n"
+            "    syscall\n"
+            "    movq $60, %rax\n"
+            "    movq $1, %rdi\n"
+            "    syscall\n"
+            ".L_tape_overflow:\n"
+            "    movq $1, %rax\n"
+            "    movq $2, %rdi\n"
+            "    leaq .L_msg_overflow(%rip), %rsi\n"
+            "    movq $29, %rdx\n"
+            "    syscall\n"
+            "    movq $60, %rax\n"
+            "    movq $1, %rdi\n"
+            "    syscall\n"
             ".weak main\n"
             ".globl main\n"
             ".type main, @function\n"
@@ -584,6 +610,8 @@ def build_compiler():
             "    jz .L_calloc_err\n"
             "    movq %rax, %rbx\n"
             "    leaq 4000000(%rbx), %rdi\n"
+            "    movq %rbx, %rsi\n"
+            "    leaq 8000000(%rbx), %rdx\n"
             "    call bf_execute\n"
             "    movq %rbx, %rdi\n"
             "    call free\n"
@@ -593,6 +621,11 @@ def build_compiler():
             ".L_calloc_err:\n"
             "    movl $1, %edi\n"
             "    call exit\n"
+            ".section .rodata\n"
+            ".L_msg_underflow:\n"
+            "    .ascii \"Error: tape pointer underflow\\n\"\n"
+            ".L_msg_overflow:\n"
+            "    .ascii \"Error: tape pointer overflow\\n\"\n"
         )
         g.print_str(footer, "str_acc")
 

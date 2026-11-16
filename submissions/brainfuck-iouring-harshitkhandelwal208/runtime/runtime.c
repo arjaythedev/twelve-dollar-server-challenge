@@ -34,7 +34,7 @@
 #define FLAG_OPEN 1
 #define FLAG_CLOSING 2
 
-void bf_execute(int64_t *tape);
+void bf_execute(int64_t *tape, int64_t *tape_start, int64_t *tape_end);
 
 static sqlite3 *db = NULL;
 static sqlite3_stmt *st_feed = NULL;
@@ -771,7 +771,7 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     req_ctx.out_body = req_ctx.resp_buf + 512;
 
     curr_conn = &req_ctx;
-    static int64_t bf_tape[96];
+    static int64_t bf_tape[256];
     memset(bf_tape, 0, sizeof(bf_tape));
     bf_tape[0] = req_ctx.method;
     bf_tape[2] = req_ctx.path_len;
@@ -794,7 +794,7 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     for (int i = 0; i < copy_len; i++) bf_tape[64 + i] = req_ctx.path[i];
     bf_tape[64 + copy_len] = 0;
 
-    bf_execute(bf_tape);
+    bf_execute(bf_tape, bf_tape, bf_tape + 256);
 
     if (bf_tape[7] == 1) bf_mmio_sys(bf_tape);
     if (bf_tape[16] != 0) bf_mmio_db(bf_tape);

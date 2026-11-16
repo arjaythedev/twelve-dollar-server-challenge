@@ -48,7 +48,14 @@ int main(int argc, char **argv) {
 
     fprintf(out, ".text\n.globl bf_execute\n.type bf_execute, @function\nbf_execute:\n");
     fprintf(out, "    pushq %%r12\n    pushq %%r13\n    pushq %%r14\n    pushq %%r15\n    pushq %%rbx\n    pushq %%rbp\n    subq $8, %%rsp\n");
-    fprintf(out, "    movq %%rdi, %%r12\n    movq %%rdi, %%r13\n");
+    fprintf(out, "    movq %%rdi, %%r12\n");
+    fprintf(out, "    testq %%rsi, %%rsi\n");
+    fprintf(out, "    jnz 1f\n");
+    fprintf(out, "    leaq -4000000(%%rdi), %%rsi\n");
+    fprintf(out, "    leaq 4000000(%%rdi), %%rdx\n");
+    fprintf(out, "1:\n");
+    fprintf(out, "    movq %%rsi, %%r14\n");
+    fprintf(out, "    movq %%rdx, %%r15\n");
 
     fill_queue(in);
 
@@ -83,9 +90,11 @@ int main(int argc, char **argv) {
             if (op == '>') {
                 if (count == 1) fprintf(out, "    addq $8, %%r12\n");
                 else fprintf(out, "    addq $%ld, %%r12\n", count * 8);
+                fprintf(out, "    cmpq %%r15, %%r12\n    jae .L_tape_overflow\n");
             } else if (op == '<') {
                 if (count == 1) fprintf(out, "    subq $8, %%r12\n");
                 else fprintf(out, "    subq $%ld, %%r12\n", count * 8);
+                fprintf(out, "    cmpq %%r14, %%r12\n    jb .L_tape_underflow\n");
             } else if (op == '+') {
                 if (count == 1) fprintf(out, "    incq (%%r12)\n");
                 else fprintf(out, "    addq $%ld, (%%r12)\n", count);
@@ -145,15 +154,25 @@ int main(int argc, char **argv) {
     }
 
     fprintf(out, "    addq $8, %%rsp\n    popq %%rbp\n    popq %%rbx\n    popq %%r15\n    popq %%r14\n    popq %%r13\n    popq %%r12\n    ret\n");
+    fprintf(out, ".L_tape_underflow:\n");
+    fprintf(out, "    movq $1, %%rax\n    movq $2, %%rdi\n    leaq .L_msg_underflow(%%rip), %%rsi\n    movq $30, %%rdx\n    syscall\n");
+    fprintf(out, "    movq $60, %%rax\n    movq $1, %%rdi\n    syscall\n");
+    fprintf(out, ".L_tape_overflow:\n");
+    fprintf(out, "    movq $1, %%rax\n    movq $2, %%rdi\n    leaq .L_msg_overflow(%%rip), %%rsi\n    movq $29, %%rdx\n    syscall\n");
+    fprintf(out, "    movq $60, %%rax\n    movq $1, %%rdi\n    syscall\n");
     fprintf(out, ".weak main\n.globl main\n.type main, @function\nmain:\n");
     fprintf(out, "    pushq %%rbp\n    movq %%rsp, %%rbp\n    subq $16, %%rsp\n");
     fprintf(out, "    movl $8000000, %%edi\n    movl $1, %%esi\n    call calloc\n");
     fprintf(out, "    testq %%rax, %%rax\n    jz .L_calloc_err\n");
     fprintf(out, "    movq %%rax, %%rbx\n    leaq 4000000(%%rbx), %%rdi\n");
+    fprintf(out, "    movq %%rbx, %%rsi\n    leaq 8000000(%%rbx), %%rdx\n");
     fprintf(out, "    call bf_execute\n");
     fprintf(out, "    movq %%rbx, %%rdi\n    call free\n");
     fprintf(out, "    xorl %%eax, %%eax\n    leave\n    ret\n");
     fprintf(out, ".L_calloc_err:\n    movl $1, %%edi\n    call exit\n");
+    fprintf(out, ".section .rodata\n");
+    fprintf(out, ".L_msg_underflow:\n    .ascii \"Error: tape pointer underflow\\n\"\n");
+    fprintf(out, ".L_msg_overflow:\n    .ascii \"Error: tape pointer overflow\\n\"\n");
 
     if (in != stdin) fclose(in);
     if (out != stdout) fclose(out);

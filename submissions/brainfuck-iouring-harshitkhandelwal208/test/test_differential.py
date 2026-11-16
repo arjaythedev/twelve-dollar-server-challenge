@@ -109,8 +109,12 @@ def run_differential_test(test_name, source_path, input_data=b"", expect_error=F
     rc_s2, out_s2, err_s2 = compile_and_run("stage2", source_path, input_data)
 
     if expect_error:
-        # Verify that all reject the program
-        if rc_interp != 0 and rc_s0 == -1 and rc_s1 == -1 and rc_s2 == -1:
+        # Verify that all reject the program (either compile-time .error or runtime boundary trap)
+        rejected_interp = (rc_interp != 0)
+        rejected_s0 = (rc_s0 != 0)
+        rejected_s1 = (rc_s1 != 0)
+        rejected_s2 = (rc_s2 != 0)
+        if rejected_interp and rejected_s0 and rejected_s1 and rejected_s2:
             print("OK [Correctly rejected by interpreter and all compiler stages]")
             return True
         else:

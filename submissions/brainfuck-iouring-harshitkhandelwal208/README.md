@@ -6,10 +6,10 @@ A genuinely self-hosting **Brainfuck** HTTP server implementation for the $12 Se
 
 ## Technical Highlights & Stack
 
-* **Application Logic Language**: **Pure Brainfuck** ([`src/bf/server.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/bf/server.bf) and [`src/compiler/bf_compiler.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/compiler/bf_compiler.bf)). All HTTP routing, endpoint matching, post ID accumulation, body validation, and error branching are executed on the Brainfuck memory tape.
-* **Genuinely Self-Hosting Compiler**: The Brainfuck compiler ([`src/compiler/bf_compiler.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/compiler/bf_compiler.bf)) is a general-purpose compiler written entirely in 8-instruction Brainfuck. It reads arbitrary Brainfuck source from stdin, handles nested loops, emits valid x86-64 GNU assembly, performs instruction coalescing and pattern lowering, and compiles itself to achieve bit-for-bit fixed-point reproducibility (`stage1.s` == `stage2.s`).
-* **Bootstrap Pipeline**: Bootstrapped via a minimal AOT C compiler ([`runtime/stage0.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/runtime/stage0.c)) that shares the exact language semantics, followed by full self-compilation in Stage 1.
-* **Reference Semantic Oracle**: An independent reference interpreter ([`test/interpreter/bf_interp.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/interpreter/bf_interp.c)) implementing the identical Brainfuck dialect semantics for differential verification.
+* **Application Logic Language**: **Pure Brainfuck** ([`src/bf/server.bf`](src/bf/server.bf) and [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf)). All HTTP routing, endpoint matching, post ID accumulation, body validation, and error branching are executed on the Brainfuck memory tape.
+* **Genuinely Self-Hosting Compiler**: The Brainfuck compiler ([`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf)) is a general-purpose compiler written entirely in 8-instruction Brainfuck. It reads arbitrary Brainfuck source from stdin, handles nested loops, emits valid x86-64 GNU assembly, performs instruction coalescing and pattern lowering, and compiles itself to achieve bit-for-bit fixed-point reproducibility (`stage1.s` == `stage2.s`).
+* **Bootstrap Pipeline**: Bootstrapped via a minimal AOT C compiler ([`runtime/stage0.c`](runtime/stage0.c)) that shares the exact language semantics, followed by full self-compilation in Stage 1.
+* **Reference Semantic Oracle**: An independent reference interpreter ([`test/interpreter/bf_interp.c`](test/interpreter/bf_interp.c)) implementing the identical Brainfuck dialect semantics for differential verification.
 * **C I/O Runtime**: Single-threaded event loop multiplexing 8 Linux `io_uring` ring instances and kernel direct descriptors (`IORING_REGISTER_FILES2`), eliminating syscall overhead.
 * **Database Driver**: In-process SQLite (`libsqlite3-dev` 3.45+) operating with WAL mode, `PRAGMA synchronous=NORMAL`, `PRAGMA mmap_size=268435456`, and persistent prepared statements.
 * **Cryptography**: OpenSSL (`libssl-dev` 3.0+) HMAC-SHA256 verification with startup context initialization.
@@ -28,6 +28,7 @@ The Brainfuck dialect implemented by both the reference interpreter (`test/inter
 | **Arithmetic Behavior** | Two's complement wrapping on overflow / underflow |
 | **Tape Size** | 1,000,000 cells (8,000,000 bytes allocated via `calloc`) |
 | **Initial Pointer** | Positioned in the middle of the tape (cell 500,000), supporting bidirectional movement |
+| **Tape Boundary Behavior** | Strictly enforced 1,000,000 cell boundary; pointer underflow (< 0) or overflow (>= 1,000,000) prints "Error: tape pointer underflow\n" or "Error: tape pointer overflow\n" to stderr and terminates with status 1 |
 | **Pointer Step** | 8 bytes per cell step in native x86-64 (`addq $8, %r12` / `subq $8, %r12`) |
 | **EOF Behavior** | Cell is set to `0` upon reaching EOF (`xorl %eax, %eax`) |
 | **Output Semantics** | Byte-level output via `putchar((int)(tape[ptr] & 0xFF))` |
@@ -39,7 +40,7 @@ The Brainfuck dialect implemented by both the reference interpreter (`test/inter
 
 ## 2. Genuinely Self-Hosting Compiler Architecture
 
-The compiler in [`src/compiler/bf_compiler.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/compiler/bf_compiler.bf) is a 100% pure Brainfuck application (no C or embedded shellcode) that parses arbitrary Brainfuck programs and emits complete x86-64 GNU assembly.
+The compiler in [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) is a 100% pure Brainfuck application (no C or embedded shellcode) that parses arbitrary Brainfuck programs and emits complete x86-64 GNU assembly.
 
 ### Architecture Stages
 1. **Lexical Filtering & Ingestion**:
@@ -66,7 +67,7 @@ The compiler in [`src/compiler/bf_compiler.bf`](file:///home/harshit/Projects/mc
 
 ## 3. The 3-Stage Bootstrap Pipeline
 
-The build process ([`build.sh`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/build.sh)) executes a verified 3-stage bootstrap:
+The build process ([`build.sh`](build.sh)) executes a verified 3-stage bootstrap:
 
 ```mermaid
 flowchart LR
@@ -98,7 +99,7 @@ flowchart LR
    ```
    `stage1.s` and `stage2.s` are bit-for-bit identical (`SHA-256: 2b313663ceec80f922174717eff29a112839e4af20fa7188b23586f64b4422be`).
 4. **Server Compilation**:
-   Stage 1 compiles the application server [`src/bf/server.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/bf/server.bf):
+   Stage 1 compiles the application server [`src/bf/server.bf`](src/bf/server.bf):
    ```bash
    ./build/stage1 < src/bf/server.bf > build/server_bf.s
    as -o build/server_bf.o build/server_bf.s
@@ -109,7 +110,7 @@ flowchart LR
 
 ## 4. Comprehensive Differential Testing
 
-The repository contains an independent reference interpreter ([`test/interpreter/bf_interp.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/interpreter/bf_interp.c)) and automated differential testing framework ([`test/test_differential.py`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/test_differential.py)).
+The repository contains an independent reference interpreter ([`test/interpreter/bf_interp.c`](test/interpreter/bf_interp.c)) and automated differential testing framework ([`test/test_differential.py`](test/test_differential.py)).
 
 For every test case, the suite runs:
 1. Reference Interpreter (`bf_interp`)
@@ -119,7 +120,7 @@ For every test case, the suite runs:
 
 And asserts 100% equivalence of outputs, exit codes, and compile-time error rejection.
 
-### Test Programs ([`test/programs/`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/programs/))
+### Test Programs ([`test/programs/`](test/programs/))
 * `hello_world.bf`: Standard Hello World greeting.
 * `empty.bf`: Empty program boundary handling.
 * `single_inc_dec.bf`: Cell increment/decrement operations.
@@ -144,6 +145,8 @@ And asserts 100% equivalence of outputs, exit codes, and compile-time error reje
 * `err_unmatched_close.bf`: Verification of compilation rejection on unexpected `]`.
 * `err_mismatched_brackets.bf`: Verification of rejection on mismatched bracket sequences.
 * `err_loop_depth_17.bf`: Verification of compilation rejection when loop depth exceeds 16.
+* `err_tape_underflow.bf`: Verification of runtime termination on pointer underflow below cell 0.
+* `err_tape_overflow.bf`: Verification of runtime termination on pointer overflow past cell 1,000,000.
 * **50 Deterministic Pseudo-Random Valid Programs**: Randomly synthesized valid Brainfuck programs exercising loops, boundary pointer movements, arithmetic RLE, comments, and clear idioms.
 * **20 Deterministic Pseudo-Random Malformed Programs**: Randomly synthesized invalid Brainfuck programs verifying consistent compile-time and runtime error rejection.
 
@@ -156,7 +159,7 @@ bash test/run_tests.sh
 
 ## 5. Runtime Architecture & Concurrency Audit
 
-The runtime ([`runtime/runtime.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/runtime/runtime.c)) provides the underlying network, SQLite, and cryptographic bindings for the Brainfuck application:
+The runtime ([`runtime/runtime.c`](runtime/runtime.c)) provides the underlying network, SQLite, and cryptographic bindings for the Brainfuck application:
 
 * **Execution Model**: The server runs on a **single OS thread** executing a single-threaded reactor event loop.
 * **8 io_uring Rings**: 8 separate `io_uring` instances are initialized to spread descriptor queues across 523,776 direct descriptor slots ($8 \times 65,472$). The single event loop polls and drains CQEs across all 8 rings in round-robin sequence. Describing these rings as "8 parallel worker threads" would be inaccurate: they are 8 kernel completion queues serviced cooperatively by one thread.
@@ -276,6 +279,6 @@ passed=42 failed=0
 # Build the self-hosted compiler and production server
 bash build.sh
 
-# Run the complete test suite (Self-hosting diff + 40 differential tests + 42 server tests)
+# Run the complete test suite (Self-hosting diff + 96 differential tests + 7 runtime correctness tests + 42 challenge tests)
 bash test/run_tests.sh
 ```

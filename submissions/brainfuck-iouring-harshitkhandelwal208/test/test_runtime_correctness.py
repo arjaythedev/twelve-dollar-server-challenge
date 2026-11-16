@@ -19,6 +19,7 @@ import hmac
 import hashlib
 import base64
 import json
+import threading
 
 PORT = 19875
 DB_PATH = "/tmp/feed_test_runtime.db"
@@ -156,14 +157,91 @@ def run_tests():
         s.close()
         print("PASS")
 
-        # Test 6: Malformed header handling
-        print("  [Test 6] Malformed header handling...", end=" ", flush=True)
+        # Test 6: Malformed request handling & rejection verification
+        print("  [Test 6] Malformed request handling & rejection verification...", end=" ", flush=True)
+        malformed_inputs = [
+            b"NOT_A_VALID_HTTP_REQUEST\r\n\r\n",
+            b"GET /path_without_version\r\n\r\n",
+            b"INVALID_METHOD /health HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            b"\r\n\r\n",
+        ]
+        for bad_req in malformed_inputs:
+            s = socket.create_connection(("127.0.0.1", PORT))
+            s.sendall(bad_req)
+            r = b""
+            try:
+                s.settimeout(1.0)
+                r = s.recv(4096)
+            except socket.timeout:
+                pass
+            s.close()
+            # Server must either close connection cleanly (EOF: b"") or return 40x error
+            assert (r == b"" or b"HTTP/1.1 40" in r), f"Expected connection close or 40x error for {bad_req!r}, got {r!r}"
+
+        # Verify that after handling malformed inputs, the server remains healthy
         s = socket.create_connection(("127.0.0.1", PORT))
-        s.sendall(b"NOT_A_VALID_HTTP_REQUEST\r\n\r\n")
+        s.sendall(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         r = s.recv(4096)
-        # Server should respond with 400 or close cleanly
         s.close()
+        assert b"200 OK" in r and b"\"status\":\"ok\"" in r, f"Server failed health check after malformed inputs: {r!r}"
         print("PASS")
+
+        # Test 7: Simultaneous multi-client concurrency (50 parallel clients)
+        print("  [Test 7] Simultaneous multi-client concurrency (50 parallel clients)...", end=" ", flush=True)
+        num_clients = 50
+        barrier = threading.Barrier(num_clients)
+        client_results = [None] * num_clients
+
+        def client_worker(idx):
+            try:
+                s = socket.create_connection(("127.0.0.1", PORT), timeout=5.0)
+                barrier.wait(timeout=5.0)
+
+                if idx % 4 == 0:
+                    req = b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    expected_status = b"200 OK"
+                elif idx % 4 == 1:
+                    req = b"GET /feed HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    expected_status = b"200 OK"
+                elif idx % 4 == 2:
+                    req = b"GET /posts/1 HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+                    expected_status = b"200 OK"
+                else:
+                    post_body = f'{{"body":"Simultaneous client {idx}"}}'.encode()
+                    req = (
+                        f"POST /posts HTTP/1.1\r\n"
+                        f"Host: localhost\r\n"
+                        f"Authorization: Bearer {token}\r\n"
+                        f"Content-Type: application/json\r\n"
+                        f"Content-Length: {len(post_body)}\r\n"
+                        f"Connection: close\r\n\r\n"
+                    ).encode() + post_body
+                    expected_status = b"201 Created"
+
+                s.sendall(req)
+                resp = b""
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk: break
+                    resp += chunk
+                s.close()
+
+                if expected_status in resp:
+                    client_results[idx] = "OK"
+                else:
+                    client_results[idx] = f"Status mismatch: expected {expected_status}, got {resp[:100]!r}"
+            except Exception as e:
+                client_results[idx] = f"Exception: {e}"
+
+        threads = [threading.Thread(target=client_worker, args=(i,)) for i in range(num_clients)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10.0)
+
+        failures = [res for res in client_results if res != "OK"]
+        assert len(failures) == 0, f"{len(failures)} simultaneous clients failed: {failures[:5]}"
+        print(f"PASS (all {num_clients} concurrent requests succeeded)")
 
         print("\nAll HTTP runtime correctness tests PASSED!")
         return True

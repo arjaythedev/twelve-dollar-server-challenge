@@ -22,13 +22,6 @@
   accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues,
   so a ramp's new connections wait there instead of being refused. A connection is accepted when its handshake
   completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives).
-- **Admission at the door.** Each listener's accept queue holds 64 connections (`ADMITQ`). While the oldest request
-  waiting for an answer is 25 ms old or more (`ADMITHI`), the loop cancels its accepts, and it accepts again once that
-  age is under 5 ms (`ADMITLO`), so the connections already open get the CPU through a burst of arrivals. Meanwhile
-  new connections wait in the accept queues; once those are full the kernel drops their SYNs and the client sends them
-  again (after 1 s, then 3 s). Part of the gain comes from where that wait is counted: a load generator that times a
-  request from the moment its connection is up (mload leaves the dial out) doesn't count a resent SYN as request time.
-  The idea, and this note, come from [c-iouring-jowinjestine](../c-iouring-jowinjestine) (#435).
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -55,10 +48,13 @@
   first pass after the hold answers up to 4,096 of them, oldest first, in its one commit. Releasing at most a pass's
   64 answers per write window let the held set outgrow the release rate after a checkpoint hold under load: every pass
   then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
-- **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
-  few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
-  first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
-  waits without bound.
+- **Oldest first.** A pass answers up to 256 requests, oldest first, keeping each connection's order;
+  the rest stay parsed in the batch for the next pass (a parsed request costs a few dozen bytes, one left in its socket
+  a 3-4 KB socket buffer), and the loop doesn't wait for completions while any are queued. Earlier versions answered
+  64 per pass and, past one pass of backlog, the newest first, so that fewer requests waited past the 40 ms delayed-ACK
+  timer. But then a stall of a few hundred milliseconds left its oldest requests waiting until the whole backlog
+  drained, seconds at 80-85 % CPU, and in a short run a few such stalls are 1 % of the requests. Oldest first, a
+  request waits about as long as the stall. `LIFO=1 ANSWERS=64` restores the old order.
 - **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
@@ -147,7 +143,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `ADMITQ` (64; 0: no admission control), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (256), `LIFO` (0), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
 line a second on stderr).
 
@@ -155,8 +151,8 @@ line a second on stderr).
 
 The loop's policies (accept high-water marks, bounded re-arms, answers per pass, newest-first under backlog, the write
 window, checkpoint holds) come from the author's [objc-uring-delneg](../objc-uring-delneg), and `Ring.fs` and `Jwt.fs`
-from the author's F# entries. Ideas from other entries: the `unix-excl` VFS and eight `SO_REUSEPORT` listeners from
-[rust-iouring-kensac](../rust-iouring-kensac), and calling SQLite's `sqlite3Btree*` functions on the unmodified
+from the author's F# entries. Ideas from other entries: the `unix-excl` VFS, eight `SO_REUSEPORT` listeners and
+oldest-first passes from [rust-iouring-kensac](../rust-iouring-kensac), and calling SQLite's `sqlite3Btree*` functions on the unmodified
 amalgamation built with `SQLITE_PRIVATE` defined empty from [swift-iouring-akbashev](../swift-iouring-akbashev),
 and writing each commit's WAL frames with one `pwrite` at the commit frame, and the page cache's truncate walk, from
 [c-iouring-pavlyhalim](../c-iouring-pavlyhalim).

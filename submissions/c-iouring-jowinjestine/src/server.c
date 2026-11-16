@@ -528,6 +528,11 @@ static void on_eventfd(struct io_uring_cqe *cqe) {
   unsigned notified_ring = UD_RING(cqe->user_data);
   if (notified_ring >= NR || R[notified_ring].efd < 0) return;
   S.eventfd_events++;
+  /* Drain the eventfd's readiness counter.  It is nonblocking and may have
+   * already been drained by another eventfd CQE in this batch.  Without this,
+   * an eventfd can remain readable and generate unnecessary poll wakeups. */
+  uint64_t count;
+  (void)read(R[notified_ring].efd, &count, sizeof count);
   /* The multishot eventfd poll normally stays armed.  If it terminates,
    * rearm it on the primary ring for reliable cross-ring wakeups. */
   if (!(cqe->flags & IORING_CQE_F_MORE) && eventfd_wake)

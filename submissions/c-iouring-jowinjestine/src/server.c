@@ -1014,7 +1014,7 @@ int main(int argc, char **argv) {
   /* The rings a full load needs are made now, while the box is idle: a ring is ~1 MB of
    * physically contiguous kernel memory, and asking for that mid-ramp, with a gigabyte of socket
    * slab fragmenting the memory, can stall the loop in compaction. */
-  long pre = env_long("PRE_CONNS", 430000); /* 400k: allocate all seven rings before the ramp */
+  long pre = env_long("PRE_CONNS", 330000); /* pre-create six rings for a 310k+ run; use 430000 for 400k */
   while (NR < NR_MAX && (long)NR * (long)nslots < pre && ring_create(NR) == 0) NR++;
   prewarm();
   fprintf(stderr, "experiment: idle_poll=%d eventfd_wake=%d recv_size=%u backlog_slice_us=%u pre_conns=%ld\n",

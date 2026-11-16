@@ -43,10 +43,11 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
-  ring 0 waits for 256 completions or 1 ms, whichever comes first, so bigger batches share one
-  commit and a pass never spins. (4 ms batches were tried: they cut the WAL ~40 %, one set of
-  hot-page frames per commit, but under a CPU quota they add 25-50 ms to p95 at high load, so
-  the batches stay short.)
+  ring 0 waits for 64 completions or 2 ms, whichever comes first, so bigger batches share one
+  commit and a pass never spins. Every pass enters every ring, so fewer, fuller passes are less
+  CPU: measured at 300k connections, ~4 % less loop CPU than 256 completions / 1 ms, with p99
+  unchanged. (4 ms batches were tried: they cut the WAL ~40 %, one set of hot-page frames per
+  commit, but under a CPU quota they add 25-50 ms to p95 at high load.)
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per
@@ -149,47 +150,42 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
-  rust-iouring-kensac #264, changed for one vCPU). Past 4,096 WAL frames (16 MB) a thread at
-  nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
-  writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
-  fully copied; so that thread runs pass after pass, each copying what the previous one missed,
-  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). Then
-  writes are held (reads go on; the next POST on each connection waits in its buffer) while a
-  second thread at the normal priority copies that remainder: a few milliseconds of copying plus
-  the syncs of the log and of the database, on a thread. **The loop's next write restarts the
-  log**, as in kensac's entry. (Until this commit the tail thread restarted it with a one-frame
-  transaction, to keep the log-header sync off the loop. But a log restarted by another
-  connection makes SQLite drop the loop connection's whole page cache at its next read: every
-  cycle, the hot pages were read again, ~105-119k cache misses per run against ~8.9k now. On a
-  disk whose reads cost milliseconds, with the box's memory pressure evicting the file's pages,
-  those misses are reads from the disk on the loop thread. `TAIL_RESTART=1` brings it back.) A hold
-  starts and ends only between batches and lasts at most 400 ms (writes only, once per cycle:
-  under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the next
-  cycle waits for half a log more, so a slow disk never gives back-to-back holds, and the limit
-  grows for a log that has missed restarts, up to 800 ms and no further: a POST that waited a
-  second would count against the score, so past that the log is simply allowed to grow (a
-  longer log costs the loop nothing while its page cache holds the hot pages: the wal-index is
-  consulted only on a cache miss) until the disk gives a restart. Cycles are 16 MB (they were
-  64 MB, with a read-ahead of up to 256 MB of log before each pass; `CKPT_FRAMES=16384
-  WAL_READAHEAD=1` bring that back): less log in the page cache at the box's memory wall, so
-  fewer of the database's own pages are evicted. (`e3070c5` tried 16 MB cycles alone and scored
-  260,000: with the tail thread still restarting the log that meant four times as many cache
-  wipes.) Measured in a 1 vCPU / 2 GB guest with 2 ms added to every disk read and write, 270k
-  users: p99 4.5 s / 2.4 s before, 2.2 s / 0.81 s after; worst commit 249 / 137 ms before,
-  60 / 24 ms after.
-  (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms limit: on the
-  box the tail's sync of a few hundred random pages outlasted the limit, the log never restarted,
-  and the last resort copied half a gigabyte on the loop once per probe, the one stall that
-  failed every 280k probe at 78 % CPU.) While idle, the bulk thread starts the writeback of the log pages
-  written since its last look every 250 ms (`sync_file_range`, no waiting), so the log's dirty
-  pages reach the disk continuously rather than in a burst at the next fsync, and the tail's
-  sync finds little left. Two earlier designs scored worse
-  on the box. `c3fdb10` (270,000 users) copied the tail without the convergence: on one vCPU it
-  had grown to tens of MB during the slow bulk, the thread competed with the loop for the core and
-  the holds ran into their limit, so every request saw the cycle (p95 114 ms, p99 551 ms at 77 %
-  CPU). `f2f9227` (253,000) copied the small tail on the loop itself: its two fsyncs stalled the
-  loop for seconds on the droplet's disk (p99 3.5 s on a hold). Past 1,048,576 frames (4 GB, a
-  disk that gave no restart for minutes) the loop checkpoints by itself, as a last resort.
+  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
+  nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time, after a
+  read-ahead of the log (up to 256 MB: the pass reads frames in page order, random in the file).
+  Under steady writes a pass cannot copy the frames written meanwhile, and the log only restarts
+  once it is fully copied; so that thread runs pass after pass, each copying what the previous one
+  missed, until fewer than 64 frames remain. Then writes are held (reads go on; the next POST on
+  each connection waits in its buffer) while a second thread at the normal priority copies that
+  remainder and restarts the log with a one-frame transaction, so the log-header sync SQLite does
+  on a restart lands there too: a few milliseconds of copying plus the syncs, on a thread.
+- **The log stays bounded.** A nice-19 thread gets ~1.5 % of a saturated core, and nothing else
+  stopped the log from growing (short of the 4 GB last resort below), each frame staying in the
+  page cache at the box's memory wall. Past 32,768 frames (128 MB, `CKPT_URGENT`) the passes go to
+  a third checkpoint thread at the normal priority until the log restarts. (A thread of its own
+  because an unprivileged thread can raise its nice value but never lower it again.)
+- A hold starts and ends only between batches and lasts at most 400 ms (writes only, once per
+  cycle: under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the
+  next cycle waits for half a log more, so a slow disk never gives back-to-back holds; for a log
+  past 128 MB the limit grows to 800 ms and no further (a POST that waited a second would count
+  against the score). `TAIL_RESTART=0` makes the loop's next write restart the log instead, as in
+  kensac's entry: the loop's page cache then survives the cycle (a restart by another connection
+  makes SQLite drop it), but the loop does the header sync. `91da0e6` defaulted to that with 16 MB
+  cycles and no read-ahead, and scored 266,000 (it passed 280k for two minutes, then failed the
+  five-minute hold with its memory peak at 1.6 GB); `8193037`, with this design, held 280,000 at
+  an 810 MB peak. (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms
+  limit: on the box the tail's sync of a few hundred random pages outlasted the limit, the log
+  never restarted, and the last resort copied half a gigabyte on the loop once per probe, the one
+  stall that failed every 280k probe at 78 % CPU.) While idle, the bulk thread starts the
+  writeback of the log pages written since its last look every 250 ms (`sync_file_range`, no
+  waiting), so the log's dirty pages reach the disk continuously rather than in a burst at the
+  next fsync, and the tail's sync finds little left. Two earlier designs scored worse on the box.
+  `c3fdb10` (270,000 users) copied the tail without the convergence: on one vCPU it had grown to
+  tens of MB during the slow bulk, the thread competed with the loop for the core and the holds
+  ran into their limit, so every request saw the cycle (p95 114 ms, p99 551 ms at 77 % CPU).
+  `f2f9227` (253,000) copied the small tail on the loop itself: its two fsyncs stalled the loop
+  for seconds on the droplet's disk (p99 3.5 s on a hold). Past 1,048,576 frames (4 GB, a disk
+  that gave no restart for minutes) the loop checkpoints by itself, as a last resort.
 - Build options: `THREADSAFE=2` (each connection is used by one thread), `DEFAULT_MEMSTATUS=0`,
   `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`,
   `USE_ALLOCA`, `TEMP_STORE=3`, `OMIT_` deprecated/progress-callback/shared-cache/load-extension/

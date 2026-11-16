@@ -891,9 +891,9 @@ static void drain_cqes(RingWorker *w) {
 
 static inline void enter_with_timeout(int fd, unsigned to_submit, unsigned min_complete, int64_t ns) {
     struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = ns };
-    struct io_uring_getevents_arg arg = {
-        .sigmask = 0, .sigmask_sz = 0, .min_wait_usec = 0, .ts = (uint64_t)&ts
-    };
+    struct io_uring_getevents_arg arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.ts = (uint64_t)&ts;
     unsigned flags = IORING_ENTER_GETEVENTS | IORING_ENTER_EXT_ARG;
     sys_io_uring_enter(fd, to_submit, min_complete, flags, &arg, sizeof(arg));
 }

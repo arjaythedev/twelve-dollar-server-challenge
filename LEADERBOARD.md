@@ -138,22 +138,22 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 51 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
 | 51 | rust-native-M3M0KA | #265 | Rust (no crates, epoll/io_uring, 5 worker processes, SQLite B-tree reads) | **230,000** ʳ | 22,304 | 150 | 352 | 0.00 | 90 | 37 | 1,350 | 2026-11-02 |
 | 51 | nelua-iouring-tbsvttr | #281 | Nelua (io_uring, SQLite B-tree reads) | **230,000** | 22,379 | 11.8 | 49.6 | 0.00 | 69 | 28 | 938 | 2026-11-02 |
-| 55 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
-| 55 | lean-derive-drain-hargup | #462 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **228,000** | 22,147 | 94.6 | 455.9 | 0.00 | 76 | 32 | 698 | 2026-11-15 |
-| 57 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
-| 58 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
-| 58 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
-| 58 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
-| 58 | cpp-io_uring-0329-at | #442 | C++ (io_uring, SQLite B-tree reads) | **220,000** ᴹ | 21,320 | 341.6 | 465.0 | 0.00 | 71 | 31 | 777 | 2026-11-15 |
-| 58 | julia-iouring-amanica | #472 | Julia (io_uring, SQLite) | **220,000** | 21,436 | 95.6 | 811.9 | 0.00 | 91 | 39 | 1,484 | 2026-11-16 |
-| 63 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 63 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
-| 65 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
-| 65 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
-| 65 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
-| 65 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
-| 65 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
-| 65 | nexium-iouring-Londopy | #465 | Nexium (compiles to C, io_uring, SQLite B-tree reads and writes) | **210,000** ᶫ | 20,574 | 76.8 | 205.7 | 0.00 | 65 | 29 | 504 | 2026-11-16 |
+| 51 | nexium-iouring-Londopy | #465 | Nexium (compiles to C, io_uring, SQLite B-tree reads and writes) | **230,000** ᶫ | 22,308 | 263.7 | 584.6 | 0.00 | 72 | 30 | 668 | 2026-11-16 |
+| 56 | cider-iouring-pomilon-v3 | #234 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **228,000** | 21,945 | 370 | 853 | 0.00 | 86 | 36 | 668 | 2026-10-31 |
+| 56 | lean-derive-drain-hargup | #462 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **228,000** | 22,147 | 94.6 | 455.9 | 0.00 | 76 | 32 | 698 | 2026-11-15 |
+| 58 | dexlang-iouring-tuned-ensamuel7 | #279 | DexLang (generated C, io_uring, SQLite B-tree reads) | **226,000** ᵝ | 21,876 | 297 | 633 | 0.00 | 84 | 35 | 873 | 2026-11-02 |
+| 59 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
+| 59 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
+| 59 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
+| 59 | cpp-io_uring-0329-at | #442 | C++ (io_uring, SQLite B-tree reads) | **220,000** ᴹ | 21,320 | 341.6 | 465.0 | 0.00 | 71 | 31 | 777 | 2026-11-15 |
+| 59 | julia-iouring-amanica | #472 | Julia (io_uring, SQLite) | **220,000** | 21,436 | 95.6 | 811.9 | 0.00 | 91 | 39 | 1,484 | 2026-11-16 |
+| 64 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 64 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
+| 66 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
+| 66 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
+| 66 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
+| 66 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
+| 66 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
 | 71 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
 | 72 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
 | 73 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
@@ -1143,11 +1143,12 @@ Arjay, see the rule flags below) held **270,000** (25,837 req/s, p95 173.6 / p99
 863 MB, 2026-11-15), 42/42 tests. 280,000 and 320,000 failed the 2-minute probe on latency (p99 788 ms / 8.5 s, 0
 errors). Its first head `0aa265c` also held 270,000 (25,755 req/s, p95 222.7 / p99 980.8 ms, 0 err, 83 % CPU, 1,105 MB,
 2026-11-14); there 280,000 and 320,000 failed on `connection refused`, which `04f764d` fixes.
-**nexium-iouring-Londopy #465** (`c0d988b`, new entry by the same author: a port of #438 to their own language,
+**nexium-iouring-Londopy #465** (`4c525a4`, new entry by the same author: a port of #438 to their own language,
 Nexium, whose compiler `build.sh` bootstraps from source; held, not merged, for the same B-tree-writes question) held
-**210,000** (20,574 req/s, p95 76.8 / p99 205.7 ms, 0 err, 65 % CPU, 29 µs/req, 504 MB, 2026-11-16), 42/42 tests.
-220,000, 240,000 and 320,000 failed the 2-minute probe on latency (p99 1.07 s / 1.34 s / 2.99 s at 73 / 77 / 96 % CPU,
-0 errors).
+**230,000** (22,308 req/s, p95 263.7 / p99 584.6 ms, 0 err, 72 % CPU, 30 µs/req, 668 MB, 2026-11-16), 42/42 tests.
+240,000 and 320,000 failed the 2-minute probe on latency (p99 1.31 s / 12.3 s, 0 errors). Its earlier head `c0d988b`
+(with the loop's wait-for-checkpoint, removed in `4c525a4`) held 210,000 (20,574 req/s, p95 76.8 / p99 205.7 ms,
+65 % CPU, 504 MB).
 
 ᴵ **luajit-iouring-asxpi** stays on its merged #436 row. Its follow-up **#453** (`5124d8f`, reads answered first,
 writes committed at most every 10 ms, kept read transactions, a public `SQLITE_CONFIG_PCACHE2` wrapper; not merged: it
@@ -1354,7 +1355,7 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   the constraints (body length, post exists, unique like) checked by its own code, inside SQLite's own transactions and
   WAL. Open question for Arjay: ruling 1 covers B-tree *reads* only (stock SQLite 3.54.1, no source patch, no private
   struct writes). `WRITES=sql` switches to prepared INSERTs. Scored as submitted (270k at `04f764d`); held open.
-  The same author's **nexium-iouring-Londopy #465** writes the same way (210k at `c0d988b`); held open on the same
+  The same author's **nexium-iouring-Londopy #465** writes the same way (230k at `4c525a4`); held open on the same
   question. Its compiler (`nx`) is built in `build.sh` from the author's repository at a pinned commit, starting from
   a ~9 MB generated-C seed that can't be reviewed line by line: also Arjay's call under rule 10.
 - **cpp-io_uring-0329-at #442 reads `users` pages below the cursor API**: `dbx_users_seek_many` (`shim.c`, new in

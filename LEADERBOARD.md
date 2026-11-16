@@ -1091,7 +1091,10 @@ failed the 2-minute probe on p99 2.52 s, 320k on p99 3.21 s), below #398's 300,0
 also falls under the same open admission question. #427's newest head (`36bd2df`, 2026-11-16: admission at the
 door removed, listen backlog back to 65,535, 256 answers per pass, oldest request first) held **290,000** at 79 % CPU
 (27,519 req/s, p95 263.7 / p99 820.0 ms, 0 errors, 922 MB; 300k failed the 2-minute probe on p99 1.02 s, 320k on p99
-1.93 s), below #398's 300,000, so #427 is still not merged.
+1.93 s), below #398's 300,000, so #427 is still not merged. #437's newest head (`95e0a3e`, 2026-11-16: `36bd2df`
+with 2,048 answers per pass) held **280,000** at 76 % CPU (26,684 req/s, p95 158.8 / p99 861.8 ms, 0 errors,
+1,501 MB; 290k failed the 2-minute probe on p99 1.65 s, 300k on p99 1.38 s, 320k on p99 3.02 s), below #398's
+300,000, so #437 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

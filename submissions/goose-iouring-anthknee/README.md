@@ -58,6 +58,10 @@ SQLITE_PATH=/absolute/path/feed.db JWT_SECRET=twelve-dollar-challenge \
 
 Goose’s `c_headers` exposes the native I/O adapters to the C compiler for inlining. GCC builds the generated C, adapters and SQLite with `-O3` and link-time optimization. The build targets `x86-64-v3`, tunes for Cascade Lake and prefers 256-bit vectors. Runtime assertions stay enabled.
 
+## Credits
+
+I adapted the JSON, JWT and SQLite record routines from [goose-iouring-ahmadsh2007 (#291)](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/291) and [sstadick’s changes](https://github.com/sstadick/twelve-dollar-server-challenge/pull/1), and based the native SQLite adapters and io_uring calls on #291 and [rust-iouring-kensac (#264)](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
+
 ## AI
 
 Done using GPT-6.1 Sol Max and GPT-6 Astra Extra High.

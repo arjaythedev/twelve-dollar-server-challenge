@@ -162,8 +162,11 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - **The log stays bounded.** A nice-19 thread gets ~1.5 % of a saturated core, and nothing else
   stopped the log from growing (short of the 4 GB last resort below), each frame staying in the
   page cache at the box's memory wall. Past 32,768 frames (128 MB, `CKPT_URGENT`) the passes go to
-  a third checkpoint thread at the normal priority until the log restarts. (A thread of its own
-  because an unprivileged thread can raise its nice value but never lower it again.)
+  a third checkpoint thread at nice 10 until the log restarts: ~10 % of the core against the loop,
+  enough to catch up (a checkpoint that keeps up needs ~1 %). (`297c8ea` had such a thread at the
+  normal priority, and on the box it ran against the loop as an equal minutes into a hold. A
+  thread of its own because an unprivileged thread can raise its nice value but never lower it
+  again.)
 - A hold starts and ends only between batches and lasts at most 400 ms (writes only, once per
   cycle: under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the
   next cycle waits for half a log more, so a slow disk never gives back-to-back holds; for a log

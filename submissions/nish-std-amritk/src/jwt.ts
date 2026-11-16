@@ -121,10 +121,7 @@ export class Jwt {
     hmacCopySha256(this.keyed.inner, this.work.inner)
     hmacCopySha256(this.keyed.outer, this.work.outer)
     this.work.update(src, off, len)
-    const tag: u8[] = this.work.digest()
-    for (let k: i32 = 0; k < 32; k++) {
-      out[at + k] = tag[k]
-    }
+    this.work.digestInto(out, at)
   }
 
   /**

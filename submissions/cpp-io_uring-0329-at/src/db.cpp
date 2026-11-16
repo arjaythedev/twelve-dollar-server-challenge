@@ -25,7 +25,7 @@ void checkpoint_loop(dbx* h, CkState* st) {
   setpriority(PRIO_PROCESS, 0, 19);
   std::unique_lock<std::mutex> lk(st->mu);
   while (!st->stop.load()) {
-    st->cv.wait_for(lk, std::chrono::milliseconds(4), [st] { return st->stop.load(); });
+    st->cv.wait_for(lk, std::chrono::milliseconds(20), [st] { return st->stop.load(); });
     if (st->stop.load()) break;
     lk.unlock();
     /* PASSIVE, so it never waits for the loop's readers: copy what it can, and once every frame

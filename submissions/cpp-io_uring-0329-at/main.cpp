@@ -115,6 +115,7 @@ class Server {
   bool init(const char* host, uint16_t port) {
     host_ = host;
     port_ = port;
+    app::preload_pool(pool_);
     return add_ring();
   }
 
@@ -318,13 +319,13 @@ class Server {
         if (p5 - stat_at >= 1000000000ULL) {
           std::fprintf(stderr,
                        "stats: pass=%llu/s cqes=%llu req=%llu gated=%llu/%llu wait=%.1f%% drain=%.1f%% "
-                       "read=%.1f%% commit=%.1f%% sweep=%.1f%% pool_miss=%lu\n",
+                       "read=%.1f%% commit=%.1f%% sweep=%.1f%% pool_miss=%lu pool=%zu\n",
                        (unsigned long long)(pass - stat_pass), (unsigned long long)cqes_sum,
                        (unsigned long long)requests_sum, (unsigned long long)held_gate,
                        (unsigned long long)(pass - stat_pass), 100.0 * t_wait / (p5 - stat_at),
                        100.0 * t_drain / (p5 - stat_at), 100.0 * t_read / (p5 - stat_at),
                        100.0 * t_commit / (p5 - stat_at), 100.0 * t_sweep / (p5 - stat_at),
-                       app::pool_misses());
+                       app::pool_misses(), pool_.size());
           stat_at = p5;
           stat_pass = pass;
           t_wait = t_drain = t_read = t_commit = t_sweep = 0;

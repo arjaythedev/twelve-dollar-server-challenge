@@ -931,7 +931,10 @@ follow-up #470 (`b81f018`, merged) serves the port itself on a Tcl 8.7a5 it buil
 scored hold: 45,000 failed the 2-minute probe on p99 (1.28 s at 91 % CPU) and 50,000 on p99 plus 0.43 % timeouts (95 %).
 On the rig its `install.sh` exited 100 (the box already had a newer `libsqlite3-tcl`, 3.45.1-1ubuntu2.9, than the
 pinned 3.45.1-1ubuntu2, and apt won't downgrade without `--allow-downgrades`); every package it needs was already
-installed, so the run went ahead unpatched on that newer binding.
+installed, so the run went ahead unpatched on that newer binding. Follow-up #477 (`8a0b1a8`, 2026-11-16, open) adds
+`--allow-downgrades` to that install and changes nothing else; it held the same 43,000 (4,222 req/s, p95 59.9 / p99
+201.6 ms, 0 errors, 86 % CPU, 189 µs/req, 703 MB; 42/42; 45,000 failed the 2-minute probe on p99), so the row stays at
+#470's run.
 
 ᵅ **TeX went from Nginx to direct.** Its merged #457 code (`3734a94`), behind Nginx, held 24,000 (2,362 req/s, p95 28.4 /
 p99 88.3 ms, 62 % CPU, 244 µs/req, 80 MB, 2026-11-15) with 0.96 % errors: EOFs, all on POSTs (13 % of likes and 11 % of

@@ -64,7 +64,10 @@ held 250,000 and its merged #399 code (`bab1010`) 220,000. Its later follow-up #
 held, not merged: it didn't beat the merged row) scored 230,000 (22,383 req/s, p95 10.5 / p99 34.0 ms, 0 err, 63 % CPU,
 26 µs/req, 674 MB, 2026-11-14; 240,000 failed the 2-minute probe on p99 1.39 s); its next commit `3be2728` (log restarts
 spaced by hold length) scored 280,000 (26,693 req/s, p95 197.6 / p99 539.9 ms, 0 err, 76 % CPU, 26 µs/req, 860 MB,
-2026-11-14; 290,000 failed the 2-minute probe on p99 2.03 s), the same as the merged row, so it isn't merged either. asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
+2026-11-14; 290,000 failed the 2-minute probe on p99 2.03 s), the same as the merged row, so it isn't merged either; its
+next commit `2e1163d` (512 answers per pass, newest waiting requests first in a backlog) scored 270,000 (25,871 req/s,
+p95 20.4 / p99 122.6 ms, 0 err, 72 % CPU, 25 µs/req, 1,041 MB, 2026-11-16; 280,000 failed the 2-minute probe on p99
+2.09 s), below the merged row, so it isn't merged either. asm-raw-StefanoC90 is scored at its follow-up PR #431 (`8b2c9f2`, merged); its merged
 #414 code (`7c9e722`, thread per connection behind Nginx) held 24,000. zig-iouring-harshitkhandelwal208 is scored at
 its follow-up PR #460 (`122da96`: 8 io_uring rings, SQLite B-tree cursor reads; held, not merged yet: the README's
 credit to #264 doesn't match the code and it commits a PGO profile, see the rule flags; its earlier `7c2ebfb` held

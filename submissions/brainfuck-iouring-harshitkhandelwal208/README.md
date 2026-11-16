@@ -1,167 +1,204 @@
 # brainfuck-iouring-harshitkhandelwal208
 
-A pure **Brainfuck** implementation for the $12 Server Challenge (`arjaythedev/twelve-dollar-server-challenge`), engineered for ultra-low latency and minimal CPU overhead on a 1 vCPU, 2 GB RAM environment.
+A genuinely self-hosting **Brainfuck** HTTP server implementation for the $12 Server Challenge (`arjaythedev/twelve-dollar-server-challenge`), engineered for low latency and minimal CPU overhead on a 1 vCPU, 2 GB RAM environment.
 
 ---
 
-## Deployment Configuration & Stack
+## Technical Highlights & Stack
 
-* **Server Mode**: **Direct (No Nginx)**. The engine binds directly to `0.0.0.0:$PORT` (default `3000`) and serves HTTP directly via Linux kernel `io_uring` direct descriptors (`IORING_REGISTER_FILES2`), saving the 14–20% CPU overhead incurred by reverse proxying and handling hundreds of thousands of concurrent connections natively.
-* **Application Logic Language**: **Pure Brainfuck** (`src/bf/server.bf` and `src/compiler/bf_compiler.bf`). All HTTP parsing, route selection, post ID decimal accumulation, body presence checks, and error responses are written entirely in 8-instruction Brainfuck.
-* **Compiler Pipeline**: Self-hosted pure Brainfuck compiler (`src/compiler/bf_compiler.bf`) bootstrapped via an ultra-compact ~75-line naive C translator (`runtime/stage0.c`), reversing roles so that the optimizing AOT compiler is 100% written in pure Brainfuck.
-* **Database Driver**: In-process SQLite (`libsqlite3-dev` 3.45+) with WAL mode, `PRAGMA synchronous=NORMAL`, `PRAGMA mmap_size=268435456`, and persistent prepared statements.
-* **Cryptography**: OpenSSL (`libssl-dev` 3.0+) constant-time HMAC-SHA256 coprocessor with pre-initialized context replication.
-
----
-
-## Overview & Philosophy
-
-Can an esoteric programming language with only 8 instructions (`+ - < > [ ] , .`) run a production-grade, high-performance database web server?
-
-Yes.
-
-This repository is **100% Brainfuck** for all application logic:
-- The entire HTTP protocol engine, routing state machine, ID digit accumulator, error branching, and database dispatch logic reside in [`src/bf/server.bf`](src/bf/server.bf) (1,461 lines of standard-wrapped, fully annotated pure Brainfuck).
-- The self-hosted Brainfuck native optimizing compiler resides in [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) (7,535 lines of pure Brainfuck).
-- The `src/` directory contains 100% pure Brainfuck code (.bf) and documentation (.md).
-- The C bootstrap compiler (`runtime/stage0.c`) has been shrunk to an ultra-basic ~75-line naive translator, reversing roles so that the full optimizing compiler logic is 100% Brainfuck-hosted.
-
-```
--------------------------------------------------------------------------------
-Language                     files          blank        comment           code
--------------------------------------------------------------------------------
-Brainfuck                        2             42            153           8801
-C (runtime & stage0)             2            106             19           1077
-Markdown                         1             32              0            184
-Bourne Shell                     3             10             10             59
--------------------------------------------------------------------------------
-Total                            8            190            182          10121
--------------------------------------------------------------------------------
-```
-
-To achieve maximum performance under strict challenge constraints (1 vCPU, 2 GB RAM, SQLite WAL durability, zero cross-request caching), we created the **BF-MMIO (Memory-Mapped I/O) Architecture** for Brainfuck and paired it with an optimizing AOT (Ahead-of-Time) Brainfuck compiler.
+* **Application Logic Language**: **Pure Brainfuck** ([`src/bf/server.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/bf/server.bf) and [`src/compiler/bf_compiler.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/compiler/bf_compiler.bf)). All HTTP routing, endpoint matching, post ID accumulation, body validation, and error branching are executed on the Brainfuck memory tape.
+* **Genuinely Self-Hosting Compiler**: The Brainfuck compiler ([`src/compiler/bf_compiler.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/compiler/bf_compiler.bf)) is a general-purpose compiler written entirely in 8-instruction Brainfuck. It reads arbitrary Brainfuck source from stdin, handles nested loops, emits valid x86-64 GNU assembly, performs instruction coalescing and pattern lowering, and compiles itself to achieve bit-for-bit fixed-point reproducibility (`stage1.s` == `stage2.s`).
+* **Bootstrap Pipeline**: Bootstrapped via a minimal AOT C compiler ([`runtime/stage0.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/runtime/stage0.c)) that shares the exact language semantics, followed by full self-compilation in Stage 1.
+* **Reference Semantic Oracle**: An independent reference interpreter ([`test/interpreter/bf_interp.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/interpreter/bf_interp.c)) implementing the identical Brainfuck dialect semantics for differential verification.
+* **C I/O Runtime**: Single-threaded event loop multiplexing 8 Linux `io_uring` ring instances and kernel direct descriptors (`IORING_REGISTER_FILES2`), eliminating syscall overhead.
+* **Database Driver**: In-process SQLite (`libsqlite3-dev` 3.45+) operating with WAL mode, `PRAGMA synchronous=NORMAL`, `PRAGMA mmap_size=268435456`, and persistent prepared statements.
+* **Cryptography**: OpenSSL (`libssl-dev` 3.0+) HMAC-SHA256 verification with startup context initialization.
 
 ---
 
-## The BF-MMIO Architecture
+## 1. Target Brainfuck Dialect Semantics
 
-Standard Brainfuck only possesses byte-level standard input (`,`) and standard output (`.`). Rather than writing an external server with a Brainfuck toy attached, we engineered a hardware-level memory-mapped abstraction directly on the Brainfuck memory tape:
+The Brainfuck dialect implemented by both the reference interpreter (`test/interpreter/bf_interp.c`) and the compilers (`runtime/stage0.c`, `src/compiler/bf_compiler.bf`) is defined explicitly:
 
-```
-+-----------------------------------------------------------------------------------------+
-|                               BRAINFUCK MEMORY TAPE MAP                                 |
-+-----------------------------------------------------------------------------------------+
-| Cells 0..7    | MMIO_SYS        | System Call Control Registers (Method, PathLen, Slots)|
-| Cells 8..15   | MMIO_CRYPTO     | Hardware-Accelerated JWT HMAC-SHA256 Coprocessor      |
-| Cells 16..31  | MMIO_DB         | SQLite B-Tree Leaf Reader & WAL Append Engine         |
-| Cells 32..47  | MMIO_NET        | Linux Direct-Descriptor Network Engine                |
-| Cells 48..63  | REG_SCRATCH     | Brainfuck Working Registers, Mismatch & Loop Flags    |
-| Cells 64..255 | REG_PATH_BUF    | Request URI Path Buffer & Integer Accumulator         |
-+-----------------------------------------------------------------------------------------+
-```
-
-### Protocol & Dispatch Lifecycle
-1. When an HTTP connection arrives, the request parameters (method, path, auth header flag, body length) are loaded into `TAPE[0..63]`.
-2. The Brainfuck program [`src/bf/server.bf`](src/bf/server.bf) executes on the memory tape:
-   - Validates the HTTP request method and URI path.
-   - Evaluates prefix and exact endpoint matches using flat mismatch scoring (zero pointer drift).
-   - Validates post IDs (branchless rejection of negative, zero, non-numeric, or floating-point IDs like `0`, `-1`, `abc`, `1.5`).
-   - Accumulates decimal integer digits into `TAPE[17]` (`MMIO_POST_ID`).
-   - Validates request body existence directly in Brainfuck (`TAPE[5] == 0` for `POST /posts` triggers 400 empty body error before touching the database).
-   - Explicitly governs HTTP status codes (`TAPE[33] = 200, 201, 400, 401, 404`).
-3. Brainfuck triggers peripheral actions via strobe registers:
-   - **`TAPE[7] = 1` (`MMIO_SYS`)**: Dispatches system health check (`GET /health`) with live uptime serialization.
-   - **`TAPE[8] = 1` (`MMIO_CRYPTO`)**: Verifies JWT HMAC-SHA256 signature and returns authentication status into `TAPE[9]` (`0` = OK, `1` = expired or invalid signature, `2` = invalid payload).
-   - **`TAPE[16] = 1..5` (`MMIO_DB`)**: Executes SQLite queries:
-     - `1`: `GET /feed` (zero-copy B-tree leaf traversal)
-     - `2`: `GET /posts/:id`
-     - `3`: `POST /posts` (atomic WAL append)
-     - `4`: `POST /posts/:id/like`
-     - `5`: `DELETE /posts/:id/like` (unlike post & re-count)
-   - **`TAPE[32] = 1` (`MMIO_NET`)**: Transmits the formatted HTTP response over kernel direct descriptors using `TAPE[34]` (`MMIO_RESP_TYPE`):
-     - `0`: Success (body generated by SQLite query engine)
-     - `1`: 404 Not Found (`{"error":"not found"}`)
-     - `2`: 400 Bad Request ID (`{"error":"invalid post id"}`)
-     - `3`: 401 Unauthorized (`{"error":"missing bearer token"}`)
-     - `4`: 401 Unauthorized (`{"error":"invalid or expired token"}`)
-     - `5`: 401 Unauthorized (`{"error":"invalid token payload"}`)
-     - `6`: 400 Bad Request (`{"error":"body is required"}`)
+| Specification Property | Dialect Definition |
+| :--- | :--- |
+| **Instruction Set** | Standard 8 instructions: `>` `<` `+` `-` `.` `,` `[` `]` |
+| **Comments / Non-ops** | All characters outside `><+-.,[]` are strictly ignored as comments |
+| **Cell Width** | 64-bit integer cells (`int64_t` / `uint64_t`) |
+| **Arithmetic Behavior** | Two's complement wrapping on overflow / underflow |
+| **Tape Size** | 1,000,000 cells (8,000,000 bytes allocated via `calloc`) |
+| **Initial Pointer** | Positioned in the middle of the tape (cell 500,000), supporting bidirectional movement |
+| **Pointer Step** | 8 bytes per cell step in native x86-64 (`addq $8, %r12` / `subq $8, %r12`) |
+| **EOF Behavior** | Cell is set to `0` upon reaching EOF (`xorl %eax, %eax`) |
+| **Output Semantics** | Byte-level output via `putchar((int)(tape[ptr] & 0xFF))` |
+| **Loop Jump Semantics** | `[` jumps past matching `]` if cell == 0; `]` jumps to matching `[` if cell != 0 |
+| **Error Handling** | Unmatched opening or closing brackets trigger compile-time `.error` assembly failure |
 
 ---
 
-## Self-Hosted Brainfuck Compiler Pipeline
+## 2. Genuinely Self-Hosting Compiler Architecture
 
-The build system employs a verified multi-stage bootstrap pipeline modeled on self-hosting compiler architectures (such as Zig):
+The compiler in [`src/compiler/bf_compiler.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/compiler/bf_compiler.bf) is a 100% pure Brainfuck application (no C or embedded shellcode) that parses arbitrary Brainfuck programs and emits complete x86-64 GNU assembly.
 
-1. **Stage 0 (Minimal Bootstrap)**: `build.sh` generates and compiles a minimal AOT Brainfuck bootstrap compiler (`build/stage0`).
-2. **Stage 1 (Self-Hosting Bootstrap)**: `stage0` compiles the Brainfuck compiler source [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) to native x86_64 assembly (`build/stage1.s`), which is assembled into `build/stage1`.
-3. **Stage 2 (Fixed-Point Verification)**: `build/stage0` recompiles [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) to `build/stage2.s`. A bit-for-bit `diff` between `stage1.s` and `stage2.s` proves that the compiler has converged to a mathematical fixed point and is completely self-hosted.
-4. **Production Compilation**: The self-hosted compiler compiles [`src/bf/server.bf`](src/bf/server.bf) directly to optimized native assembly with:
-   - **Compile-Time Static Pointer Offsets**: Every cell access is resolved at compile time to a static hardware displacement (`offset(%r12)`), eliminating runtime pointer manipulation instructions (`<` and `>`) completely.
-   - **Branchless Non-Zero Testing**: The boolean mismatch normalization idiom `[->[-]+<]` is compiled directly into a single hardware condition set (`cmpq $0` + `setne %al` + `movzbq %al`), with zero branch penalties.
-   - **Store-Immediate Constant Folding**: Sequences like `[-]++++` collapse directly into `movq $4, offset(%r12)`, avoiding clear-then-increment loops.
-   - **Single-Cycle LEA Multiply-Accumulate**: Inner loops for multiplication (e.g. factors 1, 2, 3, 5, 9, 10) are replaced by single-cycle `leaq` address calculation instructions instead of 3-4 cycle `imulq`.
-   - **Composite Copy-Restore Double-Loop Folding**: Brainfuck non-destructive read idioms (`[->+>+<<] >> [-<<+>>] <`) are folded from 7 instructions into 2 hardware instructions (`movq src, %rax; addq %rax, dst`).
-   - **Direct Character Mismatch Collapse**: Multi-instruction route comparisons (12 assembly instructions per character check) collapse into a 4-instruction hardware sequence (`cmpq $val, src; setne %al; movzbq %al, %rax; addq %rax, dst`).
-   - **Dead Store Elimination (DSE)**: Redundant clear instructions (`movq $0, disp(%r12)`) on already-zeroed scratch cells are tracked and pruned, eliminating over 140 memory writes.
-   - **Short-Circuit Route Early-Exit**: Route character checks immediately jump on first mismatch (`cmpq $val, disp(%r12); jne .L_skip`), skipping subsequent character evaluations and accumulator memory writes completely.
-   - **Double-Loop IF Elimination (49 Loops Removed)**: Brainfuck conditional blocks (`if (flag) { ... }`) encoded via decremental loops are pattern-matched and lowered directly to forward conditional jumps (`cmpq $0, %X; jne .L_skip`), eliminating 49 runtime loop counters and backward jumps.
-   - **Decimal Digit Accumulator Lowering**: Decimal parsing loops for post IDs (`acc = acc * 10 + digit - 48`) are flattened into straight-line LEA arithmetic.
-   - **Acyclic DAG Control Flow**: The final compiled server binary contains **zero cyclic loops** and **zero backward branches**, transforming the entire protocol state machine into an acyclic Directed Acyclic Graph (DAG) for optimal CPU branch predictor throughput.
-   - **31.0× Assembly Code Compression**: Compresses 27,079 Brainfuck instructions down to just **875 lines of assembly** (~7.1 KB binary), fitting entirely inside L1 instruction cache.
-   - **5.23 ns Single-Core Routing Latency**: The compiled Brainfuck routing engine executes in **5.23 ns per request** (>191 million requests/second/core), consuming virtually zero CPU overhead.
-5. **Machine-Trained Profile-Guided Optimization (PGO)**: `build.sh` automatically compiles an instrumented binary, trains branch weights and memory layouts against a temporary scratch database copy (100% Rule 10 compliant without touching `seed/feed.db`), and rebuilds the final production server with `-fprofile-use -fprofile-correction -flto -O3 -march=native`.
-
----
-
-## Hardware Harness & I/O Engine
-
-The underlying runtime provides the BF-MMIO hardware ports:
-- **8-Ring `io_uring` Direct Descriptor Engine**: 523,776 direct descriptor slots ($8 \times 65,472$) registered via `IORING_REGISTER_FILES2`, completely bypassing standard Linux file descriptor limits (`RLIMIT_NOFILE`) and descriptor table spinlocks.
-- **Ultra-Compact Connection State**: Minimized 24-byte `Conn` state struct tracking generation, flags, ring index, and buffer offsets, requiring just 12.5 MB total memory across all 523k direct descriptor slots.
-- **Zero-sprintf Response Pipeline**: Compile-time constant header formatting (`write_http_header`) and direct hex JSON escaping eliminate `sprintf` overhead entirely across the entire response pipeline.
-- **Single Forward Pass Header Scanner**: Line-by-line single-sweep scanner processes `Authorization` and `Connection` headers in a single traversal, eliminating multiple redundant `memmem` searches.
-- **High-Throughput Concurrency**: Benchmarks achieve up to **175,134 reqs/sec** on `/health` (6 µs mean latency across concurrent requests), **138,381 reqs/sec** on `/posts/:id` (7 µs mean latency), and **47,684 reqs/sec** on `/feed` with live SQLite B-tree traversal. Mixed-workload simulation achieves **22,255 reqs/sec** with 0.00% errors and 2.59 ms median latency.
-- **Zero-Memmove Response Pipeline**: Response headers are prepended directly into the pre-allocated buffer before the body (`send_start = out_body - hdr_len`), eliminating large 8 KB `memmove` operations on every feed response.
-- **Fast Integer Serializer**: Zero-allocation `write_u64` and fixed-size string transfers replace `sprintf` format string parsing during JSON generation.
-- **Pre-Initialized Reusable HMAC Context**: Reusable base `HMAC_CTX` initialized on startup with `HMAC_CTX_copy`, speeding up JWT verification by **2.83×** (from 512 ns down to 180 ns) with zero dynamic heap allocations.
-- **Static Tape Architecture**: Replaces per-request stack zeroing (2,048 bytes) with a static 96-cell tape and localized 128-byte cache-line zeroing.
-- **Zero-Copy Provided Buffer Rings**: Kernel-selected buffer management (`IORING_REGISTER_PBUF_RING`) with 1,024 buffers of 2 KB per ring, recycling packet buffers directly inside the kernel completion ring.
-- **Recycled Response Buffer Pool**: Dedicated 16,384-slot buffer pool (256 MB) operating with lock-free index recycling, eliminating heap allocations during burst concurrency.
-- **Tight Microsecond Polling Loop**: Rotating idle wait using `IORING_ENTER_EXT_ARG` with a 50 µs timeout, ensuring sub-millisecond wakeup while preventing CPU thermal throttling.
-- **SQLite Performance Pragmas**: In-process engine tuned with `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=NORMAL`, `PRAGMA cache_size=-32000`, `PRAGMA mmap_size=268435456`, and persistent prepared statements (`SQLITE_PREPARE_PERSISTENT`).
-- **OpenSSL Hardware Acceleration**: Direct HMAC-SHA256 signature verification with constant-time comparison (`CRYPTO_memcmp`).
+### Architecture Stages
+1. **Lexical Filtering & Ingestion**:
+   Reads characters one byte at a time via `,`. Non-instruction characters are filtered out; only the 8 Brainfuck instructions are queued.
+2. **Streaming Lookahead Queue**:
+   Maintains a sliding-window queue of instructions on the Brainfuck memory tape to detect multi-instruction optimization idioms.
+3. **Optimizations Implemented**:
+   * **Arithmetic Coalescing (RLE)**: Consecutive runs of `+` and `-` are coalesced into a single `addq $N, (%r12)` or `subq $N, (%r12)` (or single `incq`/`decq` when count == 1).
+   * **Pointer Movement Coalescing**: Consecutive runs of `>` and `<` are coalesced into `addq $(N*8), %r12` or `subq $(N*8), %r12`.
+   * **Clear-Loop Lowering (`[-]`)**: Clear loops are detected in the lookahead queue and lowered directly to `movq $0, (%r12)`.
+   * **Boolean Normalization Lowering (`[->[-]+<]`)**: The standard idiom `[->[-]+<]` is recognized and lowered to branchless/forward-jump native instructions:
+     ```assembly
+         cmpq $0, (%r12)
+         je 1f
+         movq $1, 8(%r12)
+         movq $0, (%r12)
+     1:
+     ```
+     This prevents $2^{64}$ decrements when testing negative numbers in 64-bit cells.
+   * **Loop Label Management & Bracket Validation**: Maintains a loop depth stack. Emits forward jump `je .L_e_<id>` on `[` and backward jump `jne .L_s_<id>` on `]`. Emits `.error "unmatched closing bracket"` or `.error "unmatched opening bracket"` if brackets are imbalanced.
+   * **Decimal Number Formatter**: In Brainfuck, formats multi-digit decimal integer constants (offsets, counts, label IDs) for assembly output without external runtime helpers.
 
 ---
 
-## Benchmark Results (25,000 Concurrent VUs)
+## 3. The 3-Stage Bootstrap Pipeline
 
-Measured under full k6 load (25,000 VUs, 10s ramp, 20s steady hold):
+The build process ([`build.sh`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/build.sh)) executes a verified 3-stage bootstrap:
 
-```
-============================================================
-BENCHMARK RESULTS (VUs: 25000)
-============================================================
-Throughput:       1818.0 req/s (127,301 requests total)
-Latency p50:      0.11 ms   (115.7 us)
-Latency p95:      0.45 ms   (threshold: < 500 ms)
-Latency p99:      2.12 ms   (threshold: < 1000 ms)
-Latency max:      14.50 ms  (reduced by > 55%)
-Error Rate:       0.00%     (threshold: < 1.0%)
-Checks Passed:    100.00%   (127,301 / 127,301)
-Peak Memory (RSS):116.4 MB  (limit: 2000 MB)
-============================================================
+```mermaid
+flowchart LR
+    A["stage0.c (C Bootstrap)"] -->|Compiles| B["bf_compiler.bf"]
+    B -->|Produces| C["stage1.s -> stage1"]
+    C -->|Compiles itself| D["stage2.s -> stage2"]
+    C -.->|Bit-for-bit diff| D
+    C -->|Compiles server| E["server.bf -> server_bf.o"]
+    E -->|Linked with runtime.c| F["bin/server"]
 ```
 
+1. **Stage 0**:
+   ```bash
+   gcc -O3 -o build/stage0 runtime/stage0.c
+   ./build/stage0 src/compiler/bf_compiler.bf build/stage1.s
+   as -o build/stage1.o build/stage1.s
+   gcc -O3 -o build/stage1 build/stage1.o
+   ```
+2. **Stage 1 (Self-Hosting)**:
+   The Stage 1 native binary (compiled from pure Brainfuck) compiles its own source code:
+   ```bash
+   ./build/stage1 < src/compiler/bf_compiler.bf > build/stage2.s
+   as -o build/stage2.o build/stage2.s
+   gcc -O3 -o build/stage2 build/stage2.o
+   ```
+3. **Verification (Bit-for-Bit Convergence)**:
+   ```bash
+   diff -u build/stage1.s build/stage2.s
+   ```
+   `stage1.s` and `stage2.s` are bit-for-bit identical (`SHA-256: 2b313663ceec80f922174717eff29a112839e4af20fa7188b23586f64b4422be`).
+4. **Server Compilation**:
+   Stage 1 compiles the application server [`src/bf/server.bf`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/src/bf/server.bf):
+   ```bash
+   ./build/stage1 < src/bf/server.bf > build/server_bf.s
+   as -o build/server_bf.o build/server_bf.s
+   gcc -O3 -flto -march=native -o bin/server runtime/runtime.c build/server_bf.o -lsqlite3 -lcrypto
+   ```
+
 ---
 
-## Compliance & Test Suite
+## 4. Comprehensive Differential Testing
 
-All 42 specification tests pass with 100% compliance:
+The repository contains an independent reference interpreter ([`test/interpreter/bf_interp.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/interpreter/bf_interp.c)) and automated differential testing framework ([`test/test_differential.py`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/test_differential.py)).
 
+For every test case, the suite runs:
+1. Reference Interpreter (`bf_interp`)
+2. Stage 0 Native Binary
+3. Stage 1 Native Binary
+4. Stage 2 Native Binary
+
+And asserts 100% equivalence of outputs, exit codes, and compile-time error rejection.
+
+### Test Programs ([`test/programs/`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/test/programs/))
+* `hello_world.bf`: Standard Hello World greeting.
+* `empty.bf`: Empty program boundary handling.
+* `single_inc_dec.bf`: Cell increment/decrement operations.
+* `pointer_movement.bf`: Pointer shifting and relative indexing.
+* `nested_loops.bf`: Multi-level nested loops.
+* `multiply.bf`: Arithmetic multiplication loop ($7 \times 8 = 56$).
+* `copy_loop.bf`: Non-destructive cell copy idiom.
+* `echo.bf`: Input/output character streaming.
+* `rot13.bf`: Stream byte arithmetic and transformation.
+* `multi_input.bf`: Multiple input byte ordering.
+* `eof_test.bf`: Verification of cell zeroing on EOF.
+* `zeroing.bf`: Clear loop (`[-]`) execution on multiple cells.
+* `large_sequence.bf`: 1,000+ instruction sequence (1000 `+` followed by 935 `-`).
+* `repeated_ops.bf`: Boundary run lengths of coalesced operations.
+* `comments.bf`: Programs with arbitrary non-instruction ASCII text.
+* `alphabet.bf`: Iterative loop printing ASCII alphabet `A`–`Z`.
+* `calculator.bf`: Two-digit addition program.
+* `independent_loops.bf`: Multiple non-nested sequential loops.
+* `err_unmatched_open.bf`: Verification of compilation rejection on missing `]`.
+* `err_unmatched_close.bf`: Verification of compilation rejection on unexpected `]`.
+* **20 Pseudo-Random Programs**: Deterministically seeded random Brainfuck programs exercising loops, RLE runs, and clear idioms.
+
+Run the test suite:
 ```bash
-bash test/run.sh submissions/brainfuck-iouring-harshitkhandelwal208
+bash test/run_tests.sh
 ```
+
+---
+
+## 5. Runtime Architecture & Concurrency Audit
+
+The runtime ([`runtime/runtime.c`](file:///home/harshit/Projects/mcsc-research/twelve/submissions/brainfuck-iouring-harshitkhandelwal208/runtime/runtime.c)) provides the underlying network, SQLite, and cryptographic bindings for the Brainfuck application:
+
+* **Execution Model**: The server runs on a **single OS thread** executing a single-threaded reactor event loop.
+* **8 io_uring Rings**: 8 separate `io_uring` instances are initialized to spread descriptor queues across 523,776 direct descriptor slots ($8 \times 65,472$). The single event loop polls and drains CQEs across all 8 rings in round-robin sequence. Describing these rings as "8 parallel worker threads" would be inaccurate: they are 8 kernel completion queues serviced cooperatively by one thread.
+* **Shared Request State Safety**: Because all request parsing, Brainfuck execution (`bf_execute`), and MMIO dispatch (`bf_mmio_sys`, `bf_mmio_db`, `bf_mmio_net`) execute synchronously to completion on the main event loop thread before yielding back to `sys_io_uring_enter`, the shared `req_ctx`, `curr_conn`, and `bf_tape` structures are never accessed concurrently by multiple threads.
+* **Zero-Allocation Buffer Pools**:
+  * Packet buffers: 1,024 buffers of 2 KB managed via kernel-managed buffer rings (`IORING_REGISTER_PBUF_RING`).
+  * Response buffers: 16,384 buffers of 16 KB managed via a fixed LIFO free-stack.
+* **Durability & Challenge Compliance**:
+  * SQLite WAL mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`).
+  * Zero cross-request caching of dynamic endpoints.
+  * Every mutation (`POST /posts`, `POST /posts/:id/like`, `DELETE /posts/:id/like`) commits immediately to WAL.
+
+---
+
+## 6. Real Measured Benchmarks
+
+Benchmarked locally using `ab` (ApacheBench) under concurrency $C = 50$:
+
+```
+Endpoint: GET /health
+------------------------------------------------------------
+Completed Requests:     10,000
+Concurrency Level:      50
+Requests per second:    123,076.92 [#/sec]
+Time per request (mean):0.406 ms
+Latency p50:            0 ms
+Latency p95:            1 ms
+Latency p99:            1 ms
+Failed requests:        0
+
+Endpoint: GET /feed (Live SQLite B-Tree Leaf Traversal)
+------------------------------------------------------------
+Completed Requests:     5,000
+Concurrency Level:      50
+Requests per second:    42,799.79 [#/sec]
+Transfer rate:          217.3 MB/sec
+Time per request (mean):1.168 ms
+Latency p50:            1 ms
+Latency p95:            2 ms
+Latency p99:            2 ms
+Failed requests:        0
+```
+
+---
+
+## 7. Challenge Test Suite Verification
+
+The server compiled via the pure Brainfuck Stage 1 compiler passes 100% of the 42 official challenge tests:
 
 ```
 Testing http://127.0.0.1:3000
@@ -201,7 +238,7 @@ Testing http://127.0.0.1:3000
   ok   special characters round-trip (trimmed) -> 201
   ok   create 500-char post -> 201
   ok   POST /posts content-type (application/json)
-  ok   created_at format 2026-11-15T18:20:32.299Z
+  ok   created_at format 2026-11-16T17:27:40.681Z
   ok   created_at is now (UTC, 0s)
   ok   like (first) -> 201
   ok   like (repeat) -> 200
@@ -213,4 +250,16 @@ Testing http://127.0.0.1:3000
   ok   new post is at the top of the feed
   ok   feed entry matches the post
 passed=42 failed=0
+```
+
+---
+
+## 8. Build & Verification Commands
+
+```bash
+# Build the self-hosted compiler and production server
+bash build.sh
+
+# Run the complete test suite (Self-hosting diff + 40 differential tests + 42 server tests)
+bash test/run_tests.sh
 ```

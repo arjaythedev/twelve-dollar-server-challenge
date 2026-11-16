@@ -740,6 +740,7 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     req_ctx.resp_buf = acquire_pool(&resp_pool);
     req_ctx.out_body = req_ctx.resp_buf + 512;
 
+    curr_conn = &req_ctx;
     static int64_t bf_tape[96];
     bf_tape[0] = req_ctx.method;
     bf_tape[2] = req_ctx.path_len;
@@ -747,8 +748,17 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     bf_tape[4] = req_ctx.has_auth;
     bf_tape[5] = req_ctx.body_len;
     bf_tape[7] = 0;
-    bf_tape[8] = 0;
-    bf_tape[9] = 0;
+    if (req_ctx.has_auth) {
+        int res = verify_jwt(req_ctx.auth_header, &req_ctx.auth_uid, req_ctx.auth_uname, sizeof(req_ctx.auth_uname));
+        req_ctx.auth_status = res;
+        if (res == 1) { bf_tape[8] = 1; bf_tape[9] = 0; }
+        else if (res == -2) { bf_tape[8] = 0; bf_tape[9] = 2; }
+        else { bf_tape[8] = 0; bf_tape[9] = 1; }
+    } else {
+        bf_tape[8] = 0;
+        bf_tape[9] = 1;
+        req_ctx.auth_status = 0;
+    }
     bf_tape[16] = 0;
     bf_tape[17] = 0;
     bf_tape[32] = 0;
@@ -759,8 +769,11 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     for (int i = 0; i < copy_len; i++) bf_tape[64 + i] = req_ctx.path[i];
     bf_tape[64 + copy_len] = 0;
 
-    curr_conn = &req_ctx;
     bf_execute(bf_tape);
+
+    if (bf_tape[7] == 1) bf_mmio_sys(bf_tape);
+    if (bf_tape[16] != 0) bf_mmio_db(bf_tape);
+    if (bf_tape[32] == 1) bf_mmio_net(bf_tape);
 
     c->out_buf = req_ctx.resp_buf;
     c->out_len = req_ctx.resp_len;

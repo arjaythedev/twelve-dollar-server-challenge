@@ -2,78 +2,154 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int queue[16];
+static int q_len = 0;
+static int next_label_id = 0;
+static int stack_top = 0;
+static int stack[65536];
+static int in_eof = 0;
+
+static int next_bf_char(FILE *in) {
+    int c;
+    while ((c = fgetc(in)) != EOF) {
+        if (c == '>' || c == '<' || c == '+' || c == '-' ||
+            c == '.' || c == ',' || c == '[' || c == ']') {
+            return c;
+        }
+    }
+    return EOF;
+}
+
+static void fill_queue(FILE *in) {
+    while (q_len < 9 && !in_eof) {
+        int c = next_bf_char(in);
+        if (c == EOF) {
+            in_eof = 1;
+            break;
+        }
+        queue[q_len++] = c;
+    }
+}
+
+static void pop_queue(int count) {
+    for (int i = 0; i < q_len - count; i++) {
+        queue[i] = queue[i + count];
+    }
+    q_len -= count;
+}
+
 int main(int argc, char **argv) {
-    if (argc < 3) return 1;
-    FILE *in = fopen(argv[1], "rb");
-    FILE *out = fopen(argv[2], "wb");
+    FILE *in = stdin;
+    FILE *out = stdout;
+    if (argc > 1 && argv[1][0] != '-') in = fopen(argv[1], "rb");
+    if (argc > 2 && argv[2][0] != '-') out = fopen(argv[2], "wb");
     if (!in || !out) return 1;
 
-    fseek(in, 0, SEEK_END);
-    long sz = ftell(in);
-    fseek(in, 0, SEEK_SET);
-    char *raw = malloc(sz + 1);
-    fread(raw, 1, sz, in);
-    fclose(in);
-
-    char *code = malloc(sz + 1);
-    long n = 0;
-    for (long i = 0; i < sz; i++) {
-        char ch = raw[i];
-        if (ch == '>' || ch == '<' || ch == '+' || ch == '-' ||
-            ch == '.' || ch == ',' || ch == '[' || ch == ']') {
-            code[n++] = ch;
-        }
-    }
-    free(raw);
-
     fprintf(out, ".text\n.globl bf_execute\n.type bf_execute, @function\nbf_execute:\n");
-    fprintf(out, "    pushq %%r12\n    pushq %%r13\n    subq $8, %%rsp\n");
+    fprintf(out, "    pushq %%r12\n    pushq %%r13\n    pushq %%r14\n    pushq %%r15\n    pushq %%rbx\n    pushq %%rbp\n    subq $8, %%rsp\n");
     fprintf(out, "    movq %%rdi, %%r12\n    movq %%rdi, %%r13\n");
 
-    int ptr = 0, lid = 0, stack[65536], top = 0;
-    long i = 0;
-    while (i < n) {
-        if (i + 8 < n && memcmp(&code[i], "[->[-]+<]", 9) == 0) {
-            fprintf(out, "    cmpq $0, (%%r12)\n    setne %%al\n    movzbq %%al, %%rax\n    movq %%rax, 8(%%r12)\n    movq $0, (%%r12)\n");
-            i += 9;
+    fill_queue(in);
+
+    while (q_len > 0) {
+        // Pattern 1: [->[-]+<]
+        if (q_len >= 9 &&
+            queue[0] == '[' && queue[1] == '-' && queue[2] == '>' &&
+            queue[3] == '[' && queue[4] == '-' && queue[5] == ']' &&
+            queue[6] == '+' && queue[7] == '<' && queue[8] == ']') {
+            fprintf(out, "    cmpq $0, (%%r12)\n    je 1f\n    movq $1, 8(%%r12)\n    movq $0, (%%r12)\n1:\n");
+            pop_queue(9);
+            fill_queue(in);
             continue;
         }
-        if (i + 2 < n && memcmp(&code[i], "[-]", 3) == 0) {
+
+        // Pattern 2: [-]
+        if (q_len >= 3 && queue[0] == '[' && queue[1] == '-' && queue[2] == ']') {
             fprintf(out, "    movq $0, (%%r12)\n");
-            i += 3;
+            pop_queue(3);
+            fill_queue(in);
             continue;
         }
-        char c = code[i];
-        if (c == '>') { ptr++; fprintf(out, "    addq $8, %%r12\n"); }
-        else if (c == '<') { ptr--; fprintf(out, "    subq $8, %%r12\n"); }
-        else if (c == '+') {
-            fprintf(out, "    incq (%%r12)\n");
-            if (ptr == 7) fprintf(out, "    movq %%r13, %%rdi\n    call bf_mmio_sys\n");
-            else if (ptr == 8) fprintf(out, "    movq %%r13, %%rdi\n    call bf_mmio_crypto\n");
-            else if (ptr == 16) fprintf(out, "    movq %%r13, %%rdi\n    call bf_mmio_db\n");
-            else if (ptr == 32) fprintf(out, "    movq %%r13, %%rdi\n    call bf_mmio_net\n");
+
+        int op = queue[0];
+        if (op == '>' || op == '<' || op == '+' || op == '-') {
+            long count = 0;
+            while (q_len > 0 && queue[0] == op) {
+                count++;
+                pop_queue(1);
+                fill_queue(in);
+            }
+            if (op == '>') {
+                if (count == 1) fprintf(out, "    addq $8, %%r12\n");
+                else fprintf(out, "    addq $%ld, %%r12\n", count * 8);
+            } else if (op == '<') {
+                if (count == 1) fprintf(out, "    subq $8, %%r12\n");
+                else fprintf(out, "    subq $%ld, %%r12\n", count * 8);
+            } else if (op == '+') {
+                if (count == 1) fprintf(out, "    incq (%%r12)\n");
+                else fprintf(out, "    addq $%ld, (%%r12)\n", count);
+            } else if (op == '-') {
+                if (count == 1) fprintf(out, "    decq (%%r12)\n");
+                else fprintf(out, "    subq $%ld, (%%r12)\n", count);
+            }
+            continue;
         }
-        else if (c == '-') fprintf(out, "    decq (%%r12)\n");
-        else if (c == '.') fprintf(out, "    movq (%%r12), %%rdi\n    call putchar\n");
-        else if (c == ',') fprintf(out, "    call getchar\n    cmpl $-1, %%eax\n    jne .L_eok_%d\n    xorl %%eax, %%eax\n.L_eok_%d:\n    movq %%rax, (%%r12)\n", lid, lid);
-        else if (c == '[') {
-            int l = ++lid; stack[top++] = l;
-            fprintf(out, "    cmpq $0, (%%r12)\n    je .L_e_%d\n.L_s_%d:\n", l, l);
-        } else if (c == ']') {
-            int l = stack[--top];
-            fprintf(out, "    cmpq $0, (%%r12)\n    jne .L_s_%d\n.L_e_%d:\n", l, l);
+
+        if (op == '.') {
+            fprintf(out, "    movzbl (%%r12), %%edi\n    call putchar\n");
+            pop_queue(1);
+            fill_queue(in);
+            continue;
         }
-        i++;
+
+        if (op == ',') {
+            fprintf(out, "    call getchar\n    cmpl $-1, %%eax\n    jne 1f\n    xorl %%eax, %%eax\n1:\n    movq %%rax, (%%r12)\n");
+            pop_queue(1);
+            fill_queue(in);
+            continue;
+        }
+
+        if (op == '[') {
+            next_label_id++;
+            stack[stack_top++] = next_label_id;
+            fprintf(out, "    cmpq $0, (%%r12)\n    je .L_e_%d\n.L_s_%d:\n", next_label_id, next_label_id);
+            pop_queue(1);
+            fill_queue(in);
+            continue;
+        }
+
+        if (op == ']') {
+            if (stack_top == 0) {
+                fprintf(out, ".error \"unmatched closing bracket\"\n");
+                fprintf(stderr, "Error: unmatched closing bracket\n");
+                return 1;
+            }
+            int lbl = stack[--stack_top];
+            fprintf(out, "    cmpq $0, (%%r12)\n    jne .L_s_%d\n.L_e_%d:\n", lbl, lbl);
+            pop_queue(1);
+            fill_queue(in);
+            continue;
+        }
     }
-    free(code);
-    fprintf(out, "    addq $8, %%rsp\n    popq %%r13\n    popq %%r12\n    ret\n");
+
+    if (stack_top != 0) {
+        fprintf(out, ".error \"unmatched opening bracket\"\n");
+        fprintf(stderr, "Error: unmatched opening bracket\n");
+        return 1;
+    }
+
+    fprintf(out, "    addq $8, %%rsp\n    popq %%rbp\n    popq %%rbx\n    popq %%r15\n    popq %%r14\n    popq %%r13\n    popq %%r12\n    ret\n");
     fprintf(out, ".weak main\n.globl main\n.type main, @function\nmain:\n");
-    fprintf(out, "    pushq %%r12\n    subq $8000000, %%rsp\n    leaq 4000000(%%rsp), %%r12\n");
-    fprintf(out, "    movq %%r12, %%rdi\n    call bf_execute\n    addq $8000000, %%rsp\n    popq %%r12\n    xorl %%eax, %%eax\n    ret\n");
-    fprintf(out, ".weak bf_mmio_sys\nbf_mmio_sys: ret\n");
-    fprintf(out, ".weak bf_mmio_crypto\nbf_mmio_crypto: ret\n");
-    fprintf(out, ".weak bf_mmio_db\nbf_mmio_db: ret\n");
-    fprintf(out, ".weak bf_mmio_net\nbf_mmio_net: ret\n");
-    fclose(out);
+    fprintf(out, "    pushq %%rbp\n    movq %%rsp, %%rbp\n    subq $16, %%rsp\n");
+    fprintf(out, "    movl $8000000, %%edi\n    movl $1, %%esi\n    call calloc\n");
+    fprintf(out, "    testq %%rax, %%rax\n    jz .L_calloc_err\n");
+    fprintf(out, "    movq %%rax, %%rbx\n    leaq 4000000(%%rbx), %%rdi\n");
+    fprintf(out, "    call bf_execute\n");
+    fprintf(out, "    movq %%rbx, %%rdi\n    call free\n");
+    fprintf(out, "    xorl %%eax, %%eax\n    leave\n    ret\n");
+    fprintf(out, ".L_calloc_err:\n    movl $1, %%edi\n    call exit\n");
+
+    if (in != stdin) fclose(in);
+    if (out != stdout) fclose(out);
     return 0;
 }

@@ -1,2 +1,8 @@
 bin/
 build/
+feed.db*
+test/interpreter/bf_interp
+__pycache__/
+*.o
+*.s
+prog

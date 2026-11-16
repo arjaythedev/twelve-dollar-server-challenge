@@ -90,13 +90,16 @@ pub fn spawn(
             .ok()
             .and_then(|v| v.parse::<u64>().ok())
             .unwrap_or(0);
+        // Capacity retained across batches: 2,048 x sizeof(WriteJob) is a
+        // 245 KB allocation the writer would otherwise repeat per batch.
+        let mut jobs: Vec<WriteJob> = Vec::with_capacity(2048);
         loop {
             let first = match rx.recv() {
                 Ok(job) => job,
                 Err(_) => break,
             };
 
-            let mut jobs = Vec::with_capacity(2048);
+            jobs.clear();
             jobs.push(first);
             if window_us == 0 {
                 while let Ok(job) = rx.try_recv() {
@@ -121,7 +124,7 @@ pub fn spawn(
 
             let (results, committed) = run_batch(&mut db, &mut cache, &jobs);
             let mut results = results.into_iter();
-            for job in jobs {
+            for job in jobs.drain(..) {
                 let (status, body) = if committed {
                     results.next().unwrap_or_else(|| (500, error("internal server error")))
                 } else {
@@ -193,20 +196,18 @@ pub fn run_batch(
                 None
             };
 
-            let mut create_jobs: Vec<(usize, String, String)> = Vec::new();
-            let mut creates: Vec<(i64, String)> = Vec::new();
+            // Job indices instead of cloned bodies/usernames: the response is
+            // built from the job itself, and the JSON from borrowed strings.
+            let mut create_idx: Vec<usize> = Vec::new();
+            let mut creates: Vec<(i64, &str)> = Vec::new();
             let mut pairs: Vec<[i64; 2]> = Vec::new();
             let mut pair_jobs: Vec<usize> = Vec::new();
 
             for (i, job) in jobs.iter().enumerate() {
                 match &job.cmd.kind {
-                    WriteKind::Create {
-                        user_id,
-                        username,
-                        body,
-                    } => {
-                        create_jobs.push((i, body.clone(), username.clone()));
-                        creates.push((*user_id, body.clone()));
+                    WriteKind::Create { user_id, body, .. } => {
+                        create_idx.push(i);
+                        creates.push((*user_id, body.as_str()));
                     }
                     WriteKind::Like { user_id, post_id } => {
                         pairs.push([*user_id, *post_id]);
@@ -237,15 +238,17 @@ pub fn run_batch(
                     }
                     None => batch_ok = false,
                 }
-                if batch_ok && rows.len() == creates.len() {
+                if batch_ok && rows.len() == create_idx.len() {
                     rows.sort_unstable_by_key(|row| row.0);
-                    for ((i, body, username), (id, created_at)) in
-                        create_jobs.iter().zip(rows.iter())
-                    {
+                    for (&i, (id, created_at)) in create_idx.iter().zip(rows.iter()) {
+                        let WriteKind::Create { body, username, .. } = &jobs[i].cmd.kind
+                        else {
+                            continue;
+                        };
                         let body_json = json_string(body);
                         let author_json = json_string(username);
                         let created_json = json_string(created_at);
-                        results[*i] = (
+                        results[i] = (
                             201,
                             format!(
                                 "{{\"post\":{{\"id\":{id},\"body\":{body_json},\"created_at\":{created_json},\"author\":{author_json},\"like_count\":0}}}}"

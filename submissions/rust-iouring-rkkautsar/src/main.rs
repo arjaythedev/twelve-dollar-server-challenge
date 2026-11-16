@@ -195,22 +195,32 @@ fn parse_request<'a>(buf: &'a [u8]) -> ParseResult<'a> {
         };
         let name = &line[..colon];
         let value = trim_ascii(&line[colon + 1..]);
-        if name.eq_ignore_ascii_case(b"content-length") {
-            let Ok(text) = std::str::from_utf8(value) else {
-                return ParseResult::Bad;
-            };
-            let Ok(n) = text.parse::<usize>() else {
-                return ParseResult::Bad;
-            };
-            content_length = n;
-        } else if name.eq_ignore_ascii_case(b"authorization") {
-            if let Ok(text) = std::str::from_utf8(value) {
-                auth = Some(text);
+        // Only three header names matter, so dispatch on the first byte
+        // instead of case-folding every header name against all three.
+        match name.first().map(u8::to_ascii_lowercase) {
+            Some(b'c') => {
+                if name.eq_ignore_ascii_case(b"content-length") {
+                    let Ok(text) = std::str::from_utf8(value) else {
+                        return ParseResult::Bad;
+                    };
+                    let Ok(n) = text.parse::<usize>() else {
+                        return ParseResult::Bad;
+                    };
+                    content_length = n;
+                } else if name.eq_ignore_ascii_case(b"connection")
+                    && value.eq_ignore_ascii_case(b"close")
+                {
+                    close = true;
+                }
             }
-        } else if name.eq_ignore_ascii_case(b"connection") {
-            if value.eq_ignore_ascii_case(b"close") {
-                close = true;
+            Some(b'a') => {
+                if name.eq_ignore_ascii_case(b"authorization") {
+                    if let Ok(text) = std::str::from_utf8(value) {
+                        auth = Some(text);
+                    }
+                }
             }
+            _ => {}
         }
     }
 

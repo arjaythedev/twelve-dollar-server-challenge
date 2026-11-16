@@ -641,6 +641,10 @@ fn load_roots(db: &Db) -> Option<(u32, u32, u32, u32)> {
 }
 
 pub struct WriteDb {
+    // Declared before `db` so the statements are finalized while the
+    // connection is still open (fields drop in declaration order).
+    begin_stmt: Option<Stmt<'static>>,
+    commit_stmt: Option<Stmt<'static>>,
     db: Db,
 }
 
@@ -648,7 +652,15 @@ impl WriteDb {
     pub fn open(path: &str) -> Result<Self, String> {
         let db = Db::open(path)?;
         db.exec("PRAGMA foreign_keys=ON")?;
-        Ok(Self { db })
+        // One compile per connection instead of one per batch: sqlite3_exec
+        // re-parses "BEGIN IMMEDIATE"/"COMMIT" on every transaction.
+        let begin_stmt = Some(unsafe {
+            std::mem::transmute::<Stmt<'_>, Stmt<'static>>(db.prepare("BEGIN IMMEDIATE")?)
+        });
+        let commit_stmt = Some(unsafe {
+            std::mem::transmute::<Stmt<'_>, Stmt<'static>>(db.prepare("COMMIT")?)
+        });
+        Ok(Self { begin_stmt, commit_stmt, db })
     }
 
     pub fn prepare(&self, sql: &str) -> Result<Stmt<'_>, String> {
@@ -677,12 +689,22 @@ impl WriteDb {
         matches!(st.step(), Ok(true))
     }
 
-    pub fn begin(&self) -> Result<(), String> {
-        self.db.exec("BEGIN IMMEDIATE")
+    pub fn begin(&mut self) -> Result<(), String> {
+        let st = self
+            .begin_stmt
+            .as_mut()
+            .ok_or_else(|| "begin statement unavailable".to_string())?;
+        st.reset();
+        st.step().map(|_| ())
     }
 
-    pub fn commit(&self) -> Result<(), String> {
-        self.db.exec("COMMIT")
+    pub fn commit(&mut self) -> Result<(), String> {
+        let st = self
+            .commit_stmt
+            .as_mut()
+            .ok_or_else(|| "commit statement unavailable".to_string())?;
+        st.reset();
+        st.step().map(|_| ())
     }
 
     pub fn rollback(&self) -> Result<(), String> {

@@ -20,14 +20,14 @@
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
-static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
-static int ckpt_urgent = 32768;  /* past this many frames (128 MB) the passes run on a nice-10 thread: the log stays bounded */
-#define HOLD_GROW_FRAMES 32768   /* a log this long has missed restarts: the hold limit grows (to 2x at most) */
+static int ckpt_frames = 32768;  /* WAL frames (128 MB) after which the bulk thread copies the log back */
+static int ckpt_urgent = 65536;  /* past this many frames (256 MB) the passes run on a nice-10 thread: the log stays bounded */
+#define HOLD_GROW_FRAMES 65536   /* a log this long has missed restarts: the hold limit grows (to 2x at most) */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
 static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
 /* TAIL_RESTART=0 (default): the loop's next write restarts the log, so its page cache survives the
- * cycle (the loop does the header sync SQLite does on a restart, once per 64 MB of log).
+ * cycle (the loop does the header sync SQLite does on a restart, once per 128 MB of log).
  * TAIL_RESTART=1: the tail thread restarts it, which makes SQLite drop the loop's whole page cache
  * at its next read, every cycle. */
 static int tail_restart_on = 0;

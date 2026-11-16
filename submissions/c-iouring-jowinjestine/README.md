@@ -150,7 +150,7 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
-  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
+  rust-iouring-kensac #264, changed for one vCPU). Past 32,768 WAL frames (128 MB) a thread at
   nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time, after a
   read-ahead of the log (up to 256 MB: the pass reads frames in page order, random in the file).
   Under steady writes a pass cannot copy the frames written meanwhile, and the log only restarts
@@ -162,7 +162,13 @@ mostly idle sockets under `LimitNOFILE=65535`.
   restarted by another connection makes SQLite drop that connection's whole cache at its next
   read, and the hot pages would be read again every cycle (~105-119k cache misses per run against
   ~8.9k, measured with 2 ms added to every disk access). The loop does the one header sync of a
-  restart, once per 64 MB of log. `TAIL_RESTART=1` gives the restart to the tail thread.
+  restart, once per 128 MB of log. `TAIL_RESTART=1` gives the restart to the tail thread.
+- **128 MB cycles.** A cycle copies each page it finds in the log once, however many times it was
+  written, and the hot pages (the feed's tail, the likes index) are written in nearly every batch:
+  the longer the cycle, the less the checkpoint copies and syncs per request, and the fewer holds
+  and header syncs on the loop. The rig agreed so far: 16 MB cycles held 260,000 (`e3070c5`),
+  64 MB 280,000-285,000 (`8193037`, `e487a70`). The log's extra 64 MB of page cache is paid for
+  by the dropped database pages below.
 - **Only SQLite's cache holds the database.** Every 2 s (`DB_DROP_MS`) the bulk thread drops the
   kernel's cached pages of `$SQLITE_PATH` (`posix_fadvise(DONTNEED)`; dirty pages are only queued
   for writeback). The pages requests use are in SQLite's own 64 MB cache, warmed at start, which
@@ -171,7 +177,7 @@ mostly idle sockets under `LimitNOFILE=65535`.
   kernel memory. (The organiser's 2026-11-15 ruling allows this for the entry's own files.)
 - **The log stays bounded.** A nice-19 thread gets ~1.5 % of a saturated core, and nothing else
   stopped the log from growing (short of the 4 GB last resort below), each frame staying in the
-  page cache at the box's memory wall. Past 32,768 frames (128 MB, `CKPT_URGENT`) the passes go to
+  page cache at the box's memory wall. Past 65,536 frames (256 MB, `CKPT_URGENT`) the passes go to
   a third checkpoint thread at nice 10 until the log restarts: ~10 % of the core against the loop,
   enough to catch up (a checkpoint that keeps up needs ~1 %). (`297c8ea` had such a thread at the
   normal priority, and on the box it ran against the loop as an equal minutes into a hold. A
@@ -180,7 +186,7 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - A hold starts and ends only between batches and lasts at most 400 ms (writes only, once per
   cycle: under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the
   next cycle waits for half a log more, so a slow disk never gives back-to-back holds; for a log
-  past 128 MB the limit grows to 800 ms and no further (a POST that waited a second would count
+  past 256 MB the limit grows to 800 ms and no further (a POST that waited a second would count
   against the score). `91da0e6` had the loop restart the log with 16 MB cycles (four times the
   header syncs on the loop) and no read-ahead, and scored 266,000 (it passed 280k for two minutes,
   then failed the five-minute hold with its memory peak at 1.6 GB); `8193037`, with the tail

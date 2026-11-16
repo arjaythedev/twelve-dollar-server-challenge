@@ -29,15 +29,15 @@
 
 **批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 等待 256 个完成或 500 µs，其余非阻塞）→ 每个 ring 最多处理 256 个完成 → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。
 
-**ring 模型。** 固定 **2 个 ring**，每个 ring 的 direct-descriptor 表是 **262,144 项**（合计 524,288 连接上限，目标是 320k），**按目标连接数定尺寸，不按 `RLIMIT_NOFILE`**——按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上是 300k 连接装不装得下的区别。ring 数从 6 降到 2 也是量出来的：每 pass 的 `io_uring_enter` 从 6 次降到 2 次，同机同库饱和 `/feed` 容量 15.9k → **22.5k req/s**，每请求 CPU 57.6 → **40.2 µs**（同一测试里 rust-iouring-kensac #264 是 19.3k / 55.7 µs）。再降到 1 个 ring 反而退（19.2k / 48.8 µs），2 是最优点。每个 ring 有**一个专属的** `SO_REUSEPORT` listener，ring 接近满时关闭自己的 listener（连接由其他 ring 接收），不做运行期扩容或跨 ring 迁移。
+**ring 模型。** ring **按需增长**：起步 1 个，最新一个的 direct-descriptor 表用到 3/4 时才加下一个，上限 2 个，合计 **524,288 连接上限**（目标是 320k）；每个 ring 表 262,144 项，**按目标连接数定尺寸，不按 `RLIMIT_NOFILE`**——按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上是 300k 连接装不装得下的区别。ring 数量是量出来的：每 pass 的 `io_uring_enter` 是 1 次/ring，同机同库饱和 `/feed` 容量 6 ring 15.9k、1 ring 19.0k、2 ring 22.5k req/s（同一测试里 rust-iouring-kensac #264 是 19.3k / 55.7 µs）；所以低连接数走 1 个 ring、300k 连接那一段再长出第二个，两边都拿到。每个 ring 有**一个专属的** `SO_REUSEPORT` listener，ring 接近满时关闭自己的 listener（连接由其他 ring 接收），不做跨 ring 迁移。
 
-**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数把 20 个 id 排序后沿 `likes_post_id_idx` 走一遍（merge），一次遍历统计全部 20 个；20 个作者用一次批量 seek（每层共享页、页内插值二分、`CellInfo` 解析 record），不是 20 次独立查找。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译。
+**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数把 20 个 id 排序后沿 `likes_post_id_idx` 走一遍（merge），一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好），不碰 B-tree 页。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译。
 
 **C++23 编译期计算。** 响应头由 `consteval` 在编译期拼成 `std::array`（状态行 + Content-Type + Content-Length 占位），运行时一次拷贝；JSON 转义表、base64url 表、两位数字表和 serial-type 长度表都是 `constexpr`；record 里的整数用 `std::byteswap` + 位运算解码，输入用 `std::string_view`/`std::span` 表达。
 
 **微架构与构建。** 编译用 `-O3 -march=native -fno-plt -fno-semantic-interposition -flto`，另加 `-falign-functions=32 -falign-loops=32`、`-fipa-pta`、`-flto-partition=one`；io_uring 的 ring 启用 `COOP_TASKRUN`/`TASKRUN_FLAG`，连接表和接收缓冲用 `MADV_HUGEPAGE` + `MADV_POPULATE_READ` 预触；有 mold 时用 `-fuse-ld=mold` 并行链接。
 
-**来源说明。** io_uring 的 multishot receive 与 direct descriptor 多 ring 参考了 rust-iouring-kensac (#264) 的实现思路。`src/shim.c` 里的批量作者 seek（`bt_cell_key`、`bt_lower_bound`、`dbx_users_seek_many`：每层共享页、页内插值二分、`findCell` + `CellInfo` 解析 record）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`（`bt_seek_many`、`bt_lower_bound`、`bt_hit_record`），record 的变长整数与列头解码沿用同一套写法；c-iouring-jowinjestine (#404) 把同一段代码记在 #245 名下，这里也一样记。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）同样改写自 #245 的 `src/db.h`（同一段 shim over `unix-excl`，改了命名），`WAL_COALESCE=0` 可关掉它做 A/B（仅供测试，规则里没这条）。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
+**来源说明。** io_uring 的 multishot receive 与 ring 模型参考了 rust-iouring-kensac (#264) 的实现思路。数据层只用 B-tree 游标 API（`sqlite3BtreeFirst/Next/TableMoveto/IndexMoveto/Payload*`），不碰 `MemPage`/`findCell`/`getAndInitPage`/`xParseCell`，也不读写 `BtCursor` 私有字段——之前那版批量作者 seek（每层共享页、页内插值二分）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`，因为走的是 SQLite 内部页函数、落在「B-tree cursor reads are fine」这条裁定之外，已经删掉换成 20 次 `TableMoveto`（实测 handler 8.86 → 8.34 µs，反而更快）。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）同样改写自 #245 的 `src/db.h`（同一段 shim over `unix-excl`，改了命名），`WAL_COALESCE=0` 可关掉它做 A/B（仅供测试，规则里没这条）。record 的变长整数与列头解码沿用 #245 的写法。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
 
 ## 读取走 SQLite 的 B-tree，而不是 SQL 引擎
 

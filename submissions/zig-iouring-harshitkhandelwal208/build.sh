@@ -34,38 +34,11 @@ if command -v clang >/dev/null 2>&1 && [ -n "$PROFDATA_CMD" ] && [ -f src/c/pgo_
     -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_USE_ALLOCA -DHAVE_USLEEP=1 -DHAVE_FDATASYNC=1 \
     -DSQLITE_DISABLE_DIRSYNC -DSQLITE_OMIT_AUTHORIZATION -DSQLITE_OMIT_EXPLAIN \
     -fprofile-generate="$TMP_PGO/prof" \
-    src/shim.c src/c/pgo_train.c -lpthread -ldl -lm -o "$TMP_PGO/pgo_train" 2>/dev/null; then
+    src/shim.c src/c/pgo_train.c -lpthread -ldl -lm -o "$TMP_PGO/pgo_train"; then
 
-    # Create temporary scratch training schema and run
-    sqlite3 "$TMP_PGO/scratch.db" >/dev/null 2>&1 <<'SQL' || true
-CREATE TABLE users (
-  id          INTEGER PRIMARY KEY,
-  username    TEXT NOT NULL UNIQUE,
-  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-CREATE TABLE posts (
-  id          INTEGER PRIMARY KEY,
-  user_id     INTEGER NOT NULL REFERENCES users(id),
-  body        TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 500),
-  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
-);
-CREATE TABLE likes (
-  user_id     INTEGER NOT NULL REFERENCES users(id),
-  post_id     INTEGER NOT NULL REFERENCES posts(id),
-  created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-  PRIMARY KEY (user_id, post_id)
-);
-CREATE INDEX posts_created_at_id_idx ON posts (created_at DESC, id DESC);
-CREATE INDEX posts_user_id_idx       ON posts (user_id);
-CREATE INDEX likes_post_id_idx       ON likes (post_id);
-PRAGMA journal_mode = WAL;
-INSERT INTO users (id, username) VALUES (1, 'user1'), (2, 'user2');
-INSERT INTO posts (id, user_id, body) VALUES (1, 1, 'Hello world 1'), (2, 2, 'Hello world 2');
-INSERT INTO likes (user_id, post_id) VALUES (1, 2), (2, 1);
-SQL
-
-    "$TMP_PGO/pgo_train" "$TMP_PGO/scratch.db" 2>/dev/null || true
-    $PROFDATA_CMD merge -output="$TMP_PGO/sqlite.profdata" "$TMP_PGO/prof"/*.profraw 2>/dev/null || true
+    # pgo_train creates and populates a 1,000-post multi-level B-tree scratch database internally
+    "$TMP_PGO/pgo_train" "$TMP_PGO/scratch.db"
+    $PROFDATA_CMD merge -output="$TMP_PGO/sqlite.profdata" "$TMP_PGO/prof"/*.profraw
 
     if [ -f "$TMP_PGO/sqlite.profdata" ]; then
       if clang -c src/shim.c \
@@ -77,7 +50,7 @@ SQL
         -DSQLITE_OMIT_PROGRESS_CALLBACK -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_LIKE_DOESNT_MATCH_BLOBS \
         -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_USE_ALLOCA -DHAVE_USLEEP=1 -DHAVE_FDATASYNC=1 \
         -DSQLITE_DISABLE_DIRSYNC -DSQLITE_OMIT_AUTHORIZATION -DSQLITE_OMIT_EXPLAIN \
-        -o src/c/shim_pgo.o 2>/dev/null; then
+        -o src/c/shim_pgo.o; then
         PGO_FLAG="-Dpgo=true"
         echo "== Compiled PGO SQLite shim successfully =="
       fi

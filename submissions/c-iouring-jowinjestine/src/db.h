@@ -20,14 +20,30 @@
 #include "btree.h"
 
 #define VFS_NAME "feed-wal"
-static int ckpt_frames = 4096;   /* WAL frames (16 MB) after which the bulk thread copies the log back */
+static int ckpt_frames = 16384;  /* WAL frames (64 MB) after which the bulk thread copies the log back */
+static int ckpt_urgent = 32768;  /* past this many frames (128 MB) the passes run on a nice-10 thread: the log stays bounded */
+#define HOLD_GROW_FRAMES 32768   /* a log this long has missed restarts: the hold limit grows (to 2x at most) */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
 static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
 static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
+/* TAIL_RESTART=0 (default): the loop's next write restarts the log, so its page cache survives the
+ * cycle (the loop does the header sync SQLite does on a restart, once per 64 MB of log).
+ * TAIL_RESTART=1: the tail thread restarts it, which makes SQLite drop the loop's whole page cache
+ * at its next read, every cycle. */
+static int tail_restart_on = 0;
+static int wal_ra_on = 1;        /* WAL_READAHEAD=0: no read-ahead of the log before a bulk pass */
+/* DB_DROP_MS: every this many ms the bulk thread drops the kernel's cached pages of the database
+ * file (posix_fadvise DONTNEED on $SQLITE_PATH; dirty pages are only queued for writeback). The
+ * pages requests use live in SQLite's own cache, anonymous memory that with no swap is never
+ * evicted; the kernel's copy of the rest of the file is what pushes a 2 GB box into reclaim at
+ * 300k connections. 0 = off. Meant for TAIL_RESTART=0 (otherwise each cycle's cache drop would
+ * read the hot pages back from the disk). */
+static long db_drop_ms = 2000;
 static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
 #define CKPT_NICE 19
+#define CKPT_URGENT_NICE 10 /* ~10 % of a core against the loop: enough to catch up, not enough to stall it */
 
 enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 
@@ -51,6 +67,7 @@ struct db {
   int ck_passes;
   int ck_tail_frames;
   int ck_min_frames; /* the next cycle starts at this many frames: CKPT_FRAMES, or more after a slow tail */
+  int ck_urgent;     /* the current bulk pass goes to the nice-10 thread (the log is past ckpt_urgent) */
   const char *path;
   int wal_frames;  /* from the wal hook, on the loop thread */
   int writes_held; /* the tail is being copied: writes wait (reads go on) */
@@ -336,6 +353,9 @@ struct ck_thread {
   int wal_fd;        /* the bulk thread's own descriptor on the log, for writeback kicks */
   int64_t wb_kicked; /* log offset up to which writeback has been started */
   int uv;            /* the tail thread's user_version toggle: its restart transactions */
+  int urgent;        /* bulk threads: 1 = the nice-10 one, for a log past ckpt_urgent */
+  int db_fd;         /* the bulk thread's descriptor on the database file, for DB_DROP_MS */
+  uint64_t dropped_at;
   int last_frames;   /* log size after the tail thread's last commit (1 = it restarted the log) */
 };
 static int tail_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
@@ -383,6 +403,14 @@ static void wal_readahead(struct ck_thread *t) {
   if (end > (int64_t)256 << 20) end = (int64_t)256 << 20; /* a log that long is a disk that cannot keep up: the pass reads the rest itself */
   if (wal_fd_open(t) >= 0) (void)readahead(t->wal_fd, 0, (size_t)end);
 }
+static void db_drop(struct ck_thread *t) {
+  if (db_drop_ms <= 0 || t->urgent) return;
+  uint64_t now = now_ns();
+  if (now - t->dropped_at < (uint64_t)db_drop_ms * 1000000ULL) return;
+  t->dropped_at = now;
+  if (t->db_fd < 0) t->db_fd = open(t->d->path, O_RDONLY | O_CLOEXEC);
+  if (t->db_fd >= 0) (void)posix_fadvise(t->db_fd, 0, 0, POSIX_FADV_DONTNEED);
+}
 static void wb_kick(struct ck_thread *t) {
   struct db *d = t->d;
   if (wal_fd_open(t) < 0) return;
@@ -397,8 +425,8 @@ static void *ck_main(void *arg) {
   if (t->nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), t->nice);
   for (;;) {
     pthread_mutex_lock(&d->mu);
-    while (d->ck_state != t->state) {
-      if (t->state != CK_BULK || wb_kick_ms <= 0) { pthread_cond_wait(&d->cv, &d->mu); continue; }
+    while (d->ck_state != t->state || (t->state == CK_BULK && d->ck_urgent != t->urgent)) {
+      if (t->state != CK_BULK || t->urgent || wb_kick_ms <= 0) { pthread_cond_wait(&d->cv, &d->mu); continue; }
       struct timespec ts;
       clock_gettime(CLOCK_REALTIME, &ts);
       ts.tv_nsec += wb_kick_ms * 1000000L;
@@ -406,14 +434,15 @@ static void *ck_main(void *arg) {
       if (pthread_cond_timedwait(&d->cv, &d->mu, &ts) == ETIMEDOUT) {
         pthread_mutex_unlock(&d->mu);
         wb_kick(t);
+        db_drop(t);
         pthread_mutex_lock(&d->mu);
       }
     }
     pthread_mutex_unlock(&d->mu);
-    if (t->state == CK_BULK) wal_readahead(t);
+    if (t->state == CK_BULK && wal_ra_on) wal_readahead(t);
     int nlog = -1, ndone = -2;
     int rc = sqlite3_wal_checkpoint_v2(t->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-    int restarted = t->state == CK_TAIL && rc == SQLITE_OK && nlog > 0 && nlog == ndone && tail_restart(t);
+    int restarted = t->state == CK_TAIL && rc == SQLITE_OK && nlog > 0 && nlog == ndone && tail_restart_on && tail_restart(t);
     pthread_mutex_lock(&d->mu);
     d->tail_restarted = restarted;
     d->ck_left = rc == SQLITE_OK && nlog >= ndone ? nlog - ndone : CKPT_FORCE;
@@ -424,13 +453,15 @@ static void *ck_main(void *arg) {
   }
   return NULL;
 }
-static int ck_start(struct db *d, const char *path, int state, int nice) {
+static int ck_start(struct db *d, const char *path, int state, int nice, int urgent) {
   struct ck_thread *t = calloc(1, sizeof *t);
   if (!t) return -1;
   t->d = d;
   t->state = state;
   t->nice = nice;
+  t->urgent = urgent;
   t->wal_fd = -1;
+  t->db_fd = -1;
   if (db_open_conn(&t->c, path, 64) < 0) return -1;
   if (state == CK_TAIL) sqlite3_wal_hook(t->c, tail_wal_hook, t);
   pthread_t th;
@@ -462,13 +493,18 @@ static void db_tick(struct db *d) {
       d->bulk_t0 = now_ns();
       d->ck_passes = 0;
       d->n_cycles++;
+      d->ck_urgent = ckpt_urgent > 0 && d->wal_frames >= ckpt_urgent;
       ck_set(d, CK_BULK);
     }
     break;
   case CK_BULK_DONE: {
     d->ck_passes++;
     int behind = d->ck_left + (d->wal_frames - d->ck_nlog); /* skipped by the pass, plus appended since it began */
-    if (behind > ckpt_tail && d->ck_passes < CKPT_PASSES_MAX) { ck_set(d, CK_BULK); break; } /* another pass */
+    if (behind > ckpt_tail && d->ck_passes < CKPT_PASSES_MAX) { /* another pass */
+      d->ck_urgent = ckpt_urgent > 0 && d->wal_frames >= ckpt_urgent;
+      ck_set(d, CK_BULK);
+      break;
+    }
     if (d->ck_passes >= CKPT_PASSES_MAX) d->n_passes_max++;
     uint64_t t = now_ns(), dt = t - d->bulk_t0;
     if (dt > d->bulk_max_ns) d->bulk_max_ns = dt;
@@ -511,7 +547,7 @@ static void db_tick(struct db *d) {
   default: { /* a thread is working */
     /* The limit grows with the log: a log that has missed restarts (the disk made the last tails
      * slow) must restart before it reaches the inline last resort, whatever the sync costs. */
-    uint64_t limit = hold_max_ns * (uint64_t)(1 + d->wal_frames / (2 * ckpt_frames));
+    uint64_t limit = hold_max_ns * (uint64_t)(1 + d->wal_frames / HOLD_GROW_FRAMES);
     if (limit > 2 * hold_max_ns) limit = 2 * hold_max_ns; /* never a hold a POST would count as a failure */
     if (d->writes_held && now_ns() - d->hold_t0 > limit) { /* a slow sync: writes resume, the log restarts next cycle */
       d->writes_held = 0;
@@ -600,7 +636,7 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
   sqlite3_wal_hook(d->c, db_wal_hook, d);
   pthread_mutex_init(&d->mu, NULL);
   pthread_cond_init(&d->cv, NULL);
-  if (ck_start(d, path, CK_BULK, CKPT_NICE) || ck_start(d, path, CK_TAIL, 0)) {
+  if (ck_start(d, path, CK_BULK, CKPT_NICE, 0) || ck_start(d, path, CK_BULK, CKPT_URGENT_NICE, 1) || ck_start(d, path, CK_TAIL, 0, 0)) {
     fprintf(stderr, "checkpoint threads: %s\n", strerror(errno));
     return -1;
   }

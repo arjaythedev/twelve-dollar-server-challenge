@@ -32,30 +32,46 @@ mostly idle sockets under `LimitNOFILE=65535`.
 - Eight listening sockets share the port (`SO_REUSEPORT`), each with its own accept queue of
   `somaxconn`, so together they hold ~32k pending connections through a ramp or a stall. Their
   multishot accepts are armed on the ring being filled and cancelled by user data when it moves on.
-- Each connection has one **multishot receive** into the ring's provided-buffer ring (1,024 × 2 KB),
+- Each connection has one **multishot receive** into the ring's provided-buffer ring (8,192 × 1 KB),
   so an idle connection holds no receive buffer and no heap, only a 32-byte record, and a request
   costs one completion. Requests are parsed in place in the kernel's buffer and the buffer goes
   back at once.
 - One `SEND` per response, headers and body in one buffer (`MSG_WAITALL`, so the completion
-  means all or nothing). Output comes from per-batch arenas that go back to a pool once every
-  send that points into them has completed, so idle connections hold no output memory either.
+  means all or nothing). Output comes from per-batch 1 MB arenas, each its own mapping, that go
+  back to a pool of 16 once every send that points into them has completed; arenas a burst needed
+  beyond that are unmapped. Idle connections hold no output memory either.
 - Every ring is `SINGLE_ISSUER | DEFER_TASKRUN`: completions are posted only when the loop enters
   the ring, so receive copies happen in batches on the loop's own thread. Each pass first gives
   every other ring one non-blocking enter (submits its sends, collects its completions), then
-  ring 0 waits for 256 completions or 1 ms, whichever comes first, so bigger batches share one
-  commit and a pass never spins. (4 ms batches were tried: they cut the WAL ~40 %, one set of
-  hot-page frames per commit, but under a CPU quota they add 25-50 ms to p95 at high load, so
-  the batches stay short.)
+  ring 0 waits for 64 completions or 2 ms, whichever comes first, so bigger batches share one
+  commit and a pass never spins. Every pass enters every ring, so fewer, fuller passes are less
+  CPU: measured at 300k connections, ~4 % less loop CPU than 256 completions / 1 ms, with p99
+  unchanged. (4 ms batches were tried: they cut the WAL ~40 %, one set of hot-page frames per
+  commit, but under a CPU quota they add 25-50 ms to p95 at high load.)
 - **After a burst, reads are bounded.** When a stall ends every connection has a request waiting
   and the multishot receives would use up the buffer ring at once; the rest end with `ENOBUFS`.
   Such a connection is not re-armed but queued, and each pass issues one `MSG_DONTWAIT` read per
   queued connection, never more on a ring than it has buffers, in rounds that complete inside the
   submit. A read that fills its buffer is queued again; a shorter one, or `EAGAIN`, means the
   socket is drained and the multishot receive is armed again.
-- **Drain first.** A pass reads up to 16,384 times but answers at most 2,048 requests; the rest
-  wait in the connection's own buffer (a copy the size of the request) on a ready list that later
-  passes answer first, oldest first. A request left in its socket costs a 3–4 KB kernel buffer,
-  and a backlog of those is what runs a 2 GB box out of memory.
+- **Drain first.** A pass reads up to 16,384 times and answers up to 16,384 requests; the rest
+  wait in the connection's own buffer (a copy the size of the request) on a ready list that the
+  next pass answers before it reaps anything new, oldest first. A request left in its socket
+  costs a 3–4 KB kernel buffer, and a backlog of those is what runs a 2 GB box out of memory.
+- **Reaped during a long pass.** Answering 16,384 waiting requests takes ~0.4 s, and nothing was
+  reaped meanwhile: the receive buffers ran dry, new requests stayed in their sockets, and each
+  socket holding one counts at least a page against `tcp_mem` (~116 MB to pressure on 2 GB). Past
+  ~30k of them TCP went into memory pressure and pruned queues (CPU, drops, client retransmits)
+  until the OOM killer ended the run. Now the pass reaps every 512 answers (`REAP_EVERY`); what
+  arrived goes into the connections' buffers behind the requests already waiting, and the receive
+  buffers go back. Measured at 285k users in a 1 vCPU / 2 GB guest: no `ENOBUFS`, TCP memory
+  stayed under 31 MB, no OOM kill, longest loop turn 0.65 s (was 1.9 s).
+- **A backlog leaves no memory behind.** A connection's buffer is freed as soon as nothing waits
+  in it, and at the first stats tick after a backlog has cleared, `malloc_trim` hands the freed
+  heap back to the kernel. (Before, every connection a backlog touched kept its buffer for good:
+  at 300k users in a 2 GB guest the process grew from ~175 to 365-380 MB and the kernel's OOM
+  killer took it; now it peaks at ~260 MB with a 30-40 MB heap. The stats line prints `heap`,
+  `heap_free`, `arenas` and `trims`.)
 - Closing is a `SHUTDOWN` hard-linked to a direct-descriptor `CLOSE`; a generation number in every
   `user_data` drops completions for a reused slot. Idle connections are never closed by the server.
 - The binary's code and data are locked in RAM (`mlock`, best effort), the connection tables and
@@ -64,8 +80,8 @@ mostly idle sockets under `LimitNOFILE=65535`.
 
 ## A batch
 
-1. Every completion is handled. Requests are answered straight into the arena, up to 2,048 a
-   batch; a connection gets at most one request per batch (pipelined bytes wait for the send).
+1. Every completion is handled. Requests are answered straight into the arena, up to 16,384 a
+   batch, after the requests earlier batches left waiting; a connection gets at most one request per batch (pipelined bytes wait for the send).
 2. All of the batch's reads and writes run in one SQLite transaction, begun lazily by the first of
    them (`BEGIN`, then the read transaction and four B-tree cursors). Reads see the batch's earlier
    writes.
@@ -131,53 +147,56 @@ mostly idle sockets under `LimitNOFILE=65535`.
   every slot). The idea is from c-iouring-pavlyhalim #245. The cache's memory comes from one arena
   handed to SQLite with `SQLITE_CONFIG_PAGECACHE`, backed by transparent huge pages where the kernel
   offers them.
-- **A short log.** At 270-300k connections the kernel holds ~4.1 KB per connection (the TCP socket
-  2.4 KB, its inode 0.8 KB, file and dentry 0.45 KB, the armed receive 0.35 KB), so free memory reaches
-  the reclaim watermark at about the end of the ramp, and from then on the kernel evicts file pages to
-  make room. With 64 MB checkpoint cycles the log grew to ~100 MB of page cache and the database's pages
-  were evicted instead; with 16 MB cycles the log stays small and the database keeps its pages. In a
-  1 vCPU / 2 GB guest at the edge (270k, CPU capped to the box's speed) the worst ramp-end window fell
-  from 3.4-3.8 s to 1.9 s in two pairs of runs.
 - WAL, `synchronous=NORMAL`, `wal_autocheckpoint=0`, 64 MB page cache (warmed at start with the feed pages and the likes primary-key index), no `mmap` (a page in
   SQLite's own cache keeps its parsed header and is found without a wal-index lookup).
 - **Checkpoints converge in the background; nothing on the loop ever fsyncs** (after
-  rust-iouring-kensac #264, changed for one vCPU). Past 4,096 WAL frames (16 MB) a thread at
-  nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time. Under steady
-  writes a pass cannot copy the frames written meanwhile, and the log only restarts once it is
-  fully copied; so that thread runs pass after pass, each copying what the previous one missed,
-  until fewer than 64 frames remain (it converges: it copies faster than the loop writes). Then
-  writes are held (reads go on; the next POST on each connection waits in its buffer) while a
-  second thread at the normal priority copies that remainder: a few milliseconds of copying plus
-  the syncs of the log and of the database, on a thread. That thread then restarts the log itself
-  with a one-frame transaction (`PRAGMA user_version`): SQLite syncs the log header when a log is
-  reused (`synchronous=NORMAL`), and this way that sync, the last one the loop used to do, lands
-  on the thread too. The loop's reads go on meanwhile from the database file (read mark 0), which
-  a restart does not disturb; a read that began earlier holds another mark and makes the attempt
-  `BUSY`, so it is retried, and if the hold ends first the loop's next write restarts the log as
-  before. A hold
-  starts and ends only between batches and lasts at most 400 ms (writes only, once per cycle:
-  under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the next
-  cycle waits for half a log more, so a slow disk never gives back-to-back holds, and the limit
-  grows for a log that has missed restarts, up to 800 ms and no further: a POST that waited a
-  second would count against the score, so past that the log is simply allowed to grow (a
-  longer log costs the loop nothing while its page cache holds the hot pages: the wal-index is
-  consulted only on a cache miss) until the disk gives a restart. Before each pass the bulk
-  thread reads the log sequentially ahead (`readahead`): a pass reads frames in page order,
-  random in the file, and once the box's memory pressure has evicted them (they are clean once
-  written back) that would be a disk seek per frame.
-  (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms limit: on the
-  box the tail's sync of a few hundred random pages outlasted the limit, the log never restarted,
-  and the last resort copied half a gigabyte on the loop once per probe, the one stall that
-  failed every 280k probe at 78 % CPU.) While idle, the bulk thread starts the writeback of the log pages
-  written since its last look every 250 ms (`sync_file_range`, no waiting), so the log's dirty
-  pages reach the disk continuously rather than in a burst at the next fsync, and the tail's
-  sync finds little left. Two earlier designs scored worse
-  on the box. `c3fdb10` (270,000 users) copied the tail without the convergence: on one vCPU it
-  had grown to tens of MB during the slow bulk, the thread competed with the loop for the core and
-  the holds ran into their limit, so every request saw the cycle (p95 114 ms, p99 551 ms at 77 %
-  CPU). `f2f9227` (253,000) copied the small tail on the loop itself: its two fsyncs stalled the
-  loop for seconds on the droplet's disk (p99 3.5 s on a hold). Past 1,048,576 frames (4 GB, a
-  disk that gave no restart for minutes) the loop checkpoints by itself, as a last resort.
+  rust-iouring-kensac #264, changed for one vCPU). Past 16,384 WAL frames (64 MB) a thread at
+  nice 19 runs PASSIVE checkpoints on its own connection in the loop's idle time, after a
+  read-ahead of the log (up to 256 MB: the pass reads frames in page order, random in the file).
+  Under steady writes a pass cannot copy the frames written meanwhile, and the log only restarts
+  once it is fully copied; so that thread runs pass after pass, each copying what the previous one
+  missed, until fewer than 64 frames remain. Then writes are held (reads go on; the next POST on
+  each connection waits in its buffer) while a second thread at the normal priority copies that
+  remainder: a few milliseconds of copying plus the syncs, on a thread. **The loop's next write
+  restarts the log** (as in kensac's entry), so the loop's page cache survives the cycle; a log
+  restarted by another connection makes SQLite drop that connection's whole cache at its next
+  read, and the hot pages would be read again every cycle (~105-119k cache misses per run against
+  ~8.9k, measured with 2 ms added to every disk access). The loop does the one header sync of a
+  restart, once per 64 MB of log. `TAIL_RESTART=1` gives the restart to the tail thread.
+- **Only SQLite's cache holds the database.** Every 2 s (`DB_DROP_MS`) the bulk thread drops the
+  kernel's cached pages of `$SQLITE_PATH` (`posix_fadvise(DONTNEED)`; dirty pages are only queued
+  for writeback). The pages requests use are in SQLite's own 64 MB cache, warmed at start, which
+  is anonymous memory and, with no swap, never evicted; the kernel's copy of the rest of the
+  ~290 MB file is what pushes a 2 GB box into reclaim when 300k sockets already hold ~1.2 GB of
+  kernel memory. (The organiser's 2026-11-15 ruling allows this for the entry's own files.)
+- **The log stays bounded.** A nice-19 thread gets ~1.5 % of a saturated core, and nothing else
+  stopped the log from growing (short of the 4 GB last resort below), each frame staying in the
+  page cache at the box's memory wall. Past 32,768 frames (128 MB, `CKPT_URGENT`) the passes go to
+  a third checkpoint thread at nice 10 until the log restarts: ~10 % of the core against the loop,
+  enough to catch up (a checkpoint that keeps up needs ~1 %). (`297c8ea` had such a thread at the
+  normal priority, and on the box it ran against the loop as an equal minutes into a hold. A
+  thread of its own because an unprivileged thread can raise its nice value but never lower it
+  again.)
+- A hold starts and ends only between batches and lasts at most 400 ms (writes only, once per
+  cycle: under 0.5 % of requests): if the disk makes the tail's sync slow, writes resume and the
+  next cycle waits for half a log more, so a slow disk never gives back-to-back holds; for a log
+  past 128 MB the limit grows to 800 ms and no further (a POST that waited a second would count
+  against the score). `91da0e6` had the loop restart the log with 16 MB cycles (four times the
+  header syncs on the loop) and no read-ahead, and scored 266,000 (it passed 280k for two minutes,
+  then failed the five-minute hold with its memory peak at 1.6 GB); `8193037`, with the tail
+  thread restarting the log and 64 MB cycles, held 280,000 at an 810 MB peak. (`42abbf3`, 270,000 with p99 179 ms at 270k, had a 512-frame tail and a 100 ms
+  limit: on the box the tail's sync of a few hundred random pages outlasted the limit, the log
+  never restarted, and the last resort copied half a gigabyte on the loop once per probe, the one
+  stall that failed every 280k probe at 78 % CPU.) While idle, the bulk thread starts the
+  writeback of the log pages written since its last look every 250 ms (`sync_file_range`, no
+  waiting), so the log's dirty pages reach the disk continuously rather than in a burst at the
+  next fsync, and the tail's sync finds little left. Two earlier designs scored worse on the box.
+  `c3fdb10` (270,000 users) copied the tail without the convergence: on one vCPU it had grown to
+  tens of MB during the slow bulk, the thread competed with the loop for the core and the holds
+  ran into their limit, so every request saw the cycle (p95 114 ms, p99 551 ms at 77 % CPU).
+  `f2f9227` (253,000) copied the small tail on the loop itself: its two fsyncs stalled the loop
+  for seconds on the droplet's disk (p99 3.5 s on a hold). Past 1,048,576 frames (4 GB, a disk
+  that gave no restart for minutes) the loop checkpoints by itself, as a last resort.
 - Build options: `THREADSAFE=2` (each connection is used by one thread), `DEFAULT_MEMSTATUS=0`,
   `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`, `LIKE_DOESNT_MATCH_BLOBS`, `MAX_EXPR_DEPTH=0`,
   `USE_ALLOCA`, `TEMP_STORE=3`, `OMIT_` deprecated/progress-callback/shared-cache/load-extension/
@@ -209,7 +228,9 @@ mostly idle sockets under `LimitNOFILE=65535`.
 amalgamation, builds an instrumented binary, generates a synthetic database (5,000 users, 40,000
 posts, 160,000 likes of random words, no seed data) and drives the load test's request mix plus the
 test suite's error paths through it with `src/train.c` over 48 keep-alive connections, then builds
-the final binary with the profile. `PGO=0 bash build.sh` skips that. No 512-bit vectors: on Cascade
+the final binary with the profile. The instrumented build counts with `-fprofile-update=prefer-atomic`:
+the checkpoint thread runs SQLite during training too, and racing counters once left a profile the
+optimized build rejected. `PGO=0 bash build.sh` skips that. No 512-bit vectors: on Cascade
 Lake one would lower the core's clock for a while after each use.
 
 ## Rules

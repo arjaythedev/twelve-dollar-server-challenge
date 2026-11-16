@@ -768,7 +768,11 @@ connections. Its newer commit `91da0e6` (reaping during long passes, 16 MB check
 log, a WAL write-shim fix) held **266,000** (25,520 req/s, p95 42.7 / p99 207.7 ms, 0 err, 74 % CPU, 26 µs/req,
 1,387 MB, 2026-11-15), also below the merged row, so not merged: 280,000 passed the 2-minute probe but failed the
 5-minute hold on p99 (1.20 s at 79 % CPU), and 290,000, 300,000 and 320,000 failed the 2-minute probe on p99 (3.68 s,
-2.11 s and 2.73 s), all with 0 errors. #452 stays open.
+2.11 s and 2.73 s), all with 0 errors. Its next head, **`482a49e`** (64 MB checkpoint cycles with the tail thread
+restarting the log, a third checkpoint thread at nice 10 past 128 MB, 64-completion / 2 ms ring-0 wait) held
+**280,000** (26,671 req/s, p95 99.5 / p99 828.2 ms, 0 err, 78 % CPU, 26 µs/req, 1,150 MB, 2026-11-16), still below
+the merged row, so not merged: 290,000 failed the 2-minute probe on p95/p99 (1.71 / 5.27 s at 81 % CPU), 300,000 on
+p99 (1.45 s at 84 % CPU) and 320,000 on p95/p99 (3.08 / 3.76 s at 92 % CPU), all with 0 errors. #452 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

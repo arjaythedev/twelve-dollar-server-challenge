@@ -133,6 +133,81 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
                     }
 
                     if (valid_linear && p_inner == 0 && deltas[256] == -1) {
+                        // Check for copy-restore pair: [->..+>..+<<..] >>.. [-<<..+>>..]
+                        int non_zero_count = 0;
+                        int off_a = 0, off_b = 0;
+                        for (int k = 0; k < 512; k++) {
+                            if (k == 256 || deltas[k] == 0) continue;
+                            if (deltas[k] == 1) {
+                                non_zero_count++;
+                                if (off_a == 0) off_a = k - 256;
+                                else off_b = k - 256;
+                            } else {
+                                non_zero_count = 999;
+                            }
+                        }
+
+                        if (non_zero_count == 2) {
+                            size_t j = (close_bracket - code) + 1;
+                            int64_t shift1 = 0;
+                            while (j < n && (code[j] == '>' || code[j] == '<')) {
+                                if (code[j] == '>') shift1++;
+                                else shift1--;
+                                j++;
+                            }
+                            int tmp_off = 0, dst_off = 0;
+                            if (shift1 == off_a) { tmp_off = off_a; dst_off = off_b; }
+                            else if (shift1 == off_b) { tmp_off = off_b; dst_off = off_a; }
+
+                            if (tmp_off != 0 && j < n && code[j] == '[') {
+                                char *close2 = strchr(&code[j + 1], ']');
+                                if (close2) {
+                                    size_t sub_len2 = close2 - &code[j + 1];
+                                    char *open2 = memchr(&code[j + 1], '[', sub_len2);
+                                    if (!open2) {
+                                        int64_t p_inner2 = 0;
+                                        int64_t deltas2[512] = {0};
+                                        bool valid2 = true;
+                                        for (size_t k = 0; k < sub_len2; k++) {
+                                            char ch = code[j + 1 + k];
+                                            if (ch == '>') p_inner2++;
+                                            else if (ch == '<') p_inner2--;
+                                            else if (ch == '+') {
+                                                if (p_inner2 + 256 >= 0 && p_inner2 + 256 < 512) deltas2[p_inner2 + 256]++;
+                                                else valid2 = false;
+                                            } else if (ch == '-') {
+                                                if (p_inner2 + 256 >= 0 && p_inner2 + 256 < 512) deltas2[p_inner2 + 256]--;
+                                                else valid2 = false;
+                                            } else { valid2 = false; break; }
+                                        }
+
+                                        if (valid2 && p_inner2 == 0 && deltas2[256] == -1 && deltas2[-tmp_off + 256] == 1) {
+                                            int l2_count = 0;
+                                            for (int k = 0; k < 512; k++) if (k != 256 && deltas2[k] != 0) l2_count++;
+                                            if (l2_count == 1) {
+                                                // MATCHED COPY-RESTORE PAIR! Collapse 7 memory instructions into 2
+                                                int64_t src_disp = ptr * 8;
+                                                int64_t dst_disp = (ptr + dst_off) * 8;
+                                                fprintf(out, "    movq %ld(%%r12), %%rax\n", (long)src_disp);
+                                                fprintf(out, "    addq %%rax, %ld(%%r12)\n", (long)dst_disp);
+
+                                                size_t j2 = (close2 - code) + 1;
+                                                int64_t shift2 = 0;
+                                                while (j2 < n && (code[j2] == '>' || code[j2] == '<')) {
+                                                    if (code[j2] == '>') shift2++;
+                                                    else shift2--;
+                                                    j2++;
+                                                }
+                                                ptr += shift1 + shift2;
+                                                i = j2;
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         int64_t src_disp = ptr * 8;
                         fprintf(out, "    movq %ld(%%r12), %%rax\n", (long)src_disp);
                         for (int k = 0; k < 512; k++) {

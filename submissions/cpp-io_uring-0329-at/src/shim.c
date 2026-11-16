@@ -405,7 +405,7 @@ dbx *dbx_open(const char *path, char *err, int n) {
 
   static const char *pragmas[] = {
       "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL",
-      "PRAGMA temp_store = MEMORY", "PRAGMA cache_size = -65536",
+      "PRAGMA temp_store = MEMORY", "PRAGMA cache_size = -16384",
       "PRAGMA mmap_size = 0", "PRAGMA wal_autocheckpoint = 0",
       "SELECT count(*) FROM sqlite_schema",
   };

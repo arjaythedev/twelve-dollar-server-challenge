@@ -31,7 +31,7 @@ constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 8192;
 constexpr unsigned kCqEntries = 65536;
 constexpr size_t kBufSize = 2048;
-constexpr uint16_t kBufCount = 4096;
+constexpr uint16_t kBufCount = 2048;
 constexpr uint32_t kWaitNs = 1000000;
 constexpr size_t kDrainBudget = 512;
 constexpr uint32_t kIdleSeconds = 90;
@@ -727,7 +727,7 @@ constexpr uint32_t kSlotsPerRing = 262144;
 
 /* The descriptor table follows the environment's hard limit, capped at the size this server
  * wants: rust-iouring-kensac #264 does exactly this (min(hard NOFILE, 1M)) and it is why their
- * build runs on a CI runner whose NOFILE is small â€?a fixed 262,144-entry sparse table there is
+ * build runs on a CI runner whose NOFILE is small â€”a fixed 262,144-entry sparse table there is
  * refused by io_uring_register_files_sparse and the server never comes up. */
 uint32_t descriptor_slots() {
   struct rlimit rl {};

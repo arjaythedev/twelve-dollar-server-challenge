@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <sys/eventfd.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -159,12 +160,12 @@ static void prefault(void *p, size_t n) {
 /* Creates a ring: sq_entries SQEs, cq_entries CQEs, a sparse direct-descriptor table of nslots,
  * nbufs receive buffers of bufsz bytes. Returns 0, or -1 with *err naming the failed step. */
 static int ring_init(struct ring *r, unsigned sq_entries, unsigned cq_entries, unsigned nslots, unsigned nbufs,
-                     unsigned bufsz, const char **err) {
+                     unsigned bufsz, int defer_taskrun, const char **err) {
   memset(r, 0, sizeof *r);
   struct io_uring_params p;
   memset(&p, 0, sizeof p);
-  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE |
-            IORING_SETUP_NO_SQARRAY;
+  p.flags = IORING_SETUP_SINGLE_ISSUER | (defer_taskrun ? IORING_SETUP_DEFER_TASKRUN : 0) |
+            IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE | IORING_SETUP_NO_SQARRAY;
   p.cq_entries = cq_entries;
   int fd = sys_io_uring_setup(sq_entries, &p);
   if (fd < 0 && errno == EINVAL) { /* a kernel before 6.6: no NO_SQARRAY */
@@ -221,6 +222,20 @@ fail:
   return -1;
 }
 
+/* Ring-to-ring notifications let ring 0 sleep while another ring receives CQEs.
+ * Nonzero rings must not use DEFER_TASKRUN for notifications to arrive without
+ * a userspace enter() on that same ring. */
+static inline int ring_register_eventfd(struct ring *r) {
+  int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (efd < 0) return -1;
+  if (sys_io_uring_register(r->fd, IORING_REGISTER_EVENTFD, &efd, 1) < 0) {
+    int err = errno;
+    close(efd);
+    errno = err;
+    return -1;
+  }
+  return efd;
+}
 static inline unsigned ring_pending_submit(const struct ring *r) { return r->sq_local - r->sq_pushed; }
 
 /* Publishes the SQEs written so far and enters the kernel: submits them, runs the ring's
@@ -288,6 +303,15 @@ static inline void sqe_poll_multishot_conn(struct io_uring_sqe *s, unsigned slot
   s->fd = (int)slot;
   s->len = IORING_POLL_ADD_MULTI;
   s->poll32_events = POLLIN | POLLRDHUP;
+  s->user_data = ud;
+}
+/* Wake the controlling ring when the eventfd belonging to another io_uring
+ * gets a completion. */
+static inline void sqe_poll_eventfd(struct io_uring_sqe *s, int fd, uint64_t ud) {
+  s->opcode = IORING_OP_POLL_ADD;
+  s->fd = fd;
+  s->len = IORING_POLL_ADD_MULTI;
+  s->poll32_events = POLLIN;
   s->user_data = ud;
 }
 /* One read, MSG_DONTWAIT: if nothing is left it ends with EAGAIN instead of waiting. */

@@ -17,6 +17,10 @@ case "${1:-test}" in
          mkdir -p /work/data && cp /src/seed/feed.db /work/data/feed.db
          . "submissions/$SUB/config.sh"
          exec "$JULIA_HOME/bin/julia" --startup-file=no -O3 "submissions/$SUB/dev/feedbench.jl" /work/data/feed.db ;;
+  jwtbench) # dev/jwtbench.jl: HS256 signature variants (PLAN 7.1)
+         bash "submissions/$SUB/build.sh" >/dev/null
+         . "submissions/$SUB/config.sh"
+         exec "$JULIA_HOME/bin/julia" --startup-file=no -O3 "submissions/$SUB/dev/jwtbench.jl" ;;
   feedbench-pgo) # SQLite PGO feasibility (PLAN 5.8): plain, then instrumented + trained on feedbench, then
          # profile-guided, each timed with feedbench. Trained and measured on the same workload: an upper bound.
          . "submissions/$SUB/config.sh"

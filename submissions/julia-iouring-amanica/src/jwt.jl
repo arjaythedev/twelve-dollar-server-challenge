@@ -18,9 +18,19 @@ const JKEY = Buf(64)
 const JF = Fields()
 const USERNAME = Buf(128)  # decoded username of the last verified token
 
+# One HMAC context keyed once at startup, re-initialised per token (PLAN 7.1): the one-shot HMAC() of
+# OpenSSL 3 sets up a context and hashes both key pads on every call, 2.0 vs 0.66 µs (dev/jwtbench.jl).
+# Every token's MAC is still computed in full. JR_HMAC=oneshot: HMAC() per call, for dev A/B.
+const HMAC_ONESHOT = get(ENV, "JR_HMAC", "") == "oneshot"
+const HCTX = Ref{Ptr{Cvoid}}(C_NULL)
+
 function init_jwt(secret::String)
     append!(empty!(JWT_KEY), codeunits(secret))
     EVP_SHA256[] = ccall((:EVP_sha256, LIBCRYPTO), Ptr{Cvoid}, ())
+    HCTX[] = ccall((:HMAC_CTX_new, LIBCRYPTO), Ptr{Cvoid}, ())
+    HCTX[] == C_NULL && error("HMAC_CTX_new failed")
+    ccall((:HMAC_Init_ex, LIBCRYPTO), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Cint, Ptr{Cvoid}, Ptr{Cvoid}),
+        HCTX[], JWT_KEY, length(JWT_KEY), EVP_SHA256[], C_NULL) == 1 || error("HMAC_Init_ex failed")
     nothing
 end
 
@@ -81,9 +91,19 @@ function verify_jwt(d::Vector{UInt8}, s::Int, e::Int, now::Float64)
 
     b64url_decode!(JSIG, d, d2 + 1, e) || return (AUTH_INVALID, 0)
     JSIG.len == 32 || return (AUTH_INVALID, 0)
-    GC.@preserve d ccall((:HMAC, LIBCRYPTO), Ptr{UInt8},
-        (Ptr{Cvoid}, Ptr{UInt8}, Cint, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Ptr{Cuint}),
-        EVP_SHA256[], JWT_KEY, length(JWT_KEY), pointer(d, s), d2 - s, MAC, C_NULL)
+    if HMAC_ONESHOT
+        GC.@preserve d ccall((:HMAC, LIBCRYPTO), Ptr{UInt8},
+            (Ptr{Cvoid}, Ptr{UInt8}, Cint, Ptr{UInt8}, Csize_t, Ptr{UInt8}, Ptr{Cuint}),
+            EVP_SHA256[], JWT_KEY, length(JWT_KEY), pointer(d, s), d2 - s, MAC, C_NULL)
+    else
+        c = HCTX[]                  # Init_ex with a NULL key: same key, pads already hashed
+        ok = ccall((:HMAC_Init_ex, LIBCRYPTO), Cint, (Ptr{Cvoid}, Ptr{Cvoid}, Cint, Ptr{Cvoid}, Ptr{Cvoid}),
+                c, C_NULL, 0, C_NULL, C_NULL) == 1
+        ok &= GC.@preserve d ccall((:HMAC_Update, LIBCRYPTO), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Csize_t),
+                c, pointer(d, s), d2 - s) == 1
+        ok &= ccall((:HMAC_Final, LIBCRYPTO), Cint, (Ptr{Cvoid}, Ptr{UInt8}, Ptr{Cuint}), c, MAC, C_NULL) == 1
+        ok || return (AUTH_INVALID, 0)
+    end
     diff = 0x00
     @inbounds for i in 1:32
         diff |= MAC[i] ⊻ JSIG.data[i]

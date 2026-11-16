@@ -115,7 +115,7 @@ end
 function ckpt_start(path::String)
     get(ENV, "JR_CKPT", "") == "auto" && return false
     restart = get(ENV, "JR_RESTART", "") == "loop" ? 0 : 1   # dev A/B only: who restarts the WAL after a hold
-    rc = ccall((:jr_ckpt_start, LIBJR), Cint, (Ptr{Cvoid}, Cstring, Cint, Cint, Cint), DB[], path, CKPT_PAGES, HOLD_PAGES, restart)
+    rc = ccall((:jr_ckpt_start, LIBJR), Cint, (Ptr{Cvoid}, Cstring, Cint, Cint, Cint), write_db(), path, CKPT_PAGES, HOLD_PAGES, restart)
     rc == 0 || error("checkpoint thread: sqlite error $rc")
     true
 end
@@ -247,6 +247,15 @@ const READ = SqlBackend()
 
 # ---- writes (always SQL) ----
 
+# {"post":{...}} for a new post: created_at tp[1:tn], body p[1:n], author ap[1:an].
+function put_post_created!(b::Buf, id::Int, tp::Ptr{UInt8}, tn::Int, p::Ptr{UInt8}, n::Int, ap::Ptr{UInt8}, an::Int)
+    putstr!(b, "{\"post\":{\"id\":"); putint!(b, id)
+    putstr!(b, ",\"body\":"); putjsonstr!(b, p, n)
+    putstr!(b, ",\"created_at\":"); putjsonstr!(b, tp, tn)
+    putstr!(b, ",\"author\":"); putjsonstr!(b, ap, an)
+    putstr!(b, ",\"like_count\":0}}")
+end
+
 # Inserts a post and writes {"post":{...}}. Returns false on a database error.
 function create_post!(b::Buf, uid::Int, p::Ptr{UInt8}, n::Int, author::Buf)
     @dbg t0 = time_ns()
@@ -259,11 +268,8 @@ function create_post!(b::Buf, uid::Int, p::Ptr{UInt8}, n::Int, author::Buf)
         reset(st)
         return false
     end
-    putstr!(b, "{\"post\":{\"id\":"); putint!(b, col_int(st, 0))
-    putstr!(b, ",\"body\":"); putjsonstr!(b, p, n)
-    putstr!(b, ",\"created_at\":"); put_text_col!(b, st, 1)
-    putstr!(b, ",\"author\":"); putjsonstr!(b, author)
-    putstr!(b, ",\"like_count\":0}}")
+    tp = col_text(st, 1)
+    GC.@preserve author put_post_created!(b, col_int(st, 0), tp, col_bytes(st, 1), p, n, pointer(author.data), author.len)
     rc = step(st)                   # run to completion: the autocommit happens here
     reset(st)
     @dbg MAX_WRITE_NS[] = max(MAX_WRITE_NS[], time_ns() - t0)
@@ -284,6 +290,112 @@ function insert_like(uid::Int, pid::Int)
     @dbg MAX_WRITE_NS[] = max(MAX_WRITE_NS[], time_ns() - t0)
     rc == SQLITE_DONE || return -1
     db_changes() == 1 ? 1 : 2
+end
+
+# ---- writer thread (io_uring only; csrc/shim.c) ----
+# POSTs are validated on the event loop, then queued in a batch that the writer thread commits on its own
+# connection; their replies are written when it signals the batch done (uring.jl). One batch is in flight
+# while the next one fills. Off by default (PLAN 5.9: a draw against group commit on the loop, +3-4 points of
+# CPU); JR_WRITER=on turns it on, for dev A/B.
+
+const WRITER = get(ENV, "JR_WRITER", "") == "on"
+const W_ON = Ref(false)             # set by the transport that runs the writer
+const DEFER = 0                     # handler status: the reply waits for the writer
+
+struct WJob                         # jr_job in csrc/shim.c
+    kind::Int64                     # 1 post, 2 like
+    uid::Int64
+    pid::Int64
+    off::Int64                      # post body in the batch's bytes (0-based)
+    len::Int64
+    id::Int64                       # out: new post id
+    rc::Int32                       # out: post 1; like 1 new, 2 already liked; -1 error
+    tlen::Int32                     # out: created_at
+    ts::NTuple{32,UInt8}
+end
+const WJOB_TS = 56                  # byte offset of ts
+
+mutable struct WBatch
+    n::Int
+    jobs::Vector{WJob}
+    bytes::Buf                      # post bodies and their authors
+    aoff::Vector{Int}               # author in bytes (0-based)
+    alen::Vector{Int}
+    ring::Vector{Int}               # the connection to answer
+    slot::Vector{Int}
+    gen::Vector{UInt32}
+    ka::Vector{Bool}
+end
+WBatch() = WBatch(0, Vector{WJob}(undef, 1024), Buf(1 << 20), zeros(Int, 1024), zeros(Int, 1024),
+    zeros(Int, 1024), zeros(Int, 1024), zeros(UInt32, 1024), fill(false, 1024))
+const WB = Ref{WBatch}()            # filling
+const WB_FLY = Ref{WBatch}()        # with the writer thread
+const W_BUSY = Ref(false)
+const W_EFD = Ref{Cint}(-1)
+
+function w_start(path::String)
+    WRITER || return false
+    fd = ccall((:jr_w_start, LIBJR), Cint, (Cstring,), path)
+    fd >= 0 || error("writer thread: failed to start")
+    W_EFD[] = fd
+    WB[] = WBatch(); WB_FLY[] = WBatch()
+    W_ON[] = true
+    true
+end
+# The connection that commits: the checkpoint thread's WAL hook goes on it.
+write_db() = W_ON[] ? ccall((:jr_w_db, LIBJR), Ptr{Cvoid}, ()) : DB[]
+
+function w_grow!(B::WBatch)
+    m = 2 * length(B.jobs)
+    resize!(B.jobs, m); resize!(B.aoff, m); resize!(B.alen, m)
+    resize!(B.ring, m); resize!(B.slot, m); resize!(B.gen, m); resize!(B.ka, m)
+    nothing
+end
+
+# Queues a job; the transport then fills in the connection (w_conn!).
+function w_add!(kind::Int, uid::Int, pid::Int, p::Ptr{UInt8}, n::Int, author::Buf)
+    B = WB[]
+    B.n == length(B.jobs) && w_grow!(B)
+    k = B.n += 1
+    off = B.bytes.len
+    putraw!(B.bytes, p, n)
+    @inbounds B.aoff[k] = B.bytes.len
+    @inbounds B.alen[k] = author.len
+    putbuf!(B.bytes, author)
+    @inbounds B.jobs[k] = WJob(kind, uid, pid, off, n, 0, Int32(0), Int32(0), ntuple(_ -> 0x00, 32))
+    DEFER
+end
+w_add_post!(uid::Int, p::Ptr{UInt8}, n::Int, author::Buf) = w_add!(1, uid, 0, p, n, author)
+w_add_like!(uid::Int, pid::Int) = w_add!(2, uid, pid, Ptr{UInt8}(C_NULL), 0, EMPTY_BUF)
+const EMPTY_BUF = Buf(0)
+
+@inline function w_conn!(ring::Int, slot::Int, gen::UInt32, ka::Bool)
+    B = WB[]; k = B.n
+    @inbounds (B.ring[k] = ring; B.slot[k] = slot; B.gen[k] = gen; B.ka[k] = ka)
+    nothing
+end
+
+# Hands the filling batch to the writer if it is idle.
+function w_kick!()
+    (W_BUSY[] || WB[].n == 0) && return nothing
+    B = WB[]; WB[] = WB_FLY[]; WB_FLY[] = B
+    W_BUSY[] = true
+    GC.@preserve B ccall((:jr_w_submit, LIBJR), Cvoid, (Ptr{WJob}, Clong, Ptr{UInt8}), B.jobs, B.n, B.bytes.data)
+    nothing
+end
+
+# Reply body for job k of a finished batch; returns the status.
+function w_reply!(b::Buf, B::WBatch, k::Int)
+    j = @inbounds B.jobs[k]
+    reset!(b)
+    j.rc < 0 && return err!(b, 500, "internal server error")
+    if j.kind == 1
+        bp = pointer(B.bytes.data)
+        GC.@preserve B put_post_created!(b, Int(j.id), Ptr{UInt8}(pointer(B.jobs, k)) + WJOB_TS, Int(j.tlen),
+            bp + j.off, Int(j.len), bp + B.aoff[k], B.alen[k])
+        return 201
+    end
+    put_like!(b, Int(j.rc), Int(j.pid))
 end
 
 function health_ok()

@@ -119,6 +119,7 @@ function h_create!(b::Buf, d::Vector{UInt8}, r::Req)
         units += c >= 0xf0 ? 2 : 1
     end
     units <= 500 || return err!(b, 400, "body must be at most 500 characters")
+    W_ON[] && return GC.@preserve t w_add_post!(uid, pointer(t, s), e - s + 1, USERNAME)
     ok = GC.@preserve t create_post!(b, uid, pointer(t, s), e - s + 1, USERNAME)
     ok ? 201 : err!(b, 500, "internal server error")
 end
@@ -131,8 +132,14 @@ function h_like!(b::Buf, d::Vector{UInt8}, r::Req, s::Int, e::Int)
     ex = post_exists(READ, id)
     ex == 0 && return err!(b, 404, "post not found")
     ex < 0 && return err!(b, 500, "internal server error")
+    W_ON[] && return w_add_like!(uid, id)
     lk = insert_like(uid, id)
     lk < 0 && return err!(b, 500, "internal server error")
+    put_like!(b, lk, id)
+end
+
+# Like reply for lk (1 new, 2 already liked); returns the status.
+function put_like!(b::Buf, lk::Int, id::Int)
     putstr!(b, lk == 1 ? "{\"liked\":true,\"already_liked\":false,\"post_id\":" :
                          "{\"liked\":true,\"already_liked\":true,\"post_id\":")
     putint!(b, id)
@@ -170,5 +177,7 @@ function handle!(out::Buf, d::Vector{UInt8}, r::Req)
         @error "handler failed" exception = (ex, catch_backtrace())
         err!(RESP, 500, "internal server error")
     end
+    status == DEFER && return true          # the writer thread's batch answers it (uring.jl)
     write_response!(out, status, RESP, r.keepalive)
+    false
 end

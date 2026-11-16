@@ -17,6 +17,7 @@ const OP_ACCEPT = 0x0d
 const OP_CLOSE = 0x13
 const OP_SEND = 0x1a
 const OP_RECV = 0x1b
+const OP_READ = 0x16
 const OP_SHUTDOWN = 0x22
 
 const SQE_FIXED_FILE = 0x01
@@ -49,6 +50,7 @@ const U_ACCEPT = UInt64(1)
 const U_RECV = UInt64(2)
 const U_SEND = UInt64(3)
 const U_CLOSE = UInt64(4)
+const U_WAKE = UInt64(5)        # the writer thread finished a batch (eventfd read)
 const OWN_ARENA = 0xff          # a send from the slot's own buffer, not from an arena
 
 const SQ_ENTRIES = 4096
@@ -129,6 +131,7 @@ mutable struct Ring
     inbuf::Vector{Vector{UInt8}}# a partial request waiting for more bytes
     inlen::Vector{Int}
     held::Vector{Bool}          # waits in U.held: a POST in its inbuf until the write hold ends
+    waiting::Vector{Bool}       # its reply waits for the writer thread: later requests stay in inbuf
 end
 
 mutable struct Uring
@@ -158,6 +161,7 @@ mutable struct Uring
     nobufs::Int
     backlogs::Int
     wait_ns::UInt64             # time blocked in io_uring_enter waiting for completions
+    wbuf::Vector{UInt64}        # the eventfd read of the writer thread
 end
 
 function nofile_limit()
@@ -234,7 +238,7 @@ function ring_setup(p::Vector{UInt8}, pp::Ptr{UInt8}, idx::Int, nslots::Int, fla
         nslots, 0, 0, true,
         zeros(UInt32, nslots), fill(false, nslots), fill(false, nslots), fill(false, nslots), fill(false, nslots),
         fill(Ptr{UInt8}(0), nslots), zeros(Int, nslots), zeros(Int, nslots),
-        fill(EMPTY, nslots), fill(EMPTY, nslots), zeros(Int, nslots), fill(EMPTY, nslots), zeros(Int, nslots), fill(false, nslots))
+        fill(EMPTY, nslots), fill(EMPTY, nslots), zeros(Int, nslots), fill(EMPTY, nslots), zeros(Int, nslots), fill(false, nslots), fill(false, nslots))
     ring.sq_tail = unsafe_load(ring.sq_tail_p)
     for b in 0:NBUF-1
         give_buf!(ring, b)
@@ -302,6 +306,17 @@ function submit_send!(r::Ring, slot::Int)
     pu32!(p, 24, r.slen[slot+1])
     pu32!(p, 28, MSG_NOSIGNAL)
     pu64!(p, 32, ud(U_SEND, r.idx, r.sarena[slot+1], r.gen[slot+1], slot))
+    nothing
+end
+
+# Reads the writer thread's eventfd (a plain fd, not a direct descriptor) on ring 0.
+function submit_wake!(U::Uring, r::Ring)
+    p = sqe!(r)
+    pu8!(p, 0, OP_READ)
+    pu32!(p, 4, W_EFD[])
+    pu64!(p, 16, UInt(pointer(U.wbuf)))
+    pu32!(p, 24, 8)
+    pu64!(p, 32, ud(U_WAKE, r.idx, 0, 0, 0))
     nothing
 end
 
@@ -428,7 +443,7 @@ function on_data!(U::Uring, r::Ring, slot::Int, d::Vector{UInt8}, s::Int, n::Int
     end
     out = U.out
     reset!(out)
-    while pos <= len && !r.closing[i]
+    while pos <= len && !r.closing[i] && !r.waiting[i]
         st = parse_req!(REQ, data, pos, len)
         st == 0 && break
         if st < 0
@@ -438,16 +453,21 @@ function on_data!(U::Uring, r::Ring, slot::Int, d::Vector{UInt8}, s::Int, n::Int
             pos = len + 1
             break
         end
-        if REQ.method == M_POST && write_hold()              # stays in the input until the hold ends
+        if REQ.method == M_POST && !W_ON[] && write_hold()   # stays in the input until the hold ends
             if !r.held[i]
                 r.held[i] = true
                 push!(U.held, (r.idx, slot, r.gen[i]))
             end
             break
         end
-        handle!(out, data, REQ)
+        deferred = handle!(out, data, REQ)
         @dbg NREQ[] += 1
         pos = REQ.next
+        if deferred                                          # answered by on_wake!; the rest waits till then
+            w_conn!(r.idx, slot, r.gen[i], REQ.keepalive)
+            r.waiting[i] = true
+            break
+        end
         REQ.keepalive || (r.closing[i] = true)
     end
     rest = r.closing[i] ? 0 : len - pos + 1
@@ -484,7 +504,7 @@ function on_accept!(U::Uring, r::Ring, res::Int)
     slot = res
     i = slot + 1
     r.gen[i] += UInt32(1)
-    r.live[i] = true; r.closing[i] = false; r.sending[i] = false; r.recving[i] = false; r.held[i] = false
+    r.live[i] = true; r.closing[i] = false; r.sending[i] = false; r.recving[i] = false; r.held[i] = false; r.waiting[i] = false
     r.inlen[i] = 0; r.pendlen[i] = 0
     r.open += 1
     @dbg U.conns += 1
@@ -553,6 +573,32 @@ function on_send!(U::Uring, r::Ring, u::UInt64, res::Int)
     nothing
 end
 
+# The writer thread committed the batch in flight (or failed it): answer its requests, then let each
+# connection go on with the requests that arrived behind it.
+function on_wake!(U::Uring, r::Ring, res::Int)
+    res == 8 || res == -EINTR || res == -EAGAIN || error("writer eventfd read: $res")
+    submit_wake!(U, r)
+    res == 8 || return nothing
+    W_BUSY[] = false
+    B = WB_FLY[]
+    out = U.out
+    for k in 1:B.n
+        q = U.rings[B.ring[k]+1]
+        slot = B.slot[k]; i = slot + 1
+        (q.live[i] && q.gen[i] == B.gen[k]) || continue      # closed meanwhile (the write stands)
+        q.waiting[i] = false
+        status = w_reply!(RESP, B, k)
+        reset!(out)
+        write_response!(out, status, RESP, B.ka[k])
+        queue_send!(U, q, slot)
+        B.ka[k] || (q.closing[i] = true)
+        on_data!(U, q, slot, q.bufs, 1, 0)                   # requests pipelined behind it; closes if done
+    end
+    B.n = 0
+    reset!(B.bytes)
+    nothing
+end
+
 # Handles up to `cap` completions; returns how many. Any left over stay in the CQ for the next pass.
 function reap!(U::Uring, r::Ring, cap::Int)
     head = unsafe_load(r.cq_head_p)
@@ -573,7 +619,9 @@ function reap!(U::Uring, r::Ring, cap::Int)
             on_send!(U, r, u, res)
         elseif op == U_ACCEPT
             on_accept!(U, r, res)
-        end                                                  # U_CLOSE: only failures arrive; nothing to do
+        elseif op == U_WAKE
+            on_wake!(U, r, res)
+        end                                                 # U_CLOSE: only failures arrive; nothing to do
         if head == tail                                      # more may have arrived meanwhile
             unsafe_store!(r.cq_head_p, head, 1, :release)
             tail = unsafe_load(r.cq_tail_p, 1, :acquire)
@@ -624,7 +672,7 @@ function uring_init(lfd::Cint)
     r, flags = Ring(0, nslots, want)
     U = Uring(lfd, [r], 1, flags, [Arena(Vector{UInt8}(undef, ARENA_SIZE), 0, 0)], 1, Buf(1 << 16),
         Vector{UInt8}[], Dict{UInt64,Vector{UInt8}}(), Tuple{Int,Int,UInt32}[], 1, 0, Tuple{Int,Int,UInt32}[], Tuple{Int,Int,UInt32}[],
-        Int64[0, 1_000_000], zeros(UInt64, 3), nslots, 0, 0, 0, 0, UInt64(0), zeros(Int, MAX_RINGS), 0, 0, UInt64(0))
+        Int64[0, 1_000_000], zeros(UInt64, 3), nslots, 0, 0, 0, 0, UInt64(0), zeros(Int, MAX_RINGS), 0, 0, UInt64(0), zeros(UInt64, 1))
     U.evarg[3] = UInt(pointer(U.timeout))                    # getevents_arg.ts
     println("io_uring: flags=0x$(string(flags, base = 16)) slots/ring=$nslots buffers=$NBUF x $BUFSZ B")
     U
@@ -634,6 +682,7 @@ function serve_uring(U::Uring)
     GROUP_ON[] = GROUP
     @prof prof_init!()
     @dbg (g = Base.gc_num(); st = Stats(time(), NREQ[], Base.gc_bytes(), g.total_time, g.pause))
+    W_ON[] && submit_wake!(U, U.rings[1])
     top_up_accepts!(U)
     while true
         # 1. Submit, then wait: on ring 0 for one completion (with several rings, at most 1 ms, then the
@@ -714,6 +763,7 @@ function serve_uring(U::Uring)
             end
             empty!(U.held2)
         end
+        W_ON[] && w_kick!()                                  # the POSTs of this pass, if the writer is idle
         top_up_accepts!(U)
         @prof prof_tick!()
         A = U.arenas[U.cur]
@@ -731,7 +781,10 @@ function serve_uring(U::Uring)
                     " hold_timeouts=$(ccall((:jr_ckpt_hold_timeouts, LIBJR), Clong, ()))" *
                     " hold_ms=$(ccall((:jr_ckpt_hold_ms, LIBJR), Clong, ()))" *
                     " wal_max_pages=$(ccall((:jr_ckpt_max_pages, LIBJR), Clong, ()))" *
-                    " restarts=$(ccall((:jr_ckpt_restarts, LIBJR), Clong, ())) max_write_ms=$(MAX_WRITE_NS[] ÷ 1_000_000)")
+                    " restarts=$(ccall((:jr_ckpt_restarts, LIBJR), Clong, ())) max_write_ms=$(MAX_WRITE_NS[] ÷ 1_000_000)" *
+                    " wbatches=$(ccall((:jr_w_batches, LIBJR), Clong, ())) wjobs=$(ccall((:jr_w_jobs, LIBJR), Clong, ()))" *
+                    " w_hold_waits=$(ccall((:jr_w_hold_waits, LIBJR), Clong, ()))" *
+                    " w_max_batch_ms=$(ccall((:jr_w_take_max_us, LIBJR), Clong, ()) ÷ 1000)")
                 MAX_WRITE_NS[] = 0
                 U.wait_ns = 0
                 U.passes = 0; U.ncqes = 0; U.max_pass_ns = 0; U.backlogs = 0; U.nobufs = 0; fill!(U.ring_cqes, 0)

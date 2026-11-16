@@ -5,9 +5,9 @@ JWT HMAC from Ubuntu's OpenSSL 3 (`libssl3t64`) · **direct** (no Nginx: serves 
 
 One Julia thread runs an io_uring event loop through raw syscalls; SQLite is the pinned amalgamation,
 used through its public C API only (no B-tree reads). Locally (1 CPU / 2 GB container, wrk-based users
-with think time) it holds 225,000 users reliably and 250,000 about half the time; running two leaderboard
-entries through the same harness suggests that is roughly 225–250k on the benchmark box. See "Running
-locally" for how that was measured.
+with think time) it holds 225,000–275,000 users and passes 300,000 about half the time, depending on how
+busy the laptop is; running a leaderboard entry through the same harness on the same nights suggests
+roughly 250–290k on the benchmark box. See "Running locally" for how that was measured.
 
 ## How it works
 
@@ -22,7 +22,9 @@ locally" for how that was measured.
   a shared output buffer (no intermediate objects, no JSON library). An idle connection holds no buffers;
   0 bytes allocated per request, so the GC does not run under load.
 - No Julia packages: the server uses only Base and `ccall`.
-- JWT HS256 verified on every request with libcrypto's `HMAC`.
+- JWT HS256 verified on every request with libcrypto's HMAC: one `HMAC_CTX` keyed once at startup and
+  re-initialised per token (the key pads are hashed once), so each token still gets its full HMAC but
+  skips OpenSSL 3's per-call setup in one-shot `HMAC()`: 2.0 → 0.66 µs per token (`dev/ct.sh jwtbench`).
 - SQLite through its public C API only: prepared statements for every read and write (no B-tree internals).
   WAL checkpoints run on a background thread, so their fsyncs don't block the event loop.
 - Group commit (io_uring): all writes of one event-loop pass share one transaction, committed before the
@@ -169,14 +171,18 @@ Caveats:
 
 `ENTRY=<folder> dev/ct.sh stress ...` runs another submission through the same harness (its rows go to
 `calibration.csv`, not to the table below). With a ramp like `load.js`'s (`RAMP_UP=60s
-CONNS_PER_SHARD=2000 WRK_THREADS=2`), 1-minute `users` steps on this laptop (2026-11-15):
+CONNS_PER_SHARD=2000 WRK_THREADS=2`), 1-minute `users` steps on this laptop, on two nights:
 
-| entry | leaderboard | passes here | fails here |
+| entry | leaderboard | 2026-11-15: passes / fails | 2026-11-16: passes / fails |
 |---|---:|---|---|
-| c-iouring-pavlyhalim (#245) | 295,000 | 275,000 | 300,000 |
-| julia-iouring-amanica (this) | – | 225,000 (2 of 2), 250,000 (1 of 2) | 250,000 (1 of 2) |
-| c-iouring-meros (#137) | 235,000 | – | 175,000, with idle CPU |
+| c-iouring-pavlyhalim (#245) | 295,000 | 275,000 / 300,000 | 275,000 and 300,000 / – |
+| julia-iouring-amanica (this) | – | 225,000 (2 of 2), 250,000 (1 of 2) / 250,000 (1 of 2) | 275,000 (all), 300,000 (3 of 5) / 300,000 (2 of 5: p95 516, 673 ms) |
+| c-iouring-meros (#137) | 235,000 | – / 175,000, with idle CPU | not run |
 
+The second night the host had more memory to spare and both entries passed more; ours moved up more
+(the 300,000 runs include the HMAC change below, which passed 2 of 2). Taking each night's gap to
+pavlyhalim: roughly 250–290k on the box. At 300,000 pavlyhalim's CPU averaged 60%, ours 80%: most of
+that gap is its B-tree reads, which this entry doesn't use.
 pavlyhalim's local limit matches its score, so the laptop and this ramp are a fair stand-in for the box.
 meros fails here far below its score while its CPU is mostly idle, so something in this harness doesn't
 suit it, and it isn't used for calibration. With the default, burstier ramp (5,000 connections per wrk
@@ -190,7 +196,12 @@ Measured one at a time, kept only if they helped: SQLite at `-O3`, `-march=x86-6
 `SQLITE_OMIT_*` options, SQLite PGO (0–7% even as an upper bound), `mmap_size=0` (no throughput change,
 worse p95), a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
 everywhere), restarting the WAL from the checkpoint thread after every catch-up (more fsyncs, worse
-latency), prefaulting buffers (moves page faults, doesn't remove them).
+latency), prefaulting buffers (moves page faults, doesn't remove them). A writer thread (a C pthread with
+its own connection commits the POSTs in batches while the loop keeps serving reads; replies still wait for
+the commit) was a draw against group commit on the loop: 8 of 9 runs passed each way at 225–275k users,
+and it used 3–4 points more CPU. It stays in the code behind `WRITER=on` (`JR_WRITER=on`), off by default.
+Reading text columns through one `sqlite3_column_value` instead of `sqlite3_column_text` + `_bytes` made
+no difference to GET /feed (18.4 → 17.9 µs, noise).
 
 ## Progress
 
@@ -224,4 +235,10 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P7: 5 min hold | 15,000 | 175,000 (442 MB) | – |
 | P5.7: mmap 256M | – | 225,000 (467 MB) | 47,735 (-6%), n=3 |
 | P5.7: mmap off | – | 225,000 (430 MB) | 48,335 (+1%), n=3 |
+| P5.9: writer smoke | – | 20,000 (372 MB) | – |
+| P5.9: writer thread | – | 275,000 (446 MB) | – |
+| P5.9: writes on loop | – | 275,000 (507 MB) | – |
+| calib: ours smooth | – | 275,000 (498 MB) | – |
+| P7.1: hmac ctx | – | 300,000 (506 MB) | 54,773 (+13%), n=3 |
+| P7.1: hmac oneshot | – | 300,000 (497 MB) | 52,991 (-3%), n=3 |
 <!-- results:end -->

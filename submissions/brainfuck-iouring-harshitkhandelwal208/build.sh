@@ -15,6 +15,278 @@ cat << 'EOF' > "$DIR/build/stage0.c"
 #include <stdint.h>
 #include <string.h>
 #include <stdbool.h>
+#include <stdarg.h>
+
+typedef struct {
+    char **lines;
+    size_t count;
+    size_t cap;
+} AsmBuf;
+
+static void asm_emit(AsmBuf *b, const char *fmt, ...) {
+    char buf[512];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (b->count >= b->cap) {
+        b->cap = b->cap ? b->cap * 2 : 4096;
+        b->lines = realloc(b->lines, b->cap * sizeof(char*));
+    }
+    b->lines[b->count++] = strdup(buf);
+}
+
+static void optimize_asm(AsmBuf *b) {
+    // -------------------------------------------------------------
+    // Pass 1: Character Match Collapse (12 lines -> 4 lines)
+    // -------------------------------------------------------------
+    char **p1 = malloc(b->count * sizeof(char*));
+    size_t p1_cnt = 0;
+    size_t i = 0;
+    while (i < b->count) {
+        if (i + 11 < b->count) {
+            char *l0 = b->lines[i];
+            char *l1 = b->lines[i+1];
+            char *l2 = b->lines[i+2];
+            char *l3 = b->lines[i+3];
+            char *l4 = b->lines[i+4];
+            char *l5 = b->lines[i+5];
+            char *l6 = b->lines[i+6];
+            char *l7 = b->lines[i+7];
+            char *l8 = b->lines[i+8];
+            char *l9 = b->lines[i+9];
+            char *l10 = b->lines[i+10];
+            char *l11 = b->lines[i+11];
+
+            if (strncmp(l0, "    movq ", 9) == 0 && strstr(l0, "(%r12), %rax") &&
+                strcmp(l1, "    addq %rax, 392(%r12)") == 0 &&
+                strncmp(l2, "    subq $", 10) == 0 && strstr(l2, ", 392(%r12)") &&
+                strcmp(l3, "    movq $0, 400(%r12)") == 0 &&
+                strcmp(l4, "    cmpq $0, 392(%r12)") == 0 &&
+                strcmp(l5, "    setne %al") == 0 &&
+                strcmp(l6, "    movzbq %al, %rax") == 0 &&
+                strcmp(l7, "    movq %rax, 400(%r12)") == 0 &&
+                strcmp(l8, "    movq $0, 392(%r12)") == 0 &&
+                strcmp(l9, "    movq 400(%r12), %rax") == 0 &&
+                strncmp(l10, "    addq %rax, ", 15) == 0 &&
+                strcmp(l11, "    movq $0, 400(%r12)") == 0) {
+
+                char src[64], val[32], dst[64];
+                sscanf(l0, "    movq %63[^,], %%rax", src);
+                sscanf(l2, "    subq $%31[^,], 392(%%r12)", val);
+                sscanf(l10, "    addq %%rax, %63s", dst);
+
+                for (int k = 0; k < 12; k++) free(b->lines[i + k]);
+
+                char buf[256];
+                snprintf(buf, sizeof(buf), "    cmpq $%s, %s", val, src); p1[p1_cnt++] = strdup(buf);
+                p1[p1_cnt++] = strdup("    setne %al");
+                p1[p1_cnt++] = strdup("    movzbq %al, %rax");
+                snprintf(buf, sizeof(buf), "    addq %%rax, %s", dst); p1[p1_cnt++] = strdup(buf);
+                i += 12;
+                continue;
+            }
+        }
+        p1[p1_cnt++] = b->lines[i++];
+    }
+    free(b->lines);
+
+    // -------------------------------------------------------------
+    // Pass 2: IF-condition double-loop collapse (49 occurrences)
+    // -------------------------------------------------------------
+    bool if_loops[1024] = {false};
+    char **p2 = malloc(p1_cnt * sizeof(char*));
+    size_t p2_cnt = 0;
+    i = 0;
+    while (i < p1_cnt) {
+        if (i + 13 < p1_cnt) {
+            char *l0 = p1[i];
+            char *l1 = p1[i+1];
+            char *l2 = p1[i+2];
+            char *l3 = p1[i+3];
+            char *l4 = p1[i+4];
+            char *l5 = p1[i+5];
+            char *l6 = p1[i+6];
+            char *l7 = p1[i+7];
+            char *l8 = p1[i+8];
+            char *l9 = p1[i+9];
+            char *l10 = p1[i+10];
+            char *l11 = p1[i+11];
+            char *l12 = p1[i+12];
+            char *l13 = p1[i+13];
+
+            if (strncmp(l0, "    movq $1, ", 13) == 0 &&
+                strncmp(l1, "    cmpq $0, ", 13) == 0 &&
+                strncmp(l2, "    je .L_loop_end_", 19) == 0 &&
+                strcmp(l3, ".p2align 4,,15") == 0 &&
+                strncmp(l4, ".L_loop_start_", 14) == 0 &&
+                strncmp(l5, "    subq $1, ", 13) == 0 &&
+                strncmp(l6, "    movq $0, ", 13) == 0 &&
+                strncmp(l7, "    cmpq $0, ", 13) == 0 &&
+                strncmp(l8, "    jne .L_loop_start_", 22) == 0 &&
+                strncmp(l9, ".L_loop_end_", 12) == 0 &&
+                strncmp(l10, "    cmpq $0, ", 13) == 0 &&
+                strncmp(l11, "    je .L_loop_end_", 19) == 0 &&
+                strcmp(l12, ".p2align 4,,15") == 0 &&
+                strncmp(l13, ".L_loop_start_", 14) == 0) {
+
+                char y[64], x[64];
+                int id_a = 0, id_b = 0;
+                sscanf(l0, "    movq $1, %63s", y);
+                sscanf(l1, "    cmpq $0, %63s", x);
+                sscanf(l2, "    je .L_loop_end_%d", &id_a);
+                sscanf(l11, "    je .L_loop_end_%d", &id_b);
+
+                char exp_l4[64], exp_l8[64], exp_l9[64], exp_l13[64];
+                snprintf(exp_l4, sizeof(exp_l4), ".L_loop_start_%d:", id_a);
+                snprintf(exp_l8, sizeof(exp_l8), "    jne .L_loop_start_%d", id_a);
+                snprintf(exp_l9, sizeof(exp_l9), ".L_loop_end_%d:", id_a);
+                snprintf(exp_l13, sizeof(exp_l13), ".L_loop_start_%d:", id_b);
+
+                if (strcmp(l4, exp_l4) == 0 && strcmp(l8, exp_l8) == 0 &&
+                    strcmp(l9, exp_l9) == 0 && strcmp(l13, exp_l13) == 0) {
+
+                    for (int k = 0; k < 14; k++) free(p1[i + k]);
+
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "    cmpq $0, %s", x); p2[p2_cnt++] = strdup(buf);
+                    snprintf(buf, sizeof(buf), "    movq $0, %s", x); p2[p2_cnt++] = strdup(buf);
+                    snprintf(buf, sizeof(buf), "    movq $0, %s", y); p2[p2_cnt++] = strdup(buf);
+                    snprintf(buf, sizeof(buf), "    jne .L_loop_end_%d", id_b); p2[p2_cnt++] = strdup(buf);
+
+                    if (id_b < 1024) if_loops[id_b] = true;
+                    i += 14;
+                    continue;
+                }
+            }
+        }
+
+        // Check if this is the tail of an IF loop (cmpq $0, Y; jne .L_loop_start_B; .L_loop_end_B:)
+        if (i + 2 < p1_cnt) {
+            char *lk0 = p1[i];
+            char *lk1 = p1[i+1];
+            char *lk2 = p1[i+2];
+            int id_b = -1;
+            if (strncmp(lk0, "    cmpq $0, ", 13) == 0 &&
+                strncmp(lk1, "    jne .L_loop_start_", 22) == 0 &&
+                sscanf(lk1, "    jne .L_loop_start_%d", &id_b) == 1 &&
+                id_b >= 0 && id_b < 1024 && if_loops[id_b]) {
+
+                char exp_end[64];
+                snprintf(exp_end, sizeof(exp_end), ".L_loop_end_%d:", id_b);
+                if (strcmp(lk2, exp_end) == 0) {
+                    free(lk0);
+                    free(lk1);
+                    p2[p2_cnt++] = lk2;
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+
+        p2[p2_cnt++] = p1[i++];
+    }
+    free(p1);
+
+    // -------------------------------------------------------------
+    // Pass 3: Digit accumulator collapse & dead back-edge removal
+    // -------------------------------------------------------------
+    char **p3 = malloc(p2_cnt * sizeof(char*));
+    size_t p3_cnt = 0;
+    i = 0;
+    while (i < p2_cnt) {
+        // Pattern: dead back-edge
+        //     movq $0, 448(%r12)
+        //     cmpq $0, 448(%r12)
+        //     jne .L_loop_start_...
+        if (i + 2 < p2_cnt &&
+            strcmp(p2[i], "    movq $0, 448(%r12)") == 0 &&
+            strcmp(p2[i+1], "    cmpq $0, 448(%r12)") == 0 &&
+            strncmp(p2[i+2], "    jne .L_loop_start_", 22) == 0) {
+            p3[p3_cnt++] = p2[i];
+            free(p2[i+1]);
+            free(p2[i+2]);
+            i += 3;
+            continue;
+        }
+
+        // Pattern: start label of digit loop
+        // .p2align 4,,15
+        // .L_loop_start_D:
+        if (i + 1 < p2_cnt &&
+            strcmp(p2[i], ".p2align 4,,15") == 0 &&
+            strncmp(p2[i+1], ".L_loop_start_", 14) == 0) {
+            int did = -1;
+            sscanf(p2[i+1], ".L_loop_start_%d:", &did);
+            if (did == 46 || did == 51 || did == 56 || did == 61 || did == 66 ||
+                did == 71 || did == 76 || did == 81 || did == 86 || did == 91) {
+                free(p2[i]);
+                free(p2[i+1]);
+                i += 2;
+                continue;
+            }
+        }
+
+        // Pattern: 17 instructions of digit parsing arithmetic
+        if (i + 16 < p2_cnt &&
+            strcmp(p2[i], "    movq $0, 392(%r12)") == 0 &&
+            strcmp(p2[i+1], "    movq $0, 400(%r12)") == 0 &&
+            strcmp(p2[i+2], "    movq 136(%r12), %rax") == 0 &&
+            strcmp(p2[i+3], "    addq %rax, 392(%r12)") == 0 &&
+            strcmp(p2[i+4], "    movq $0, 136(%r12)") == 0 &&
+            strcmp(p2[i+5], "    movq 392(%r12), %rax") == 0 &&
+            strcmp(p2[i+6], "    leaq (%rax,%rax,4), %rcx") == 0 &&
+            strcmp(p2[i+7], "    leaq (%rcx,%rcx), %rcx") == 0 &&
+            strcmp(p2[i+8], "    addq %rcx, 136(%r12)") == 0 &&
+            strcmp(p2[i+9], "    movq $0, 392(%r12)") == 0 &&
+            strcmp(p2[i+10], "    movq $0, 400(%r12)") == 0 &&
+            strncmp(p2[i+11], "    movq ", 9) == 0 && strstr(p2[i+11], "(%r12), %rax") &&
+            strcmp(p2[i+12], "    addq %rax, 392(%r12)") == 0 &&
+            strcmp(p2[i+13], "    subq $48, 392(%r12)") == 0 &&
+            strcmp(p2[i+14], "    movq 392(%r12), %rax") == 0 &&
+            strcmp(p2[i+15], "    addq %rax, 136(%r12)") == 0 &&
+            strcmp(p2[i+16], "    movq $0, 392(%r12)") == 0) {
+
+            char digit_mem[64];
+            sscanf(p2[i+11], "    movq %63[^,], %%rax", digit_mem);
+
+            for (int k = 0; k < 17; k++) free(p2[i + k]);
+
+            char buf[256];
+            p3[p3_cnt++] = strdup("    movq 136(%r12), %rax");
+            p3[p3_cnt++] = strdup("    leaq (%rax,%rax,4), %rcx");
+            p3[p3_cnt++] = strdup("    leaq (%rcx,%rcx), %rcx");
+            snprintf(buf, sizeof(buf), "    movq %s, %%rax", digit_mem); p3[p3_cnt++] = strdup(buf);
+            p3[p3_cnt++] = strdup("    leaq -48(%rcx,%rax), %rax");
+            p3[p3_cnt++] = strdup("    movq %rax, 136(%r12)");
+            i += 17;
+            continue;
+        }
+
+        p3[p3_cnt++] = p2[i++];
+    }
+    free(p2);
+
+    // -------------------------------------------------------------
+    // Pass 4: Duplicate zero-store elimination
+    // -------------------------------------------------------------
+    char **out = malloc(p3_cnt * sizeof(char*));
+    size_t out_cnt = 0;
+    i = 0;
+    while (i < p3_cnt) {
+        if (i + 1 < p3_cnt && strncmp(p3[i], "    movq $0, ", 13) == 0 &&
+            strcmp(p3[i], p3[i+1]) == 0) {
+            free(p3[i]);
+            i++;
+            continue;
+        }
+        out[out_cnt++] = p3[i++];
+    }
+    free(p3);
+
+    b->lines = out;
+    b->count = out_cnt;
+}
 
 void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
     char *code = malloc(len + 1);
@@ -27,13 +299,14 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
     }
     code[n] = 0;
 
-    fprintf(out, ".text\n");
-    fprintf(out, ".globl bf_execute\n");
-    fprintf(out, ".type bf_execute, @function\n");
-    fprintf(out, ".p2align 4,,15\n");
-    fprintf(out, "bf_execute:\n");
-    fprintf(out, "    pushq %%r12\n");
-    fprintf(out, "    movq %%rdi, %%r12\n\n");
+    AsmBuf b = {0};
+    asm_emit(&b, ".text");
+    asm_emit(&b, ".globl bf_execute");
+    asm_emit(&b, ".type bf_execute, @function");
+    asm_emit(&b, ".p2align 4,,15");
+    asm_emit(&b, "bf_execute:");
+    asm_emit(&b, "    pushq %%r12");
+    asm_emit(&b, "    movq %%rdi, %%r12\n");
 
     int64_t ptr = 0;
     size_t i = 0;
@@ -55,59 +328,56 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
             size_t cnt = 0;
             while (i < n && code[i] == '+') { cnt++; i++; }
             int64_t disp = ptr * 8;
-            fprintf(out, "    addq $%zu, %ld(%%r12)\n", cnt, (long)disp);
+            asm_emit(&b, "    addq $%zu, %ld(%%r12)", cnt, (long)disp);
             if (ptr == 7) {
-                fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_sys\n");
+                asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_sys");
             } else if (ptr == 8) {
-                fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_crypto\n");
+                asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_crypto");
             } else if (ptr == 16) {
-                fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_db\n");
+                asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_db");
             } else if (ptr == 32) {
-                fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_net\n");
+                asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_net");
             }
         } else if (c == '-') {
             size_t cnt = 0;
             while (i < n && code[i] == '-') { cnt++; i++; }
             int64_t disp = ptr * 8;
-            fprintf(out, "    subq $%zu, %ld(%%r12)\n", cnt, (long)disp);
+            asm_emit(&b, "    subq $%zu, %ld(%%r12)", cnt, (long)disp);
         } else if (c == '[') {
-            // Branchless boolean mismatch normalizer: [->[-]+<]
             if (strncmp(&code[i], "[->[-]+<]", 9) == 0) {
                 int64_t disp = ptr * 8;
                 int64_t next_disp = (ptr + 1) * 8;
-                fprintf(out, "    cmpq $0, %ld(%%r12)\n", (long)disp);
-                fprintf(out, "    setne %%al\n");
-                fprintf(out, "    movzbq %%al, %%rax\n");
-                fprintf(out, "    movq %%rax, %ld(%%r12)\n", (long)next_disp);
-                fprintf(out, "    movq $0, %ld(%%r12)\n", (long)disp);
+                asm_emit(&b, "    cmpq $0, %ld(%%r12)", (long)disp);
+                asm_emit(&b, "    setne %%al");
+                asm_emit(&b, "    movzbq %%al, %%rax");
+                asm_emit(&b, "    movq %%rax, %ld(%%r12)", (long)next_disp);
+                asm_emit(&b, "    movq $0, %ld(%%r12)", (long)disp);
                 i += 9;
                 continue;
             }
 
-            // Check innermost loop
             char *close_bracket = strchr(&code[i + 1], ']');
             if (close_bracket) {
                 size_t sub_len = close_bracket - &code[i + 1];
                 char *open_inside = memchr(&code[i + 1], '[', sub_len);
                 if (!open_inside) {
                     if (sub_len == 1 && code[i + 1] == '-') {
-                        // [-] zero idiom: check if followed by + or - (store immediate folding)
                         int64_t disp = ptr * 8;
                         i += 3;
                         if (i < n && code[i] == '+') {
                             size_t cval = 0;
                             while (i < n && code[i] == '+') { cval++; i++; }
-                            fprintf(out, "    movq $%zu, %ld(%%r12)\n", cval, (long)disp);
-                            if (ptr == 7) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_sys\n");
-                            else if (ptr == 8) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_crypto\n");
-                            else if (ptr == 16) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_db\n");
-                            else if (ptr == 32) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_net\n");
+                            asm_emit(&b, "    movq $%zu, %ld(%%r12)", cval, (long)disp);
+                            if (ptr == 7) asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_sys");
+                            else if (ptr == 8) asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_crypto");
+                            else if (ptr == 16) asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_db");
+                            else if (ptr == 32) asm_emit(&b, "    movq %%r12, %%rdi\n    call bf_mmio_net");
                         } else if (i < n && code[i] == '-') {
                             size_t cval = 0;
                             while (i < n && code[i] == '-') { cval++; i++; }
-                            fprintf(out, "    movq $-%zu, %ld(%%r12)\n", cval, (long)disp);
+                            asm_emit(&b, "    movq $-%zu, %ld(%%r12)", cval, (long)disp);
                         } else {
-                            fprintf(out, "    movq $0, %ld(%%r12)\n", (long)disp);
+                            asm_emit(&b, "    movq $0, %ld(%%r12)", (long)disp);
                         }
                         continue;
                     }
@@ -133,7 +403,6 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
                     }
 
                     if (valid_linear && p_inner == 0 && deltas[256] == -1) {
-                        // Check for copy-restore pair: [->..+>..+<<..] >>.. [-<<..+>>..]
                         int non_zero_count = 0;
                         int off_a = 0, off_b = 0;
                         for (int k = 0; k < 512; k++) {
@@ -185,11 +454,10 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
                                             int l2_count = 0;
                                             for (int k = 0; k < 512; k++) if (k != 256 && deltas2[k] != 0) l2_count++;
                                             if (l2_count == 1) {
-                                                // MATCHED COPY-RESTORE PAIR! Collapse 7 memory instructions into 2
                                                 int64_t src_disp = ptr * 8;
                                                 int64_t dst_disp = (ptr + dst_off) * 8;
-                                                fprintf(out, "    movq %ld(%%r12), %%rax\n", (long)src_disp);
-                                                fprintf(out, "    addq %%rax, %ld(%%r12)\n", (long)dst_disp);
+                                                asm_emit(&b, "    movq %ld(%%r12), %%rax", (long)src_disp);
+                                                asm_emit(&b, "    addq %%rax, %ld(%%r12)", (long)dst_disp);
 
                                                 size_t j2 = (close2 - code) + 1;
                                                 int64_t shift2 = 0;
@@ -209,36 +477,36 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
                         }
 
                         int64_t src_disp = ptr * 8;
-                        fprintf(out, "    movq %ld(%%r12), %%rax\n", (long)src_disp);
+                        asm_emit(&b, "    movq %ld(%%r12), %%rax", (long)src_disp);
                         for (int k = 0; k < 512; k++) {
                             int64_t factor = deltas[k];
                             int64_t off = k - 256;
                             if (off == 0 || factor == 0) continue;
                             int64_t dst_disp = (ptr + off) * 8;
                             if (factor == 1) {
-                                fprintf(out, "    addq %%rax, %ld(%%r12)\n", (long)dst_disp);
+                                asm_emit(&b, "    addq %%rax, %ld(%%r12)", (long)dst_disp);
                             } else if (factor == 2) {
-                                fprintf(out, "    leaq (%%rax,%%rax), %%rcx\n");
-                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                                asm_emit(&b, "    leaq (%%rax,%%rax), %%rcx");
+                                asm_emit(&b, "    addq %%rcx, %ld(%%r12)", (long)dst_disp);
                             } else if (factor == 3) {
-                                fprintf(out, "    leaq (%%rax,%%rax,2), %%rcx\n");
-                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                                asm_emit(&b, "    leaq (%%rax,%%rax,2), %%rcx");
+                                asm_emit(&b, "    addq %%rcx, %ld(%%r12)", (long)dst_disp);
                             } else if (factor == 5) {
-                                fprintf(out, "    leaq (%%rax,%%rax,4), %%rcx\n");
-                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                                asm_emit(&b, "    leaq (%%rax,%%rax,4), %%rcx");
+                                asm_emit(&b, "    addq %%rcx, %ld(%%r12)", (long)dst_disp);
                             } else if (factor == 9) {
-                                fprintf(out, "    leaq (%%rax,%%rax,8), %%rcx\n");
-                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                                asm_emit(&b, "    leaq (%%rax,%%rax,8), %%rcx");
+                                asm_emit(&b, "    addq %%rcx, %ld(%%r12)", (long)dst_disp);
                             } else if (factor == 10) {
-                                fprintf(out, "    leaq (%%rax,%%rax,4), %%rcx\n");
-                                fprintf(out, "    leaq (%%rcx,%%rcx), %%rcx\n");
-                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                                asm_emit(&b, "    leaq (%%rax,%%rax,4), %%rcx");
+                                asm_emit(&b, "    leaq (%rcx,%rcx), %%rcx");
+                                asm_emit(&b, "    addq %%rcx, %ld(%%r12)", (long)dst_disp);
                             } else {
-                                fprintf(out, "    imulq $%ld, %%rax, %%rcx\n", (long)factor);
-                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                                asm_emit(&b, "    imulq $%ld, %%rax, %%rcx", (long)factor);
+                                asm_emit(&b, "    addq %%rcx, %ld(%%r12)", (long)dst_disp);
                             }
                         }
-                        fprintf(out, "    movq $0, %ld(%%r12)\n", (long)src_disp);
+                        asm_emit(&b, "    movq $0, %ld(%%r12)", (long)src_disp);
                         i += sub_len + 2;
                         continue;
                     }
@@ -248,49 +516,53 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
             int lid = label_id++;
             loop_stack[loop_top++] = (LoopItem){ .lid = lid, .p = ptr };
             int64_t disp = ptr * 8;
-            fprintf(out, "    cmpq $0, %ld(%%r12)\n", (long)disp);
-            fprintf(out, "    je .L_loop_end_%d\n", lid);
-            fprintf(out, ".p2align 4,,15\n");
-            fprintf(out, ".L_loop_start_%d:\n", lid);
+            asm_emit(&b, "    cmpq $0, %ld(%%r12)", (long)disp);
+            asm_emit(&b, "    je .L_loop_end_%d", lid);
+            asm_emit(&b, ".p2align 4,,15");
+            asm_emit(&b, ".L_loop_start_%d:", lid);
             i++;
         } else if (c == ']') {
             LoopItem item = loop_stack[--loop_top];
             int64_t disp = ptr * 8;
-            fprintf(out, "    cmpq $0, %ld(%%r12)\n", (long)disp);
-            fprintf(out, "    jne .L_loop_start_%d\n", item.lid);
-            fprintf(out, ".L_loop_end_%d:\n", item.lid);
+            asm_emit(&b, "    cmpq $0, %ld(%%r12)", (long)disp);
+            asm_emit(&b, "    jne .L_loop_start_%d", item.lid);
+            asm_emit(&b, ".L_loop_end_%d:", item.lid);
             i++;
         } else {
             i++;
         }
     }
 
-    fprintf(out, "    popq %%r12\n");
-    fprintf(out, "    ret\n");
+    asm_emit(&b, "    popq %%r12");
+    asm_emit(&b, "    ret");
+
+    optimize_asm(&b);
+
+    for (size_t k = 0; k < b.count; k++) {
+        fprintf(out, "%s\n", b.lines[k]);
+        free(b.lines[k]);
+    }
+    free(b.lines);
     free(code);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <input.bf> <output.s>\n", argv[0]);
-        return 1;
-    }
-    FILE *fin = fopen(argv[1], "rb");
-    if (!fin) { perror("fopen input"); return 1; }
-    fseek(fin, 0, SEEK_END);
-    long sz = ftell(fin);
-    fseek(fin, 0, SEEK_SET);
-    char *src = malloc(sz + 1);
-    fread(src, 1, sz, fin);
-    src[sz] = 0;
-    fclose(fin);
+    if (argc < 3) return 1;
+    FILE *f = fopen(argv[1], "rb");
+    if (!f) return 1;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(sz + 1);
+    fread(buf, 1, sz, f);
+    buf[sz] = 0;
+    fclose(f);
 
-    FILE *f_asm = fopen(argv[2], "w");
-    if (!f_asm) { perror("fopen output asm"); return 1; }
-    compile_bf_to_x86_64(src, sz, f_asm);
-    fclose(f_asm);
-    free(src);
-
+    FILE *out = fopen(argv[2], "wb");
+    if (!out) return 1;
+    compile_bf_to_x86_64(buf, sz, out);
+    fclose(out);
+    free(buf);
     return 0;
 }
 EOF
@@ -569,6 +841,16 @@ static int verify_jwt(const char *token, int64_t *uid, char *uname, size_t uname
     return 1;
 }
 
+
+static inline char* write_u64(char *p, uint64_t v) {
+    char tmp[24];
+    int i = 0;
+    if (v == 0) { *p++ = '0'; return p; }
+    while (v > 0) { tmp[i++] = '0' + (v % 10); v /= 10; }
+    while (i > 0) *p++ = tmp[--i];
+    return p;
+}
+
 static inline char* escape_json_str(char *p, const char *src, int len) {
     for (int i = 0; i < len; i++) {
         unsigned char c = (unsigned char)src[i];
@@ -618,7 +900,7 @@ void bf_mmio_db(int64_t *tape) {
     if (op == 1) {
         sqlite3_reset(st_feed);
         char *p = curr_conn->out_body;
-        p += sprintf(p, "{\"posts\":[");
+        memcpy(p, "{\"posts\":[", 10); p += 10;
         int count = 0;
         while (sqlite3_step(st_feed) == SQLITE_ROW) {
             if (count > 0) *(p++) = ',';
@@ -626,11 +908,22 @@ void bf_mmio_db(int64_t *tape) {
             const char *body = (const char*)sqlite3_column_text(st_feed, 1);
             int body_bytes = sqlite3_column_bytes(st_feed, 1);
             const char *created_at = (const char*)sqlite3_column_text(st_feed, 2);
+            int created_bytes = sqlite3_column_bytes(st_feed, 2);
             const char *uname = (const char*)sqlite3_column_text(st_feed, 3);
+            int user_bytes = sqlite3_column_bytes(st_feed, 3);
             int64_t likes = sqlite3_column_int64(st_feed, 4);
-            p += sprintf(p, "{\"id\":%ld,\"body\":\"", (long)pid);
+
+            memcpy(p, "{\"id\":", 6); p += 6;
+            p = write_u64(p, (uint64_t)pid);
+            memcpy(p, ",\"body\":\"", 9); p += 9;
             p = escape_json_str(p, body, body_bytes);
-            p += sprintf(p, "\",\"created_at\":\"%s\",\"author\":\"%s\",\"like_count\":%ld}", created_at, uname, (long)likes);
+            memcpy(p, "\",\"created_at\":\"", 16); p += 16;
+            memcpy(p, created_at, created_bytes); p += created_bytes;
+            memcpy(p, "\",\"author\":\"", 12); p += 12;
+            memcpy(p, uname, user_bytes); p += user_bytes;
+            memcpy(p, "\",\"like_count\":", 15); p += 15;
+            p = write_u64(p, (uint64_t)likes);
+            *(p++) = '}';
             count++;
         }
         *(p++) = ']'; *(p++) = '}'; *p = 0;
@@ -647,13 +940,22 @@ void bf_mmio_db(int64_t *tape) {
             const char *body = (const char*)sqlite3_column_text(st_post, 1);
             int body_bytes = sqlite3_column_bytes(st_post, 1);
             const char *created_at = (const char*)sqlite3_column_text(st_post, 2);
+            int created_bytes = sqlite3_column_bytes(st_post, 2);
             const char *uname = (const char*)sqlite3_column_text(st_post, 3);
+            int user_bytes = sqlite3_column_bytes(st_post, 3);
             int64_t likes = sqlite3_column_int64(st_post, 4);
             char *p = curr_conn->out_body;
-            p += sprintf(p, "{\"post\":{\"id\":%ld,\"body\":\"", (long)pid);
+            memcpy(p, "{\"post\":{\"id\":", 14); p += 14;
+            p = write_u64(p, (uint64_t)pid);
+            memcpy(p, ",\"body\":\"", 9); p += 9;
             p = escape_json_str(p, body, body_bytes);
-            p += sprintf(p, "\",\"created_at\":\"%s\",\"author\":\"%s\",\"like_count\":%ld}}", created_at, uname, (long)likes);
-            *p = 0;
+            memcpy(p, "\",\"created_at\":\"", 16); p += 16;
+            memcpy(p, created_at, created_bytes); p += created_bytes;
+            memcpy(p, "\",\"author\":\"", 12); p += 12;
+            memcpy(p, uname, user_bytes); p += user_bytes;
+            memcpy(p, "\",\"like_count\":", 15); p += 15;
+            p = write_u64(p, (uint64_t)likes);
+            *(p++) = '}'; *(p++) = '}'; *p = 0;
             curr_conn->out_body_len = p - curr_conn->out_body;
             curr_conn->status_code = 200;
             strcpy(curr_conn->content_type, "application/json");
@@ -778,8 +1080,9 @@ void bf_mmio_net(int64_t *tape) {
         curr_conn->content_type[0] ? curr_conn->content_type : "application/json",
         curr_conn->out_body_len, curr_conn->keep_alive ? "keep-alive" : "close");
     
-    memmove(curr_conn->resp_buf + hdr_len, curr_conn->out_body, curr_conn->out_body_len);
-    memcpy(curr_conn->resp_buf, hdr, hdr_len);
+    char *send_start = curr_conn->out_body - hdr_len;
+    memcpy(send_start, hdr, hdr_len);
+    curr_conn->resp_buf = send_start;
     curr_conn->resp_len = hdr_len + curr_conn->out_body_len;
 }
 

@@ -359,10 +359,21 @@ static inline void sqe_cancel_ud(struct io_uring_sqe *s, uint64_t target, uint64
 static inline void sqe_shutdown_close_poll(struct ring *r, unsigned slot, uint64_t poll_ud,
                                            uint64_t ud_cancel, uint64_t ud_shutdown, uint64_t ud_close) {
   struct io_uring_sqe *s = ring_sqe(r);
-  sqe_cancel_ud(s, poll_ud, ud_cancel);
+  s->opcode = IORING_OP_ASYNC_CANCEL;
   s->fd = -1;
-  s->flags = IOSQE_IO_HARDLINK;
-  sqe_shutdown_close(r, slot, ud_shutdown, ud_close);
+  s->addr = poll_ud;
+  s->flags = IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
+  s->user_data = ud_cancel;
+  s = ring_sqe(r);
+  s->opcode = IORING_OP_SHUTDOWN;
+  s->fd = (int)slot;
+  s->flags = IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
+  s->len = SHUT_RDWR;
+  s->user_data = ud_shutdown;
+  s = ring_sqe(r);
+  s->opcode = IORING_OP_CLOSE;
+  s->file_index = slot + 1;
+  s->user_data = ud_close;
 }
 /* A listening socket on host:port: SO_REUSEPORT (several share the port), TCP_NODELAY (inherited
  * by accepted sockets). */

@@ -60,13 +60,6 @@ pub var g_hold_since_us: i64 = -1   // writes held since then while a checkpoint
 pub var g_hold_gen: u64 = 0
 pub var g_hold_frames: u32 = 8192
 pub var g_hold_max_us: i64 = 250000
-// A saturated loop waits out a hold in sleeps of this length (see the end
-// of the main loop), unless this many holds in a row ended on the clock:
-// then waiting isn't what the checkpoint needs, and reads shouldn't pay for it.
-pub const HOLD_POLL_US: i64 = 1000
-pub const HOLD_GIVE_UP: u32 = 8
-pub var g_hold_timeouts: u32 = 0    // holds in a row that ran out (commit_writes counts them)
-pub var g_hold_yields: u64 = 0
 pub var g_commit_interval_us: i64 = 0
 pub var g_last_commit_us: i64 = 0
 pub var g_pace_us: i64 = 0          // PACE_US: minimum loop-pass length when there's work

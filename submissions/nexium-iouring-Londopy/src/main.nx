@@ -47,13 +47,13 @@ fn cslice(p: *u8) -> []u8 {
 
 fn print_stats() {
     unsafe {
-        _ = stdio.dprintf(2, @cstr("stats: accepts=%lu accept_errs=%lu eofs=%lu recv_errs=%lu closes=%lu rearm_nobufs=%lu rearm_final=%lu sends=%lu send_errs=%lu chunks=%u free=%u cur_refs=%u wal=%u taskrun_clears=%lu bufs=%u cache_misses=%lu busy_pct=%d napping=%d nap_us=%d batch=%d nap_backoffs=%lu ready=%u stashed=%lu pbuf_mb=%lu hold_yields=%lu\n"),
+        _ = stdio.dprintf(2, @cstr("stats: accepts=%lu accept_errs=%lu eofs=%lu recv_errs=%lu closes=%lu rearm_nobufs=%lu rearm_final=%lu sends=%lu send_errs=%lu chunks=%u free=%u cur_refs=%u wal=%u taskrun_clears=%lu bufs=%u cache_misses=%lu busy_pct=%d napping=%d nap_us=%d batch=%d nap_backoffs=%lu ready=%u stashed=%lu pbuf_mb=%lu\n"),
             loop.st.accepts, loop.st.accept_errs, loop.st.eofs, loop.st.recv_errs, loop.st.closes, loop.st.rearm_nobufs,
             loop.st.rearm_final, loop.st.sends, loop.st.send_errs, net.g_nchunks, net.g_nfree,
             net.g_chunks[net.g_cur as usize].refs, db.wal_frames(), loop.st.taskrun_clears, net.g_rings[0].q.nbuf_live,
             db.cache_misses(), (loop.g_busy * 100.0 + 0.5) as i32, loop.g_napping as i32, loop.g_nap_us as i32,
             (loop.g_batch_ewma + 0.5) as i32, loop.g_nap_backoffs, loop.g_ready_n, loop.g_stashed,
-            (net.g_pbuf_bytes >> 20) as u64, loop.g_hold_yields)
+            (net.g_pbuf_bytes >> 20) as u64)
     }
 }
 
@@ -186,7 +186,6 @@ fn main() {
             // due), waking as soon as any ring has work. Never spin while writes
             // wait: on one vCPU a spinning loop starves the checkpoint thread
             // they depend on.
-            var slept_us: i64 = 0
             if events == 0 {
                 var wait_us: i64 = 1000
                 if loop.g_njobs != 0 and loop.g_hold_since_us < 0 {
@@ -196,8 +195,7 @@ fn main() {
                 if wait_us > 0 and !loop.rings_pending() {
                     let t0 = loop.mono_now_us()
                     loop.idle_wait(wait_us)
-                    slept_us = loop.mono_now_us() - t0
-                    loop.g_win_sleep_us += slept_us
+                    loop.g_win_sleep_us += loop.mono_now_us() - t0
                 }
             } else if loop.g_ready_n == 0 {
                 let pace = loop.nap_length()
@@ -223,33 +221,7 @@ fn main() {
                     if left > 0 {
                         var d = tm.timespec{ .tv_sec = left / 1000000, .tv_nsec = (left % 1000000) * 1000 }
                         _ = tm.nanosleep(&d, (0 as usize) as *mut tm.timespec)
-                        slept_us = loop.mono_now_us() - now_us
-                        loop.g_win_sleep_us += slept_us
-                    }
-                }
-            }
-            // Writes are waiting for the checkpoint thread to empty the log. It
-            // runs at nice 19, so beside a loop that never sleeps it gets about
-            // 1% of the CPU: the hold times out, the commit goes ahead, and the
-            // log only grows (to 545 MB at 320k users on the replica, crowding
-            // the database out of the page cache). A pass that slept at least as
-            // long as it worked left the thread room. One that didn't stops here
-            // until the checkpoint is done or the hold runs out: a short pause
-            // now, in place of a log that never shrinks. That is not idle time,
-            // so the nap controller doesn't count it.
-            if loop.g_njobs != 0 and loop.g_hold_since_us >= 0 and loop.g_hold_timeouts < loop.HOLD_GIVE_UP {
-                let now_us = loop.mono_now_us()
-                if now_us - loop.g_mono_us > 2 * slept_us {
-                    i = 0
-                    while i < net.g_nrings {
-                        let r = &mut net.g_rings[i as usize]
-                        if r.q.sqe_tail != r.q.submitted { _ = uring.enter(&mut r.q, 0) }
-                        i += 1
-                    }
-                    var d = tm.timespec{ .tv_sec = 0, .tv_nsec = loop.HOLD_POLL_US * 1000 }
-                    while db.ckpt_generation() == loop.g_hold_gen and loop.mono_now_us() - loop.g_hold_since_us < loop.g_hold_max_us {
-                        _ = tm.nanosleep(&d, (0 as usize) as *mut tm.timespec)
-                        loop.g_hold_yields += 1
+                        loop.g_win_sleep_us += loop.mono_now_us() - now_us
                     }
                 }
             }

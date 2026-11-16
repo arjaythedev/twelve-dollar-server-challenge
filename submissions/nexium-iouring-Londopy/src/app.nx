@@ -368,9 +368,7 @@ pub fn commit_writes() {
                 loop.g_hold_since_us = loop.g_mono_us
                 loop.g_hold_gen = db.ckpt_generation()
             }
-            let caught_up = db.ckpt_generation() != loop.g_hold_gen
-            if !caught_up and loop.g_mono_us - loop.g_hold_since_us < loop.g_hold_max_us { return }
-            loop.g_hold_timeouts = if caught_up { 0 } else { loop.g_hold_timeouts + 1 }
+            if db.ckpt_generation() == loop.g_hold_gen and loop.g_mono_us - loop.g_hold_since_us < loop.g_hold_max_us { return }
         }
         loop.g_hold_since_us = -1
         loop.g_last_commit_us = loop.g_mono_us

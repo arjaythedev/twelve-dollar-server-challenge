@@ -48,13 +48,10 @@
   first pass after the hold answers up to 4,096 of them, oldest first, in its one commit. Releasing at most a pass's
   64 answers per write window let the held set outgrow the release rate after a checkpoint hold under load: every pass
   then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
-- **Oldest first, in big passes.** A pass answers up to 2,048 requests, oldest first, keeping each connection's order;
-  the rest stay parsed in the batch for the next pass (a parsed request costs a few dozen bytes, one left in its socket
-  a 3-4 KB socket buffer), and the loop doesn't wait for completions while any are queued. Earlier versions answered
-  64 per pass and, past one pass of backlog, the newest first, so that fewer requests waited past the 40 ms delayed-ACK
-  timer. But then a stall of a few hundred milliseconds left its oldest requests waiting until the whole backlog
-  drained, seconds at 80-85 % CPU, and in a short run a few such stalls are 1 % of the requests. Oldest first, a
-  request waits about as long as the stall. `LIFO=1 ANSWERS=64` restores the old order.
+- **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
+  few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
+  first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
+  waits without bound.
 - **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
   asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
   steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
@@ -72,8 +69,13 @@
   started writeback of every page each of them wrote, a hot index page once per pass; left dirty until that sync, each
   page is written once, and the disk got about 60 % fewer write requests per request on the test box.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
-  lives in its memory, shared by its two connections. 256 MB page cache, no mmap, statements prepared once. Startup
-  reads the indexes that writes touch into the page cache. Inserts bind `created_at` in the column default's format
+  lives in its memory, shared by its two connections. 96 MB page cache, no mmap, statements prepared once. Startup
+  reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
+  of the 250 MB seed (the two indexes that writes land on at random, 35 MB, the users table, and the newest end of
+  everything else: a post is read and liked within seconds of being listed), and they grow by a few MB a minute. A
+  cache with room for everything (256 MB before) also keeps every page ever appended, about 0.26 MB a second at 300k
+  users, in anonymous memory that reclaim can't take back when the box is at its memory wall; at 96 MB the oldest of
+  those give way instead. Inserts bind `created_at` in the column default's format
   and take the id from `sqlite3_last_insert_rowid` (no `RETURNING`); a like is one `INSERT … SELECT … WHERE EXISTS
   … ON CONFLICT DO NOTHING`, and `sqlite3_changes` tells a new like from a repeat or a missing post.
 - **One write per commit.** A VFS of its own over `unix-excl` (SQLite's public VFS interface, the pattern of its own
@@ -92,6 +94,24 @@
   scanned the whole hash table, tens of thousands of slots, to find nothing: 2.5 % of the server's CPU under a stream
   of likes. Here the page waits out the swap under page number 0, which SQLite never gives a page, and that walk is
   gone. Fetches, truncates and everything else are pcache1's; `xRekey` runs only inside an `INSERT`'s split.
+- **The process's own pages are anonymous memory.** The box has no swap, so near the memory wall reclaim can only
+  take file-backed pages, and the pages of a mapped library are file-backed like any other: the loop thread then
+  stalls on major faults that read its own code back from disk. An entry that is one small binary locks it in RAM;
+  the .NET runtime maps 66 MB of images (about 30 MB of them in use) and `mlock` is capped at the 8 MB
+  `RLIMIT_MEMLOCK`. Under memory pressure on the test box the loop thread took 6,000 to 92,000 major faults in a
+  two-minute hold and read 0.8 to 12 GB of its own code and data back from disk; with all 66 MB locked at startup
+  (a raised limit, to test) it still took 13,000, nearly all on two pages of assemblies that load at the first write.
+  So `Pages.fs` turns every page of those files that is in use into an anonymous page with the same content, in
+  place, at startup and then by the loop once a second (every 8 s once nothing new turns up) for pages first used
+  later: a private mapping's page is copied on write
+  (`MADV_POPULATE_WRITE` for a writable one; a read-only or executable one by writing its own bytes back through
+  `/proc/self/mem`, which the kernel allows on a private mapping without a change of protection, the way a debugger
+  plants a breakpoint), and a run of pages of a read-only shared mapping (the runtime maps assemblies whole that
+  way) is replaced by an anonymous copy with one `mremap`. An anonymous page can't be reclaimed without swap, and the
+  kernel's cached copy of each moved page, which nothing maps any more, is dropped at once (`POSIX_FADV_DONTNEED`),
+  so the move costs no memory. The
+  same test afterwards: 0 major faults on the loop thread. The 8 MB lock stays, for pages not used yet. `ANON=0`
+  turns it off.
 
 ## Reads walk SQLite's B-trees
 
@@ -127,6 +147,7 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 | `src/Vfs.fs` | the VFS that writes each commit's WAL frames with one `pwrite` |
 | `src/Pcache.fs` | pcache1 with an `xRekey` of its own |
 | `src/Json.fs`, `src/Jwt.fs` | response JSON, HS256 |
+| `src/Pages.fs` | the process's own file-backed pages in use, moved to anonymous memory |
 | `src/Native.fs`, `src/Program.fs` | libc calls, startup |
 
 SQLite build options (`build.sh`): `THREADSAFE=2`, `DEFAULT_MEMSTATUS=0`, `DEFAULT_WAL_SYNCHRONOUS=1`, `DQS=0`,
@@ -143,18 +164,19 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (2048), `LIFO` (0), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
-(`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `STATS` (1: a
-line a second on stderr).
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (96000), `BTREE` (1), `VFS`
+(`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
+process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
 
 ## Credits
 
 The loop's policies (accept high-water marks, bounded re-arms, answers per pass, newest-first under backlog, the write
 window, checkpoint holds) come from the author's [objc-uring-delneg](../objc-uring-delneg), and `Ring.fs` and `Jwt.fs`
-from the author's F# entries. Ideas from other entries: the `unix-excl` VFS, eight `SO_REUSEPORT` listeners and oldest-first passes of up to
-2,048 answers from [rust-iouring-kensac](../rust-iouring-kensac), and calling SQLite's `sqlite3Btree*` functions on the unmodified
+from the author's F# entries. Ideas from other entries: the `unix-excl` VFS and eight `SO_REUSEPORT` listeners from
+[rust-iouring-kensac](../rust-iouring-kensac), and calling SQLite's `sqlite3Btree*` functions on the unmodified
 amalgamation built with `SQLITE_PRIVATE` defined empty from [swift-iouring-akbashev](../swift-iouring-akbashev),
 and writing each commit's WAL frames with one `pwrite` at the commit frame, and the page cache's truncate walk, from
-[c-iouring-pavlyhalim](../c-iouring-pavlyhalim).
+[c-iouring-pavlyhalim](../c-iouring-pavlyhalim), and that reclaim takes a server's own code at the memory wall (it
+locks its binary in RAM and counted the loop's major faults) from [mojo-iouring-oh-meh](../mojo-iouring-oh-meh).
 
 MIT license (the repository's).

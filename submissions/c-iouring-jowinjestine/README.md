@@ -305,6 +305,7 @@ independent network scheduling switches:
 - `PRE_CONNS=430000` (experimental default): attempt to create the rings
   necessary for 400K connections before the connection ramp. This allocates
   additional ring resources up front and may itself use too much RAM.
+  The default is `PRE_CONNS=330000` for the 310K+ leaderboard target.
 
 Suggested A/B configurations on an otherwise identical system:
 

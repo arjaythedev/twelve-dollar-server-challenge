@@ -2,3 +2,7 @@
 /deps/
 /.zig-cache/
 /zig-out/
+src/c/*.o
+src/c/*.profdata
+src/c/*.profraw
+src/c/pgo_train

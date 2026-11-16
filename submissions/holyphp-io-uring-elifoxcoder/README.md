@@ -184,6 +184,37 @@ build. PGO data should be refreshed after substantial source changes.
 | `1569472` (io_uring backend + ring-scale fixes) | **145,000** | 14,093 | 91 % | 60 | 0 |
 | `d75dd29` (allocation-free request path) | box run requested | — | — | — | — |
 
+### Event-loop round after the 260k box run (`dbe2947`)
+
+The box held 260,000 at 79 % CPU and 29 µs/request; 270,000 failed on the
+tail at 82 %. A same-load comparison with the 310k Rust leader showed the gap
+is small at 8k connections (37.7 vs 36.5 µs/request) but grows to ~25 % at
+130k connections, in both user and kernel time. Changes in this round, all
+generic runtime or launcher defaults:
+
+- **Every ring is `DEFER_TASKRUN` and entered with `GETEVENTS` each pass**
+  (`HPHP_DEFER_ALL=1`, `HPHP_FORCE_ENTER=1`); ring 0 waits for 256
+  completions or 1 ms (`HPHP_BATCH_N=256`). Completions are posted only when
+  the loop asks for them instead of by signal-driven task work.
+- **Ring 0 does not sleep over completions it just produced**: after the
+  other rings are flushed, their newly posted CQEs are counted and ring 0's
+  bounded wait is skipped when there are any.
+- **Larger response-buffer and send-chunk pools** (32 MB / 8,192 buffers,
+  4,096 chunks): with 2,048 answers per pass, the old 4 MB pool missed for
+  most feed responses, which then went through `malloc`/`free`.
+- **Circular answer/read FIFOs by default** (no compaction `memmove` under a
+  sustained backlog).
+- Responses no longer carry the redundant `Content-Encoding: identity` and
+  `Connection: keep-alive` headers (HTTP/1.1 keep-alive is the default;
+  `Connection: close` is still sent when closing).
+
+Same-binary mirrored A/B/B/A on one pinned CPU, 130k connections (kernel
+6.18): 48.9 → 44.4 µs/request (−9 %), p95 ~2 ms in both. On an Ubuntu 6.8
+1-vCPU/2 GB VM at 80k users: ~44.5 % → 40.5 % CPU for the same requests.
+42/42 Direct and 42/42 Classic pass with the new defaults and with
+`HPHP_DEFER_ALL=0 HPHP_FORCE_ENTER=0 HPHP_BATCH_N=64` (the previous loop).
+Local numbers are not box results.
+
 ### The allocation round (`2f8507b` … `d75dd29`)
 
 Instrumentation first: `runtime_stats()` exposes generic runtime counters

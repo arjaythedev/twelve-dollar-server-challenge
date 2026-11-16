@@ -76,13 +76,19 @@ export HPHP_FEED_BATCH_USERS="${HPHP_FEED_BATCH_USERS:-1}"
 # These typed fast-array accesses are used only with in-range feed-loop indices.
 # Set 0 to restore runtime bounds checks while diagnosing array logic.
 export HPHP_IARR_FAST="${HPHP_IARR_FAST:-1}"
-# Keep the 64-CQE default: the 256-CQE leader-style wait was not repeatable at
-# 280k-shaped WSL load and worsened p95 on the reverse-order run. Both knobs are overridable.
+# Every ring uses DEFER_TASKRUN and is entered with GETEVENTS on each pass, so
+# completions are posted only when the loop asks for them; ring 0 waits for 256
+# completions or 1 ms. Mirrored A/B/B/A on one CPU: -9% CPU per request at 130k
+# connections (kernel 6.18) and about -5% on an Ubuntu 6.8 VM at 80k, with the
+# same tail. HPHP_DEFER_ALL=0 HPHP_FORCE_ENTER=0 HPHP_BATCH_N=64 restore the
+# previous mixed-ring loop.
+export HPHP_DEFER_ALL="${HPHP_DEFER_ALL:-1}"
+export HPHP_FORCE_ENTER="${HPHP_FORCE_ENTER:-1}"
 case "$HPHP_RINGS" in
   ''|*[!0-9]*) ;;
   *)
     if [ "$HPHP_DIRECT" = "1" ] && [ "$HPHP_RINGS" -gt 1 ] && [ "$HPHP_RING0_WAIT" != "0" ]; then
-      export HPHP_BATCH_N="${HPHP_BATCH_N:-64}"
+      export HPHP_BATCH_N="${HPHP_BATCH_N:-256}"
       export HPHP_BATCH_US="${HPHP_BATCH_US:-1000}"
     fi
     ;;

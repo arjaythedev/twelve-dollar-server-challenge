@@ -36,9 +36,27 @@ static inline void hbuf_putc(Buf *b, char c) {
     b->data[b->len++] = c;
     b->data[b->len] = 0;
 }
+/* Copy n bytes; short runs (JSON keys, numbers) use fixed-size, overlapping
+ * moves that the compiler emits inline instead of a libc memcpy call. Every
+ * access stays inside [s, s+n) and [d, d+n). */
+static inline void hbuf_copy(char *d, const char *s, size_t n) {
+    if (n >= 8 && n <= 16) {
+        uint64_t a, z;
+        memcpy(&a, s, 8); memcpy(&z, s + n - 8, 8);
+        memcpy(d, &a, 8); memcpy(d + n - 8, &z, 8);
+    } else if (n >= 4 && n < 8) {
+        uint32_t a, z;
+        memcpy(&a, s, 4); memcpy(&z, s + n - 4, 4);
+        memcpy(d, &a, 4); memcpy(d + n - 4, &z, 4);
+    } else if (n > 0 && n < 4) {
+        d[0] = s[0]; d[n / 2] = s[n / 2]; d[n - 1] = s[n - 1];
+    } else if (n > 16) {
+        memcpy(d, s, n);
+    }
+}
 static inline void hbuf_write(Buf *b, const char *s, size_t n) {
     hbuf_need(b, n);
-    memcpy(b->data + b->len, s, n);
+    hbuf_copy(b->data + b->len, s, n);
     b->len += n;
     b->data[b->len] = 0;
 }

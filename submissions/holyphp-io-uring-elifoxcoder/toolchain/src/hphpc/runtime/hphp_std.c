@@ -3061,6 +3061,7 @@ static _Thread_local uint32_t hp_ur_answerq_cap, hp_ur_answerq_head, hp_ur_answe
 static _Thread_local int hp_ur_circular_queues;
 static _Thread_local uint32_t hp_ur_readq_max, hp_ur_answerq_max;
 static _Thread_local uint64_t hp_ur_readq_moved, hp_ur_answerq_moved;
+static _Thread_local uint32_t hp_ur_readq_total;   /* entries across all rings' recovery FIFOs */
 static _Thread_local uint32_t hp_ur_answer_budget;
 static _Thread_local int hp_ur_recovery_mode;
 static _Thread_local int hp_ur_readq_debugged;
@@ -3091,6 +3092,11 @@ struct hp_uring_ring {
     uint32_t pbuf_n, pbuf_mask, pbuf_tail, pbuf_blen;
     size_t pbuf_stride;
     uint32_t read_inflight;               /* buffer-select recovery reads in flight */
+    /* Receive-recovery FIFO for this ring's connections (power-of-two ring
+     * buffer). Kept per ring so a ring without free provided buffers is
+     * skipped as a whole instead of rotating every queued entry. */
+    struct hp_ur_readq_ent *rq;
+    uint32_t rq_cap, rq_head, rq_tail;
     uint32_t accept_armed;                 /* single-shot accepts in flight */
     uint32_t live;                         /* installed direct descriptors */
     uint32_t accept_margin;                /* reserve for accepts already in flight */
@@ -3529,13 +3535,42 @@ static bool hp_ur_fifo_pop(struct hp_ur_readq_ent *q, uint32_t cap,
     return true;
 }
 
+static bool hp_ur_rq_push(struct hp_uring_ring *rg, struct hp_ur_readq_ent ent) {
+    uint32_t count = rg->rq_tail - rg->rq_head;
+    if (count == rg->rq_cap) {
+        uint32_t ncap = rg->rq_cap ? rg->rq_cap << 1 : 1024;
+        if (ncap > (1U << 22) || ncap < rg->rq_cap) return false;
+        struct hp_ur_readq_ent *n = (struct hp_ur_readq_ent *)malloc((size_t)ncap * sizeof *n);
+        if (!n) return false;
+        for (uint32_t i = 0; i < count; i++)
+            n[i] = rg->rq[(rg->rq_head + i) & (rg->rq_cap - 1)];
+        free(rg->rq);
+        rg->rq = n;
+        rg->rq_cap = ncap;
+        rg->rq_head = 0;
+        rg->rq_tail = count;
+    }
+    rg->rq[rg->rq_tail & (rg->rq_cap - 1)] = ent;
+    rg->rq_tail++;
+    hp_ur_readq_total++;
+    if (hp_ur_readq_total > hp_ur_readq_max) hp_ur_readq_max = hp_ur_readq_total;
+    return true;
+}
+static bool hp_ur_rq_pop(struct hp_uring_ring *rg, struct hp_ur_readq_ent *out) {
+    if (rg->rq_head == rg->rq_tail) return false;
+    *out = rg->rq[rg->rq_head & (rg->rq_cap - 1)];
+    rg->rq_head++;
+    hp_ur_readq_total--;
+    return true;
+}
+
 static bool hp_ur_readq_push(hp_sock fd, struct hp_urfds *st, int reason) {
     if (!st || st->rreadq) return true;
     hp_ur_recovery_mode = 1;
-    if (!hp_ur_fifo_push(&hp_ur_readq, &hp_ur_readq_cap,
-                         &hp_ur_readq_head, &hp_ur_readq_tail,
-                         (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch },
-                         &hp_ur_readq_moved, &hp_ur_readq_max))
+    int rr = hp_ur_ring_of(fd);
+    if (rr < 0 || rr >= hp_ur_nrings) rr = 0;   /* not a direct handle: dropped by the drain */
+    if (!hp_ur_rq_push(&hp_ur_rings[rr],
+                       (struct hp_ur_readq_ent){ (uint32_t)fd, st->epoch }))
         return false;
     st->rreadq = 1;
     hp_ur_readq_enqueues++;
@@ -3547,10 +3582,6 @@ static bool hp_ur_readq_push(hp_sock fd, struct hp_urfds *st, int reason) {
     return true;
 }
 
-static bool hp_ur_readq_pop(struct hp_ur_readq_ent *out) {
-    return hp_ur_fifo_pop(hp_ur_readq, hp_ur_readq_cap,
-                          &hp_ur_readq_head, &hp_ur_readq_tail, out);
-}
 
 static bool hp_ur_answerq_push(hp_sock fd, struct hp_urfds *st) {
     if (!st || st->ranswerq) return true;
@@ -5620,52 +5651,46 @@ static int hp_ur_drain_ring(HpFdList *in) {
 static int hp_ur_run_readq(HpFdList *in) {
     uint32_t budget = 16384;
     int any_drained = 0;
-    while (budget && hp_ur_readq_head != hp_ur_readq_tail) {
-        uint32_t scan = hp_ur_readq_tail - hp_ur_readq_head;
+    while (budget && hp_ur_readq_total) {
         uint32_t issued = 0;
-        while (scan-- && issued < budget) {
-            struct hp_ur_readq_ent ent;
-            if (!hp_ur_readq_pop(&ent)) break;
-            hp_sock fd = (hp_sock)ent.fd;
-            int rr = hp_ur_ring_of(fd);
-            if (rr < 0 || rr >= hp_ur_nrings) continue;
-            hp_ur_cur = &hp_ur_rings[rr];
-            struct hp_urfds *st = hp_ur_st_of(fd);
-            if (!st || st->epoch != ent.epoch || !st->rreadq) continue;
-            if (hp_ur_dbg && !hp_ur_readq_diag) {
-                hp_ur_readq_diag = 1;
-                fprintf(stderr, "[ur] recovery state fd=%d direct=%d mshot=%d pbuf=%d eof=%d closing=%d armed=%d reading=%d inflight=%u/%u\n",
-                        (int)fd, st->direct, st->rmshot, hp_ur_pbuf != 0,
-                        st->reof, st->closeafter, st->rarmed, st->rreading,
-                        hp_ur_cur->read_inflight, hp_ur_pbuf_n);
-            }
-            if (!st->direct || !st->rmshot || !hp_ur_pbuf || st->reof ||
-                st->closeafter || st->rarmed || st->rreading) {
-                st->rreadq = 0;
-                continue;
-            }
-            if (hp_ur_cur->read_inflight >= hp_ur_pbuf_n) {
-                /* This connection is still waiting for a provided receive
-                 * slot. Keep its queued flag set while rotating it behind
-                 * other rings' eligible entries; clearing and re-enqueueing
-                 * on every poll caused millions of duplicate queue writes
-                 * while the buffer pool was saturated. */
-                if (!hp_ur_fifo_push(&hp_ur_readq, &hp_ur_readq_cap,
-                                     &hp_ur_readq_head, &hp_ur_readq_tail,
-                                     ent, &hp_ur_readq_moved,
-                                     &hp_ur_readq_max)) {
-                    st->rreadq = 0;
-                    hp_ur_retfd(fd);
+        bool sq_full = false;
+        /* Per ring, issue only as many reads as it has free provided
+         * buffers; a saturated ring keeps its FIFO untouched until its
+         * reads complete (no rotation of waiting entries). */
+        for (int rr = 0; rr < hp_ur_nrings && issued < budget && !sq_full; rr++) {
+            struct hp_uring_ring *rg = &hp_ur_rings[rr];
+            hp_ur_cur = rg;
+            /* Without a provided-buffer pool the entries are not eligible;
+             * pop them so the checks below drop them. */
+            while (issued < budget && rg->rq_head != rg->rq_tail &&
+                   (!hp_ur_pbuf || rg->read_inflight < hp_ur_pbuf_n)) {
+                struct hp_ur_readq_ent ent;
+                if (!hp_ur_rq_pop(rg, &ent)) break;
+                hp_sock fd = (hp_sock)ent.fd;
+                if (hp_ur_ring_of(fd) != rr) continue;
+                struct hp_urfds *st = hp_ur_st_of(fd);
+                if (!st || st->epoch != ent.epoch || !st->rreadq) continue;
+                if (hp_ur_dbg && !hp_ur_readq_diag) {
+                    hp_ur_readq_diag = 1;
+                    fprintf(stderr, "[ur] recovery state fd=%d direct=%d mshot=%d pbuf=%d eof=%d closing=%d armed=%d reading=%d inflight=%u/%u\n",
+                            (int)fd, st->direct, st->rmshot, hp_ur_pbuf != 0,
+                            st->reof, st->closeafter, st->rarmed, st->rreading,
+                            rg->read_inflight, hp_ur_pbuf_n);
                 }
-                continue;
+                if (!st->direct || !st->rmshot || !hp_ur_pbuf || st->reof ||
+                    st->closeafter || st->rarmed || st->rreading) {
+                    st->rreadq = 0;
+                    continue;
+                }
+                st->rreadq = 0;
+                if (!hp_uring_arm_read(fd)) {
+                    if (!hp_ur_readq_push(fd, st, 6)) hp_ur_retfd(fd);
+                    /* The SQ is full: let the next normal wait reap it first. */
+                    sq_full = true;
+                    break;
+                }
+                issued++;
             }
-            st->rreadq = 0;
-            if (!hp_uring_arm_read(fd)) {
-                if (!hp_ur_readq_push(fd, st, 6)) hp_ur_retfd(fd);
-                /* The SQ is full: let the next normal wait reap it first. */
-                break;
-            }
-            issued++;
         }
         if (!issued) break;
         budget -= issued;
@@ -5698,7 +5723,7 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
     hp_ur_answer_budget = hp_ur_answer_budget_limit;
     hp_ur_recovery_mode =
         (hp_ur_answerq_head != hp_ur_answerq_tail ||
-         hp_ur_readq_head != hp_ur_readq_tail);
+         hp_ur_readq_total != 0);
     uint32_t recovery_dispatched = hp_ur_dispatch_answerq(in);
     hp_ur_arm_all_accepts();
 
@@ -5723,7 +5748,7 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
     bool ring0_wait = hp_ur_ring0_wait && hp_ur_direct == 1 &&
                       hp_ur_nrings > 1 && hp_ur_ep_conns == 0;
     bool ring0_work_pending = have > 0 || recovery_dispatched > 0 ||
-        hp_ur_readq_head != hp_ur_readq_tail ||
+        hp_ur_readq_total != 0 ||
         hp_ur_answerq_head != hp_ur_answerq_tail;
     bool ring0_do_wait = ring0_wait &&
         (!hp_ur_ring0_busy_aware || !ring0_work_pending);
@@ -5817,7 +5842,7 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
          * must then publish task work that arrived during the collection. */
         if (hp_ur_epoll_batch_us && (n > 0 || have > 0) &&
             !recovery_dispatched &&
-            hp_ur_readq_head == hp_ur_readq_tail &&
+            hp_ur_readq_total == 0 &&
             hp_ur_answerq_head == hp_ur_answerq_tail) {
             for (int pass = 0; pass < 2; pass++) {
                 for (int r = 0; r < hp_ur_nrings; r++) {
@@ -10844,7 +10869,7 @@ hstr *hp_runtime_stats_t(void) {
              ",\"queues\":{\"circular\":%s,\"ring0_busy_aware\":%s,\"read_depth\":%u,\"read_max\":%u,\"read_moved\":%llu,\"answer_depth\":%u,\"answer_max\":%u,\"answer_moved\":%llu}",
              hp_ur_circular_queues ? "true" : "false",
              hp_ur_ring0_busy_aware ? "true" : "false",
-             hp_ur_readq_tail - hp_ur_readq_head, hp_ur_readq_max,
+             hp_ur_readq_total, hp_ur_readq_max,
              (unsigned long long)hp_ur_readq_moved,
              hp_ur_answerq_tail - hp_ur_answerq_head, hp_ur_answerq_max,
              (unsigned long long)hp_ur_answerq_moved);

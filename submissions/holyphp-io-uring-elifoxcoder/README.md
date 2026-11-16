@@ -839,3 +839,40 @@ access (2.2% less CPU/request). Mean throughput was 46.1k versus 46.7k requests/
 all four runs had zero HTTP failures. Exact challenge suites passed 42/42 in
 both Direct-6 and Classic modes. These are WSL diagnostics, not Box measurements
 or evidence that 280k users are reached.
+
+#### Receive-recovery queue per ring and small runtime costs (2026-11-16)
+
+Generic runtime changes only; `server.hphp`, `start.sh` and defaults are unchanged.
+
+- **Receive recovery per ring.** When a multishot receive runs out of provided
+  buffers, the connection waits in a recovery FIFO for a bounded single-shot
+  read. That FIFO was shared by all rings. Each round rotated every entry of a
+  ring without free buffers to the back, and the non-circular queue compacted
+  itself with `memmove`. Under a burst this was O(queue²) work, exactly when
+  the loop was already behind: a failed 176k local run recorded 316 million
+  moved entries. Each ring now has its own power-of-two circular FIFO. A ring
+  without free buffers is skipped as a whole, so a round costs O(reads issued).
+- **`hbuf_reserve(b, n)`** now reserves a total of `n` bytes, which is how all
+  callers use it. It used to treat `n` as bytes beyond the current length, so
+  half-full builders (for example during JSON escaping) asked for twice their
+  size.
+- **Multi-seek results** (~1.3 KiB, just above glibc's tcache limit) are kept
+  in a small per-thread free list instead of going through `malloc`'s slower
+  bins on every feed. Only storage is reused.
+- **Short appends** (JSON keys, numbers) copy with fixed-size inline moves
+  instead of calling libc `memcpy` for 1–16 bytes.
+
+Checks:
+- Direct and Classic suites pass 42/42.
+- `hbuf_copy` matches `memcpy` for every length 0–40 at eight offsets.
+
+Measurements (WSL, mirrored A/B/B/A, 8,000 connections):
+- Pool: 35.0 → 34.1 µs per request; better in all four pairs.
+- Small copies: 33.1 → 32.4 µs per request; better in all four pairs.
+- Against `aa6f126` directly, the bundle measured within noise (34.45 vs
+  34.25 µs).
+
+In the Ubuntu 6.8 VM at 176k (overloaded for that VM) the per-ring queue
+served 1.57M versus 1.54M requests on average over two mirrored series. That
+is within the VM's run-order effect. These are local diagnostics, not Box
+results.

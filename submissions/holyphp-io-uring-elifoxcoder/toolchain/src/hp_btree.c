@@ -24,6 +24,23 @@ typedef struct HpBtMulti {
     sqlite3_int64 key[HP_BT_MULTI_MAX];
 } HpBtMulti;
 
+/* A multi-seek result (~1.3 KiB) is just above glibc's tcache limit, so a
+ * fresh malloc/free per batch lookup went through the slower bins (and
+ * malloc_consolidate). Keep a few released results per thread for reuse.
+ * Only the storage is reused; every result is fully reinitialised. */
+#define HP_BT_MULTI_POOL 64
+static _Thread_local HpBtMulti *hp_bt_multi_pool[HP_BT_MULTI_POOL];
+static _Thread_local int hp_bt_multi_pool_n;
+static HpBtMulti *hp_bt_multi_alloc(void) {
+    if (hp_bt_multi_pool_n > 0) return hp_bt_multi_pool[--hp_bt_multi_pool_n];
+    return (HpBtMulti *)sqlite3_malloc(sizeof(HpBtMulti));
+}
+static void hp_bt_multi_free(HpBtMulti *m) {
+    if (!m) return;
+    if (hp_bt_multi_pool_n < HP_BT_MULTI_POOL) { hp_bt_multi_pool[hp_bt_multi_pool_n++] = m; return; }
+    sqlite3_free(m);
+}
+
 static int hp_bt_multi_cursors_enabled = -1;
 
 static int hp_bt_multi_cursor_opt_in(void) {
@@ -68,7 +85,7 @@ static int hp_bt_multi_cursor_open(HpBt *h, int n) {
 static void *hp_bt_multi_seek_cursors(HpBt *h,
                                       const sqlite3_int64 *keys, int n) {
     if (hp_bt_multi_cursor_open(h, n) != SQLITE_OK) return 0;
-    HpBtMulti *out = (HpBtMulti *)sqlite3_malloc(sizeof *out);
+    HpBtMulti *out = hp_bt_multi_alloc();
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     out->n = n;
@@ -78,7 +95,7 @@ static void *hp_bt_multi_seek_cursors(HpBt *h,
         if (sqlite3BtreeTableMoveto(c, (i64)keys[i], 0, &res) != SQLITE_OK) {
             for (int j = 0; j < i; j++)
                 if (out->page[j]) releasePage(out->page[j]);
-            sqlite3_free(out);
+            hp_bt_multi_free(out);
             return 0;
         }
         out->key[i] = keys[i];
@@ -157,7 +174,7 @@ void *hp_bt_multi_seek_impl(void *v, const sqlite3_int64 *keys_in, int n) {
         out = (HpBtMulti *)hp_bt_multi_seek_cursors(h, keys_in, n);
         if (out) return out;
     }
-    out = (HpBtMulti *)sqlite3_malloc(sizeof *out);
+    out = hp_bt_multi_alloc();
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     out->n = n;
@@ -241,7 +258,7 @@ void *hp_bt_multi_seek_impl(void *v, const sqlite3_int64 *keys_in, int n) {
     return out;
 fail:
     for (int i = 0; i < n; i++) if (cur[i]) releasePage(cur[i]);
-    sqlite3_free(out);
+    hp_bt_multi_free(out);
     return 0;
 }
 
@@ -255,7 +272,7 @@ void *hp_bt_tail_impl(void *v, int n) {
     HpBtMulti *out;
     int res = 1, rc;
     if (!h || !h->isOpen || h->isIndex || n < 1 || n > HP_BT_MULTI_MAX) return 0;
-    out = (HpBtMulti *)sqlite3_malloc(sizeof *out);
+    out = hp_bt_multi_alloc();
     if (!out) return 0;
     memset(out, 0, sizeof *out);
     if ((rc = sqlite3BtreeLast(&h->cur, &res)) != SQLITE_OK) goto fail;
@@ -310,7 +327,7 @@ void hp_bt_multi_release_impl(void *v) {
     HpBtMulti *r = (HpBtMulti *)v;
     if (!r) return;
     for (int i = 0; i < r->n; i++) if (r->page[i]) releasePage(r->page[i]);
-    sqlite3_free(r);
+    hp_bt_multi_free(r);
 }
 
 #ifndef HP_BT_SEEK_WALK_MAX

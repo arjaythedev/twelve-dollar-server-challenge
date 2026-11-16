@@ -82,7 +82,14 @@ static void hbuf_grow_impl(Buf *b, size_t need) {
 }
 
 void hbuf_grow_slow(Buf *b, size_t need) { hbuf_grow_impl(b, need); }
-void hbuf_reserve(Buf *b, size_t n) { hbuf_grow_impl(b, n); }
+/* hbuf_reserve(b, n): make room for a TOTAL of n bytes (plus the NUL), which
+ * is how every caller uses it. It used to treat n as bytes beyond the current
+ * length, so a half-full builder asked for twice its size; feed responses then
+ * outgrew the response-buffer pool and went through realloc/free each time. */
+void hbuf_reserve(Buf *b, size_t n) {
+    if (n + 1 <= b->cap) return;
+    hbuf_grow_impl(b, n > b->len ? n - b->len : 0);
+}
 
 void hbuf_puts(Buf *b, const char *s) { hbuf_write(b, s, strlen(s)); }
 

@@ -13,7 +13,7 @@ gcc -O3 -o "$DIR/build/stage0" "$DIR/runtime/stage0.c"
 echo "==> [Stage 1] Compiling Brainfuck compiler source (src/compiler/bf_compiler.bf)..."
 "$DIR/build/stage0" "$DIR/src/compiler/bf_compiler.bf" "$DIR/build/stage1.s"
 as -o "$DIR/build/stage1.o" "$DIR/build/stage1.s"
-gcc -O3 -o "$DIR/build/stage1" "$DIR/build/stage1.o" "$DIR/runtime/compiler_driver.c"
+gcc -O3 -o "$DIR/build/stage1" "$DIR/build/stage1.o"
 
 echo "==> [Stage 2] Recompiling compiler with Stage 1 binary (self-hosting verification)..."
 "$DIR/build/stage0" "$DIR/src/compiler/bf_compiler.bf" "$DIR/build/stage2.s"
@@ -21,8 +21,8 @@ echo "==> [Stage 2] Recompiling compiler with Stage 1 binary (self-hosting verif
 diff -u "$DIR/build/stage1.s" "$DIR/build/stage2.s" >/dev/null && \
     echo "    [VERIFIED] Stage 1 and Stage 2 bit-for-bit identical! Self-hosted compiler convergence proven."
 
-echo "==> [Production] Compiling Brainfuck server (src/bf/server.bf)..."
-"$DIR/build/stage0" "$DIR/src/bf/server.bf" "$DIR/build/server_bf.s"
+echo "==> [Production] Compiling Brainfuck server using Pure Brainfuck Compiler (stage1)..."
+"$DIR/build/stage1" < "$DIR/src/bf/server.bf" > "$DIR/build/server_bf.s"
 as -o "$DIR/build/server_bf.o" "$DIR/build/server_bf.s"
 
 # ==============================================================================

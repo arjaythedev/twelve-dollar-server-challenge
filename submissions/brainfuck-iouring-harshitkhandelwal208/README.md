@@ -8,7 +8,7 @@ A pure **Brainfuck** implementation for the $12 Server Challenge (`arjaythedev/t
 
 * **Server Mode**: **Direct (No Nginx)**. The engine binds directly to `0.0.0.0:$PORT` (default `3000`) and serves HTTP directly via Linux kernel `io_uring` direct descriptors (`IORING_REGISTER_FILES2`), saving the 14–20% CPU overhead incurred by reverse proxying and handling hundreds of thousands of concurrent connections natively.
 * **Application Logic Language**: **Pure Brainfuck** (`src/bf/server.bf` and `src/compiler/bf_compiler.bf`). All HTTP parsing, route selection, post ID decimal accumulation, body presence checks, and error responses are written entirely in 8-instruction Brainfuck.
-* **Compiler**: Self-hosted optimizing AOT Brainfuck-to-x86_64 compiler (`runtime/stage0.c`) with 5 optimization passes (DAG flattening, character match collapse, loop fusion, LEA multiplier, dead-store elimination).
+* **Compiler Pipeline**: Self-hosted pure Brainfuck compiler (`src/compiler/bf_compiler.bf`) bootstrapped via an ultra-compact ~75-line naive C translator (`runtime/stage0.c`), reversing roles so that the optimizing AOT compiler is 100% written in pure Brainfuck.
 * **Database Driver**: In-process SQLite (`libsqlite3-dev` 3.45+) with WAL mode, `PRAGMA synchronous=NORMAL`, `PRAGMA mmap_size=268435456`, and persistent prepared statements.
 * **Cryptography**: OpenSSL (`libssl-dev` 3.0+) constant-time HMAC-SHA256 coprocessor with pre-initialized context replication.
 
@@ -22,17 +22,20 @@ Yes.
 
 This repository is **100% Brainfuck** for all application logic:
 - The entire HTTP protocol engine, routing state machine, ID digit accumulator, error branching, and database dispatch logic reside in [`src/bf/server.bf`](src/bf/server.bf) (1,461 lines of standard-wrapped, fully annotated pure Brainfuck).
-- Self-hosted Brainfuck native compiler logic resides in [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf).
+- The self-hosted Brainfuck native optimizing compiler resides in [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) (7,535 lines of pure Brainfuck).
 - The `src/` directory contains 100% pure Brainfuck code (.bf) and documentation (.md).
+- The C bootstrap compiler (`runtime/stage0.c`) has been shrunk to an ultra-basic ~75-line naive translator, reversing roles so that the full optimizing compiler logic is 100% Brainfuck-hosted.
 
 ```
 -------------------------------------------------------------------------------
 Language                     files          blank        comment           code
 -------------------------------------------------------------------------------
-Brainfuck                        2             38            120           1475
-C (runtime engine)               3            180            165           1483
-Markdown                         1             30              0            174
-Bourne Shell                     2             10             15             48
+Brainfuck                        2             42            153           8801
+C (runtime & stage0)             2            106             19           1077
+Markdown                         1             32              0            184
+Bourne Shell                     3             10             10             59
+-------------------------------------------------------------------------------
+Total                            8            190            182          10121
 -------------------------------------------------------------------------------
 ```
 

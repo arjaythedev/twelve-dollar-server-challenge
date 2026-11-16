@@ -28,7 +28,7 @@ let MAX_BODY: i64 = 1048576;
 let MAX_RINGS: i64 = 16;
 let ANSWERS: i64 = 2048;
 let READS: i64 = 16384;
-let RX_BUFFERS: i64 = 1024;
+let MAX_RECOVERY_READS_PER_RING: i64 = 1024;
 // These flags describe independent facts, not mutually exclusive lifecycle states.
 let CLOSE_AFTER: u8 = 1;
 let TOUCHED: u8 = 2;

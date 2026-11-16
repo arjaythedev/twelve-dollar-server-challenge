@@ -28,7 +28,7 @@ SQLITE_PATH=/absolute/path/feed.db JWT_SECRET=twelve-dollar-challenge \
 ### Network and scheduling
 
 - Eight `SO_REUSEPORT` listeners use multishot accepts. Accepted sockets inherit `TCP_NODELAY` and occupy fixed-file slots in io_uring. As one ring fills, the event loop moves accepts to the next ring. It can use up to 16 rings with up to 65,535 slots each.
-- Each ring shares 1,024 receive buffers of 2 KiB across its connections. Multishot receives handle steady traffic. If a receive ends with data or runs out of buffers, bounded nonblocking reads drain the socket before the server rearms it.
+- Each ring shares 2,048 receive buffers of 1 KiB across its connections. Multishot receives handle steady traffic. If a receive ends with data or runs out of buffers, nonblocking reads drain the socket before the server rearms it. Each ring allows up to 1,024 recovery reads in flight.
 - Each ring uses `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN`. The loop batches I/O submissions and buffer returns. It rotates the first ring it drains on each pass. It skips the blocking wait when ready requests, eligible held writes or recovery reads are queued.
 - Ready, held and recovery queues advance a head index so removing an entry usually takes no copying. Each pass allows 2,048 request attempts. Before the loop drains new completions, it spends up to 1,024 attempts on older ready requests and eligible held writes.
 - If the loop has spent its request budget and has replies pending, it commits and submits sends before the next recovery round. Recovery continues in the same pass.

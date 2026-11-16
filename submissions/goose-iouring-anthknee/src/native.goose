@@ -10,6 +10,7 @@ extern fn submit_pending() -> i32 = "io_submit_pending";
 extern fn reap(ring: i32, out: Cqe[>..]&) = "io_reap";
 extern fn accept(ring: i32, listener: i32, ud: u64) -> i32 = "io_accept";
 extern fn cancel_accept(ring: i32, accept_ud: u64, ud: u64) -> i32 = "io_cancel_accept";
+extern fn receive_buffer_size() -> i32 = "io_receive_buffer_size";
 extern fn recv(ring: i32, slot: i32, ud: u64) -> i32 = "io_recv";
 extern fn read(ring: i32, slot: i32, ud: u64) -> i32 = "io_read";
 extern fn send(ring: i32, slot: i32, box: i32, offset: u32, ud: u64) -> i32 = "io_send";

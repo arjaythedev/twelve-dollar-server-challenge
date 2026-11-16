@@ -263,7 +263,7 @@ fn on_receive(ring: i64, index: i64, generation: u32, result: i32, flags: u32,
         incoming.clear(); native::take(ring as! i32, buffer, result, incoming);
         received(index, incoming);
         if single {
-            if result == 2048 { queue_read(index); } else { arm_receive(index); }
+            if result == native::receive_buffer_size() { queue_read(index); } else { arm_receive(index); }
         } else if (flags & MORE) == 0 { queue_read(index); }
     } else {
         if selected { native::return_buffer(ring as! i32, buffer); }
@@ -418,7 +418,7 @@ fn read_rounds(first_ring: i64, reads_left: i64&, pause_for_replies: bool) -> bo
             let c .= connections[h.index];
             if c.rx != model::Rx.Queued { continue; }
             let ring = h.index / slots;
-            if rings[ring].reads >= model::RX_BUFFERS { reads.push(h); continue; }
+            if rings[ring].reads >= model::MAX_RECOVERY_READS_PER_RING { reads.push(h); continue; }
             if (c.flags & (model::CLOSE_AFTER | model::PEER_EOF)) != 0 { c.rx = model::Rx.End; continue; }
             c.rx = model::Rx.Reading; rings[ring].reads++;
             queued(native::read(ring as! i32, (h.index % slots) as! i32, tag(READ, h.index)));

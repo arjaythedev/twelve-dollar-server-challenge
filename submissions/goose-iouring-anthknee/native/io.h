@@ -24,8 +24,8 @@
 #include "goose.h"
 
 #define IO_RINGS 16
-#define IO_RX 1024
-#define IO_BYTES 2048
+#define IO_RX 2048
+#define IO_BYTES 1024
 #define IO_BOX_FIRST 256
 #define IO_BOX_LIMIT (256u << 20)
 #define IO_BOX_MAX (2u << 20)
@@ -273,6 +273,7 @@ static inline int32_t io_cancel_accept(int32_t ri, uint64_t accept_ud, uint64_t 
   io_uring_sqe_set_data64(e, ud);
   return 0;
 }
+static inline int32_t io_receive_buffer_size(void) { return IO_BYTES; }
 static inline int32_t io_recv(int32_t ri, int32_t slot, uint64_t ud) {
   struct io_uring_sqe *e = io_sqe(io_rings[ri]);
   if (!e) return -EIO;

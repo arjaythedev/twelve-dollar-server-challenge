@@ -976,6 +976,7 @@ int main(int argc, char **argv) {
   long pre = env_long("PRE_CONNS", 430000); /* 400k: allocate all seven rings before the ramp */
   while (NR < NR_MAX && (long)NR * (long)nslots < pre && ring_create(NR) == 0) NR++;
   prewarm();
+  fprintf(stderr, "experiment: idle_poll=%d backlog_slice_us=%u pre_conns=%ld\n", poll_idle, backlog_slice_us, pre);
   fprintf(stderr, "listening on %s:%s: up to %u rings x %u direct descriptors; cache %d KiB; code locked %zu KiB\n", host, port, NR_MAX,
           nslots, cache_kib, lock_code() >> 10);
   accept_policy();

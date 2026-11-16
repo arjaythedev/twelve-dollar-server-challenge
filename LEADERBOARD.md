@@ -1156,7 +1156,10 @@ err) and 78,000 the 2-minute probe (1.36 %). Its first version, #382 (`e6a08ba`)
 p99 584.6 ms, 0 err, 86 % CPU, 2026-11-11); #410's earlier head `3b3c64f` also held 71,000 (2026-11-12). The open
 follow-up **#467** (`65b50f0`, closes idle keep-alive connections after 3 s; held, not merged) scored **0**
 (2026-11-15), 42/42 tests: every 2-minute probe from 20,000 down to 500 users failed on about 7 % errors (EOF on
-`POST` requests sent on a connection the server had just closed; `GET`s had no failures) at 3–37 % CPU.
+`POST` requests sent on a connection the server had just closed; `GET`s had no failures) at 3–37 % CPU. Its next head
+`12fa452` (120 s keep-alive again; sends `Connection: close` while its open-fd count is ≥ 75 % of its own limit) held
+**58,000** (5,698 req/s, p95 82.3 / p99 121.4 ms, 0 err, 80 % CPU, 131 µs/req, 226 MB, 2026-11-16), 42/42 tests:
+60,000 failed the 2-minute probe on p99 (1.75 s at 89 % CPU). Below #410's 71,000, so the row stays (not merged).
 
 ᶫ **c-iouring-Londopy #438** (`04f764d`, new entry; held, not merged: its B-tree *writes* are an open question for
 Arjay, see the rule flags below) held **270,000** (25,837 req/s, p95 173.6 / p99 392.7 ms, 0 err, 82 % CPU, 29 µs/req,

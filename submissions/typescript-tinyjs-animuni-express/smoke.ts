@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
-import { readFile, mkdtemp, rm } from "node:fs/promises";
+import { readFile, readdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import { createConnection } from "node:net";
-import { request as httpRequest } from "node:http";
+import { Agent, request as httpRequest } from "node:http";
+import type { Socket } from "node:net";
 
 const cli = process.argv[2] ?? "node_modules/tinyjs-fullstack/bin/tinyjs.js";
 const prefix = process.argv[3] ?? "";
@@ -45,9 +46,33 @@ function slowUpload(url: string, stop?: () => void) {
   });
 }
 
-async function withServer(sqlitePath: string, run: (url: string, stop: () => void) => Promise<void>,
-    host = cli === "transport.ts" ? "0.0.0.0" : "127.0.0.1") {
-  const child = Bun.spawn([process.execPath, cli, "serve", "--port", "0"], {
+function agentRequest(url: string, agent: Agent, body?: string) {
+  return new Promise<{ status: number; body: any; connection?: string; socket?: Socket }>((resolve, reject) => {
+    let socket: Socket | undefined;
+    const pending = httpRequest(url + prefix + (body === undefined ? "/health" : "/posts"), {
+      agent, method: body === undefined ? "GET" : "POST",
+      headers: { authorization: "Bearer " + token },
+    }, (response) => {
+      let result = "";
+      response.on("data", (chunk) => { result += chunk.toString(); });
+      response.on("error", reject);
+      response.on("end", () => {
+        try { resolve({ status: response.statusCode!, body: JSON.parse(result),
+          connection: response.headers.connection, socket }); } catch (error) { reject(error); }
+      });
+    });
+    pending.on("socket", (value) => { socket = value; });
+    pending.on("error", reject);
+    pending.setTimeout(10000, () => pending.destroy(new Error("agent request timed out")));
+    pending.end(body);
+  });
+}
+
+async function withServer(sqlitePath: string, run: (url: string, stop: () => void, pid: number) => Promise<void>,
+    host = cli === "transport.ts" ? "0.0.0.0" : "127.0.0.1", fdLimit?: number) {
+  const entry = [process.execPath, cli, "serve", "--port", "0"];
+  const child = Bun.spawn(fdLimit === undefined ? entry :
+    ["bash", "-c", 'ulimit -n "$1"; shift; exec "$@"', "bash", String(fdLimit), ...entry], {
     env: { ...process.env, HOST: host, PORT: "0", SQLITE_PATH: sqlitePath, JWT_SECRET: secret },
     stdout: "pipe",
   });
@@ -56,11 +81,20 @@ async function withServer(sqlitePath: string, run: (url: string, stop: () => voi
     if (!stopping) { stopping = true; child.kill("SIGTERM"); }
   };
   try {
-    const reader = child.stdout.getReader();
-    const { value } = await reader.read();
-    const url = /http:\/\/(?:127\.0\.0\.1|0\.0\.0\.0):\d+/.exec(new TextDecoder().decode(value))?.[0].replace("0.0.0.0", "127.0.0.1");
-    assert.ok(url, "TinyJS did not announce its listening address");
-    await run(url, stop);
+    const url = await Promise.race([
+      (async () => {
+        let output = "";
+        for await (const chunk of child.stdout) {
+          output += new TextDecoder().decode(chunk);
+          const match = /http:\/\/(?:127\.0\.0\.1|0\.0\.0\.0):\d+/.exec(output);
+          if (match) return match[0].replace("0.0.0.0", "127.0.0.1");
+        }
+        throw new Error("TinyJS exited before announcing its listening address");
+      })(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("TinyJS startup timed out")), 10000).unref()),
+    ]);
+    await run(url, stop, child.pid);
   } finally {
     const timeout = setTimeout(() => child.kill("SIGKILL"), 5000);
     stop();
@@ -124,33 +158,70 @@ try {
     assert.ok(afterCreates.posts.every((post: { id: number }) => ids.has(post.id)));
     if (cli === "transport.ts") {
       await slowUpload(url);
-      await new Promise<void>((resolve, reject) => {
-        const socket = createConnection(Number(new URL(url).port), "127.0.0.1");
-        let received = "";
-        socket.setTimeout(10000, () => {
-          socket.destroy();
-          reject(new Error("direct transport did not reclaim its idle socket"));
-        });
-        socket.on("connect", () => socket.write("GET " + prefix + "/health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"));
-        socket.on("data", (chunk) => { received += chunk.toString(); });
-        socket.on("error", reject);
-        socket.on("end", () => {
-          try {
-            assert.match(received, /^HTTP\/1\.1 200/);
-            resolve();
-          } catch (error) { reject(error); }
-        });
-      });
-      for (const gap of [2900, 3100, 4900, 5100]) {
-        await Bun.sleep(gap);
-        const response = await post("/posts", JSON.stringify({ body: "after idle " + gap }));
-        assert.equal(response.status, 201);
-        const created = (await response.json()).post;
-        assert.equal((await (await get("/posts/" + created.id)).json()).post.body, created.body);
+      const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+      try {
+        const first = await agentRequest(url, agent);
+        for (const gap of [8000, 16000]) {
+          await Bun.sleep(gap);
+          const response = await agentRequest(url, agent, JSON.stringify({ body: "after idle " + gap }));
+          assert.equal(response.status, 201);
+          assert.equal(response.socket, first.socket, "direct idle connection must remain reusable for POST");
+          assert.notEqual(response.connection, "close");
+          const created = response.body.post;
+          assert.equal((await (await get("/posts/" + created.id)).json()).post.body, created.body);
+        }
+      } finally {
+        agent.destroy();
       }
     }
   });
   if (cli === "transport.ts") {
+    if (process.platform === "linux") {
+      await withServer(path, async (url, _stop, pid) => {
+        const idle: Socket[] = [];
+        const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+        try {
+          let observedRetirement = false;
+          while (!observedRetirement && (await readdir(`/proc/${pid}/fd`)).length < Math.ceil(128 * 0.75)) {
+            assert.ok(idle.length < 128, "pressure fixture must reach its descriptor threshold");
+            await new Promise<void>((resolve, reject) => {
+              const socket = createConnection(Number(new URL(url).port), "127.0.0.1");
+              idle.push(socket);
+              socket.setTimeout(10000, () => socket.destroy(new Error("pressure fixture timed out")));
+              socket.on("error", reject);
+              socket.on("connect", () => socket.write("GET " + prefix + "/health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n"));
+              socket.once("data", (chunk) => {
+                try {
+                  assert.match(chunk.toString(), /^HTTP\/1\.1 200/);
+                  observedRetirement = /\r\nconnection:\s*close\r\n/i.test(chunk.toString());
+                  resolve();
+                } catch (error) { reject(error); }
+              });
+            });
+          }
+          await Bun.sleep(1300);
+          let previous: Socket | undefined;
+          const ids = new Set<number>();
+          for (let index = 0; index < 4; index++) {
+            const result = await agentRequest(url, agent, JSON.stringify({ body: "retired " + index }));
+            assert.equal(result.status, 201);
+            assert.equal(result.connection, "close", "retirement must be advertised on the response");
+            assert.notEqual(result.socket, previous, "the next write must reconnect without replay");
+            ids.add(result.body.post.id);
+            previous = result.socket;
+          }
+          assert.equal(ids.size, 4);
+          idle.forEach((socket) => socket.destroy());
+          await Bun.sleep(1300);
+          const recovered = await agentRequest(url, agent);
+          assert.equal(recovered.status, 200);
+          assert.notEqual(recovered.connection, "close", "normal keep-alive must resume after pressure falls");
+        } finally {
+          idle.forEach((socket) => socket.destroy());
+          agent.destroy();
+        }
+      }, "0.0.0.0", 128);
+    }
     await withServer(path, async (url, stop) => { shutdownId = await slowUpload(url, stop); });
     await withServer(path, async (url) => {
       await new Promise<void>((resolve, reject) => {
@@ -185,7 +256,15 @@ try {
     assert.equal(response.status, 503);
     assert.equal((await response.json()).status, "degraded");
   });
-  console.log("Production smoke passed: invalid auth, malformed JSON, HTTP semantics, concurrent likes/posts, idle writes, restart persistence, degraded health.");
+  const persisted = new Database(path, { readonly: true });
+  try {
+    assert.equal(persisted.query("SELECT count(*) AS n FROM posts WHERE body LIKE 'retired %'").get().n,
+      cli === "transport.ts" && process.platform === "linux" ? 4 : 0, "retired connections must commit each write exactly once");
+    assert.equal(persisted.query("SELECT count(*) AS n FROM posts WHERE body = 'must not commit'").get().n, 0);
+  } finally {
+    persisted.close();
+  }
+  console.log("Production smoke passed: invalid auth, malformed JSON, HTTP semantics, concurrent likes/posts, retained idle writes, descriptor-pressure retirement (Linux/native), restart persistence, degraded health.");
 } finally {
   await rm(root, { recursive: true, force: true });
 }

@@ -1,120 +1,109 @@
-# 100K investigation (15 November 2026)
+# Capacity investigation (16 November 2026)
 
-100,000 users and a peak RSS below 300 MB remain targets, not verified results.
-The official benchmark machine is unavailable to this development session.
+The last verified challenge score is **71,000 users for five minutes**.
+More than 100,000 users and peak RSS below 300 MB remain targets.
 
-## Official baseline
+## Official evidence and the regression
 
-[PR #410's benchmark report](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/410#issuecomment-6878634773)
-at `048312f0a5c1eb9580856076c5d9b37bf7756e50`:
+[PR #410's report](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/410#issuecomment-6878634773)
+at `048312f`, direct on the 1-vCPU/2-GB box:
 
-| Five-minute users | Requests/s (whole run / hold) | p95 / p99 | Errors | CPU | Peak memory |
+| Users / hold | Requests/s overall / hold | p95 / p99 | Errors | CPU | Peak memory |
 | ---: | ---: | ---: | ---: | ---: | ---: |
-| 71,000 | 6,534 / 6,985 | 184.3 / 524 ms | 0.93% | 92% (132 us/request) | 219 MB |
+| 71,000 / 5 minutes | 6,534 / 6,985 | 184.3 / 524 ms | 0.93% | 92% (132 us/request) | 219 MB |
 
 75,000 failed its five-minute hold with 1.59% errors; 78,000 failed its
-two-minute probe with 1.36%. The report attributes errors to connect timeouts
-past the service's 65,535-descriptor limit. Correctness was 42/42.
+two-minute probe with 1.36%. Errors were connect timeouts at the fixed
+65,535-descriptor ceiling. Correctness was 42/42.
 
-## Bottlenecks and boundaries
+The subsequent three-second idle timeout at `65b50f0` was a regression.
+[PR #467's official report](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/467#issuecomment-6898503703)
+found **score 0**, with approximately 7% errors from 20,000 down to 500 users.
+At 500 users, all 7,601 reads succeeded, but 524/542 likes and 60/72 creates
+failed, almost all with EOF. Short silent closure invalidated clients' idle
+connections; GET recovery did not protect non-retryable POSTs.
 
-- **Descriptors/network:** `SPEC.md` grants `LimitNOFILE=65535`; keeping every
-  connection idle for 120 seconds cannot accommodate 100,000 simultaneous
-  sockets. A VU can remain active while its idle connection closes and is
-  reopened. This change reclaims idle direct connections after three seconds,
-  preserving 120 seconds for active handlers and loopback proxies. Bun's timeout
-  timer is coarse; three seconds is its configured value, not an exact deadline.
-  No descriptor limit, kernel setting, listen backlog or host configuration is
-  raised. Changing a shell soft limit would not override systemd's hard limit.
-- **CPU/event loop:** the official baseline already consumed 92% CPU. A local
-  saturated 50/50 feed/post read profile (Bun `--cpu-prof`, 3,641 samples) assigned
-  70.0% of self samples to SQLite `all`, 13.2% to `get`, and approximately 7.3%
-  to JSON functions. Routing's individual frames were much smaller. These are
-  sampled call-site costs, not a kernel profile or a separation of SQLite VM
-  work from driver row allocation. Synchronous SQLite blocks the event loop;
-  extra connections do not create database parallelism on a single CPU.
-- **SQLite:** feed uses `posts_created_at_id_idx`; authors and individual posts
-  use primary-key lookups; likes use covering `likes_post_id_idx`. No full likes
-  scan or temporary feed sort appeared in the original query plan. Prepared
-  statements, one connection, WAL, `synchronous=NORMAL`, foreign keys and
-  immediate like transactions remain appropriate. The default page cache is
-  2 MiB. No schema/index change, cache, durability reduction or speculative mmap
-  increase is justified by this evidence. `busy_timeout=5000` can block the event
-  loop during an external writer's lock; it is unchanged.
-- **Authentication:** writes are roughly 0.17 of 2.17 requests per workload
-  iteration. HMAC is verified on every authenticated request with constant-time
-  comparison, canonical signature encoding, HS256, expiration and claim checks.
-  Its minority workload share does not justify weakening or caching verification.
-- **Memory:** the official 219 MB baseline is the only challenge-machine
-  measurement. During the instrumented ten-second, 16-client read profile, RSS
-  samples ranged from 49.5 to 59.2 MiB, heap-used from 1.7 to 9.2 MiB and external
-  memory from 0.7 to 8.0 MiB. Profiling allocates memory itself; these numbers do
-  not predict per-connection memory at 100K. Allocation rate, exact GC frequency,
-  and SQLite's separate native allocation totals were not measured. No forced GC
-  or enlarged page cache is introduced.
+The earlier local 500-VU/256-FD experiment had passed a five-minute hold with
+one reset (0.0057%). Its success did **not** predict the official client/network
+behavior. That experiment is rejected as evidence for deploying short idle
+timeouts. The merged leaderboard entry remains at 71,000.
 
-## Local connection experiment
+## Revised connection policy
 
-Ubuntu under WSL2, Bun 1.4.4, checksum-verified full seed
-(`738d11ab3164c13177e347f75038d1e80b43c64e754544a42d1c32bd8d7bcf1d`),
-TinyJS 0.1.2 and checksum-verified k6 2.4.0. Client and server share the development
-machine (WSL reports 3.7 GiB RAM and swap); this is not the 1-vCPU/2-GB/no-swap
-challenge environment. Builds and load experiments run sequentially.
+- Restore the proven 120-second idle timeout for every connection. Remove the
+  per-request timeout overrides.
+- On Linux direct deployments, read the process's soft `Max open files` limit
+  from `/proc/self/limits`. Once per second, count `/proc/self/fd` entries.
+- At 75% of that limit, set `Connection: close` on completed responses,
+  including errors. Bun sends the complete body before closing the socket;
+  the client learns retirement before its next request.
+- Resume normal keep-alive below 50% of the limit. Hysteresis avoids toggling
+  at every sample. Unreference the timer and clear it on graceful shutdown.
+- Preserve loopback proxy connections. Do not change resource limits, kernel
+  settings, listen backlog or Nginx configuration.
 
-The unmodified official `bench/load.js` ran at 500 VUs with a 15-second ramp,
-90-second hold and its normal ramp-down. Only the server process was given a
-deliberately reduced soft/hard limit of 256 FDs. This reproduces descriptor
-pressure without allocating 100,000 local VUs. It establishes no scaled capacity
-claim. Both databases started from fresh seed copies.
+This policy applies to any direct workload; it does not inspect user identity,
+endpoint mix or benchmark metadata. No POST is retried. Sampling leaves
+headroom but cannot guarantee against arbitrary bursts between samples.
+Inspection failures conservatively enable response retirement and are logged.
 
-| Idle timeout | Requests / average req/s | p50 / p95 / p99 ms | Errors | Peak sampled FDs | Peak RSS KiB | Average server CPU |
-| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Baseline 120 s | 3,721 / 27.43 | 0.503 / 55,285 / 55,286 | 6.82% (254 request timeouts) | 256 | 40,220 | 91.8% |
-| Preliminary 3 s | 6,382 / 47.81 | 0.735 / 1.605 / 5.403 | 0% | 256 | 40,156 | 3.1% |
+## Local pressure diagnostic
 
-The final active-handler-protected variant also passed a **five-minute local
-hold**, using the same 500 VUs, 256-FD cap and 15-second ramp:
+On 16 November, unchanged `bench/load.js` ran with checksum-verified k6 2.4.0,
+500 VUs, a 15-second ramp and 90-second hold on a fresh checksum-verified full
+seed. Only the server had its FD limit reduced to 256. Client and server shared
+WSL2 (3.7 GiB RAM and swap), rather than the challenge environment.
 
-| Requests / average req/s | p50 / p95 / p99 ms | Errors | Peak sampled FDs | Peak RSS KiB | Average server CPU |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-| 17,494 / 52.96 | 0.622 / 1.342 / 8.053 | 0.0057% (1 reset) | 244 | 43,968 | 2.8% |
+The revised policy passed every threshold, k6 exit 0: **6,368 requests, zero
+errors**, 45.33 requests/s overall, median 0.596 ms, p95 1.08 ms and p99 2.12 ms.
+Once-per-second resource samples peaked at 233 descriptors and 42,552 KiB RSS.
+Server CPU ticks increased 2.99 seconds over 140 sampled seconds (2.14% of a
+CPU, excluding the client; `/proc` clock resolution 100 ticks/second).
+This tests descriptor pressure and writes, not scaled user capacity.
 
-All three official thresholds passed (k6 exit 0). The reset occurred on a like
-request; it was not retried. A close/reuse race remains possible, so this is not
-a zero-error claim. Sampled ESTABLISHED connections peaked at 235 and server-port
-TIME-WAIT sockets at 3,215. TIME-WAIT is kernel state, not part of process RSS.
-Server CPU was 9.22 seconds over the sampled run, approximately 527 us/request
-including reconnect and idle-maintenance costs at this low request rate. Do not
-compare that directly with the saturated official baseline's 132 us/request.
+The same setup also passed a **five-minute hold**: **17,485 requests, zero
+errors**, 51.25 requests/s overall, median 0.581 ms, p95 1.00 ms and p99
+1.43 ms. Sampled descriptors peaked at 235 and sampled RSS at 50,036 KiB.
+Server CPU ticks increased 7.34 seconds over 342 sampled seconds (2.15% of a
+CPU). This is a separate fresh database; all official thresholds passed,
+k6 exit 0. These measurements still do not establish remote capacity.
 
-The preliminary variant changed only `idleTimeout`; the final variant also
-protects active handlers and restores the idle timeout afterward. CPU was
-sampled from `/proc/PID/stat` at 100 ticks/second, excluding the load generator;
-the baseline's CPU includes descriptor-exhaustion handling. These figures are
-not evidence of faster SQL or normal-load CPU savings. RSS uses `/proc/PID/status`
-`VmHWM`, sampled once a second; FDs use `/proc/PID/fd`.
+A separate probe held 49,152 `/dev/null` descriptors and sampled the same
+directory ten times at one-second intervals. Enumeration took 21.9-31.0 ms
+after an initial 78.5-ms sample, averaging 29.7 ms CPU/sample (2.97% of one CPU
+at that cadence). File descriptors reproduce directory enumeration cost, not
+socket memory or HTTP load. The monitor's cost is material and requires an
+official capacity check; it is not claimed to be free.
 
-## CPU experiments not adopted
+## CPU, SQLite, authentication and memory
 
-The profile motivated an A/B/B/A feed microbenchmark: 1,000 warm-ups per path,
-then 10,000 calls per round on the full seed in one stable read snapshot. The
-current row query plus `JSON.stringify` used 25.93 / 23.79 CPU us per call;
-SQLite `json_object`/`json_group_array` used 33.91 / 36.01. Exact bytes matched on
-the full seed and empty/Unicode/control-character/tied-timestamp fixtures, but
-SQL JSON was slower and its sampled RSS was higher. It was rejected. The candidate
-included explicit aggregate ordering, which adds a small temporary B-tree for
-the 20 output rows; [SQLite requires explicit aggregate ORDER BY for a guaranteed
-order](https://www.sqlite.org/lang_aggfunc.html).
+The official baseline already used 92% CPU. Earlier local Bun CPU profiling
+(3,641 samples, saturated 50/50 feed/post reads) attributed about 70% of self
+samples to SQLite `all`, 13.2% to `get` and 7.3% to JSON functions. These are
+call-site samples, not a separation of database work from row allocation.
 
-A separate 20,000-call-per-round A/B/B/A, 50/50 feed/post probe compared mmap off
-with 256 MiB mmap. CPU us/call were 16.93 (off), 14.44 (on), 14.50 (on), 14.94
-(off); final warm-round separation was only about 3%. That small in-process
-difference does not justify changing the memory footprint without an HTTP and
-challenge-machine benefit. mmap and page-cache configuration remain unchanged.
+The feed uses `posts_created_at_id_idx`, primary-key author lookups and the
+covering `likes_post_id_idx`. SQL JSON aggregation was previously slower than
+row retrieval plus `JSON.stringify` (34-36 versus 24-26 CPU us/feed). A 256-MiB
+mmap experiment had only about 3% separation between its final warm rounds.
+Neither change was adopted.
 
-## Regression coverage and reproduction
+On 16 November, a fresh full-seed read snapshot compared normal objects,
+`values()` plus object mapping, and class-mapped rows, with 1,000 warmups and
+20,000 calls per round in A/B/C/C/B/A order. CPU us/feed were
+35.90 / 38.72 / 35.21 / 31.97 / 27.93 / 27.55. Outputs matched exactly;
+warmup/order drift exceeded any consistent advantage, so neither mapping was
+adopted. These are local diagnostics, not capacity estimates.
 
-From a clean Linux checkout, with the pinned Bun installed:
+Prepared SQL, schema and indexes, per-request JWT verification, WAL,
+`synchronous=NORMAL`, foreign keys and immediate like transactions remain
+unchanged. No response/result/authentication cache, extra process, worker or
+forced garbage collection is introduced. The official 219-MB baseline remains
+the only challenge-machine memory measurement for a passing entry.
+
+## Regression coverage
+
+Use a clean Linux checkout and pinned Bun 1.4.4:
 
 ```bash
 bash seed/make-seed.sh
@@ -124,46 +113,30 @@ bun smoke.ts transport.ts
 bun smoke.ts
 ```
 
-The official runner uses loopback. To check short-idle direct mode, start
-`transport.ts` with `HOST=0.0.0.0`, a fresh seed copy in `SQLITE_PATH`, the challenge
-`JWT_SECRET` and an unused `PORT`, then run unchanged `test/test.sh` against it.
-Both loopback and direct mode pass 42/42 locally. Smoke additionally covers HEAD,
-method rejection, authentication failures, malformed JSON, concurrent likes and
-posts, restart persistence, missing-database health, six-second uploads, writes
-around idle expiry, idle reclamation, loopback reuse, and an upload completing
-through SIGTERM and persisting after restart. No POST retry is added.
+The frozen-lockfile production build and all 42 official checks passed locally
+on 16 November with full seed content checksum
+`738d11ab3164c13177e347f75038d1e80b43c64e754544a42d1c32bd8d7bcf1d`.
+Native and published Node-adapter smoke suites also passed.
+`build.sh` now runs the native regressions before CI's official suite.
 
-To reproduce descriptor pressure, build once, start on a disposable seed copy:
+Native smoke checks same-socket POST reuse after 8- and 16-second gaps, slow
+uploads, graceful shutdown during an upload, proxy reuse and restart
+persistence. Linux smoke additionally lowers only the child server's FD limit
+to 128, fills idle connections to trigger pressure, checks advertised closure,
+four successful writes on new connections without replay, exact persisted
+write counts and recovery to normal keep-alive. Startup reads handle split log
+chunks and fail after ten seconds instead of hanging indefinitely.
 
-```bash
-(ulimit -n 256; exec env HOST=0.0.0.0 PORT=3099 \
-  SQLITE_PATH=/absolute/path/to/disposable.db \
-  JWT_SECRET=twelve-dollar-challenge bun transport.ts)
-```
+## Required capacity gate
 
-In a separate terminal at repository root:
+Run unchanged `bench/load.js` on the challenge-equivalent server with a separate
+load generator, fresh data, normal 60-second ramp and five-minute confirmations.
+First retain at least the existing 71,000-user hold, then progress through
+75K/80K/90K/100K/110K. More than 100K requires a passing hold **above** 100,000.
+Keep p95 <500 ms, p99 <1 second and errors <1%; record error categories, CPU,
+peak RSS, FD counts and reconnects. Do not merge a lower capacity result.
 
-```bash
-k6 run -e BASE_URL=http://127.0.0.1:3099 -e VUS=500 \
-  -e RAMP_UP=15s -e DURATION=90s --summary-export=/tmp/result.json bench/load.js
-```
-
-For the baseline use the submission from the parent commit, its own build and a
-separate fresh database. Do not impose the diagnostic 256-FD limit on an official
-run. Record actual `/proc/PID/limits`, CPU ticks, RSS and FD counts; use
-`ss -Htan 'sport = :3099'` to distinguish ESTABLISHED and TIME-WAIT sockets.
-
-## Remaining official validation
-
-No new official benchmark has run. The 50K, 60K, 71K, 75K, 80K, 90K and 100K
-progression (then 110K if 100K succeeds) is pending on the challenge machine.
-Use unchanged workload/scoring, fresh data, the normal 60-second ramp, and a
-five-minute confirmation. Record hold duration, req/s, p50/p95/p99, errors and
-categories, CPU, peak RSS and FD counts. The thresholds remain p95 <500 ms,
-p99 <1 second and <1% errors.
-
-Shorter keep-alive trades sockets for reconnects and TIME-WAIT state; reconnect
-CPU, kernel socket memory, timeout races and the single-core SQLite ceiling can
-still prevent 100K or 300 MB. The accepted backlog and host/container limits
-cannot be inspected remotely from this session. The legitimate fallback is the
-highest passing official hold, not raised resource limits or extrapolation.
+No new official passing capacity is established by this revision. Response
+retirement trades descriptors for reconnect CPU and TIME-WAIT state. Sampling
+cost at tens of thousands of FDs, kernel socket memory and the single-core
+SQLite ceiling require measurements on the actual benchmark infrastructure.

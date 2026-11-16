@@ -18,6 +18,7 @@ int dbx_users_seek_many(dbx *h, const long long *ids, int n, unsigned char *buf,
 int dbx_checkpoint(dbx *h, int *copied);
 int dbx_writes_held(dbx *h);
 int dbx_wal_frames(dbx *h);
+void dbx_pcache_stats(unsigned long long *scans, unsigned long long *skipped);
 
 int dbx_first(dbx *h, int c);
 int dbx_seek(dbx *h, int c, long long rowid);

@@ -91,10 +91,24 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
                 char *open_inside = memchr(&code[i + 1], '[', sub_len);
                 if (!open_inside) {
                     if (sub_len == 1 && code[i + 1] == '-') {
-                        // [-] zero idiom
+                        // [-] zero idiom: check if followed by + or - (store immediate folding)
                         int64_t disp = ptr * 8;
-                        fprintf(out, "    movq $0, %ld(%%r12)\n", (long)disp);
                         i += 3;
+                        if (i < n && code[i] == '+') {
+                            size_t cval = 0;
+                            while (i < n && code[i] == '+') { cval++; i++; }
+                            fprintf(out, "    movq $%zu, %ld(%%r12)\n", cval, (long)disp);
+                            if (ptr == 7) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_sys\n");
+                            else if (ptr == 8) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_crypto\n");
+                            else if (ptr == 16) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_db\n");
+                            else if (ptr == 32) fprintf(out, "    movq %%r12, %%rdi\n    call bf_mmio_net\n");
+                        } else if (i < n && code[i] == '-') {
+                            size_t cval = 0;
+                            while (i < n && code[i] == '-') { cval++; i++; }
+                            fprintf(out, "    movq $-%zu, %ld(%%r12)\n", cval, (long)disp);
+                        } else {
+                            fprintf(out, "    movq $0, %ld(%%r12)\n", (long)disp);
+                        }
                         continue;
                     }
 
@@ -128,6 +142,18 @@ void compile_bf_to_x86_64(const char *src, size_t len, FILE *out) {
                             int64_t dst_disp = (ptr + off) * 8;
                             if (factor == 1) {
                                 fprintf(out, "    addq %%rax, %ld(%%r12)\n", (long)dst_disp);
+                            } else if (factor == 2) {
+                                fprintf(out, "    leaq (%%rax,%%rax), %%rcx\n");
+                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                            } else if (factor == 3) {
+                                fprintf(out, "    leaq (%%rax,%%rax,2), %%rcx\n");
+                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                            } else if (factor == 5) {
+                                fprintf(out, "    leaq (%%rax,%%rax,4), %%rcx\n");
+                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
+                            } else if (factor == 9) {
+                                fprintf(out, "    leaq (%%rax,%%rax,8), %%rcx\n");
+                                fprintf(out, "    addq %%rcx, %ld(%%r12)\n", (long)dst_disp);
                             } else if (factor == 10) {
                                 fprintf(out, "    leaq (%%rax,%%rax,4), %%rcx\n");
                                 fprintf(out, "    leaq (%%rcx,%%rcx), %%rcx\n");

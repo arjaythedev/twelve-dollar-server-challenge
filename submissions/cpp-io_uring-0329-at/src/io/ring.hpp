@@ -108,6 +108,14 @@ class Ring {
     return true;
   }
 
+  /* Where the kernel entries come from, so a syscall-heavy loop can be attributed instead of
+   * guessed at: 0 = the blocking wait, 1 = a full submission queue forcing a flush inside sqe(),
+   * 2 = the per-pass enter of the other rings.  STATS=1 prints the three counters. */
+  static unsigned long& enters(int kind) {
+    static unsigned long c[3] = {0, 0, 0};
+    return c[kind];
+  }
+
   io_uring_sqe* sqe(unsigned room) {
     for (unsigned tries = 0;; tries++) {
       if (io_uring_sq_space_left(&ring_) >= room) {
@@ -117,6 +125,7 @@ class Ring {
           return s;
         }
       }
+      enters(1)++;
       io_uring_submit(&ring_);
       io_uring_get_events(&ring_);
       if (tries == 1000) return nullptr;
@@ -124,11 +133,13 @@ class Ring {
   }
 
   void enter() {
+    enters(2)++;
     io_uring_submit(&ring_);
     io_uring_get_events(&ring_);
   }
 
   int wait(unsigned min_complete, unsigned ns) {
+    enters(0)++;
     struct __kernel_timespec ts {};
     ts.tv_sec = 0;
     ts.tv_nsec = ns;

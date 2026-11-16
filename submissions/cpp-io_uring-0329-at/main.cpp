@@ -28,7 +28,7 @@ namespace {
 constexpr uint32_t kMaxRings = 2;   /* rings are grown on demand up to this */
 constexpr uint32_t kAcceptDepth = 2048;
 constexpr size_t kHeldPerPass = 1024;
-constexpr unsigned kSqEntries = 4096;
+constexpr unsigned kSqEntries = 8192;
 constexpr unsigned kCqEntries = 65536;
 constexpr size_t kBufSize = 2048;
 constexpr uint16_t kBufCount = 4096;
@@ -319,13 +319,18 @@ class Server {
         if (p5 - stat_at >= 1000000000ULL) {
           std::fprintf(stderr,
                        "stats: pass=%llu/s cqes=%llu req=%llu gated=%llu/%llu wait=%.1f%% drain=%.1f%% "
-                       "read=%.1f%% commit=%.1f%% sweep=%.1f%% pool_miss=%lu pool=%zu\n",
+                       "read=%.1f%% commit=%.1f%% sweep=%.1f%% pool_miss=%lu pool=%zu "
+                       "enter[wait=%lu sqe=%lu ring=%lu]\n",
                        (unsigned long long)(pass - stat_pass), (unsigned long long)cqes_sum,
                        (unsigned long long)requests_sum, (unsigned long long)held_gate,
                        (unsigned long long)(pass - stat_pass), 100.0 * t_wait / (p5 - stat_at),
                        100.0 * t_drain / (p5 - stat_at), 100.0 * t_read / (p5 - stat_at),
                        100.0 * t_commit / (p5 - stat_at), 100.0 * t_sweep / (p5 - stat_at),
-                       app::pool_misses(), pool_.size());
+                       app::pool_misses(), pool_.size(), io::Ring::enters(0) - enter_base_[0],
+                       io::Ring::enters(1) - enter_base_[1], io::Ring::enters(2) - enter_base_[2]);
+          enter_base_[0] = io::Ring::enters(0);
+          enter_base_[1] = io::Ring::enters(1);
+          enter_base_[2] = io::Ring::enters(2);
           stat_at = p5;
           stat_pass = pass;
           t_wait = t_drain = t_read = t_commit = t_sweep = 0;
@@ -688,6 +693,7 @@ class Server {
   uint16_t port_ = 0;
   uint64_t responded_ = 0;
   uint64_t stat_pass = 0;
+  unsigned long enter_base_[3] = {0, 0, 0};
   bool writes_ok_ = true;
   uint32_t sweep_ring_ = 0;
   size_t sweep_off_ = 0;

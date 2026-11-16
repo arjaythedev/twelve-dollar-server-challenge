@@ -75,7 +75,10 @@
   everything else: a post is read and liked within seconds of being listed), and they grow by a few MB a minute. A
   cache with room for everything (256 MB before) also keeps every page ever appended, about 0.26 MB a second at 300k
   users, in anonymous memory that reclaim can't take back when the box is at its memory wall; at 96 MB the oldest of
-  those give way instead. Inserts bind `created_at` in the column default's format
+  those give way instead. After the startup reads, the kernel's cached copy of the database file is dropped
+  (`POSIX_FADV_DONTNEED`; `DBDROP=0` leaves it): whoever wrote the file left up to 250 MB of it in the kernel's cache,
+  which a server that reads through SQLite's own cache never uses, and which reclaim would otherwise have to find
+  while the connections of the ramp are taking the memory. Inserts bind `created_at` in the column default's format
   and take the id from `sqlite3_last_insert_rowid` (no `RETURNING`); a like is one `INSERT … SELECT … WHERE EXISTS
   … ON CONFLICT DO NOTHING`, and `sqlite3_changes` tells a new like from a repeat or a missing post.
 - **One write per commit.** A VFS of its own over `unix-excl` (SQLite's public VFS interface, the pattern of its own
@@ -164,7 +167,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (96000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (96000), `DBDROP` (1), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
 

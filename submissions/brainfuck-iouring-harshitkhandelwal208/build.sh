@@ -59,32 +59,45 @@ static void optimize_asm(AsmBuf *b) {
             char *l11 = b->lines[i+11];
 
             if (strncmp(l0, "    movq ", 9) == 0 && strstr(l0, "(%r12), %rax") &&
-                strcmp(l1, "    addq %rax, 392(%r12)") == 0 &&
-                strncmp(l2, "    subq $", 10) == 0 && strstr(l2, ", 392(%r12)") &&
-                strcmp(l3, "    movq $0, 400(%r12)") == 0 &&
-                strcmp(l4, "    cmpq $0, 392(%r12)") == 0 &&
-                strcmp(l5, "    setne %al") == 0 &&
-                strcmp(l6, "    movzbq %al, %rax") == 0 &&
-                strcmp(l7, "    movq %rax, 400(%r12)") == 0 &&
-                strcmp(l8, "    movq $0, 392(%r12)") == 0 &&
-                strcmp(l9, "    movq 400(%r12), %rax") == 0 &&
-                strncmp(l10, "    addq %rax, ", 15) == 0 &&
-                strcmp(l11, "    movq $0, 400(%r12)") == 0) {
+                strcmp(l1, "    addq %rax, 392(%r12)") == 0) {
+                bool has_sub = (strncmp(l2, "    subq $", 10) == 0 && strstr(l2, ", 392(%r12)"));
+                int off = has_sub ? 1 : 0;
+                char *k3 = b->lines[i + 2 + off];
+                char *k4 = b->lines[i + 3 + off];
+                char *k5 = b->lines[i + 4 + off];
+                char *k6 = b->lines[i + 5 + off];
+                char *k7 = b->lines[i + 6 + off];
+                char *k8 = b->lines[i + 7 + off];
+                char *k9 = b->lines[i + 8 + off];
+                char *k10 = b->lines[i + 9 + off];
+                char *k11 = b->lines[i + 10 + off];
 
-                char src[64], val[32], dst[64];
-                sscanf(l0, "    movq %63[^,], %%rax", src);
-                sscanf(l2, "    subq $%31[^,], 392(%%r12)", val);
-                sscanf(l10, "    addq %%rax, %63s", dst);
+                if (strcmp(k3, "    movq $0, 400(%r12)") == 0 &&
+                    strcmp(k4, "    cmpq $0, 392(%r12)") == 0 &&
+                    strcmp(k5, "    setne %al") == 0 &&
+                    strcmp(k6, "    movzbq %al, %rax") == 0 &&
+                    strcmp(k7, "    movq %rax, 400(%r12)") == 0 &&
+                    strcmp(k8, "    movq $0, 392(%r12)") == 0 &&
+                    strcmp(k9, "    movq 400(%r12), %rax") == 0 &&
+                    strncmp(k10, "    addq %rax, ", 15) == 0 &&
+                    strcmp(k11, "    movq $0, 400(%r12)") == 0) {
 
-                for (int k = 0; k < 12; k++) free(b->lines[i + k]);
+                    char src[64], val[32] = "0", dst[64];
+                    sscanf(l0, "    movq %63[^,], %%rax", src);
+                    if (has_sub) sscanf(l2, "    subq $%31[^,], 392(%%r12)", val);
+                    sscanf(k10, "    addq %%rax, %63s", dst);
 
-                char buf[256];
-                snprintf(buf, sizeof(buf), "    cmpq $%s, %s", val, src); p1[p1_cnt++] = strdup(buf);
-                p1[p1_cnt++] = strdup("    setne %al");
-                p1[p1_cnt++] = strdup("    movzbq %al, %rax");
-                snprintf(buf, sizeof(buf), "    addq %%rax, %s", dst); p1[p1_cnt++] = strdup(buf);
-                i += 12;
-                continue;
+                    int total = 11 + off;
+                    for (int k = 0; k < total; k++) free(b->lines[i + k]);
+
+                    char buf[256];
+                    snprintf(buf, sizeof(buf), "    cmpq $%s, %s", val, src); p1[p1_cnt++] = strdup(buf);
+                    p1[p1_cnt++] = strdup("    setne %al");
+                    p1[p1_cnt++] = strdup("    movzbq %al, %rax");
+                    snprintf(buf, sizeof(buf), "    addq %%rax, %s", dst); p1[p1_cnt++] = strdup(buf);
+                    i += total;
+                    continue;
+                }
             }
         }
         p1[p1_cnt++] = b->lines[i++];
@@ -334,14 +347,6 @@ static void optimize_asm(AsmBuf *b) {
                     strcmp(p4[j+3], "    addq %rax, 384(%r12)") == 0) {
                     strncpy(cmps[cmp_cnt++], p4[j], 127);
                     j += 4;
-                } else if ((strncmp(p4[j], "    movq 552(%r12), %rax", 24) == 0 ||
-                            strncmp(p4[j], "    movq 560(%r12), %rax", 24) == 0 ||
-                            strncmp(p4[j], "    movq 568(%r12), %rax", 24) == 0)) {
-                    int disp = 0;
-                    sscanf(p4[j], "    movq %d(%%r12), %%rax", &disp);
-                    snprintf(cmps[cmp_cnt++], 127, "    cmpq $0, %d(%%r12)", disp);
-                    while (j < p4_cnt && strcmp(p4[j], "    addq %rax, 384(%r12)") != 0) j++;
-                    if (j < p4_cnt) j++;
                 } else if (strcmp(p4[j], "    cmpq $0, 384(%r12)") == 0) {
                     if (j + 3 < p4_cnt && strncmp(p4[j+3], "    jne .L_loop_end_", 20) == 0) {
                         sscanf(p4[j+3], "    jne %63s", end_lbl);
@@ -976,7 +981,16 @@ static int utf8_strlen(const char *s, int len) {
     return count;
 }
 
-void bf_mmio_sys(int64_t *tape) { (void)tape; }
+void bf_mmio_sys(int64_t *tape) {
+    if (!curr_conn) return;
+    int op = tape[7];
+    if (op == 1) {
+        curr_conn->status_code = 200;
+        strcpy(curr_conn->content_type, "application/json");
+        curr_conn->out_body_len = sprintf(curr_conn->out_body,
+            "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":%ld}", (long)(time(NULL) - start_time));
+    }
+}
 
 void bf_mmio_crypto(int64_t *tape) {
     if (!curr_conn) return;
@@ -993,13 +1007,6 @@ void bf_mmio_db(int64_t *tape) {
     if (!curr_conn) return;
     int op = tape[16];
     int64_t id = tape[17];
-    if (op == 6) {
-        curr_conn->status_code = 200;
-        strcpy(curr_conn->content_type, "application/json");
-        curr_conn->out_body_len = sprintf(curr_conn->out_body,
-            "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":%ld}", (long)(time(NULL) - start_time));
-        return;
-    }
     if (op == 1) {
         sqlite3_reset(st_feed);
         char *p = curr_conn->out_body;
@@ -1152,22 +1159,55 @@ void bf_mmio_db(int64_t *tape) {
         strcpy(curr_conn->content_type, "application/json");
         return;
     }
+    if (op == 5) {
+        sqlite3_reset(st_check);
+        sqlite3_bind_int64(st_check, 1, id);
+        if (sqlite3_step(st_check) != SQLITE_ROW) {
+            curr_conn->status_code = 404; strcpy(curr_conn->content_type, "application/json");
+            curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"post not found\"}");
+            sqlite3_reset(st_check); return;
+        }
+        sqlite3_reset(st_check);
+        sqlite3_reset(st_unlike);
+        sqlite3_bind_int64(st_unlike, 1, curr_conn->auth_uid);
+        sqlite3_bind_int64(st_unlike, 2, id);
+        sqlite3_step(st_unlike);
+        sqlite3_reset(st_unlike);
+        sqlite3_reset(st_count);
+        sqlite3_bind_int64(st_count, 1, id);
+        int64_t count = 0;
+        if (sqlite3_step(st_count) == SQLITE_ROW) count = sqlite3_column_int64(st_count, 0);
+        sqlite3_reset(st_count);
+        curr_conn->status_code = 200;
+        curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"liked\":false,\"post_id\":%ld,\"like_count\":%ld}", (long)id, (long)count);
+        strcpy(curr_conn->content_type, "application/json");
+        return;
+    }
 }
 
 void bf_mmio_net(int64_t *tape) {
     if (!curr_conn) return;
-    int net_code = tape[32];
-    if (net_code == 2) {
-        curr_conn->status_code = 404; strcpy(curr_conn->content_type, "application/json");
-        curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"not found\"}");
-    } else if (net_code == 3) {
-        curr_conn->status_code = 400; strcpy(curr_conn->content_type, "application/json");
-        curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"invalid post id\"}");
-    } else if (net_code == 4) {
-        curr_conn->status_code = 401; strcpy(curr_conn->content_type, "application/json");
-        if (curr_conn->auth_status == 0) curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"missing bearer token\"}");
-        else if (curr_conn->auth_status == -2) curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"invalid token payload\"}");
-        else curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"invalid or expired token\"}");
+    int resp_type = tape[34];
+    if (resp_type == 1) {
+        curr_conn->status_code = 404;
+        memcpy(curr_conn->out_body, "{\"error\":\"not found\"}", 21);
+        curr_conn->out_body_len = 21;
+    } else if (resp_type == 2) {
+        curr_conn->status_code = 400;
+        memcpy(curr_conn->out_body, "{\"error\":\"invalid post id\"}", 27);
+        curr_conn->out_body_len = 27;
+    } else if (resp_type == 3) {
+        curr_conn->status_code = 401;
+        if (curr_conn->auth_status == -2) {
+            memcpy(curr_conn->out_body, "{\"error\":\"invalid token payload\"}", 33);
+            curr_conn->out_body_len = 33;
+        } else if (curr_conn->auth_status == 0) {
+            memcpy(curr_conn->out_body, "{\"error\":\"missing bearer token\"}", 32);
+            curr_conn->out_body_len = 32;
+        } else {
+            memcpy(curr_conn->out_body, "{\"error\":\"invalid or expired token\"}", 36);
+            curr_conn->out_body_len = 36;
+        }
     }
     const char *status_text = "OK";
     if (curr_conn->status_code == 201) status_text = "Created";
@@ -1366,13 +1406,16 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     bf_tape[3] = req_ctx.keep_alive;
     bf_tape[4] = req_ctx.has_auth;
     bf_tape[5] = req_ctx.body_len;
+    bf_tape[7] = 0;
     bf_tape[8] = 0;
     bf_tape[9] = 0;
     bf_tape[16] = 0;
     bf_tape[17] = 0;
     bf_tape[32] = 0;
+    bf_tape[33] = 0;
+    bf_tape[34] = 0;
     memset(&bf_tape[48], 0, 16 * sizeof(int64_t));
-    int copy_len = (req_ctx.path_len < 24) ? req_ctx.path_len : 24;
+    int copy_len = (req_ctx.path_len < 32) ? req_ctx.path_len : 32;
     for (int i = 0; i < copy_len; i++) bf_tape[64 + i] = req_ctx.path[i];
     bf_tape[64 + copy_len] = 0;
 

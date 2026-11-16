@@ -63,6 +63,7 @@ let main _ =
     let ck = if env "CKPT_THREAD" "1" = "1" then Db.Checkpointer(path, Ring.envInt "CKNICE" 10) else Unchecked.defaultof<_>
     let fds = Server.listen ip port (max 1 (Ring.envInt "LISTENERS" 8)) (Ring.envInt "DEFACC" 0)
     if env "LOCK" "1" = "1" then lockCode ()
+    if env "ANON" "1" = "1" then Pages.start (env "PAGELOG" "0" = "1")
     eprintfn "fsharp-uring on %O:%d: 1 loop thread, %d rings x %d slots, %d listeners, B-tree reads %s, SQLite %s"
         ip port rings slots fds.Length (if bt then "on" else "off") (Marshal.PtrToStringUTF8(Sqlite.sqlite3_libversion ()))
     Server.Worker(fds, slots, rings, ck, started).Run()

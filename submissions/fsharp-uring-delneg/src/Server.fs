@@ -21,9 +21,9 @@ let private env name dflt = envInt name dflt
 let BufSize = 1024
 let MaxReq = 16384
 let private nBufs = env "BUFS" 1024 // receive buffers per ring, a power of two
-let private answers = env "ANSWERS" 256 // requests answered per pass (0: all)
+let private answers = env "ANSWERS" 64 // requests answered per pass (0: all)
 let private wwin = uint32 (env "WWIN" 20) // ms: writes commit at most once per window (group commit)
-let private lifoOn = env "LIFO" 0 = 1 // 1: newest first past one pass of backlog
+let private lifoOn = env "LIFO" 1 = 1
 let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
 let private lifoAge = uint32 (env "LIFOAGE" 8000)
@@ -869,10 +869,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         if drain || nreq > first then
             let budget = if answers > 0 then answers else Int32.MaxValue
             let last = if nreq - first > budget then first + budget else nreq
-            // Requests are answered oldest first, up to `budget` per pass. With LIFO=1, past one pass of backlog the
-            // newest go first instead (a request answered more than 40 ms after it arrived costs a delayed-ACK timer and
-            // a bare ACK); the old end then gets a share of the pass from lifoAge on (all of it at twice that age). A
-            // connection's own requests keep their order either way.
+            // A request answered more than 40 ms after it arrived costs the kernel a delayed-ACK timer and a bare ACK.
+            // In a backlog, oldest-first makes every newcomer wait that long too. So past one pass of backlog the
+            // newest go first; the old end gets a share of the pass from lifoAge on (all of it at twice that age), so
+            // waiting has a bound. A connection's own requests keep their order.
             let lifo = lifoOn && nreq - first > budget
             let mutable oldShare = budget
             if lifo then
@@ -1225,6 +1225,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             if statsOn && now <> lastStats then
                 lastStats <- now
                 stats ()
+            Pages.tick t
 
 /// Listeners: `count` SO_REUSEPORT sockets on host:port, each with its own accept queue (somaxconn deep).
 let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) =

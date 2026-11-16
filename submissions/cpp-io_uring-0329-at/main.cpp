@@ -52,12 +52,13 @@ class Worker {
  public:
   enum class Init { Ok, RingFail, BufFail };
 
-  Init init(uint32_t index, uint32_t slots, int listener, unsigned cq) {
+  Init init(uint32_t index, uint32_t slots, int listener, unsigned cq, unsigned* err) {
     index_ = index;
     listener_ = listener;
     accepting_ = true;
-    if (!ring_.init(kSqEntries, cq, slots)) {
-      std::fprintf(stderr, "ring %u setup failed (slots=%u, cq=%u)\n", index, slots, cq);
+    if (!ring_.init(kSqEntries, cq, slots, err)) {
+      std::fprintf(stderr, "ring %u setup failed (slots=%u, cq=%u): %s\n", index, slots, cq,
+                   std::strerror(static_cast<int>(*err)));
       return Init::RingFail;
     }
     if (!bufs_.init(ring_.fd(), kBufCount, kBufSize)) {
@@ -149,11 +150,29 @@ class Server {
     }
     auto w = std::make_unique<Worker>();
     unsigned cq = cq_;
+    unsigned slots = slots_;
     for (;;) {
-      Worker::Init r = w->init(i, slots_, fd, cq);
-      if (r == Worker::Init::Ok) break;
-      if (r == Worker::Init::BufFail || cq <= 8192) { ::close(fd); return false; }
-      cq /= 2;
+      unsigned err = 0;
+      Worker::Init r = w->init(i, slots, fd, cq, &err);
+      if (r == Worker::Init::Ok) {
+        slot_cap_ = slots;
+        break;
+      }
+      if (r == Worker::Init::BufFail) { ::close(fd); return false; }
+      /* Completions first, then the descriptor table: a runner with a small RLIMIT_MEMLOCK or a
+       * restricted io_uring refuses the 262,144-entry sparse table (CI did), and halving it is
+       * enough to come up with a smaller connection ceiling instead of failing the build. */
+      if (cq > 8192) {
+        cq /= 2;
+        continue;
+      }
+      if (slots > 8192) {
+        slots /= 2;
+        std::fprintf(stderr, "ring %u: descriptor table reduced to %u slots\n", i, slots);
+        continue;
+      }
+      ::close(fd);
+      return false;
     }
     workers_.push_back(std::move(w));
     listeners_.push_back(fd);
@@ -180,7 +199,7 @@ class Server {
   void maybe_grow() {
     if (workers_.size() >= kMaxRings) return;
     Worker& w = *workers_.back();
-    if (w.open() * 4 >= slots_ * 3) add_ring();
+    if (slot_cap_ && w.open() * 4 >= slot_cap_ * 3) add_ring();
   }
 
   static uint32_t now_sec() {
@@ -688,6 +707,7 @@ class Server {
   app::App* app_;
   app::Pool pool_;
   uint32_t slots_;
+  uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
   unsigned cq_;
   const char* host_ = nullptr;
   uint16_t port_ = 0;
@@ -705,11 +725,20 @@ class Server {
  * the box cannot spare at 300k connections. */
 constexpr uint32_t kSlotsPerRing = 262144;
 
-void raise_nofile() {
+/* The descriptor table follows the environment's hard limit, capped at the size this server
+ * wants: rust-iouring-kensac #264 does exactly this (min(hard NOFILE, 1M)) and it is why their
+ * build runs on a CI runner whose NOFILE is small â€?a fixed 262,144-entry sparse table there is
+ * refused by io_uring_register_files_sparse and the server never comes up. */
+uint32_t descriptor_slots() {
   struct rlimit rl {};
   getrlimit(RLIMIT_NOFILE, &rl);
   rl.rlim_cur = rl.rlim_max;
   setrlimit(RLIMIT_NOFILE, &rl);
+  getrlimit(RLIMIT_NOFILE, &rl);
+  rlim_t n = rl.rlim_cur;
+  if (n > kSlotsPerRing) n = kSlotsPerRing;
+  if (n < 1024) n = 1024;
+  return static_cast<uint32_t>(n);
 }
 
 const char* env_or(const char* k, const char* d) {
@@ -753,13 +782,13 @@ int main() {
                                         reinterpret_cast<const uint8_t*>(secret),
                                         std::strlen(secret));
   constexpr unsigned cq = kCqEntries;
-  raise_nofile();
-  Server server(app.get(), kSlotsPerRing, cq);
+  const uint32_t slots = descriptor_slots();
+  Server server(app.get(), slots, cq);
   if (!server.init(host, static_cast<uint16_t>(std::atoi(port_s)))) {
     std::fprintf(stderr, "server init failed\n");
     return 1;
   }
   std::fprintf(stderr, "listening on %s:%s; up to %u rings x %u slots, cq=%u\n", host, port_s,
-               kMaxRings, kSlotsPerRing, cq);
+               kMaxRings, slots, cq);
   server.run();
 }

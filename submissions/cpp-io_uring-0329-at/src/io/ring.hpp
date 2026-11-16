@@ -94,17 +94,23 @@ class Ring {
   Ring(const Ring&) = delete;
   Ring& operator=(const Ring&) = delete;
 
-  bool init(unsigned sq, unsigned cq, unsigned slots) {
+  bool init(unsigned sq, unsigned cq, unsigned slots, unsigned* err) {
     struct io_uring_params p {};
     p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL |
               IORING_SETUP_CQSIZE | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG;
     p.cq_entries = cq;
-    if (io_uring_queue_init_params(sq, &ring_, &p) < 0) {
+    int rc = io_uring_queue_init_params(sq, &ring_, &p);
+    if (rc < 0) {
+      *err = static_cast<unsigned>(-rc);
       std::memset(&ring_, 0, sizeof ring_);
       return false;
     }
     ready_ = true;
-    if (io_uring_register_files_sparse(&ring_, slots) < 0) return false;
+    rc = io_uring_register_files_sparse(&ring_, slots);
+    if (rc < 0) {
+      *err = static_cast<unsigned>(-rc);
+      return false;
+    }
     return true;
   }
 

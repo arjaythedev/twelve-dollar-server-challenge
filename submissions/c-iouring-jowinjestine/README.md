@@ -323,3 +323,26 @@ the unchanged application still passes all 42 functional tests and the
 same five-minute load/latency criteria.
 
 These changes are **not validated by a successful build, CI, or load test yet**.
+
+
+### Secondary-ring wakeups and receive-memory controls
+
+- `EVENTFD_WAKE=1` (experimental default) registers an eventfd on each
+  secondary io_uring and polls those eventfds from ring 0. Nonzero rings
+  then omit `IORING_SETUP_DEFER_TASKRUN` so their CQEs can wake ring 0
+  without an extra `io_uring_enter(GETEVENTS)` per ring per batch.
+  `EVENTFD_WAKE=0` retains #441's original per-ring servicing policy.
+  If eventfd registration fails, the server falls back to legacy servicing.
+- `RECV_SIZE=512` (experimental default, 256/512/1024/2048 accepted):
+  smaller provided receive buffers reduce resident memory at the cost of
+  more partial reads for large requests. `RECV_SIZE=1024` restores #441's
+  size. Seven rings of 8192 buffers save about 28 MiB at 512 vs 1024.
+  The buffer size is **not** per-connection socket memory.
+- New `eventfd_events` diagnostic counts cross-ring wake notifications.
+
+**Recommended test sequence:** with `PRE_CONNS=330000`, first compare
+`IDLE_POLL=0 EVENTFD_WAKE=0 RECV_SIZE=1024 BACKLOG_SLICE_US=0`
+(control) to (1) eventfd only, (2) smaller buffers only, (3) idle polling
+only, (4) slicing only, and then the combined defaults. Restore
+`PRE_CONNS=430000` only for the 400K ramp. Do not infer a score from
+an allocation bound or a low-concurrency microbenchmark.

@@ -21,7 +21,9 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 
-#define K_RING_COUNT 8
+/* 6 * 65,472 = 392,832 direct slots: enough for the 350k target while
+ * reducing single-reactor ring polling/submission work by 25%. */
+#define K_RING_COUNT 6
 #define SLOTS_PER_RING 65472
 #define ACCEPT_DEPTH 1024
 #define N_BUFS_PER_RING 1024

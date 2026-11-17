@@ -1046,8 +1046,8 @@ than about 131,000 connections. It replaces the unmerged `0d958c4` row (220,000)
 rings; the process raises its own `RLIMIT_NOFILE` to `fs.nr_open`): it held **209,000** (20,476 req/s, p95 17.3 / p99
 266.4 ms, 0 errors, 66 % CPU, 30 µs/req, 602 MB, 2026-11-17), so the 131,000-connection cap is gone. 220,000 passed
 the 2-minute probe but failed the 5-minute hold on `connection refused` (78.2 %, 98 % CPU); 230,000 and 240,000 failed
-the 2-minute probe on latency (p95 706 ms, p99 1.45 s) and 320,000 on `connection refused` (80.8 %). The head moved to
-`e407b4f` during the run, so #483 isn't merged yet; `e407b4f` is queued for its own run.
+the 2-minute probe on latency (p95 706 ms, p99 1.45 s) and 320,000 on `connection refused` (80.8 %). The head moved
+(now `ef446bc`) during the run, so #483 isn't merged yet; the new head is queued for its own run.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

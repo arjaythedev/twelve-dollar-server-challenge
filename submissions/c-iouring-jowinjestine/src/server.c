@@ -1025,7 +1025,7 @@ int main(int argc, char **argv) {
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
-  debt_sched = env_long("DEBT_SCHED", 0) != 0;
+  debt_sched = env_long("DEBT_SCHED", 1) != 0;
   debt_cap = answers_per_pass;
   if (debt_sched && (debt_cap < debt_min || debt_cap > debt_max)) {
     fprintf(stderr, "DEBT_SCHED requires ANSWERS_PER_PASS between %u and %u\n", debt_min, debt_max);

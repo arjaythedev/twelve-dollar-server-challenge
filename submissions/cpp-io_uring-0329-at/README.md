@@ -27,17 +27,21 @@
 
 **连接状态机。** 每个连接有两个正交的状态：`ReadState`（`Idle` 表示 multishot receive 已装好，`Queued` 表示等单发读，`Reading` 表示单发读在途）和 `WriteState`（`Idle`/`Sending`），加上 `open`/`closing`（关闭已提交）/`close_after`（待关闭）三个布尔。状态转移集中在 `drain` 的 switch 里，不再用位标志表达。
 
-**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 等待 256 个完成或 500 µs，其余非阻塞）→ 每个 ring 最多处理 256 个完成 → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。
+**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 512 个完成 → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 2,048 个请求**，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
 
-**ring 模型。** ring **按需增长**：起步 1 个，最新一个的 direct-descriptor 表用到 3/4 时才加下一个，上限 2 个，合计 **524,288 连接上限**（目标是 320k）；每个 ring 表 262,144 项，**按目标连接数定尺寸，不按 `RLIMIT_NOFILE`**——按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上是 300k 连接装不装得下的区别。ring 数量是量出来的：每 pass 的 `io_uring_enter` 是 1 次/ring，同机同库饱和 `/feed` 容量 6 ring 15.9k、1 ring 19.0k、2 ring 22.5k req/s（同一测试里 rust-iouring-kensac #264 是 19.3k / 55.7 µs）；所以低连接数走 1 个 ring、300k 连接那一段再长出第二个，两边都拿到。每个 ring 有**一个专属的** `SO_REUSEPORT` listener，ring 接近满时关闭自己的 listener（连接由其他 ring 接收），不做跨 ring 迁移。
+**backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快；等过 **8 秒**的从队尾（最老的）先取一个，没人被饿死。这条来自 objc-uring-delneg (#326) 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 3.5 s、0 错误」的形状。
 
-**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数把 20 个 id 排序后沿 `likes_post_id_idx` 走一遍（merge），一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好），不碰 B-tree 页。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译。
+**ring 模型。** ring **按需增长**：起步 1 个，最新一个的表**半满**时加下一个（一次补齐多个，ramp 不落后），上限 **16**。ring 数量按目标连接数推导：`ceil(400,000 / 每 ring 槽位)`。每 ring 的槽位上限是 262,144，但**实际取 `min(硬 RLIMIT_NOFILE, 262,144)`**——基准机 `LimitNOFILE=65535` 时就是 7 个 ring × 65,535 = **458,745 连接**，`NOFILE=1M` 时 2 个 ring × 262,144 = 524,288。表尺寸不按 `RLIMIT_NOFILE` 一次预分配：旧版按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上就是 300k 连接装不装得下的区别。每 pass 的 `io_uring_enter` 是 1 次/ring；非 0 号 ring 不设 `DEFER_TASKRUN`、只提交不取事件，所以环数增加几乎不加系统调用（3 ring 存活时实测 `enter[wait=1040 sqe=0 ring=66]`）。
+
+**listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时只停止投递 accept，不关闭共享 listener。
+
+**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
 
 **C++23 编译期计算。** 响应头由 `consteval` 在编译期拼成 `std::array`（状态行 + Content-Type + Content-Length 占位），运行时一次拷贝；JSON 转义表、base64url 表、两位数字表和 serial-type 长度表都是 `constexpr`；record 里的整数用 `std::byteswap` + 位运算解码，输入用 `std::string_view`/`std::span` 表达。
 
 **微架构与构建。** 编译用 `-O3 -march=native -fno-plt -fno-semantic-interposition -flto`，另加 `-falign-functions=32 -falign-loops=32`、`-fipa-pta`、`-flto-partition=one`；io_uring 的 ring 启用 `COOP_TASKRUN`/`TASKRUN_FLAG`，连接表和接收缓冲用 `MADV_HUGEPAGE` + `MADV_POPULATE_READ` 预触；有 mold 时用 `-fuse-ld=mold` 并行链接。
 
-**来源说明。** io_uring 的 multishot receive 与 ring 模型参考了 rust-iouring-kensac (#264) 的实现思路；**direct-descriptor 表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144）也是 #264 的做法**——固定大表在 `NOFILE` 较小的 CI runner 上会被 `io_uring_register_files_sparse` 以 `EMFILE` 拒绝，这一点是照着他们改的。数据层只用 B-tree 游标 API（`sqlite3BtreeFirst/Next/TableMoveto/IndexMoveto/Payload*`），不碰 `MemPage`/`findCell`/`getAndInitPage`/`xParseCell`，也不读写 `BtCursor` 私有字段——之前那版批量作者 seek（每层共享页、页内插值二分）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`，因为走的是 SQLite 内部页函数、落在「B-tree cursor reads are fine」这条裁定之外，已经删掉换成 20 次 `TableMoveto`（实测 handler 8.86 → 8.34 µs，反而更快）。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）与 page-cache 的 `SQLITE_CONFIG_PCACHE2` shim（`wc_*`）同样改写自 #245 的 `src/db.h`（同一段代码，改了命名），`WAL_COALESCE=0` 可关掉 VFS 做 A/B（仅供测试，规则里没这条）。record 的变长整数与列头解码沿用 #245 的写法。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
+**来源说明。** io_uring 的 multishot receive 与 ring 模型参考了 rust-iouring-kensac (#264) 的实现思路；**direct-descriptor 表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144）也是 #264 的做法**——固定大表在 `NOFILE` 较小的 CI runner 上会被 `io_uring_register_files_sparse` 以 `EMFILE` 拒绝，这一点是照着他们改的。**8 个共享 `SO_REUSEPORT` listener 同样来自 #264**（`LISTENERS = 8`，与 ring 数无关）。**backlog 的 LIFO + 8 秒老化来自 objc-uring-delneg (#326)** 的论证（他们记的是每请求 +20% CPU 的 bare ACK 代价），不是 #264 的最老优先。数据层只用 B-tree 游标 API（`sqlite3BtreeFirst/Next/TableMoveto/IndexMoveto/Payload*`）；like 计数的页级 cell 扫描与 #264 的 `td_count_likes` 同形（读游标持有的页，不自己获取/释放页面），此前那版批量作者 seek（每层共享页、页内插值二分）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`，因为走的是 SQLite 内部页函数、落在「B-tree cursor reads are fine」这条裁定之外，已经删掉换成 20 次 `TableMoveto`（实测 handler 8.86 → 8.34 µs，反而更快）。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）与 page-cache 的 `SQLITE_CONFIG_PCACHE2` shim（`wc_*`）同样改写自 #245 的 `src/db.h`（同一段代码，改了命名），`WAL_COALESCE=0` 可关掉 VFS 做 A/B（仅供测试，规则里没这条）。record 的变长整数与列头解码沿用 #245 的写法。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
 
 ## 读取走 SQLite 的 B-tree，而不是 SQL 引擎
 
@@ -63,7 +67,7 @@
 每个 k6 用户持有一个 keep-alive 连接，所以高分意味着在 `LimitNOFILE=65535` 下数十万个 socket。
 
 - 接受的 socket 是 io_uring **直接描述符**：它们位于 ring 的文件表，不占进程 fd 表。表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144），所以同一个二进制在 `NOFILE=65535` 的 CI runner 上会注册 65,535 项并正常起来，在基准机上拿满 262,144。
-- ring 按需增长（1 → 最多 2），每个 ring 一个 `SO_REUSEPORT` listener；每个 ring 保持 `2048 / ring 数` 个单发 accept 在途。ring 接近满时关闭自己的 listener，其余 ring 继续接收。
+- 端口上是 **8 个共享的 `SO_REUSEPORT` listener**（固定 8 个，与 ring 数无关），每个有独立的 accept 队列；ring 按需增长（1 → 最多 16），每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时停止投递 accept，其他 ring 继续从全部 8 个 listener 接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.
 - 突发之后 multishot receive 会耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。
 - 每个连接同一时间最多一个发送在途；流水线响应排在它后面。输出缓冲来自池（8 KB，启动预填 256 个），发送完成后归还；一次 feed 响应的 JSON 上界约 24 KB，所以回收阈值放到 `8 × 8 KB`，否则每个 feed 缓冲都会被丢掉重分配（实测：每请求一次 24 KB `malloc`，`brk` 37,738 次/10 s）。

@@ -491,7 +491,20 @@ class Server {
     uint32_t wi;
     uint32_t idx;
     uint16_t gen;
+    uint64_t ts; /* 进入就绪队列的时刻，用于老化 */
   };
+
+  /* backlog 存在时谁先被回答。
+   *
+   * 最老优先（我们原来的做法，照 #264 学的）会让每个新到的请求也排在一长串旧请求后面：230k 的
+   * ramp 期所有新连接同时发第一个请求，队列一长，新请求的延迟就跟最老的请求一样高——benchmark
+   * 上就是「p99 3.54 s 但 0 错误」。objc-uring-delneg #326 论证得更细：回复晚于请求 40 ms 就要
+   * 多一个 bare ACK，约每请求 +20% CPU，而多出来的 CPU 又让 backlog 更难清掉。
+   *
+   * 所以 backlog 里最新优先（LIFO），只给等太久的请求留出口：等超过 8 s 的请求开始按最老优先
+   * 回答（每 pass 取一个最老的），这样既不让多数人久等，也不让任何人被饿死。连接内部的请求
+   * 顺序不变（同一连接的数据在它自己的 part 缓冲里，一次 serve 按序处理）。 */
+  static constexpr uint64_t kAgedAfterNs = 8000000000ULL;
 
   // 把收到的字节留在连接上，本 pass 不回答。
   void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
@@ -500,15 +513,22 @@ class Server {
     c.part->insert(c.part->end(), data, data + n);
     if (!c.ready_queued) {
       c.ready_queued = true;
-      ready_.push_back(ReadyRef{wi, idx, c.gen});
+      ready_.push_front(ReadyRef{wi, idx, c.gen, now_ns()});
     }
   }
 
   // 在 pass 还有答案额度时，按最老优先回答被延后的连接。
   void run_ready() {
     while (!ready_.empty() && answers_left_ > 0) {
-      const ReadyRef r = ready_.front();
-      ready_.pop_front();
+      const uint64_t now = now_ns();
+      /* 队尾是最老的：它已经等过 8 s 就轮到它，否则取队首（最新）。 */
+      const bool aged = (now - ready_.back().ts) > kAgedAfterNs;
+      const ReadyRef r = aged ? ready_.back() : ready_.front();
+      if (aged) {
+        ready_.pop_back();
+      } else {
+        ready_.pop_front();
+      }
       if (r.wi >= workers_.size()) continue;
       Worker& w = *workers_[r.wi];
       if (r.idx >= w.table().size()) continue;
@@ -551,7 +571,7 @@ class Server {
           // 队列按最老优先处理。
           if (!c.ready_queued) {
             c.ready_queued = true;
-            ready_.push_back(ReadyRef{wi, idx, c.gen});
+            ready_.push_front(ReadyRef{wi, idx, c.gen, now_ns()});
           }
           break;
         }

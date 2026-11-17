@@ -788,7 +788,11 @@ p99 (1.45 s at 84 % CPU) and 320,000 on p95/p99 (3.08 / 3.76 s at 92 % CPU), all
 512-byte receives and ready backlogs over 1,024 sliced to the next batch) held **230,000** (22,378 req/s, p95 9.2 /
 p99 96.5 ms, 0 err, 57 % CPU, 23 µs/req, 1,336 MB, 2026-11-17), below the merged row, so not merged: 240,000 failed
 the 2-minute probe on p95/p99 (231.7 ms / 1.66 s at 61 % CPU, 0 errors) and 320,000 collapsed (76 % errors, nearly
-all `connection refused`). #479 stays open.
+all `connection refused`). #479 stays open. **#480** (`c272794`: #479's code plus a 16-word rolling SHA-256 schedule,
+with SHA-256/HMAC test vectors checked on the box at build time) held **270,000** (25,866 req/s, p95 36.8 / p99
+334.9 ms, 0 err, 71 % CPU, 25 µs/req, 816 MB, 2026-11-17), below the merged row, so not merged: 280,000 failed the
+2-minute probe on p95/p99 (1.16 / 2.73 s at 74 % CPU) and 320,000 on p95/p99 (1.75 / 2.26 s at 92 % CPU), all with
+0 errors. #480 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

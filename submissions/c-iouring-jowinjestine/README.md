@@ -313,3 +313,66 @@ every run):
 - **`RECV_SIZE`** (1024): provided receive buffer size; 512 saves ~28 MB over seven rings.
 - `LTO=1 bash build.sh` adds link-time optimization (off; the server and SQLite are already one
   translation unit).
+
+
+## Follow-up to #482: 2,048-answer cap, 320K-user comparison
+
+This follow-up changes **only** the default event-loop response budget:
+`ANSWERS_PER_PASS=2048` instead of `16384`. The variable's environment
+override is retained. The read budget (`READS_PER_PASS=16384`), per-ring
+receive buffer count and size, ring waits (`WAIT_MIN=64`, `WAIT_US=2000`),
+checkpoint schedule, PGO build, rolling SHA-256, multishot receives and
+acceptance policy are unchanged from #482. The purpose is to measure
+whether shorter response-processing passes protect tail latency at high
+connection counts, not to claim an already achieved 320K result.
+
+### Correctness
+
+Run the challenge's unmodified 42-check suite on the new commit:
+
+```bash
+bash test/run.sh submissions/c-iouring-jowinjestine
+```
+
+Do not evaluate capacity unless all **42/42** checks pass, including
+write/commit visibility and JWT verification. The GitHub pull-request CI
+runs that same suite.
+
+### Reproducible load A/B (separate k6 host)
+
+Build once with the existing PGO setup. Use the same server/VM, kernel,
+seed-database copy, JWT secret, process startup settings, k6 host and k6
+workload for **both** runs. Start each run from a fresh equivalent seed copy
+and restart the server, so the first variant cannot inherit the second
+variant's WAL/database state. Avoid running k6 on the one-vCPU server.
+
+- Control (#482): `ANSWERS_PER_PASS=16384`
+- Experiment (this PR, default): `ANSWERS_PER_PASS=2048`
+
+The canonical test is `bench/load.js` from the repository root. Its
+ramp-up is 60 seconds; `DURATION` specifies the **hold**, not the ramp.
+
+```bash
+# Optional scouting probe: a 2-minute 320K hold, not an official score
+k6 run -e BASE_URL=http://SERVER_IP:80 -e VUS=320000 -e RAMP_UP=60s -e DURATION=2m bench/load.js
+
+# Required A/B comparison: a full 5-minute 320K-user hold, per variant
+k6 run -e BASE_URL=http://SERVER_IP:80 -e VUS=320000 -e RAMP_UP=60s -e DURATION=5m bench/load.js
+```
+
+Record actual held VUs, request rate, p95, p99, failed request rate,
+CPU microseconds/request, cgroup RAM peak, `max_turn`, `max_commit`,
+`ready_max`, `rq_max`, `enobufs`, and checkpoint holds. Collect
+per-10-second p99/queue trends where possible: a short probe can pass
+while the five-minute hold degrades.
+
+| Configuration | 320K 2-minute probe | 320K 5-minute hold | p95/p99 | errors | µs/req | RAM |
+|---|---|---|---|---|---|---|
+| #482, 16,384 answers | Not run | Not run | — | — | — | — |
+| This PR, 2,048 answers | Not run | Not run | — | — | — | — |
+
+A scored pass requires p95 **below 500 ms**, p99 **below 1,000 ms**
+and failed requests **below 1%** on the entire five-minute hold.
+An official result also requires the challenge operator's evaluation
+on the specified 1-vCPU/2-GB environment. A 320K probe failure should
+not be mistaken for a five-minute score.

@@ -51,6 +51,12 @@ func dbStats() (walPages, walMax, checkpoints int) {
 	return int(a), int(b), int(c)
 }
 
+func dbPageMemory() (blockKB, hugeKB int) {
+	var a, b C.long
+	C.db_page_memory(&a, &b)
+	return int(a), int(b)
+}
+
 func dbHealth() bool { return C.db_health() == 1 }
 
 // dbFeed and dbPost write the JSON body into buf, which is the free part of a response buffer

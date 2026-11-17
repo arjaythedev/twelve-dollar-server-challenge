@@ -114,9 +114,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 20 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
 | 20 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
 | 20 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
-| 30 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 31 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 31 | holyphp-io-uring-elifoxcoder | #447 | HolyPHP (io_uring, SQLite B-tree reads) | **260,000** ᵘ | 24,961 | 154.1 | 658.8 | 0.00 | 79 | 29 | 782 | 2026-11-16 |
+| 20 | holyphp-io-uring-elifoxcoder | #490 | HolyPHP (io_uring, SQLite B-tree reads) | **270,000** ᵘ | 25,816 | 234.0 | 584.6 | 0.00 | 84 | 29 | 1,325 | 2026-11-17 |
+| 31 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 32 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 33 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 33 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 33 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
@@ -342,12 +342,17 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 62 ms, 0 err, 91 % CPU, 37 µs/req, 931 MB, 2026-10-28) and is CPU-bound, not source-port-bound: 240,000 failed at 95 % CPU
 (p99 1.5 s). The row above stays on #82's merged code until #141 is rebased and merged.
 
-ᵘ **HolyPHP** is scored at its follow-up **#447** at commit **`4c0adfb`** (per-ring receive-recovery FIFO, buffer
-reserve fix, pooled multi-seek result structs on top of the shim VFS and per-batch B-tree cursors; merged 2026-11-16,
-above #418's 250,000 row). The 260,000 hold had 0 errors (27,461 req/s during the hold); 270,000 failed the 2-minute
-probe on p95/p99 (812 ms / 2.0 s, 82 % CPU), 280,000 on p95/p99 (1.2 / 2.3 s, 89 %) and 320,000 on p95/p99 (2.6 / 3.0
-s, 97 %). Its later follow-up **#481** (`4f268f4`, deferred submits and forced enter on by default, batch 256, larger
-response-buffer pool; held, not merged: not above 260,000) held **257,000** (24,702 req/s, p95 222.7 / p99 479.1 ms, 0
+ᵘ **HolyPHP** is scored at its follow-up **#490** at commit **`bcf0061`** (mixed-ring loop again, larger
+response-buffer and send-chunk pools, circular FIFOs, SQLite opened through the built-in `unix-excl` VFS by default;
+merged 2026-11-17, above #447's 260,000 row). The 270,000 hold had 0 errors (28,515 req/s during the hold); 280,000
+failed the 2-minute probe on p95/p99 (788 / 933 ms, 88 % CPU) and 320,000 on p95/p99 (2.5 / 3.4 s, 99 %). Before that
+it was scored at **#447** at commit **`4c0adfb`** (**260,000**, 24,961 req/s, p95 154.1 / p99 658.8 ms, 79 % CPU, 29
+µs/req, 782 MB, 2026-11-16; per-ring receive-recovery FIFO, buffer reserve fix, pooled multi-seek result structs on
+top of the shim VFS and per-batch B-tree cursors; merged 2026-11-16, above #418's 250,000 row). That 260,000 hold had
+0 errors; 270,000 failed the 2-minute probe on p95/p99 (812 ms / 2.0 s, 82 % CPU), 280,000 on p95/p99 (1.2 / 2.3 s, 89
+%) and 320,000 on p95/p99 (2.6 / 3.0 s, 97 %). Its follow-up **#481** (`4f268f4`, deferred submits and forced enter
+on by default, batch 256, larger response-buffer pool; not merged: not above 260,000, later closed by its author)
+held **257,000** (24,702 req/s, p95 222.7 / p99 479.1 ms, 0
 err, 85 % CPU, 31 µs/req, 737 MB, 2026-11-17); 270,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99
 (3.2 / 4.3 s, 90 % CPU), 280,000 failed the 2-minute probe on p95/p99 (757 ms / 1.3 s, 90 %) and 320,000 on p95 (2.4 s,
 96 %). Before that it was scored at **#418** at commit **`0dde0df`** (**250,000**, 24,124 req/s, p95 91.9 / p99

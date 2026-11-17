@@ -78,6 +78,16 @@
   run starts at zero. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader
   goes back to them), so the file's length doesn't cost memory. The database file's pages go too, after the pass
   that syncs the file (the held one).
+  The checkpoint thread also paces its own writes to the database file (a second thin wrapper in the VFS shim, on
+  the database file's `xWrite`; the bytes and their order are SQLite's). A pass writes thousands of pages in a
+  fraction of a second, and when that lifts the kernel's dirty memory past the point where it pauses writers, the
+  next writer it pauses is the loop, in its WAL write. So after each MiB the thread reads `nr_dirty`, `nr_writeback`
+  and the two thresholds from `/proc/vmstat`; within a quarter of the level where writers start being paused, it
+  sends its own pages to the disk (`sync_file_range` on the database file) and waits up to 250 ms for the rest to
+  drain. Measured with the dirty limits set to 12 / 24 MB and the 25 MB/s cap: without it the loop was paused in
+  `balance_dirty_pages` 10 times in a run (up to 183 ms, 1.3 s in all), with it never, in two runs. At the default
+  limits it found dirty memory high 0 times in 771 looks and changes nothing: the pages stay dirty and the kernel
+  still writes each once however many passes wrote it.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
@@ -174,7 +184,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `PACE` (1; 0: the checkpoint thread's database writes unpaced), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
 

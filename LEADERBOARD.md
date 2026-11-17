@@ -1074,7 +1074,10 @@ raises its own `RLIMIT_NOFILE` to `fs.nr_open`), held **209,000** (20,476 req/s,
 `a77a5bb`** (answer cap of 2,048 per pass with an oldest-first queue for deferred reads, feed like counts decoded from
 the index cursor's page, credited to #264): it held **220,000** (21,447 req/s, p95 24.9 / p99 614.4 ms, 0 errors, 64 %
 CPU, 28 µs/req, 804 MB, 2026-11-17). 230,000 and 240,000 failed the 2-minute probe on p99 (3.54 s, 5.07 s, 0 errors)
-and 320,000 on `connection refused` (78.1 %).
+and 320,000 on `connection refused` (78.1 %). Follow-up #492 (`4de4148`: 8 `SO_REUSEPORT` listeners credited to #264,
+LIFO ready queue with 8 s aging) held **210,000** (20,578 req/s, p95 13.3 / p99 127.6 ms, 0 errors, 61 % CPU, 27 µs/req,
+674 MB, 2026-11-17); 220,000 and 240,000 failed the 2-minute probe on p99 (4.28 s, 2.82 s, 0 errors) and 320,000 on
+`connection refused` (78.6 %). That is below the merged 220,000, so the row stays at `a77a5bb` and #492 isn't merged.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

@@ -345,7 +345,11 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 ᵘ **HolyPHP** is scored at its follow-up **#490** at commit **`bcf0061`** (mixed-ring loop again, larger
 response-buffer and send-chunk pools, circular FIFOs, SQLite opened through the built-in `unix-excl` VFS by default;
 merged 2026-11-17, above #447's 260,000 row). The 270,000 hold had 0 errors (28,515 req/s during the hold); 280,000
-failed the 2-minute probe on p95/p99 (788 / 933 ms, 88 % CPU) and 320,000 on p95/p99 (2.5 / 3.4 s, 99 %). Before that
+failed the 2-minute probe on p95/p99 (788 / 933 ms, 88 % CPU) and 320,000 on p95/p99 (2.5 / 3.4 s, 99 %). Its
+follow-up **#497** (`08da156`, `start.sh` defaults, opt-in eventfd mode; not merged: not above 270,000) held
+**257,000** (24,746 req/s, p95 79.9 / p99 220.5 ms, 0 err, 78 % CPU, 29 µs/req, 1,048 MB, 2026-11-17); 270,000 passed
+the 2-minute probe but failed the 5-minute hold on p95/p99 (348.5 ms / 1.1 s, 83 % CPU), 280,000 failed the 2-minute
+probe on p95/p99 (943 ms / 1.5 s) and 320,000 on p95/p99 (2.2 / 3.0 s). Before that
 it was scored at **#447** at commit **`4c0adfb`** (**260,000**, 24,961 req/s, p95 154.1 / p99 658.8 ms, 79 % CPU, 29
 µs/req, 782 MB, 2026-11-16; per-ring receive-recovery FIFO, buffer reserve fix, pooled multi-seek result structs on
 top of the shim VFS and per-batch B-tree cursors; merged 2026-11-16, above #418's 250,000 row). That 260,000 hold had

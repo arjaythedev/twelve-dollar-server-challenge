@@ -854,7 +854,7 @@ static void memgov_tick(uint64_t now) {
     }
   }
   int high = (psi_available && (MG.psi_full10 >= 2.0 || MG.psi_some10 >= 10.0)) ||
-             (MG.cg_limit && MG.cg_current > MG.cg_limit * 85 / 100);
+             (MG.cg_limit && MG.cg_current > MG.cg_limit * 95 / 100);
   if (high) { MG.high_streak++; MG.low_streak = 0; }
   else { MG.low_streak++; MG.high_streak = 0; }
   /* Changes affect only new accepts. Never throttle, reject or close a connection. */

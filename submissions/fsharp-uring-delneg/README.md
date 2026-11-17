@@ -69,8 +69,13 @@
   started writeback of every page each of them wrote, a hot index page once per pass; left dirty until that sync, each
   page is written once, and the disk got about 60 % fewer write requests per request on the test box.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
-  lives in its memory, shared by its two connections. 256 MB page cache, no mmap, statements prepared once. Startup
-  reads the indexes that writes touch into the page cache. Inserts bind `created_at` in the column default's format
+  lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
+  reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
+  of the 250 MB seed (the two indexes that writes land on at random, 35 MB, the users table, and the newest end of
+  everything else: a post is read and liked within seconds of being listed), and they grow by a few MB a minute. A
+  cache with room for everything (256 MB before) also keeps every page ever appended, about 0.26 MB a second at 300k
+  users, in anonymous memory that reclaim can't take back when the box is at its memory wall; at 64 MB the oldest of
+  those give way instead. Inserts bind `created_at` in the column default's format
   and take the id from `sqlite3_last_insert_rowid` (no `RETURNING`); a like is one `INSERT … SELECT … WHERE EXISTS
   … ON CONFLICT DO NOTHING`, and `sqlite3_changes` tells a new like from a repeat or a missing post.
 - **One write per commit.** A VFS of its own over `unix-excl` (SQLite's public VFS interface, the pattern of its own
@@ -159,7 +164,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (256000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
 

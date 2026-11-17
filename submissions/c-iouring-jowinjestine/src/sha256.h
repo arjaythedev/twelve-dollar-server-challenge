@@ -23,7 +23,44 @@ static const uint32_t SHA256_K[64] = {
 
 #define ROR(x, n) (((x) >> (n)) | ((x) << (32 - (n))))
 
+/* Small, hot SHA-256 messages dominate JWT verification.  Use a 16-word
+ * circular schedule instead of materializing all 64 words (256 bytes) per
+ * compression.  No SHA-NI dependency: Cascade Lake lacks that ISA feature.
+ * This is a performance hypothesis; set SHA256_ROLLING16=0 to A/B the old
+ * compression path.  Crypto vectors must match for either setting. */
+#ifndef SHA256_ROLLING16
+#define SHA256_ROLLING16 1
+#endif
+
+
 static void sha256_block(uint32_t h[8], const uint8_t *p) {
+#if SHA256_ROLLING16
+  uint32_t w[16];
+  for (unsigned i = 0; i < 16; i++)
+    w[i] = (uint32_t)p[4*i] << 24 | (uint32_t)p[4*i+1] << 16 | (uint32_t)p[4*i+2] << 8 | p[4*i+3];
+
+  uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+  for (unsigned i = 0; i < 64; i++) {
+    uint32_t wi;
+    if (i < 16) {
+      wi = w[i];
+    } else {
+      const uint32_t x = w[(i - 15) & 15], y = w[(i - 2) & 15];
+      const uint32_t s0 = ROR(x, 7) ^ ROR(x, 18) ^ (x >> 3);
+      const uint32_t s1 = ROR(y, 17) ^ ROR(y, 19) ^ (y >> 10);
+      wi = w[i & 15] + s0 + w[(i - 7) & 15] + s1;
+      w[i & 15] = wi;
+    }
+    const uint32_t S1 = ROR(e, 6) ^ ROR(e, 11) ^ ROR(e, 25);
+    const uint32_t ch = (e & f) ^ (~e & g);
+    const uint32_t t1 = hh + S1 + ch + SHA256_K[i] + wi;
+    const uint32_t S0 = ROR(a, 2) ^ ROR(a, 13) ^ ROR(a, 22);
+    const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+    const uint32_t t2 = S0 + maj;
+    hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+  }
+  h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+#else
   uint32_t w[64];
   for (int i = 0; i < 16; i++) w[i] = (uint32_t)p[4 * i] << 24 | (uint32_t)p[4 * i + 1] << 16 | (uint32_t)p[4 * i + 2] << 8 | p[4 * i + 3];
   for (int i = 16; i < 64; i++) {
@@ -42,6 +79,7 @@ static void sha256_block(uint32_t h[8], const uint8_t *p) {
     hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
   }
   h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+#endif
 }
 
 static void sha256_init(struct sha256 *s) {

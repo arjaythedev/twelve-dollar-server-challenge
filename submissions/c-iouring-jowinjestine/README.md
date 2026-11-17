@@ -380,7 +380,7 @@ not be mistaken for a five-minute score.
 
 ## Experiment: TCP receive-memory governor (independent follow-up to #484)
 
-This is **opt-in** (`TCP_MEM_GOVERNOR=0` by default) and does not alter the
+This is enabled by default in this experiment (`TCP_MEM_GOVERNOR=1`), while `TCP_MEM_GOVERNOR=0` restores #484; it does not alter the
 event-loop scheduler, B-tree reads or checkpoint policy. With
 `TCP_MEM_GOVERNOR=1`, set `SO_RCVBUF=16384` on the eight listening sockets
 before accepting connections. Linux doubles the requested value internally.
@@ -399,7 +399,7 @@ accepted sockets inherit the listener's current buffer setting.
 If cgroup v2 PSI is unavailable, the memory.current/max threshold can
 still be used; missing metrics are zero rather than grounds to throttle.
 
-Control: `TCP_MEM_GOVERNOR=0` (#484). Test with
+Control: `TCP_MEM_GOVERNOR=0` (#484). The official run uses default-on. Test with
 `TCP_MEM_GOVERNOR=1 TCP_RCVBUF_NORMAL=16384 TCP_RCVBUF_PRESSURE=8192`.
 The log emits sampled memory, socket-accounted memory, PSI and current
 listener cap. Compare 300K/310K/320K full 5-minute holds with the same

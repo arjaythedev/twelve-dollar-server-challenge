@@ -80,6 +80,38 @@ def strip_proven_bounds_checks(asm_text):
         raise ValueError("no compiler-emitted tape bounds checks found")
     return "\n".join(out), removed
 
+
+def strip_dead_bounds_abi(asm_text):
+    """Drop callee-save and default-bound setup made dead by specialization."""
+    prologue = """    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    pushq %rbx
+    pushq %rbp
+    subq $8, %rsp
+    movq %rdi, %r12
+    testq %rsi, %rsi
+    jnz 1f
+    leaq -4000000(%rdi), %rsi
+    leaq 4000000(%rdi), %rdx
+1:
+    movq %rsi, %r14
+    movq %rdx, %r15"""
+    epilogue = """    addq $8, %rsp
+    popq %rbp
+    popq %rbx
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    ret"""
+    if asm_text.count(prologue) != 1 or asm_text.count(epilogue) != 1:
+        raise ValueError("unexpected compiler ABI prologue/epilogue")
+    asm_text = asm_text.replace(prologue, "    pushq %r12\n    movq %rdi, %r12", 1)
+    asm_text = asm_text.replace(epilogue, "    popq %r12\n    ret", 1)
+    return asm_text
+
 def optimize_asm(asm_text):
     lines = asm_text.splitlines()
     i = 0
@@ -168,6 +200,7 @@ if __name__ == "__main__":
         src = f.read()
     opt, n = optimize_asm(src)
     opt, removed = strip_proven_bounds_checks(opt)
+    opt = strip_dead_bounds_abi(opt)
     with open(out_file, "w") as f:
         f.write(opt)
         f.write("\n")

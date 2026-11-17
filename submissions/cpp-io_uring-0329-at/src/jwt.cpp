@@ -70,15 +70,19 @@ constexpr B64Table kB64{};
 
 bool b64url(const uint8_t* s, size_t n, ByteBuf& out) {
   if (n % 4 == 1) return false;
+  /* Reserve once: decoding 190 bytes through buf_append() was ~63 capacity checks and 3-byte
+   * memcpys per token. */
+  buf_reserve(out, out.len + static_cast<uint32_t>(n / 4 * 3 + 3));
   size_t i = 0;
   for (; i + 4 <= n; i += 4) {
     uint8_t a = kB64.t[s[i]], b = kB64.t[s[i + 1]], d = kB64.t[s[i + 2]], e = kB64.t[s[i + 3]];
     if ((a | b | d | e) & 0xc0) return false;
     uint32_t v = static_cast<uint32_t>(a) << 18 | static_cast<uint32_t>(b) << 12 |
                  static_cast<uint32_t>(d) << 6 | e;
-    const uint8_t bytes[3] = {static_cast<uint8_t>(v >> 16), static_cast<uint8_t>(v >> 8),
-                              static_cast<uint8_t>(v)};
-    buf_append(out, bytes, 3);
+    out.p[out.len] = static_cast<uint8_t>(v >> 16);
+    out.p[out.len + 1] = static_cast<uint8_t>(v >> 8);
+    out.p[out.len + 2] = static_cast<uint8_t>(v);
+    out.len += 3;
   }
   size_t r = n - i;
   if (r == 0) return true;
@@ -91,12 +95,8 @@ bool b64url(const uint8_t* s, size_t n, ByteBuf& out) {
 
   uint32_t unused = r == 2 ? v & 0xffff : v & 0xff;
   if (r < 2 || unused != 0) return false;
-  uint8_t b0 = static_cast<uint8_t>(v >> 16);
-  buf_append(out, &b0, 1);
-  if (r == 3) {
-    uint8_t b1 = static_cast<uint8_t>(v >> 8);
-    buf_append(out, &b1, 1);
-  }
+  out.p[out.len++] = static_cast<uint8_t>(v >> 16);
+  if (r == 3) out.p[out.len++] = static_cast<uint8_t>(v >> 8);
   return true;
 }
 
@@ -213,13 +213,17 @@ void Sha256::update(const void* data, size_t n) {
 
 void Sha256::final(uint8_t out[32]) {
   uint64_t bits = bytes * 8;
-  const uint8_t pad = 0x80;
-  update(&pad, 1);
-  const uint8_t zero = 0;
-  while (fill != 56) update(&zero, 1);
-  uint8_t len[8];
-  for (int i = 0; i < 8; i++) len[i] = static_cast<uint8_t>(bits >> (56 - 8 * i));
-  update(len, 8);
+  /* The padding used to be pushed one byte at a time - up to 63 calls to update(), each a memcpy
+   * plus a fill check, twice per request (inner and outer HMAC).  Build the tail in one buffer and
+   * hash it with one call. */
+  uint8_t tail[72];
+  size_t n = 0;
+  tail[n++] = 0x80;
+  const size_t zeros = (fill < 56) ? (56 - fill - 1) : (120 - fill - 1);
+  std::memset(tail + n, 0, zeros);
+  n += zeros;
+  for (int i = 0; i < 8; i++) tail[n++] = static_cast<uint8_t>(bits >> (56 - 8 * i));
+  update(tail, n);
   for (int i = 0; i < 8; i++) {
     out[4 * i] = static_cast<uint8_t>(h[i] >> 24);
     out[4 * i + 1] = static_cast<uint8_t>(h[i] >> 16);

@@ -94,10 +94,15 @@ class Ring {
   Ring(const Ring&) = delete;
   Ring& operator=(const Ring&) = delete;
 
-  bool init(unsigned sq, unsigned cq, unsigned slots, unsigned* err) {
+  /* `defer` is set on the ring the loop blocks on: DEFER_TASKRUN batches the kernel's task work
+   * behind that one enter, which is what lets the wait park the thread cheaply.  The other rings
+   * must not defer, so their completions are posted by the kernel as they happen and the loop can
+   * read their queues straight from shared memory (c-iouring-pavlyhalim #245, c-iouring-oix7 style:
+   * entering every ring every pass was 4.7 syscalls a batch with all rings busy). */
+  bool init(unsigned sq, unsigned cq, unsigned slots, bool defer, unsigned* err) {
     struct io_uring_params p {};
-    p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL |
-              IORING_SETUP_CQSIZE | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG;
+    p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+    if (defer) p.flags |= IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG;
     p.cq_entries = cq;
     int rc = io_uring_queue_init_params(sq, &ring_, &p);
     if (rc < 0) {
@@ -138,11 +143,18 @@ class Ring {
     }
   }
 
-  void enter() {
-    enters(2)++;
-    io_uring_submit(&ring_);
-    io_uring_get_events(&ring_);
+  /* Publish this ring's SQEs if any are waiting.  No get_events: a ring that does not defer its
+   * task work needs no integer for its completions, and entering it every pass is exactly the
+   * syscall bill that kept the loop from scaling with more rings. */
+  void submit_if_ready() {
+    if (io_uring_sq_ready(&ring_) > 0) {
+      enters(2)++;
+      io_uring_submit(&ring_);
+    }
   }
+
+  /* CQEs the kernel has already posted, read from shared memory with no syscall. */
+  unsigned ready_cqes() { return io_uring_cq_ready(&ring_); }
 
   int wait(unsigned min_complete, unsigned ns) {
     enters(0)++;

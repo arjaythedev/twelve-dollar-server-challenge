@@ -372,10 +372,36 @@ bool Db::feed_rows() {
     std::array<long long, kFeedLen> ids{};
     std::array<unsigned, kFeedLen> counts{};
     for (size_t k = 0; k < n; k++) ids[k] = rows_[order_[k]].id;
-    if (dbx_likes_many(h_, ids.data(), static_cast<int>(n), counts.data()) != 0) throw DbError{};
+    int lr = dbx_likes_many(h_, ids.data(), static_cast<int>(n), counts.data());
+    if (lr < 0) throw DbError{};
+    if (lr > 0) {
+      /* A cell the page-level walk does not decode (large or odd record): one seek per post. */
+      for (size_t k = 0; k < n; k++) {
+        int c = count_likes_one(ids[k]);
+        if (c < 0) throw DbError{};
+        counts[k] = static_cast<unsigned>(c);
+      }
+    }
     for (size_t k = 0; k < n; k++) rows_[order_[k]].likes = counts[k];
   }
   return true;
+}
+
+int Db::count_likes_one(long long id) {
+  int r = dbx_seek_ge(h_, DBX_LIKES_IDX, id);
+  if (r < 0) return -1;
+  int cnt = 0;
+  while (r == 1) {
+    unsigned len = 0;
+    const uint8_t* p = dbx_record(h_, DBX_LIKES_IDX, &len);
+    if (!p) return -1;
+    Col cols[2];
+    columns(p, len, cols);
+    if (int_of(cols[0]) != id) break;
+    cnt++;
+    r = dbx_next(h_, DBX_LIKES_IDX);
+  }
+  return r < 0 ? -1 : cnt;
 }
 
 void Db::feed_json(ByteBuf& out) {

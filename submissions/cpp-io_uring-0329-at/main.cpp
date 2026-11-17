@@ -25,8 +25,10 @@
 
 namespace {
 
-constexpr uint32_t kMaxRings = 2;   /* rings are grown on demand up to this */
-constexpr uint32_t kAcceptDepth = 2048;
+constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
+constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-kensac #264 uses 16) */
+constexpr uint32_t kAcceptDepth = 2048;   /* total, divided by the live ring count */
+constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
 constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 8192;
 constexpr unsigned kCqEntries = 65536;
@@ -34,6 +36,12 @@ constexpr size_t kBufSize = 2048;
 constexpr uint16_t kBufCount = 2048;
 constexpr uint32_t kWaitNs = 1000000;
 constexpr size_t kDrainBudget = 512;
+
+/* Answers a single pass may produce.  Reads are not bounded by this: a receive past the limit
+ * is kept on its connection and answered by a later pass, oldest first, so one busy
+ * pass cannot stretch the wait of everything queued behind it (rust-iouring-kensac #264
+ * answers at most 2,048 and keeps a ready queue the same way). */
+constexpr uint32_t kAnswersPerPass = 2048;
 constexpr uint32_t kIdleSeconds = 90;
 
 constexpr uint64_t kEvAccept = 1;
@@ -56,7 +64,7 @@ class Worker {
     index_ = index;
     listener_ = listener;
     accepting_ = true;
-    if (!ring_.init(kSqEntries, cq, slots, err)) {
+    if (!ring_.init(kSqEntries, cq, slots, index == 0, err)) {
       std::fprintf(stderr, "ring %u setup failed (slots=%u, cq=%u): %s\n", index, slots, cq,
                    std::strerror(static_cast<int>(*err)));
       return Init::RingFail;
@@ -111,7 +119,8 @@ class Worker {
 
 class Server {
  public:
-  Server(app::App* app, uint32_t slots, unsigned cq) : app_(app), slots_(slots), cq_(cq) {}
+  Server(app::App* app, uint32_t slots, unsigned cq, uint32_t max_rings)
+      : app_(app), slots_(slots), cq_(cq), max_rings_(max_rings) {}
 
   bool init(const char* host, uint16_t port) {
     host_ = host;
@@ -126,7 +135,7 @@ class Server {
    * as cheap as a single ring and still gives the 300k-connection path a second CQ, buffer ring
    * and listen queue. */
   bool add_ring() {
-    if (workers_.size() >= kMaxRings) return false;
+    if (workers_.size() >= max_rings_) return false;
     struct in_addr addr {};
     if (inet_pton(AF_INET, host_, &addr) != 1) {
       std::fprintf(stderr, "HOST must be an IPv4 address\n");
@@ -197,9 +206,15 @@ class Server {
 
   /* Add a ring once the newest one is three quarters full, so the next accepts have a home. */
   void maybe_grow() {
-    if (workers_.size() >= kMaxRings) return;
+    if (workers_.size() >= max_rings_) return;
     Worker& w = *workers_.back();
-    if (slot_cap_ && w.open() * 4 >= slot_cap_ * 3) add_ring();
+    /* Grow at half full, not three quarters, and catch up in one go: a ramp adds thousands of
+     * connections a second and one ring per pass cannot keep up with it, which shows up as
+     * accepts that find no free slot and drop the connection.  rust-iouring-kensac #264 starts
+     * moving accepts at 1/8 of a ring; half is the conservative version of the same idea. */
+    while (slot_cap_ && w.open() * 2 >= slot_cap_ && workers_.size() < max_rings_) {
+      if (!add_ring()) break;
+    }
   }
 
   static uint32_t now_sec() {
@@ -276,12 +291,21 @@ class Server {
       if (writes_ok_) retry_held();
       /* Only block when there is nothing left to do: an unconditional 1 ms wait per pass is
        * what pins a loop at ~70 % CPU with a backlog it can never clear (kensac/mojo both
-       * enter with min_complete 0 whenever work is queued). */
-      bool busy = last_cqes >= 8;
-      for (auto& wp : workers_) {
-        if (!wp->pending().empty() || !wp->dirty().empty()) {
-          busy = true;
-          break;
+       * enter with min_complete 0 whenever work is queued).
+       *
+       * "Work queued" means reads waiting on the FIFO and answers waiting on the ready queue -
+       * NOT dirty() (responses this pass produced that still have to be committed).  Counting
+       * dirty() made the pass after any answered request skip the wait and return immediately
+       * with nothing in the completion queue: at 20k connections the loop ran 4,000 passes a
+       * second for 2,000 requests, i.e. half of them empty, and the empty ones are pure syscall
+       * and cache cost.  rust-iouring-kensac #264's busy flag is exactly rq/ready. */
+      bool busy = last_cqes >= 8 || !ready_.empty();
+      if (!busy) {
+        for (auto& wp : workers_) {
+          if (!wp->pending().empty()) {
+            busy = true;
+            break;
+          }
         }
       }
       for (size_t k = workers_.size(); k-- > 0;) {
@@ -290,16 +314,26 @@ class Server {
           if (busy && (last_cqes != 0 || last_reqs != 0)) {
             w.ring().wait(1, 0);
           } else {
-            w.ring().wait(last_cqes >= 8 ? 64 : 1, busy ? 50000 : kWaitNs);
+            /* Wait for a batch, not for the next completion.  min_complete used to be 64 only
+             * when the previous pass had seen 8+ completions, so under a moderate load (20k
+             * connections, ~2,100 req/s) it waited for exactly one and woke 4,000 times a
+             * second to answer 2,100 requests - half the passes handled nothing.  Asking for
+             * 256 and letting the 1 ms timeout cut it short keeps the latency the same while
+             * each pass now carries several completions (rust-iouring-kensac #264 WAIT_MIN). */
+            w.ring().wait(busy ? 1 : 256, busy ? 50000 : kWaitNs);
           }
         } else {
-          w.ring().enter();
+          w.ring().submit_if_ready();
         }
       }
       const uint64_t p1 = now_ns();
+      answers_left_ = kAnswersPerPass;
       last_cqes = 0;
       for (size_t i = 0; i < workers_.size(); i++)
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
+      /* What earlier passes had to defer, before anything this pass read: that is what keeps a
+       * request from waiting behind every request that arrived after it. */
+      run_ready();
       const uint64_t p2 = now_ns();
       for (size_t i = 0; i < workers_.size(); i++) run_reads(*workers_[i], static_cast<uint32_t>(i));
       maybe_grow();
@@ -380,7 +414,9 @@ class Server {
   }
 
   void arm_accept(Worker& w, uint32_t wi) {
-    while (w.accepts() < kAcceptDepth / workers_.size() && w.listener() >= 0) {
+    uint32_t depth = static_cast<uint32_t>(kAcceptDepth / workers_.size());
+    if (depth < kAcceptsPerRing) depth = kAcceptsPerRing;
+    while (w.accepts() < depth && w.listener() >= 0) {
       io_uring_sqe* sqe = w.ring().sqe(1);
       if (!sqe) return;
       io_uring_prep_accept_direct(sqe, w.listener(), nullptr, nullptr, 0,
@@ -433,6 +469,38 @@ class Server {
     b->user_data = ev(kEvClose, wi, c.gen, idx);
   }
 
+  struct ReadyRef {
+    uint32_t wi;
+    uint32_t idx;
+    uint16_t gen;
+  };
+
+  /* Keep received bytes on the connection without answering them this pass. */
+  void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
+             size_t n) {
+    if (!c.part) c.part = new std::vector<uint8_t>();
+    c.part->insert(c.part->end(), data, data + n);
+    if (!c.ready_queued) {
+      c.ready_queued = true;
+      ready_.push_back(ReadyRef{wi, idx, c.gen});
+    }
+  }
+
+  /* Answer deferred connections, oldest first, while the pass still has answers. */
+  void run_ready() {
+    while (!ready_.empty() && answers_left_ > 0) {
+      const ReadyRef r = ready_.front();
+      ready_.pop_front();
+      if (r.wi >= workers_.size()) continue;
+      Worker& w = *workers_[r.wi];
+      if (r.idx >= w.table().size()) continue;
+      net::Connection& c = w.table().at(r.idx);
+      if (c.gen != r.gen || !c.open || c.closing) continue;
+      c.ready_queued = false;
+      serve(w, r.wi, r.idx, nullptr, 0);
+    }
+  }
+
   void serve(Worker& w, uint32_t wi, uint32_t idx, const uint8_t* data, size_t n) {
     net::Connection& c = w.table().at(idx);
     if (c.close_after) return;
@@ -460,6 +528,15 @@ class Server {
       size_t used = 0;
       app::http::Parsed pr = app::http::parse(buf + off, len - off, req, used);
       if (pr == app::http::Parsed::Done) {
+        if (answers_left_ == 0) {
+          /* This pass has spent its answers: keep the request (and whatever follows it) on the
+           * connection and put it at the back of the ready queue, which is worked oldest first. */
+          if (!c.ready_queued) {
+            c.ready_queued = true;
+            ready_.push_back(ReadyRef{wi, idx, c.gen});
+          }
+          break;
+        }
         if (!writes_ok_ && is_write(req)) {
           /* The WAL gate is closed: keep this request (and anything behind it) on the
            * connection and answer it in a later pass. Nothing is written, so no response. */
@@ -469,6 +546,7 @@ class Server {
           }
           break;
         }
+        answers_left_--;
         mark(w, idx);
         c.answered = true;
         app_->handle(req, out_of(c), writes_ok_);
@@ -542,7 +620,11 @@ class Server {
           if (res > 0) {
             if (has) {
               c.last_active = now_sec_;
-            serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+              if (answers_left_ == 0) {
+                defer(w, wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
+              } else {
+                serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+              }
               w.bufs().give(bid);
             }
             if (!(flags & IORING_CQE_F_MORE)) {
@@ -575,7 +657,11 @@ class Server {
               break;
             }
             c.last_active = now_sec_;
-            serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+            if (answers_left_ == 0) {
+              defer(w, wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
+            } else {
+              serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+            }
             w.bufs().give(bid);
             if (static_cast<size_t>(res) == kBufSize) {
               c.read = net::ReadState::Queued;
@@ -708,6 +794,9 @@ class Server {
   app::Pool pool_;
   uint32_t slots_;
   uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
+  uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
+  uint32_t answers_left_ = 0;
+  std::deque<ReadyRef> ready_;
   unsigned cq_;
   const char* host_ = nullptr;
   uint16_t port_ = 0;
@@ -732,7 +821,18 @@ constexpr uint32_t kSlotsPerRing = 262144;
 uint32_t descriptor_slots() {
   struct rlimit rl {};
   getrlimit(RLIMIT_NOFILE, &rl);
-  rl.rlim_cur = rl.rlim_max;
+  rlim_t want = rl.rlim_max;
+  /* A service usually arrives with LimitNOFILE=65535, which caps one ring's file table at 65,535
+   * connections.  As root the hard limit can be raised to /proc/sys/fs/nr_open; when that fails
+   * (unprivileged) the ring count below makes up the difference instead. */
+  if (std::FILE* f = std::fopen("/proc/sys/fs/nr_open", "r")) {
+    unsigned long long nr_open = 0;
+    if (std::fscanf(f, "%llu", &nr_open) == 1 && nr_open > want) want = static_cast<rlim_t>(nr_open);
+    std::fclose(f);
+  }
+  if (want > (1u << 20)) want = 1u << 20;
+  rl.rlim_cur = want;
+  rl.rlim_max = want;
   setrlimit(RLIMIT_NOFILE, &rl);
   getrlimit(RLIMIT_NOFILE, &rl);
   rlim_t n = rl.rlim_cur;
@@ -783,12 +883,15 @@ int main() {
                                         std::strlen(secret));
   constexpr unsigned cq = kCqEntries;
   const uint32_t slots = descriptor_slots();
-  Server server(app.get(), slots, cq);
+  uint32_t rings_needed = (kTargetConns + slots - 1) / slots;
+  if (rings_needed < 1) rings_needed = 1;
+  if (rings_needed > kMaxRingsLimit) rings_needed = kMaxRingsLimit;
+  Server server(app.get(), slots, cq, rings_needed);
   if (!server.init(host, static_cast<uint16_t>(std::atoi(port_s)))) {
     std::fprintf(stderr, "server init failed\n");
     return 1;
   }
-  std::fprintf(stderr, "listening on %s:%s; up to %u rings x %u slots, cq=%u\n", host, port_s,
-               kMaxRings, slots, cq);
+  std::fprintf(stderr, "listening on %s:%s; up to %u rings x %u slots (=%u connections), cq=%u\n",
+               host, port_s, rings_needed, slots, rings_needed * slots, cq);
   server.run();
 }

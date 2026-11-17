@@ -343,7 +343,11 @@ conflicts with the merged #82 folder) scored **230,000** on the standard 4-sourc
 reserve fix, pooled multi-seek result structs on top of the shim VFS and per-batch B-tree cursors; merged 2026-11-16,
 above #418's 250,000 row). The 260,000 hold had 0 errors (27,461 req/s during the hold); 270,000 failed the 2-minute
 probe on p95/p99 (812 ms / 2.0 s, 82 % CPU), 280,000 on p95/p99 (1.2 / 2.3 s, 89 %) and 320,000 on p95/p99 (2.6 / 3.0
-s, 97 %). Before that it was scored at **#418** at commit **`0dde0df`** (**250,000**, 24,124 req/s, p95 91.9 / p99
+s, 97 %). Its later follow-up **#481** (`4f268f4`, deferred submits and forced enter on by default, batch 256, larger
+response-buffer pool; held, not merged: not above 260,000) held **257,000** (24,702 req/s, p95 222.7 / p99 479.1 ms, 0
+err, 85 % CPU, 31 µs/req, 737 MB, 2026-11-17); 270,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99
+(3.2 / 4.3 s, 90 % CPU), 280,000 failed the 2-minute probe on p95/p99 (757 ms / 1.3 s, 90 %) and 320,000 on p95 (2.4 s,
+96 %). Before that it was scored at **#418** at commit **`0dde0df`** (**250,000**, 24,124 req/s, p95 91.9 / p99
 297.2 ms, 82 % CPU, 31 µs/req, 1,334 MB, 2026-11-13; restarts the SQLite WAL after background checkpoints; merged
 2026-11-13, above #336's 244,000 row). That 250,000 hold had 0 errors; 260,000 failed the 2-minute
 probe on p95/p99 (728 / 879 ms, 85 % CPU), 280,000 on p95 (1.2 s, 93 %) and 320,000 on p95 (2.8 s, 100 %). Its later

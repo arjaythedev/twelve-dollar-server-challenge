@@ -36,6 +36,12 @@ constexpr size_t kBufSize = 2048;
 constexpr uint16_t kBufCount = 2048;
 constexpr uint32_t kWaitNs = 1000000;
 constexpr size_t kDrainBudget = 512;
+
+/* Answers a single pass may produce.  Reads are not bounded by this: a receive past the limit
+ * is kept on its connection and answered by a later pass, oldest first, so one busy
+ * pass cannot stretch the wait of everything queued behind it (rust-iouring-kensac #264
+ * answers at most 2,048 and keeps a ready queue the same way). */
+constexpr uint32_t kAnswersPerPass = 2048;
 constexpr uint32_t kIdleSeconds = 90;
 
 constexpr uint64_t kEvAccept = 1;
@@ -300,9 +306,13 @@ class Server {
         }
       }
       const uint64_t p1 = now_ns();
+      answers_left_ = kAnswersPerPass;
       last_cqes = 0;
       for (size_t i = 0; i < workers_.size(); i++)
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
+      /* What earlier passes had to defer, before anything this pass read: that is what keeps a
+       * request from waiting behind every request that arrived after it. */
+      run_ready();
       const uint64_t p2 = now_ns();
       for (size_t i = 0; i < workers_.size(); i++) run_reads(*workers_[i], static_cast<uint32_t>(i));
       maybe_grow();
@@ -438,6 +448,38 @@ class Server {
     b->user_data = ev(kEvClose, wi, c.gen, idx);
   }
 
+  struct ReadyRef {
+    uint32_t wi;
+    uint32_t idx;
+    uint16_t gen;
+  };
+
+  /* Keep received bytes on the connection without answering them this pass. */
+  void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
+             size_t n) {
+    if (!c.part) c.part = new std::vector<uint8_t>();
+    c.part->insert(c.part->end(), data, data + n);
+    if (!c.ready_queued) {
+      c.ready_queued = true;
+      ready_.push_back(ReadyRef{wi, idx, c.gen});
+    }
+  }
+
+  /* Answer deferred connections, oldest first, while the pass still has answers. */
+  void run_ready() {
+    while (!ready_.empty() && answers_left_ > 0) {
+      const ReadyRef r = ready_.front();
+      ready_.pop_front();
+      if (r.wi >= workers_.size()) continue;
+      Worker& w = *workers_[r.wi];
+      if (r.idx >= w.table().size()) continue;
+      net::Connection& c = w.table().at(r.idx);
+      if (c.gen != r.gen || !c.open || c.closing) continue;
+      c.ready_queued = false;
+      serve(w, r.wi, r.idx, nullptr, 0);
+    }
+  }
+
   void serve(Worker& w, uint32_t wi, uint32_t idx, const uint8_t* data, size_t n) {
     net::Connection& c = w.table().at(idx);
     if (c.close_after) return;
@@ -465,6 +507,15 @@ class Server {
       size_t used = 0;
       app::http::Parsed pr = app::http::parse(buf + off, len - off, req, used);
       if (pr == app::http::Parsed::Done) {
+        if (answers_left_ == 0) {
+          /* This pass has spent its answers: keep the request (and whatever follows it) on the
+           * connection and put it at the back of the ready queue, which is worked oldest first. */
+          if (!c.ready_queued) {
+            c.ready_queued = true;
+            ready_.push_back(ReadyRef{wi, idx, c.gen});
+          }
+          break;
+        }
         if (!writes_ok_ && is_write(req)) {
           /* The WAL gate is closed: keep this request (and anything behind it) on the
            * connection and answer it in a later pass. Nothing is written, so no response. */
@@ -474,6 +525,7 @@ class Server {
           }
           break;
         }
+        answers_left_--;
         mark(w, idx);
         c.answered = true;
         app_->handle(req, out_of(c), writes_ok_);
@@ -547,7 +599,11 @@ class Server {
           if (res > 0) {
             if (has) {
               c.last_active = now_sec_;
-            serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+              if (answers_left_ == 0) {
+                defer(w, wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
+              } else {
+                serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+              }
               w.bufs().give(bid);
             }
             if (!(flags & IORING_CQE_F_MORE)) {
@@ -580,7 +636,11 @@ class Server {
               break;
             }
             c.last_active = now_sec_;
-            serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+            if (answers_left_ == 0) {
+              defer(w, wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
+            } else {
+              serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
+            }
             w.bufs().give(bid);
             if (static_cast<size_t>(res) == kBufSize) {
               c.read = net::ReadState::Queued;
@@ -714,6 +774,8 @@ class Server {
   uint32_t slots_;
   uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
   uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
+  uint32_t answers_left_ = 0;
+  std::deque<ReadyRef> ready_;
   unsigned cq_;
   const char* host_ = nullptr;
   uint16_t port_ = 0;

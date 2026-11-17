@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
+#include <format>
 #include <memory>
 #include <string>
 #include <vector>
@@ -58,6 +59,17 @@ constexpr uint64_t kEvSend = 3;
 constexpr uint64_t kEvShutdown = 4;
 constexpr uint64_t kEvClose = 5;
 constexpr uint64_t kEvRead = 6;
+/* Every diagnostic goes through std::format: the format string is checked at compile time
+ * against the arguments, so a mismatch like the %u-printing-a-pointer that CI caught once is now
+ * a build error here rather than undefined behaviour.  (GCC 13 ships std::format, so this needs
+ * no third-party formatting library.) */
+template <typename... Args>
+void errlog(std::format_string<Args...> fmt, Args&&... args) {
+  const std::string line = std::format(fmt, std::forward<Args>(args)...);
+  std::fwrite(line.data(), 1, line.size(), stderr);
+  std::fputc('\n', stderr);
+}
+
 constexpr uint64_t kEvEvfd = 7;
 
 inline uint64_t ev(uint64_t op, uint32_t wi, uint16_t gen, uint32_t idx) {
@@ -73,12 +85,12 @@ class Worker {
     for (uint32_t li = 0; li < kListeners; li++) listeners_[li] = listeners[li];
     accepting_ = true;
     if (!ring_.init(kSqEntries, cq, slots, index == 0, err)) {
-      std::fprintf(stderr, "ring %u setup failed (slots=%u, cq=%u): %s\n", index, slots, cq,
-                   std::strerror(static_cast<int>(*err)));
+      errlog("ring {} setup failed (slots={}, cq={}): {}", index, slots, cq,
+             std::strerror(static_cast<int>(*err)));
       return Init::RingFail;
     }
     if (!bufs_.init(ring_.fd(), kBufCount, kBufSize)) {
-      std::fprintf(stderr, "ring %u buffer ring failed (slots=%u, cq=%u)\n", index, slots, cq);
+      errlog("ring {} buffer ring failed (slots={}, cq={})", index, slots, cq);
       return Init::BufFail;
     }
     table_.resize(slots);
@@ -142,7 +154,7 @@ class Server {
     if (workers_.size() >= max_rings_) return false;
     struct in_addr addr {};
     if (inet_pton(AF_INET, host_, &addr) != 1) {
-      std::fprintf(stderr, "HOST must be an IPv4 address\n");
+      errlog("HOST must be an IPv4 address");
       return false;
     }
     const uint32_t i = static_cast<uint32_t>(workers_.size());
@@ -189,7 +201,7 @@ class Server {
       }
       if (slots > 8192) {
         slots /= 2;
-        std::fprintf(stderr, "ring %u: descriptor table reduced to %u slots\n", i, slots);
+        errlog("ring {}: descriptor table reduced to {} slots", i, slots);
         continue;
       }
       return false;
@@ -209,7 +221,7 @@ class Server {
         ::close(efd);
       }
     }
-    std::fprintf(stderr, "ring %u up: %u rings x %u slots\n", i,
+    errlog("ring {} up: {} rings x {} slots", i,
                  static_cast<unsigned>(workers_.size()), slots_);
     return true;
   }
@@ -374,23 +386,21 @@ class Server {
         const uint64_t span = p5 - p0;
         if (span > 20000000ULL && slow_total < 40) {
           slow_total++;
-          std::fprintf(stderr,
-                       "slow pass %.1fms cqes=%zu: wait %.1f drain %.1f reads %.1f commit %.1f sweep %.1f\n",
-                       span / 1e6, last_cqes, (p1 - p0) / 1e6, (p2 - p1) / 1e6, (p3 - p2) / 1e6,
-                       (p4 - p3) / 1e6, (p5 - p4) / 1e6);
+          errlog("slow pass {:.1f}ms cqes={}: wait {:.1f} drain {:.1f} reads {:.1f} commit {:.1f} "
+                 "sweep {:.1f}",
+                 span / 1e6, last_cqes, (p1 - p0) / 1e6, (p2 - p1) / 1e6, (p3 - p2) / 1e6,
+                 (p4 - p3) / 1e6, (p5 - p4) / 1e6);
         }
         if (p5 - stat_at >= 1000000000ULL) {
-          std::fprintf(stderr,
-                       "stats: pass=%llu/s cqes=%llu req=%llu gated=%llu/%llu wait=%.1f%% drain=%.1f%% "
-                       "read=%.1f%% commit=%.1f%% sweep=%.1f%% pool_miss=%lu pool=%zu "
-                       "enter[wait=%lu sqe=%lu ring=%lu]\n",
-                       (unsigned long long)(pass - stat_pass), (unsigned long long)cqes_sum,
-                       (unsigned long long)requests_sum, (unsigned long long)held_gate,
-                       (unsigned long long)(pass - stat_pass), 100.0 * t_wait / (p5 - stat_at),
-                       100.0 * t_drain / (p5 - stat_at), 100.0 * t_read / (p5 - stat_at),
-                       100.0 * t_commit / (p5 - stat_at), 100.0 * t_sweep / (p5 - stat_at),
-                       app::pool_misses(), pool_.size(), io::Ring::enters(0) - enter_base_[0],
-                       io::Ring::enters(1) - enter_base_[1], io::Ring::enters(2) - enter_base_[2]);
+          errlog("stats: pass={}/s cqes={} req={} gated={}/{} wait={:.1f}% drain={:.1f}% "
+                 "read={:.1f}% commit={:.1f}% sweep={:.1f}% pool_miss={} pool={} "
+                 "enter[wait={} sqe={} ring={}]",
+                 pass - stat_pass, cqes_sum, requests_sum, held_gate, pass - stat_pass,
+                 100.0 * t_wait / (p5 - stat_at), 100.0 * t_drain / (p5 - stat_at),
+                 100.0 * t_read / (p5 - stat_at), 100.0 * t_commit / (p5 - stat_at),
+                 100.0 * t_sweep / (p5 - stat_at), app::pool_misses(), pool_.size(),
+                 io::Ring::enters(0) - enter_base_[0], io::Ring::enters(1) - enter_base_[1],
+                 io::Ring::enters(2) - enter_base_[2]);
           enter_base_[0] = io::Ring::enters(0);
           enter_base_[1] = io::Ring::enters(1);
           enter_base_[2] = io::Ring::enters(2);
@@ -620,8 +630,7 @@ class Server {
             if (accept_errs < 20) {
               uint32_t inflight = 0;
               for (uint32_t li = 0; li < kListeners; li++) inflight += w.accepts()[li];
-              std::fprintf(stderr, "accept fail res=%d errno=%d open=%u accepts=%u\n", res, -res,
-                           w.open(), inflight);
+              errlog("accept fail res={} errno={} open={} accepts={}", res, -res, w.open(), inflight);
             }
             accept_errs++;
             if (res == -ENFILE) w.full() = true;
@@ -894,7 +903,7 @@ int main() {
   app::Db db;
   std::string err;
   if (!db.open(path, err)) {
-    std::fprintf(stderr, "database: %s\n", err.c_str());
+    errlog("database: {}", err);
     return 1;
   }
   auto app = std::make_unique<app::App>(std::move(db),
@@ -907,10 +916,10 @@ int main() {
   if (rings_needed > kMaxRingsLimit) rings_needed = kMaxRingsLimit;
   Server server(app.get(), slots, cq, rings_needed);
   if (!server.init(host, static_cast<uint16_t>(std::atoi(port_s)))) {
-    std::fprintf(stderr, "server init failed\n");
+    errlog("server init failed");
     return 1;
   }
-  std::fprintf(stderr, "listening on %s:%s; up to %u rings x %u slots (=%u connections), cq=%u\n",
-               host, port_s, rings_needed, slots, rings_needed * slots, cq);
+  errlog("listening on {}:{}; up to {} rings x {} slots (={} connections), cq={}", host, port_s,
+         rings_needed, slots, rings_needed * slots, cq);
   server.run();
 }

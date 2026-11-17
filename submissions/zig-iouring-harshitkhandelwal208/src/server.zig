@@ -683,16 +683,26 @@ pub const Server = struct {
             }
             const busy = (!self.rq.isEmpty() or !self.ready.isEmpty());
 
-            // Iterate active rings in reverse order (highest down to 0)
-            // Rings N-1 down to 1 submit non-blocking; Ring 0 acts as anchor waiting for up to WAIT_MIN or WAIT_NS
+            // With deferred task-run, a long wait on one ring can defer the
+            // completions queued on every other active ring.  Once connection
+            // pressure has activated another ring, use a short rotating wait
+            // to bound that cross-ring tail; the larger idle batch remains
+            // useful while the server is still on its single initial ring.
+            const multi_ring = self.active_rings > 1;
+            const wait_min: u32 = if (multi_ring) 1 else WAIT_MIN;
+            const wait_ns: i64 = if (multi_ring) 50_000 else WAIT_NS;
+            const wait_ri = if (multi_ring) self.wait_ri % self.active_rings else 0;
+            self.wait_ri +%= 1;
+
+            // Iterate active rings in reverse order (highest down to 0).
             var ri: usize = self.active_rings;
             while (ri > 0) {
                 ri -= 1;
                 const w = &self.rings[ri];
                 const to_submit = w.ring.flush_sq();
 
-                if (ri == 0 and !busy) {
-                    _ = enterWithTimeout(w.ring.fd, to_submit, WAIT_MIN, WAIT_NS);
+                if (ri == wait_ri and !busy) {
+                    _ = enterWithTimeout(w.ring.fd, to_submit, wait_min, wait_ns);
                 } else if (to_submit > 0 or (w.ring.flags & (1 << 13) != 0)) {
                     _ = linux.io_uring_enter(w.ring.fd, to_submit, 0, linux.IORING_ENTER_GETEVENTS, null);
                 }

@@ -1217,6 +1217,10 @@ on p99 2.96 s), below #398's 300,000, so #437 is still not merged.
 #437's `c0385b9`) held **300,000** at 80 % CPU (28,379 req/s, p95 27.0 / p99 303.2 ms, 0 errors, 1,236 MB; 310k failed
 the 2-minute probe on p99 3.68 s, 320k on p99 2.63 s), a tie with #398's 300,000 and not above it, so #427 is still not
 merged.
+#437's newest head (`1a0a677`, 2026-11-17: the checkpoint thread paces its own database writes through a shim VFS, plus
+admission at the door on by default as in #435) held **300,000** at 80 % CPU (28,406 req/s, p95 32.3 / p99 377.3 ms,
+0 errors, 1,369 MB; TCP connect p95 1.05 s / p99 3.11 s; 310k failed the 2-minute probe on p99 1.15 s, 320k on p99
+1.06 s), a tie with #398's 300,000 and not above it, so #437 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

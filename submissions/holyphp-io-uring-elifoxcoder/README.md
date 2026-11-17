@@ -215,6 +215,21 @@ Same-binary mirrored A/B/B/A on one pinned CPU, 130k connections (kernel
 `HPHP_DEFER_ALL=0 HPHP_FORCE_ENTER=0 HPHP_BATCH_N=64` (the previous loop).
 Local numbers are not box results.
 
+On the box (#481 at `4f268f4`) this round held 257,000 at 85 % CPU and
+31 µs/request, so the all-deferred loop cost more there than the mixed-ring
+loop (29 µs at `4c0adfb`). The follow-up keeps the pools, FIFOs and headers
+from this round and changes two defaults in `start.sh`:
+
+- **Mixed-ring loop again** (`HPHP_DEFER_ALL=0`, `HPHP_FORCE_ENTER=0`,
+  `HPHP_BATCH_N=64`); the deferred loop stays available through those knobs.
+- **SQLite opens through `unix-excl`** (`HPHP_SQLITE_VFS=unix-excl`): the
+  process holds the database lock, so transactions take no `fcntl()` locks,
+  and the WAL index lives in process memory shared by both connections (the
+  checkpoint connection uses the same VFS). Sync calls are unchanged.
+  Mirrored A/B/B/A with the mixed-ring loop: 43.0 → 40.2 µs/request at 130k
+  connections (WSL), and about −10 % CPU for the same requests on the Ubuntu
+  6.8 VM at 80k users. 42/42 Direct and 42/42 Classic pass.
+
 ### The allocation round (`2f8507b` … `d75dd29`)
 
 Instrumentation first: `runtime_stats()` exposes generic runtime counters

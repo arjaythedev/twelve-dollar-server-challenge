@@ -25,7 +25,8 @@
 
 namespace {
 
-constexpr uint32_t kMaxRings = 2;   /* rings are grown on demand up to this */
+constexpr uint32_t kTargetConns = 320000;  /* connection ceiling the ring count must cover */
+constexpr uint32_t kMaxRingsLimit = 8;     /* hard cap on rings, whatever the table size */
 constexpr uint32_t kAcceptDepth = 2048;
 constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 8192;
@@ -111,7 +112,8 @@ class Worker {
 
 class Server {
  public:
-  Server(app::App* app, uint32_t slots, unsigned cq) : app_(app), slots_(slots), cq_(cq) {}
+  Server(app::App* app, uint32_t slots, unsigned cq, uint32_t max_rings)
+      : app_(app), slots_(slots), cq_(cq), max_rings_(max_rings) {}
 
   bool init(const char* host, uint16_t port) {
     host_ = host;
@@ -126,7 +128,7 @@ class Server {
    * as cheap as a single ring and still gives the 300k-connection path a second CQ, buffer ring
    * and listen queue. */
   bool add_ring() {
-    if (workers_.size() >= kMaxRings) return false;
+    if (workers_.size() >= max_rings_) return false;
     struct in_addr addr {};
     if (inet_pton(AF_INET, host_, &addr) != 1) {
       std::fprintf(stderr, "HOST must be an IPv4 address\n");
@@ -197,7 +199,7 @@ class Server {
 
   /* Add a ring once the newest one is three quarters full, so the next accepts have a home. */
   void maybe_grow() {
-    if (workers_.size() >= kMaxRings) return;
+    if (workers_.size() >= max_rings_) return;
     Worker& w = *workers_.back();
     if (slot_cap_ && w.open() * 4 >= slot_cap_ * 3) add_ring();
   }
@@ -708,6 +710,7 @@ class Server {
   app::Pool pool_;
   uint32_t slots_;
   uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
+  uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
   unsigned cq_;
   const char* host_ = nullptr;
   uint16_t port_ = 0;
@@ -732,7 +735,18 @@ constexpr uint32_t kSlotsPerRing = 262144;
 uint32_t descriptor_slots() {
   struct rlimit rl {};
   getrlimit(RLIMIT_NOFILE, &rl);
-  rl.rlim_cur = rl.rlim_max;
+  rlim_t want = rl.rlim_max;
+  /* A service usually arrives with LimitNOFILE=65535, which caps one ring's file table at 65,535
+   * connections.  As root the hard limit can be raised to /proc/sys/fs/nr_open; when that fails
+   * (unprivileged) the ring count below makes up the difference instead. */
+  if (std::FILE* f = std::fopen("/proc/sys/fs/nr_open", "r")) {
+    unsigned long long nr_open = 0;
+    if (std::fscanf(f, "%llu", &nr_open) == 1 && nr_open > want) want = static_cast<rlim_t>(nr_open);
+    std::fclose(f);
+  }
+  if (want > (1u << 20)) want = 1u << 20;
+  rl.rlim_cur = want;
+  rl.rlim_max = want;
   setrlimit(RLIMIT_NOFILE, &rl);
   getrlimit(RLIMIT_NOFILE, &rl);
   rlim_t n = rl.rlim_cur;
@@ -783,12 +797,15 @@ int main() {
                                         std::strlen(secret));
   constexpr unsigned cq = kCqEntries;
   const uint32_t slots = descriptor_slots();
-  Server server(app.get(), slots, cq);
+  uint32_t rings_needed = (kTargetConns + slots - 1) / slots;
+  if (rings_needed < 1) rings_needed = 1;
+  if (rings_needed > kMaxRingsLimit) rings_needed = kMaxRingsLimit;
+  Server server(app.get(), slots, cq, rings_needed);
   if (!server.init(host, static_cast<uint16_t>(std::atoi(port_s)))) {
     std::fprintf(stderr, "server init failed\n");
     return 1;
   }
-  std::fprintf(stderr, "listening on %s:%s; up to %u rings x %u slots, cq=%u\n", host, port_s,
-               kMaxRings, slots, cq);
+  std::fprintf(stderr, "listening on %s:%s; up to %u rings x %u slots (=%u connections), cq=%u\n",
+               host, port_s, rings_needed, slots, rings_needed * slots, cq);
   server.run();
 }

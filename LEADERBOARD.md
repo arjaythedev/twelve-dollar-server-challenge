@@ -146,15 +146,15 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 59 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
 | 59 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
 | 59 | julia-iouring-amanica | #472 | Julia (io_uring, SQLite) | **220,000** | 21,436 | 95.6 | 811.9 | 0.00 | 91 | 39 | 1,484 | 2026-11-16 |
-| 63 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
-| 63 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
-| 65 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
-| 65 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
-| 65 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
-| 65 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
-| 65 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
-| 70 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
-| 70 | cpp-io_uring-0329-at | #483 | C++ (io_uring, SQLite B-tree reads) | **209,000** ᴹ | 20,476 | 17.3 | 266.4 | 0.00 | 66 | 30 | 602 | 2026-11-17 |
+| 59 | cpp-io_uring-0329-at | #483 | C++ (io_uring, SQLite B-tree reads) | **220,000** ᴹ | 21,447 | 24.9 | 614.4 | 0.00 | 64 | 28 | 804 | 2026-11-17 |
+| 64 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
+| 64 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
+| 66 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
+| 66 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
+| 66 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
+| 66 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
+| 66 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
+| 71 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
 | 72 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
 | 73 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
 | 73 | crystal-rayo-faustinoaq | #218 | Crystal (Rayo, io_uring, SQLite B-tree reads) | **200,000** | 19,615 | 236 | 596 | 0.00 | 82 | 39 | 1,198 | 2026-10-31 |
@@ -1021,7 +1021,7 @@ p95, 221 ms p99, 0 errors, 401 MB); 68,000, 70,000 and 80,000 failed on EOF / `c
 24.8 %) at 37–56 % CPU. `7315af0` widened the completion tag's slot to 24 bits, but the connection table is still sized
 from `RLIMIT_NOFILE` minus 128 (main.cpp:643), and systemd gives 65,535. Its earlier `2598291` run also held 65,000.
 Its follow-up #442 replaced the #412 row (see ᴹ); its merged `ef421d0` is capped at about 131,000 connections, and
-follow-up #483 (`c3bd5f3`) now replaces that row.
+follow-up #483 (merged at `a77a5bb`) now replaces that row.
 **Zig io_uring #454** (`ede8d01`) is capped at the same point: at 65,000 it ran at 34 % CPU (33.6 ms p95, 57.0 ms
 p99, 0 errors, 258 MB); 68,000, 70,000 and 80,000 failed on `connection reset by peer` (5.2 %, 9.1 %, 24.6 %) at
 41–59 % CPU. Its direct-descriptor table has one slot per connection, at most 65,535 (main.zig:55).
@@ -1055,12 +1055,14 @@ through B-tree cursors again, a `SQLITE_CONFIG_PCACHE2` wrapper credited to #245
 and 160,000 failed the 2-minute probe on `connection refused` (1.09 %, 11.1 %, 26.2 %, all on GET /feed, each new
 connection's first request) at 45–52 % CPU: the server starts at most 2 rings × 65,535 slots, so it can't take more
 than about 131,000 connections. It replaces the unmerged `0d958c4` row (220,000) because only `ef421d0` was merged.
-**The row is now follow-up #483, scored at `c3bd5f3`** (ring count follows a 400,000-connection target, up to 16
-rings; the process raises its own `RLIMIT_NOFILE` to `fs.nr_open`): it held **209,000** (20,476 req/s, p95 17.3 / p99
-266.4 ms, 0 errors, 66 % CPU, 30 µs/req, 602 MB, 2026-11-17), so the 131,000-connection cap is gone. 220,000 passed
-the 2-minute probe but failed the 5-minute hold on `connection refused` (78.2 %, 98 % CPU); 230,000 and 240,000 failed
-the 2-minute probe on latency (p95 706 ms, p99 1.45 s) and 320,000 on `connection refused` (80.8 %). The head moved
-(now `ef446bc`) during the run, so #483 isn't merged yet; the new head is queued for its own run.
+Follow-up #483's first run, at `c3bd5f3` (ring count follows a 400,000-connection target, up to 16 rings; the process
+raises its own `RLIMIT_NOFILE` to `fs.nr_open`), held **209,000** (20,476 req/s, p95 17.3 / p99 266.4 ms, 0 errors,
+66 % CPU, 30 µs/req, 602 MB, 2026-11-17), so the 131,000-connection cap is gone; 220,000 failed the 5-minute hold on
+`connection refused` (78.2 %, 98 % CPU). The head moved during that run. **The row is now #483's merged commit
+`a77a5bb`** (answer cap of 2,048 per pass with an oldest-first queue for deferred reads, feed like counts decoded from
+the index cursor's page, credited to #264): it held **220,000** (21,447 req/s, p95 24.9 / p99 614.4 ms, 0 errors, 64 %
+CPU, 28 µs/req, 804 MB, 2026-11-17). 230,000 and 240,000 failed the 2-minute probe on p99 (3.54 s, 5.07 s, 0 errors)
+and 320,000 on `connection refused` (78.1 %).
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

@@ -21,13 +21,15 @@
 #include <openssl/hmac.h>
 #include <openssl/evp.h>
 
-#define K_RING_COUNT 8
+/* 6 * 65,472 = 392,832 direct slots: enough for the 350k target while
+ * reducing single-reactor ring polling/submission work by 25%. */
+#define K_RING_COUNT 6
 #define SLOTS_PER_RING 65472
 #define ACCEPT_DEPTH 1024
 #define N_BUFS_PER_RING 1024
 #define BUF_SIZE 2048
 #define BGID 1
-#define POOL_COUNT 16384
+#define POOL_COUNT 4096
 #define POOL_BUF_SIZE 16384
 #define K_LISTENER_COUNT 8
 
@@ -37,6 +39,8 @@
 void bf_execute(int64_t *tape, int64_t *tape_start, int64_t *tape_end);
 
 static sqlite3 *db = NULL;
+static sqlite3_stmt *st_begin = NULL;
+static sqlite3_stmt *st_commit = NULL;
 static sqlite3_stmt *st_feed = NULL;
 static sqlite3_stmt *st_post = NULL;
 static sqlite3_stmt *st_check = NULL;
@@ -44,8 +48,27 @@ static sqlite3_stmt *st_insert = NULL;
 static sqlite3_stmt *st_like = NULL;
 static sqlite3_stmt *st_unlike = NULL;
 static sqlite3_stmt *st_count = NULL;
+static int in_tx = 0;
+static int writes_held = 0;
 static char jwt_secret[256];
 static time_t start_time = 0;
+
+static inline void db_begin(void) {
+    if (!in_tx) {
+        sqlite3_step(st_begin);
+        sqlite3_reset(st_begin);
+        in_tx = 1;
+    }
+}
+
+static inline void db_commit_if_needed(void) {
+    if (in_tx && writes_held > 0) {
+        sqlite3_step(st_commit);
+        sqlite3_reset(st_commit);
+        in_tx = 0;
+        writes_held = 0;
+    }
+}
 
 typedef struct {
     uint32_t gen;
@@ -248,13 +271,33 @@ static int verify_jwt(const char *token, int64_t *uid, char *uname, size_t uname
 }
 
 
+static const char digits[200] =
+    "0001020304050607080910111213141516171819"
+    "2021222324252627282930313233343536373839"
+    "4041424344454647484950515253545556575859"
+    "6061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+
 static inline char* write_u64(char *p, uint64_t v) {
     char tmp[24];
-    int i = 0;
-    if (v == 0) { *p++ = '0'; return p; }
-    while (v > 0) { tmp[i++] = '0' + (v % 10); v /= 10; }
-    while (i > 0) *p++ = tmp[--i];
-    return p;
+    int i = 24;
+    while (v >= 100) {
+        uint64_t r = v % 100;
+        v /= 100;
+        i -= 2;
+        tmp[i] = digits[r * 2];
+        tmp[i + 1] = digits[r * 2 + 1];
+    }
+    if (v >= 10) {
+        i -= 2;
+        tmp[i] = digits[v * 2];
+        tmp[i + 1] = digits[v * 2 + 1];
+    } else {
+        tmp[--i] = '0' + (char)v;
+    }
+    int len = 24 - i;
+    memcpy(p, &tmp[i], len);
+    return p + len;
 }
 
 static inline char* escape_json_str(char *p, const char *src, int len) {
@@ -426,10 +469,12 @@ void bf_mmio_db(int64_t *tape) {
         if (clen == 0) { curr_conn->status_code = 400; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"body is required\"}"); return; }
         int ulen = utf8_strlen(cstart, clen);
         if (ulen > 500) { curr_conn->status_code = 400; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"body must be at most 500 characters\"}"); return; }
+        db_begin();
         sqlite3_reset(st_insert);
         sqlite3_bind_int64(st_insert, 1, curr_conn->auth_uid);
         sqlite3_bind_text(st_insert, 2, cstart, clen, SQLITE_TRANSIENT);
         if (sqlite3_step(st_insert) == SQLITE_ROW) {
+            writes_held++;
             int64_t new_id = sqlite3_column_int64(st_insert, 0);
             const char *created_at = (const char*)sqlite3_column_text(st_insert, 1);
             char *p = curr_conn->out_body;
@@ -453,6 +498,7 @@ void bf_mmio_db(int64_t *tape) {
             sqlite3_reset(st_check); return;
         }
         sqlite3_reset(st_check);
+        db_begin();
         sqlite3_reset(st_like);
         sqlite3_bind_int64(st_like, 1, curr_conn->auth_uid);
         sqlite3_bind_int64(st_like, 2, id);
@@ -460,6 +506,7 @@ void bf_mmio_db(int64_t *tape) {
         int changes = sqlite3_changes(db);
         sqlite3_reset(st_like);
         if (changes > 0) {
+            writes_held++;
             curr_conn->status_code = 201; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"liked\":true,\"already_liked\":false,\"post_id\":%ld}", (long)id);
         } else {
             curr_conn->status_code = 200; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"liked\":true,\"already_liked\":true,\"post_id\":%ld}", (long)id);
@@ -476,11 +523,14 @@ void bf_mmio_db(int64_t *tape) {
             sqlite3_reset(st_check); return;
         }
         sqlite3_reset(st_check);
+        db_begin();
         sqlite3_reset(st_unlike);
         sqlite3_bind_int64(st_unlike, 1, curr_conn->auth_uid);
         sqlite3_bind_int64(st_unlike, 2, id);
         sqlite3_step(st_unlike);
+        int changes = sqlite3_changes(db);
         sqlite3_reset(st_unlike);
+        if (changes > 0) writes_held++;
         sqlite3_reset(st_count);
         sqlite3_bind_int64(st_count, 1, id);
         int64_t count = 0;
@@ -1164,6 +1214,8 @@ int main(int argc, char **argv) {
     sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, NULL);
 
+    sqlite3_prepare_v3(db, "BEGIN IMMEDIATE;", -1, SQLITE_PREPARE_PERSISTENT, &st_begin, NULL);
+    sqlite3_prepare_v3(db, "COMMIT;", -1, SQLITE_PREPARE_PERSISTENT, &st_commit, NULL);
     sqlite3_prepare_v3(db, "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20;", -1, SQLITE_PREPARE_PERSISTENT, &st_feed, NULL);
     sqlite3_prepare_v3(db, "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_post, NULL);
     sqlite3_prepare_v3(db, "SELECT 1 FROM posts WHERE id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_check, NULL);
@@ -1172,7 +1224,7 @@ int main(int argc, char **argv) {
     sqlite3_prepare_v3(db, "DELETE FROM likes WHERE user_id = ? AND post_id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_unlike, NULL);
     sqlite3_prepare_v3(db, "SELECT count(*) FROM likes WHERE post_id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_count, NULL);
 
-    // Initialize RespPool (16384 * 16384 bytes = 256 MB)
+    // Initialize RespPool (4096 * 16384 bytes = 64 MB)
     size_t pool_bytes = POOL_COUNT * POOL_BUF_SIZE;
     resp_pool.mem = mmap(NULL, pool_bytes, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
     madvise(resp_pool.mem, pool_bytes, MADV_HUGEPAGE);
@@ -1256,6 +1308,8 @@ int main(int argc, char **argv) {
         for (int i = 0; i < K_RING_COUNT; i++) {
             drain_cqes(&rings[i]);
         }
+
+        db_commit_if_needed();
     }
 
     return 0;

@@ -63,6 +63,7 @@ The compiler in [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf) is 
      This prevents $2^{64}$ decrements when testing negative numbers in 64-bit cells.
    * **Loop Label Management & Bracket Validation**: Maintains a loop depth stack. Emits forward jump `je .L_e_<id>` on `[` and backward jump `jne .L_s_<id>` on `]`. Emits `.error "unmatched closing bracket"` or `.error "unmatched opening bracket"` if brackets are imbalanced.
    * **Decimal Number Formatter**: In Brainfuck, formats multi-digit decimal integer constants (offsets, counts, label IDs) for assembly output without external runtime helpers.
+   * **Peephole Assembly Optimizer (`runtime/opt_bf_asm.py`)**: Detects balanced linear loops in the generated assembly (copy `[->+>+<<]`, move `[-<+>]`, multiply `[->++++++++++<]`, etc.) and lowers them into constant-time $O(1)$ x86-64 arithmetic instructions (`imulq`, `addq`, `movq $0, (%r12)`), optimizing 315 linear loops.
 
 ---
 
@@ -175,9 +176,11 @@ The runtime ([`runtime/runtime.c`](runtime/runtime.c)) provides the underlying n
   * Connection slots track a generation counter (`c->gen`) preventing stale CQE completion callbacks from corrupting reused slots.
   * All allocated connection buffers (`c->in_buf`, `c->out_buf`) are systematically released in `on_send` completion and `on_close`.
 * **Shared Request State Safety**: Because all request parsing, Brainfuck execution (`bf_execute`), and MMIO dispatch (`bf_mmio_sys`, `bf_mmio_db`, `bf_mmio_net`) execute synchronously to completion on the main event loop thread before yielding back to `sys_io_uring_enter`, the shared `req_ctx`, `curr_conn`, and `bf_tape` structures are never accessed concurrently by multiple threads. Both `req_ctx` and `bf_tape` are explicitly re-zeroed (`memset`) on every incoming request.
-* **Zero-Allocation Buffer Pools**:
+* **Zero-Allocation Buffer Pools & Fast Formatting**:
   * Packet buffers: 1,024 buffers of 2 KB managed via kernel-managed buffer rings (`IORING_REGISTER_PBUF_RING`).
-  * Response buffers: 16,384 buffers of 16 KB managed via a fixed LIFO free-stack.
+  * Response buffers: 4,096 buffers of 16 KB (64 MB) managed via a fixed LIFO free-stack backed by anonymous huge-page memory (`MADV_HUGEPAGE`).
+  * Response integer formatting uses a precomputed two-digit decimal lookup table (`digits[200]`).
+  * Write transactions (`st_begin`, `st_commit`) are batched and committed per event loop cycle (`db_commit_if_needed()`) before yielding back to `io_uring_enter`.
 * **Durability & Challenge Compliance**:
   * SQLite WAL mode (`PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;`).
   * Zero cross-request caching of dynamic endpoints.

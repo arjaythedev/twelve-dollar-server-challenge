@@ -73,7 +73,7 @@ its follow-up PR #460 (`b118b95`, merged: 8 io_uring rings, SQLite B-tree cursor
 profile recorded on the box; that step fell back to the plain Zig build on the box, so it was scored without PGO;
 its earlier `122da96` held 260,000 and `7c2ebfb` 219,000); its first merged #454 code (`ede8d01`) held 65,000
 (connection-capped, see ᶜ). Its later follow-up #488 (`4b2fc29`; held, not merged: it didn't beat the merged row)
-scored 219,000 (see ᶜ).
+scored 219,000 and its next commit `68c90b7` 270,000 (see ᶜ).
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -1044,7 +1044,10 @@ Its follow-up **#488** (`4b2fc29`: 6 rings started on demand, 64 MiB page cache,
 response pool; the clang PGO build compiled on the box this time; held, not merged: below the merged row) held
 **219,000** (21,378 req/s, p95 16.6 / p99 98.5 ms, 0 errors, 63 % CPU, 27 µs/req, 797 MB, 2026-11-17); 230,000 passed
 the 2-minute probe but failed the 5-minute hold on p99 (8.33 s, 69 % CPU), 240,000 failed the 2-minute probe on p99
-(1.25 s) and 320,000 on p95 (36.0 s).
+(1.25 s) and 320,000 on p95 (36.0 s). Its next commit `68c90b7` (a short wait that rotates across rings once more
+than one is active) held **270,000** (25,836 req/s, p95 63.6 / p99 291.3 ms, 0 errors, 86 % CPU, 30 µs/req, 915 MB,
+2026-11-17), still below the merged row, so it isn't merged either; 280,000 failed the 2-minute probe on p99 (3.76 s)
+and 320,000 on p95 (37.1 s).
 
 ᴹ **C++ io_uring #442** (`8512d44`, follow-up to the merged #412's 65,000 ᶜ: rewrite into `src/`, PASSIVE checkpoints on
 a second connection) held **199,000** (19,576 req/s, p95 15.0 / p99 80.7 ms, 0 errors, 64 % CPU, 30 µs/req, 1,170 MB,

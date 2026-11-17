@@ -1195,6 +1195,9 @@ with 2,048 answers per pass) held **280,000** at 76 % CPU (26,684 req/s, p95 158
 300,000, so #437 is still not merged. #437's latest head (`66a0732`, 2026-11-17: the page-cache drop limited to its
 own `out/` folder, per rule 11) held **290,000** at 76 % CPU (27,608 req/s, p95 24.2 / p99 201.6 ms, 0 errors, 709 MB;
 300k failed the 2-minute probe on p99 2.38 s, 320k on p99 3.72 s), below #398's 300,000, so #437 is still not merged.
+#427's latest head (`10ade5b`, 2026-11-17: the same rule-11 fix, page-cache drop limited to its own `out/` folder) held
+**300,000** at 82 % CPU (28,402 req/s, p95 44.9 / p99 556.2 ms, 0 errors, 1,255 MB; 310k failed the 2-minute probe on
+p99 3.65 s, 320k on p99 3.44 s), a tie with #398's 300,000 and not above it, so #427 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

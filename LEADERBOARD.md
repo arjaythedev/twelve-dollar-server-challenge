@@ -823,7 +823,10 @@ open. **#485** (`b9c606f`: #484 with a latency-debt scheduler that adapts the pe
 (26,342 req/s, p95 69.5 / p99 645.8 ms, 0 err, 77 % CPU, 26 µs/req, 739 MB, 2026-11-17), below the merged row, so not
 merged: 290,000 passed the 2-minute probe but failed the 5-minute hold on p99 (1.47 s at 79 % CPU), 300,000 failed the
 2-minute probe on p95/p99 (0.71 / 1.47 s at 80 % CPU) and 320,000 on p95/p99 (1.52 / 1.78 s at 93 % CPU), all with 0
-errors. #485 stays open.
+errors. #485 stays open. **#495** (`5265020`: #486 with the per-pass answer cap raised from 2,048 to 16,384) held
+**280,000** (26,712 req/s, p95 78.3 / p99 297.2 ms, 0 err, 77 % CPU, 26 µs/req, 1,533 MB, 2026-11-17), below #486's
+300,000, so not merged: 290,000 failed the 2-minute probe on p99 (1.14 s at 81 % CPU), 300,000 on p99 (1.00 s at 83 %
+CPU) and 320,000 on p95/p99 (1.63 / 2.22 s at 94 % CPU), all with 0 errors. #495 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

@@ -757,7 +757,7 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)S.poll_ends, (unsigned long long)S.poll_rearmed,
           (unsigned long long)S.eventfd_events);
   if (MG.enabled) fprintf(stderr,
-      " tcp_memgov rcvbuf=%d pressure=%d psi_some10=%.2f psi_full10=%.2f cg_mem=%lluMB cg_max=%lluMB cg_sock=%lluMB tcp_mem_pages=%lu changes=%llu samples=%llu\\n",
+      " tcp_memgov rcvbuf=%d pressure=%d psi_some10=%.2f psi_full10=%.2f cg_mem=%lluMB cg_max=%lluMB cg_sock=%lluMB tcp_mem_pages=%lu changes=%llu samples=%llu\n",
       MG.current_rcvbuf, MG.current_rcvbuf == MG.pressure_rcvbuf, MG.psi_some10, MG.psi_full10,
       (unsigned long long)(MG.cg_current >> 20), (unsigned long long)(MG.cg_limit >> 20),
       (unsigned long long)(MG.cg_sock >> 20), MG.tcp_mem_pages,
@@ -800,14 +800,14 @@ static uint64_t cg_read_u64(const char *path) {
 static int apply_listener_rcvbuf(int requested) {
   for (unsigned i = 0; i < NLISTEN; i++) {
     if (setsockopt(LFD[i], SOL_SOCKET, SO_RCVBUF, &requested, sizeof requested) < 0) {
-      fprintf(stderr, "tcp governor: SO_RCVBUF listener %u: %s\\n", i, strerror(errno));
+      fprintf(stderr, "tcp governor: SO_RCVBUF listener %u: %s\n", i, strerror(errno));
       return -1;
     }
   }
   int effective = 0;
   socklen_t len = sizeof effective;
   if (!getsockopt(LFD[0], SOL_SOCKET, SO_RCVBUF, &effective, &len))
-    fprintf(stderr, "tcp governor: listener cap requested=%d effective=%d (Linux doubles requested)\\n", requested, effective);
+    fprintf(stderr, "tcp governor: listener cap requested=%d effective=%d (Linux doubles requested)\n", requested, effective);
   MG.current_rcvbuf = requested;
   MG.changes++;
   return 0;
@@ -818,7 +818,7 @@ static int memgov_start(void) {
   MG.normal_rcvbuf = (int)env_long("TCP_RCVBUF_NORMAL", 16384);
   MG.pressure_rcvbuf = (int)env_long("TCP_RCVBUF_PRESSURE", 8192);
   if (MG.pressure_rcvbuf < 4096 || MG.normal_rcvbuf > 1048576 || MG.pressure_rcvbuf > MG.normal_rcvbuf) {
-    fputs("TCP_RCVBUF_PRESSURE must be >=4096 and <= TCP_RCVBUF_NORMAL <=1048576\\n", stderr);
+    fputs("TCP_RCVBUF_PRESSURE must be >=4096 and <= TCP_RCVBUF_NORMAL <=1048576\n", stderr);
     return -1;
   }
   return apply_listener_rcvbuf(MG.normal_rcvbuf);
@@ -847,7 +847,7 @@ static void memgov_tick(uint64_t now) {
   if (small_read("/proc/net/sockstat", buf, sizeof buf) == 0) {
     const char *tcp = strstr(buf, "TCP:");
     if (tcp) {
-      const char *line_end = strchr(tcp, '\\n');
+      const char *line_end = strchr(tcp, '\n');
       const char *mem = strstr(tcp, " mem ");
       if (mem && (!line_end || mem < line_end)) MG.tcp_mem_pages = strtoul(mem + 5, NULL, 10);
     }

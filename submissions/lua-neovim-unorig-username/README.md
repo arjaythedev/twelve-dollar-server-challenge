@@ -5,7 +5,9 @@ no Nginx, no helper daemon, no compiled code of ours. One file of Lua, about 300
 
 - **Language / runtime:** Lua on the LuaJIT 2.1 that is built into Neovim 0.9.5 (Ubuntu package `neovim=0.9.5-6ubuntu2`)
 - **Network:** `vim.loop` (Neovim's own libuv 1.48 event loop, through luv)
-- **SQLite:** Ubuntu's `libsqlite3.so.0` (`libsqlite3-0`, 3.45.1), called through LuaJIT's FFI
+- **SQLite:** Ubuntu's `libsqlite3-0` 3.45.1-1ubuntu2 (the noble release build), called through LuaJIT's FFI.
+  `install.sh` unpacks that exact package to `/opt/lua-neovim-unorig-username/` instead of installing it, so the pin
+  does not fight a newer system `libsqlite3-0` (CI installs `sqlite3` first) and does not break when noble-updates moves on.
 - **JWT:** `HMAC()` from the system `libcrypto.so.3` through the FFI; JSON through Neovim's `vim.json`
 - **Mode:** direct. Neovim listens on `HOST:PORT` itself (`0.0.0.0:80` on the box), no Nginx.
 
@@ -14,13 +16,14 @@ no Nginx, no helper daemon, no compiled code of ours. One file of Lua, about 300
 - A libuv TCP server accepts connections inside the editor process. Each read callback parses as many
   complete HTTP/1.1 requests as the buffer holds (pipelining and split requests both work) and builds
   all their responses in one FFI byte buffer.
-- Every request runs its query on one SQLite connection with reused prepared statements. Columns are copied
+- Every request runs its query with reused prepared statements, reads on one SQLite connection and writes on another. Columns are copied
   from SQLite's memory straight into the response buffer (JSON-escaped on the way), so a feed costs
   one Lua string. Nothing is cached between requests, and every token gets a fresh HMAC-SHA256.
 - **Group commit:** the first write in a turn of the event loop opens a transaction. A libuv check handle
   runs right after the loop's I/O phase: it commits, and only then sends that turn's responses, one
   `try_write` per connection. A 201 never leaves before its `COMMIT` (WAL, `synchronous=NORMAL`).
-  If a commit fails, the connections of that turn are closed without an answer.
+  If a commit fails, the connections of that turn are closed without an answer. Reads use their own connection,
+  outside that open transaction, so a read in the same turn as a write sees only committed rows.
 - **More than 65,535 connections:** a process stops at 60,000 connections, starts a fresh Neovim that
   inherits the listening socket as fd 3, and keeps serving what it has. A child that has handed the
   socket on exits once its last connection is gone. All processes share the one vCPU.
@@ -32,7 +35,7 @@ no Nginx, no helper daemon, no compiled code of ours. One file of Lua, about 300
   uptime 2 s, 0 connections, 1 requests
   ```
 
-HMAC choice: the FFI call costs about 1.6 us per token, and only about 8% of the load test's requests
+The JWT signature is compared in constant time (XOR of all 32 bytes). HMAC choice: the FFI call costs about 1.6 us per token, and only about 8% of the load test's requests
 carry a token, so a pure Lua SHA-256 had nothing left to win.
 
 Not handled (the spec does not ask for them): `Transfer-Encoding: chunked`, `Expect: 100-continue`,

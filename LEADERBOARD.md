@@ -834,7 +834,11 @@ CPU) and 320,000 on p95/p99 (1.63 / 2.22 s at 94 % CPU), all with 0 errors. #495
 #486 with a fixed 8 KiB receive buffer on its listeners instead of the pressure governor) held **280,000** (26,731
 req/s, p95 29.8 / p99 248.4 ms, 0 err, 76 % CPU, 26 µs/req, 744 MB, 2026-11-17), below #486's 300,000, so not merged:
 290,000 failed the 2-minute probe on p95/p99 (0.52 / 1.08 s at 82 % CPU), 300,000 on p95 (0.63 s at 86 % CPU) and
-320,000 on p95/p99 (2.05 / 2.99 s at 93 % CPU), all with 0 errors. #496 stays open.
+320,000 on p95/p99 (2.05 / 2.99 s at 93 % CPU), all with 0 errors. #496 stays open. **#499** (`d2f631d`:
+#486 with a fixed 16 KiB receive buffer on its listeners instead of the pressure governor) held **270,000** (25,865
+req/s, p95 35.0 / p99 199.6 ms, 0 err, 74 % CPU, 26 µs/req, 971 MB, 2026-11-17), below #486's 300,000, so not merged:
+280,000 failed the 2-minute probe on p95/p99 (0.57 / 1.21 s at 77 % CPU) and 320,000 on p95/p99 (1.18 / 1.55 s at
+91 % CPU), all with 0 errors. #499 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

@@ -8,6 +8,8 @@
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 
+#include <malloc.h>
+
 #include <cerrno>
 #include <csignal>
 #include <cstdint>
@@ -357,6 +359,24 @@ class Server {
       if (!writes_ok_) writes_ok_ = !app_->db.writes_held();
       // 按时间而不是按 pass 驱动：负载下 pass 频率没有下界，按 pass 节奏清扫会在每秒把整张槽位表
       // 走很多遍。
+      /* 每 10 秒一次（且只在没有 backlog 时）把空闲堆还给内核。glibc 释放的内存默认留在进程的
+       * arena 里，RSS 只增不减：backlog 期间为了 part/响应缓冲分配的那些块，在 backlog 清空后
+       * 仍然算在 RSS 上。c-iouring-jowinjestine #404 记的实验是「backlog 碰过的每个连接都永久
+       * 留着一块」，我们在 210k 连接时看到的 674 MB 里绝大部分就是这个。没有 backlog 才 trim，
+       * 免得在正忙的时候去遍历堆。 */
+      if (p4 - last_trim >= 10000000000ULL) {
+        last_trim = p4;
+        bool backlog = !ready_.empty();
+        if (!backlog) {
+          for (auto& wp : workers_) {
+            if (!wp->pending().empty()) {
+              backlog = true;
+              break;
+            }
+          }
+        }
+        if (!backlog) malloc_trim(0);
+      }
       if (p4 - last_sweep >= 50000000ULL) {
         last_sweep = p4;
         now_sec_ = now_sec();
@@ -836,6 +856,7 @@ class Server {
   uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
   uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
   uint32_t answers_left_ = 0;
+  uint64_t last_trim = 0;
   std::deque<ReadyRef> ready_;
   unsigned cq_;
   const char* host_ = nullptr;

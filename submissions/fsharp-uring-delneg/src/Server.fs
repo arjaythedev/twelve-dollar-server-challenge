@@ -481,7 +481,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         ckRide <- false
         if res = 8 then
             if ck.Rc = 0 && ck.Backfilled >= 0 then ckBackfilled <- ck.Backfilled
-            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold
+            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b pace %d/%d %d ms" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold Vfs.paceHigh Vfs.paceLooks Vfs.paceMs
             if holdRem > 0 && not ckHold && ck.Rc = 0 && Db.walFrames >= ckHoldAt then
                 // past holdMax, hold anyway: passes aren't catching up with the writes
                 if Db.walFrames - ckBackfilled <= holdRem || Db.walFrames >= holdMax then

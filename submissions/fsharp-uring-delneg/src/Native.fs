@@ -86,6 +86,9 @@ extern int posix_fadvise(int fd, int64 offset, int64 len, int advice)
 [<DllImport(L, SetLastError = true)>]
 extern int fdatasync(int fd)
 
+[<DllImport(L, SetLastError = true)>]
+extern int sync_file_range(int fd, int64 offset, int64 nbytes, uint32 flags)
+
 [<DllImport(L)>]
 extern int clock_gettime(int clk, int64[] ts)
 

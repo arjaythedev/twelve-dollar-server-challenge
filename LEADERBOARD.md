@@ -112,10 +112,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 20 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
 | 20 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
 | 20 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
-| 29 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 30 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 30 | holyphp-io-uring-elifoxcoder | #447 | HolyPHP (io_uring, SQLite B-tree reads) | **260,000** ᵘ | 24,961 | 154.1 | 658.8 | 0.00 | 79 | 29 | 782 | 2026-11-16 |
-| 30 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **260,000** | 25,003 | 53.1 | 193.7 | 0.00 | 76 | 28 | 1,268 | 2026-11-16 |
+| 20 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
+| 30 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 31 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
+| 31 | holyphp-io-uring-elifoxcoder | #447 | HolyPHP (io_uring, SQLite B-tree reads) | **260,000** ᵘ | 24,961 | 154.1 | 658.8 | 0.00 | 79 | 29 | 782 | 2026-11-16 |
 | 33 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 33 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 33 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
@@ -1411,12 +1411,12 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   #264's `csrc/shim.c`; the Zig server, HTTP, JSON and JWT code are the author's own. Arjay ruled 2026-11-04 that
   credited reuse is fine; the README says so plainly since `b118b95` → merged at `b118b95` (280k). Earlier runs:
   260k at `122da96`, 219k at `7c2ebfb`.
-- **goose-iouring-anthknee #473 reuses goose-iouring-ahmadsh2007 #291's helpers (and through them #264's) with the
-  credit only in code comments**: `json.goose`, `jwt.goose`, `record.goose` and about half of `native/sqlite.c`
+- **goose-iouring-anthknee #473 reuses goose-iouring-ahmadsh2007 #291's helpers (and through them #264's)**:
+  `json.goose`, `jwt.goose`, `record.goose` and about half of `native/sqlite.c`
   (open, cursors, like counts, checkpoint thread, writes) match #291; the transport, database plan, HTTP, handlers,
   buffers, page cache and VFS shim are the author's own. Arjay ruled 2026-11-04 that reusing another entry's helpers
-  is fine when the README credits it; at `63cc70f` (260k, the row) the README doesn't → not merged until the README
-  credits #291 and #264.
+  is fine when the README credits it; the README credits #291 and #264 since `3c7cb6e` (same code as `63cc70f`) →
+  merged at `3c7cb6e` (270k). Earlier run: 260k at `63cc70f`.
 - **elisp-emacs-unorig-username #464 (follow-up to #444) closes every connection past the first 32**: it serves direct
   on :80, keeps 32 connections alive and answers everyone else with `Connection: close`, so nearly every request
   arrives on a new connection (1,235,237 dials for about 1.24 M requests in the scored hold; TCP connect time isn't

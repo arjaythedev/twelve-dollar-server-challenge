@@ -25,7 +25,9 @@ static int ckpt_urgent = 32768;  /* past this many frames (128 MB) the passes ru
 #define HOLD_GROW_FRAMES 32768   /* a log this long has missed restarts: the hold limit grows (to 2x at most) */
 static int ckpt_tail = 64;       /* once this few frames remain, the tail thread takes them under a hold */
 static uint64_t hold_max_ns = 400000000ULL; /* a hold's limit; longer when the log has missed restarts */
-static int ckpt_log = 0;         /* CKPT_LOG=1: one line per cycle on stderr */
+static int ckpt_log = 0;
+#define CKPT_PREDICT_WINDOW_NS 2000000000ULL /* forecast WAL growth two seconds ahead */
+#define CKPT_PREDICT_SAMPLE_NS 250000000ULL /* sample only at 4 Hz, off the request hot path */         /* CKPT_LOG=1: one line per cycle on stderr */
 /* TAIL_RESTART=0 (default): the loop's next write restarts the log, so its page cache survives the
  * cycle (the loop does the header sync SQLite does on a restart, once per 64 MB of log).
  * TAIL_RESTART=1: the tail thread restarts it, which makes SQLite drop the loop's whole page cache
@@ -70,6 +72,10 @@ struct db {
   int ck_urgent;     /* the current bulk pass goes to the nice-10 thread (the log is past ckpt_urgent) */
   const char *path;
   int wal_frames;  /* from the wal hook, on the loop thread */
+  uint64_t ck_pred_sample_ns;
+  int ck_pred_sample_frames;
+  uint64_t ck_pred_rate_fp; /* EWMA WAL frames per second, fixed point x1024 */
+  uint64_t ck_pred_early_starts; /* checkpoint cycles started ahead of normal threshold */
   int writes_held; /* the tail is being copied: writes wait (reads go on) */
   uint64_t hold_t0;
   /* stats */
@@ -479,6 +485,34 @@ static int db_wal_hook(void *ud, sqlite3 *c, const char *name, int frames) {
   d->wal_frames = frames;
   return SQLITE_OK;
 }
+/* Predict WAL growth from recent committed frames, not SQL results or B-tree
+ * contents. This is housekeeping only (at most four calculations per second).
+ * A negative delta means SQLite restarted the WAL: reset the estimate.
+ * The normal CKPT_FRAMES trigger remains a hard fallback. */
+static int ck_predict_start(struct db *d, uint64_t now) {
+  int frames = d->wal_frames;
+  if (!d->ck_pred_sample_ns) {
+    d->ck_pred_sample_ns = now;
+    d->ck_pred_sample_frames = frames;
+    return 0;
+  }
+  uint64_t elapsed = now - d->ck_pred_sample_ns;
+  if (elapsed < CKPT_PREDICT_SAMPLE_NS) return 0;
+  int delta = frames - d->ck_pred_sample_frames;
+  d->ck_pred_sample_ns = now;
+  d->ck_pred_sample_frames = frames;
+  if (delta < 0) { d->ck_pred_rate_fp = 0; return 0; }
+  /* Cap input to avoid integer overflow on anomalous intervals. */
+  uint64_t rate = (uint64_t)delta * 1024ULL * 1000000000ULL / elapsed;
+  if (d->ck_pred_rate_fp) d->ck_pred_rate_fp = (d->ck_pred_rate_fp * 3 + rate) / 4;
+  else d->ck_pred_rate_fp = rate;
+  /* Never start earlier than half the regular threshold: avoids excessive
+   * checkpoint churn when a short burst predicts high WAL growth. */
+  if (frames < d->ck_min_frames / 2 || frames >= d->ck_min_frames) return 0;
+  uint64_t forecast = (uint64_t)frames +
+      d->ck_pred_rate_fp * CKPT_PREDICT_WINDOW_NS / (1024ULL * 1000000000ULL);
+  return forecast >= (uint64_t)d->ck_min_frames;
+}
 /* Between batches, with no transaction open: drives the checkpoint cycle. The only place a hold
  * starts or ends. */
 static void db_tick(struct db *d) {
@@ -489,7 +523,10 @@ static void db_tick(struct db *d) {
       d->n_force++;
       if (sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone) == SQLITE_OK && nlog == ndone)
         d->wal_frames = 0;
-    } else if (d->wal_frames >= d->ck_min_frames) {
+    } else {
+      int early = ck_predict_start(d, now_ns());
+      if (d->wal_frames < d->ck_min_frames && !early) break;
+      if (early) d->ck_pred_early_starts++;
       d->bulk_t0 = now_ns();
       d->ck_passes = 0;
       d->n_cycles++;

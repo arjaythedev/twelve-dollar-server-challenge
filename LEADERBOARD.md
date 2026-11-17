@@ -784,6 +784,11 @@ restarting the log, a third checkpoint thread at nice 10 past 128 MB, 64-complet
 **280,000** (26,671 req/s, p95 99.5 / p99 828.2 ms, 0 err, 78 % CPU, 26 µs/req, 1,150 MB, 2026-11-16), still below
 the merged row, so not merged: 290,000 failed the 2-minute probe on p95/p99 (1.71 / 5.27 s at 81 % CPU), 300,000 on
 p99 (1.45 s at 84 % CPU) and 320,000 on p95/p99 (3.08 / 3.76 s at 92 % CPU), all with 0 errors. #452 stays open.
+**#479** (`b18b184`: #441's `e487a70` code plus multishot poll for idle sockets, an eventfd wake for the other rings,
+512-byte receives and ready backlogs over 1,024 sliced to the next batch) held **230,000** (22,378 req/s, p95 9.2 /
+p99 96.5 ms, 0 err, 57 % CPU, 23 µs/req, 1,336 MB, 2026-11-17), below the merged row, so not merged: 240,000 failed
+the 2-minute probe on p95/p99 (231.7 ms / 1.66 s at 61 % CPU, 0 errors) and 320,000 collapsed (76 % errors, nearly
+all `connection refused`). #479 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

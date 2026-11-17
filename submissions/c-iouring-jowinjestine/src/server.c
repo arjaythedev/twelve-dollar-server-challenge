@@ -19,19 +19,19 @@
 #define NLISTEN 8
 #define ACCEPT_NEXT_MAX 8192 /* make the next ring this many connections before the current one is full */
 #define ACCEPT_STOP_MAX 6144 /* stop accepting on a ring this many slots before its table is full */
-#define RECV_BUF_SIZE_DEFAULT 512 /* most requests fit; larger POSTs assemble across reads */
+#define RECV_BUF_SIZE_DEFAULT 1024 /* a request is ~150-400 bytes; a longer one spans buffers */
 #define ARENA_CAP (1u << 20)
 #define ARENA_POOL 16 /* arenas kept for reuse (1 MB each); a burst maps more and unmaps them after */
 #define READS_PER_PASS 16384
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
 static unsigned answers_per_pass = 16384, wait_min = 256;
-static int poll_idle = 1; /* experimental; IDLE_POLL=0 uses original multishot receives */
-static int eventfd_wake = 1; /* 0 restores per-ring io_uring_enter(GETEVENTS) */
+static int poll_idle = 0; /* IDLE_POLL=1: idle sockets wait on a multishot poll instead of a multishot receive */
+static int eventfd_wake = 0; /* EVENTFD_WAKE=1: other rings wake ring 0 through an eventfd (more, smaller batches: more CPU) */
 static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
 /* Optional soft wall-clock budget for processing a pre-existing ready backlog.
  * Experimental: 0 disables it. Does not interrupt a SQLite transaction or send. */
-static unsigned backlog_slice_us = 75000;
+static unsigned backlog_slice_us = 0;
 static uint64_t sliced_ready_passes;
 static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
@@ -975,14 +975,14 @@ int main(int argc, char **argv) {
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 16384);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
-  poll_idle = env_long("IDLE_POLL", 1) != 0;
-  eventfd_wake = env_long("EVENTFD_WAKE", 1) != 0;
+  poll_idle = env_long("IDLE_POLL", 0) != 0;
+  eventfd_wake = env_long("EVENTFD_WAKE", 0) != 0;
   recv_buf_size = (unsigned)env_long("RECV_SIZE", RECV_BUF_SIZE_DEFAULT);
   if (recv_buf_size < 256 || recv_buf_size > 2048 || (recv_buf_size & (recv_buf_size - 1))) {
     fprintf(stderr, "RECV_SIZE must be a power of 2 between 256 and 2048\n");
     return 1;
   }
-  backlog_slice_us = (unsigned)env_long("BACKLOG_SLICE_US", 75000); /* 0 restores #441's unlimited ready turn */
+  backlog_slice_us = (unsigned)env_long("BACKLOG_SLICE_US", 0); /* 0: a ready backlog is answered without a time limit */
   /* Ring 0 waits for 64 completions or 2 ms: fewer, fuller passes (each pass enters every ring).
    * Measured at 300k connections: ~4 % less loop CPU than 256 / 1 ms, p99 unchanged. */
   wait_min = (unsigned)env_long("WAIT_MIN", 64);

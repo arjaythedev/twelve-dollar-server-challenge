@@ -181,6 +181,7 @@ typedef struct {
 } RingWorker;
 
 static RingWorker rings[K_RING_COUNT];
+static uint32_t active_rings = 1;
 static int listeners[K_LISTENER_COUNT];
 static volatile bool running = true;
 
@@ -691,6 +692,7 @@ static inline void publish_pbufs(RingWorker *w) {
 }
 
 static void fill_accepts(RingWorker *w) {
+    if (!w->accepting || w->full) return;
     uint32_t target = w->depth / K_LISTENER_COUNT;
     for (int li = 0; li < K_LISTENER_COUNT; li++) {
         while (w->accepts[li] < target) {
@@ -702,6 +704,28 @@ static void fill_accepts(RingWorker *w) {
             s->user_data = make_ud(TAG_ACCEPT, 0, li);
             w->accepts[li]++;
         }
+    }
+}
+
+/* The server is single-threaded: polling an unused ring costs cache traffic
+ * and an io_uring enter every pass.  Keep all fixed-file tables registered,
+ * but activate a ring only after the previous table reports exhaustion. */
+static void spill_accepts(void) {
+    uint32_t open = 0;
+    bool can_accept = false;
+    for (uint32_t i = 0; i < active_rings; i++) {
+        open += rings[i].nconn;
+        can_accept |= rings[i].accepting && !rings[i].full;
+    }
+    /* Each ring owns 1,024 kernel-selected receive buffers.  Bring another
+     * ring online before a burst can exhaust that ring's buffer group; this
+     * preserves the low-idle-cost single-ring mode without turning a ramp
+     * into ENOBUFS churn. */
+    bool need_capacity = open >= active_rings * (N_BUFS_PER_RING / 4);
+    if (active_rings < K_RING_COUNT && (!can_accept || need_capacity)) {
+        RingWorker *w = &rings[active_rings++];
+        w->accepting = true;
+        fill_accepts(w);
     }
 }
 
@@ -996,6 +1020,9 @@ static void on_accept(RingWorker *w, int res, uint32_t listener_idx) {
         c->in_cap = 0;
         w->nconn++;
         arm_recv(w, slot, c);
+    } else if (res == -ENFILE || res == -EMFILE) {
+        w->full = true;
+        w->accepting = false;
     }
 }
 
@@ -1009,6 +1036,11 @@ static void on_recv(RingWorker *w, uint32_t slot, uint32_t gen, int res, uint32_
         char *data = w->pbuf_mem + (bid * BUF_SIZE);
         handle_incoming_data(w, slot, c, data, res);
         return_pbuf(w, bid);
+    } else if (res == -ENOBUFS) {
+        // Buffer-select exhaustion is transient during a receive burst.  The
+        // CQE drain republishes returned buffers before deferred work runs;
+        // closing here turns harmless pressure into a client-visible reset.
+        defer_op(w, slot, c, DEFER_RECV);
     } else {
         arm_close(w, slot, c);
     }
@@ -1078,6 +1110,10 @@ static void on_close(RingWorker *w, uint32_t slot, uint32_t gen) {
         c->in_cap = 0;
     }
     if (w->nconn > 0) w->nconn--;
+    if (w->full && w->nconn + w->depth < w->slots) {
+        w->full = false;
+        w->accepting = true;
+    }
 }
 
 static void drain_deferred(RingWorker *w) {
@@ -1173,7 +1209,7 @@ static int init_worker(uint32_t id) {
     w->depth = ACCEPT_DEPTH;
     w->nconn = 0;
     w->full = false;
-    w->accepting = true;
+    w->accepting = false;
     memset(w->accepts, 0, sizeof(w->accepts));
     w->deferred_head = DEFERRED_NONE;
     w->deferred_tail = DEFERRED_NONE;
@@ -1250,7 +1286,6 @@ static int init_worker(uint32_t id) {
     madvise(w->conns, conns_sz, MADV_HUGEPAGE);
     memset(w->conns, 0, conns_sz);
 
-    fill_accepts(w);
     return 0;
 }
 
@@ -1340,7 +1375,7 @@ int main(int argc, char **argv) {
         listeners[i] = fd;
     }
 
-    // Initialize 8 rings (523,776 direct descriptors)
+    // Pre-allocate all ring/file tables, then activate one ring at a time.
     for (int i = 0; i < K_RING_COUNT; i++) {
         if (init_worker(i) != 0) {
             fprintf(stderr, "Failed to init worker %d\n", i);
@@ -1348,13 +1383,16 @@ int main(int argc, char **argv) {
         }
     }
 
-    fprintf(stderr, "Brainfuck io_uring Server listening on port %d with 8 rings x %d = %d direct descriptors\n",
-        port, SLOTS_PER_RING, K_RING_COUNT * SLOTS_PER_RING);
+    rings[0].accepting = true;
+    fill_accepts(&rings[0]);
+
+    fprintf(stderr, "Brainfuck io_uring Server listening on port %d with 1 active of %d rings x %d = %d direct descriptors\n",
+        port, K_RING_COUNT, SLOTS_PER_RING, K_RING_COUNT * SLOTS_PER_RING);
 
     uint32_t wait_ri = 0;
     while (running) {
         bool any_cqes = false;
-        for (int i = 0; i < K_RING_COUNT; i++) {
+        for (uint32_t i = 0; i < active_rings; i++) {
             if (*rings[i].cq_khead != __atomic_load_n(rings[i].cq_ktail, __ATOMIC_ACQUIRE)) {
                 any_cqes = true;
                 break;
@@ -1362,7 +1400,7 @@ int main(int argc, char **argv) {
         }
 
         bool any_to_submit = false;
-        for (int i = 0; i < K_RING_COUNT; i++) {
+        for (uint32_t i = 0; i < active_rings; i++) {
             if (rings[i].sq_tail != rings[i].sq_head) {
                 any_to_submit = true;
                 break;
@@ -1370,10 +1408,10 @@ int main(int argc, char **argv) {
         }
 
         bool busy = any_cqes || any_to_submit;
-        uint32_t cur_wait = wait_ri % K_RING_COUNT;
+        uint32_t cur_wait = wait_ri % active_rings;
         wait_ri++;
 
-        for (int i = K_RING_COUNT - 1; i >= 0; i--) {
+        for (uint32_t i = active_rings; i-- > 0;) {
             RingWorker *w = &rings[i];
             uint32_t to_submit = flush_sq(w);
             if (i == cur_wait && !busy) {
@@ -1383,9 +1421,11 @@ int main(int argc, char **argv) {
             }
         }
 
-        for (int i = 0; i < K_RING_COUNT; i++) {
+        for (uint32_t i = 0; i < active_rings; i++) {
             drain_cqes(&rings[i]);
         }
+
+        spill_accepts();
 
         db_commit_if_needed();
     }

@@ -32,7 +32,9 @@ pub const bgid: u16 = 1;
 pub const pool_buf_size: usize = 16384;
 pub const pool_count: usize = 4096;
 
-pub const k_ring_count: usize = 8;
+// Six fixed-file tables provide 392,832 connection slots: comfortably above the
+// 350k target while avoiding two otherwise-empty rings worth of per-pass syscalls.
+pub const k_ring_count: usize = 6;
 pub const k_listener_count: usize = 8;
 pub const slots_per_ring: u32 = 65472;
 pub const max_pending_size: usize = 65535;
@@ -370,11 +372,13 @@ pub const Server = struct {
         s.resp_buf = try Buf.init(128 * 1024);
         s.resp_pool = try RespPool.init();
 
-        // Pre-allocate and activate all 8 rings for uniform load distribution
+        // Pre-allocate all descriptor tables, but activate rings only as the
+        // previous table fills.  A single vCPU should not poll idle rings while
+        // the connection ramp is still below one table's capacity.
         for (0..k_ring_count) |i| {
             try s.initWorker(@intCast(i));
         }
-        s.active_rings = k_ring_count;
+        s.active_rings = 1;
 
         return s;
     }
@@ -576,8 +580,8 @@ pub const Server = struct {
             self.listeners[i] = fd;
         }
 
-        // Arm accepts across all 8 rings for balanced connection distribution
-        for (0..k_ring_count) |i| {
+        // Start on one ring; spillAccepts activates another only when needed.
+        for (0..self.active_rings) |i| {
             self.armAccepts(&self.rings[i]);
         }
     }
@@ -596,6 +600,30 @@ pub const Server = struct {
                 s.user_data = ud(.accept, 0, @intCast(li));
                 w.accepts[li] += 1;
             }
+        }
+    }
+
+    /// Keep accepts armed on one non-full active ring.  Fixed-file tables are
+    /// expensive to poll on a single core, so later rings are activated only
+    /// after earlier ones run out of safe accept headroom.
+    fn spillAccepts(self: *Server) void {
+        for (0..self.active_rings) |i| {
+            const w = &self.rings[i];
+            if (w.accepting and !w.full) return;
+        }
+
+        for (0..self.active_rings) |i| {
+            const w = &self.rings[i];
+            if (!w.full) {
+                self.armAccepts(w);
+                return;
+            }
+        }
+
+        if (self.active_rings < k_ring_count) {
+            const w = &self.rings[self.active_rings];
+            self.active_rings += 1;
+            self.armAccepts(w);
         }
     }
 
@@ -769,11 +797,13 @@ pub const Server = struct {
 
             if (w.nconn + w.margin >= w.slots) {
                 w.full = true;
+                self.spillAccepts();
             }
         } else if (res == -@as(i32, @intCast(@intFromEnum(linux.E.NFILE))) or
             res == -@as(i32, @intCast(@intFromEnum(linux.E.MFILE))))
         {
             w.full = true;
+            self.spillAccepts();
         }
     }
 

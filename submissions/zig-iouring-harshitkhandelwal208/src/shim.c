@@ -156,7 +156,11 @@ int td_open(const char *path, char *err, int n) {
   }
   if (exec("PRAGMA journal_mode = WAL") ||
       exec("PRAGMA synchronous = NORMAL") || exec("PRAGMA temp_store = MEMORY") ||
-      exec("PRAGMA cache_size = -8192") || exec("PRAGMA mmap_size = 0") ||
+      /* The direct cursor path still enters SQLite's pager for every B-tree
+       * page.  Match the proven 64 MiB cache budget used by the leaderboard
+       * leader: it keeps hot roots/leaves resident while remaining modest
+       * beside the 2 GiB connection budget. */
+      exec("PRAGMA cache_size = -65536") || exec("PRAGMA mmap_size = 0") ||
       exec("PRAGMA busy_timeout = 5000") ||
       exec("PRAGMA wal_autocheckpoint = 0") || exec("SELECT count(*) FROM sqlite_schema"))
     return fail(err, n, "pragmas");

@@ -376,3 +376,34 @@ and failed requests **below 1%** on the entire five-minute hold.
 An official result also requires the challenge operator's evaluation
 on the specified 1-vCPU/2-GB environment. A 320K probe failure should
 not be mistaken for a five-minute score.
+
+
+## Experiment: TCP receive-memory governor (independent follow-up to #484)
+
+This is **opt-in** (`TCP_MEM_GOVERNOR=0` by default) and does not alter the
+event-loop scheduler, B-tree reads or checkpoint policy. With
+`TCP_MEM_GOVERNOR=1`, set `SO_RCVBUF=16384` on the eight listening sockets
+before accepting connections. Linux doubles the requested value internally.
+Every two seconds the server samples cgroup-v2 `memory.current`,
+`memory.max`, `memory.stat` (`sock`), `memory.pressure` (PSI `avg10`),
+and system-wide `/proc/net/sockstat` for **telemetry**, not an inferred
+per-connection allocation.
+
+After two consecutive high-pressure samples (PSI full avg10 >=2%,
+PSI some avg10 >=10%, or >85% of cgroup memory.max), change the listener
+cap for **future accepts only** to `SO_RCVBUF=8192`; restore the 16384
+requested cap only after four low-pressure samples. Existing sockets,
+connection admission, authentication, transaction semantics and responses
+are untouched. The kernel may clamp requested values to `rmem_max`, and
+accepted sockets inherit the listener's current buffer setting.
+If cgroup v2 PSI is unavailable, the memory.current/max threshold can
+still be used; missing metrics are zero rather than grounds to throttle.
+
+Control: `TCP_MEM_GOVERNOR=0` (#484). Test with
+`TCP_MEM_GOVERNOR=1 TCP_RCVBUF_NORMAL=16384 TCP_RCVBUF_PRESSURE=8192`.
+The log emits sampled memory, socket-accounted memory, PSI and current
+listener cap. Compare 300K/310K/320K full 5-minute holds with the same
+seed and PGO binary, preferably from a separate k6 host, and collect
+p95/p99, errors, CPU/request, RAM, `enobufs`, retransmissions and TCP
+memory. A smaller receive window may hurt throughput, so **do not enable
+without an A/B win**. No performance claim until the official benchmark.

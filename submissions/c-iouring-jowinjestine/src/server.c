@@ -813,7 +813,7 @@ static int apply_listener_rcvbuf(int requested) {
   return 0;
 }
 static int memgov_start(void) {
-  MG.enabled = env_long("TCP_MEM_GOVERNOR", 0) != 0;
+  MG.enabled = env_long("TCP_MEM_GOVERNOR", 1) != 0;
   if (!MG.enabled) return 0;
   MG.normal_rcvbuf = (int)env_long("TCP_RCVBUF_NORMAL", 16384);
   MG.pressure_rcvbuf = (int)env_long("TCP_RCVBUF_PRESSURE", 8192);

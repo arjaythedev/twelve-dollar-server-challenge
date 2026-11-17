@@ -1,0 +1,188 @@
+set shell := ["bash", "-euo", "pipefail", "-c"]
+set positional-arguments := true
+
+root := justfile_directory()
+repo := root / ".." / ".."
+folder := file_name(root)
+py := root / ".venv" / "bin" / "python"
+secret := "twelve-dollar-challenge"
+
+# list recipes
+default:
+    @just --list
+
+# create .venv (pinned deps, Python >= 3.12) and .devtools (py-spy); no uv needed
+[group: "dev"]
+setup:
+    #!/usr/bin/env python3
+    import subprocess, sys
+    python = subprocess.run(["just", "_python"], cwd="{{root}}", capture_output=True, text=True, check=True).stdout.strip()
+    print("using", python, flush=True)
+    subprocess.run([python, "{{root}}/infra/ops.py", "build"], check=True)
+    subprocess.run([python, "-m", "venv", "--clear", "{{root}}/.devtools"], check=True)
+    subprocess.run(["{{root}}/.devtools/bin/pip", "install", "--quiet", "--disable-pip-version-check",
+                    "-r", "{{root}}/requirements-dev.txt"], check=True)
+
+# serve on 127.0.0.1:3000 against build/feed.db (copied from the seed on first run)
+[group: "dev"]
+run:
+    @mkdir -p build && { [ -f build/feed.db ] || cp {{repo}}/seed/feed.db build/feed.db; }
+    @ulimit -n 65535 2>/dev/null || true; SQLITE_PATH={{root}}/build/feed.db JWT_SECRET={{secret}} HOST=127.0.0.1 PORT=3000 exec {{py}} {{root}}/infra/ops.py start
+
+# unit tests (stdlib unittest)
+[group: "test"]
+test:
+    @{{py}} -m unittest discover -s tests -t .
+
+# the official 42-check suite, exactly as CI runs it (rebuilds .venv)
+[group: "test"]
+check:
+    #!/usr/bin/env python3
+    import os, subprocess
+    python = subprocess.run(["just", "_python"], cwd="{{root}}", capture_output=True, text=True, check=True).stdout.strip()
+    env = dict(os.environ, PYTHON=python)
+    raise SystemExit(subprocess.run(["bash", "test/run.sh", "submissions/{{folder}}"], cwd="{{repo}}", env=env).returncode)
+
+# load tests (Docker VM: `just vm start`). Targets:
+#   linux <users> [--duration 300] [--profile [layers|python|hops]] [--repeat n]   one run (120 s hold)
+#   ladder <start> [--upper n] [--resolution n]    limit search      calibrate | memory   see bench/linux.py
+#   snapshot <name>                                build this tree into variant image twelve-ab-<name>
+#   ab <users> <a> <b> [--rounds 3]                alternate two snapshots, then a side-by-side summary
+#   entries <users> <name>... [--rounds 3]         alternate whole entries (ours + REFS in bench/linux.py)
+#   results [n]                                    the last n runs, one line each (default 10)
+#   samples [file] [--bucket 5]                    a run's timeline: drops, CPU 0, sockets (default newest)
+#   journey [name]                                 µs per request in-process, in the server image (or snapshot)
+#   local [vus dur ramp] | compare [rounds]        k6 against `just run` on the Mac (not capacity numbers)
+[group: "perf"]
+[doc("load tests: linux | ladder | snapshot | ab | entries | results | samples | journey | calibrate | memory | local | compare (details in the justfile)")]
+bench target="local" *args:
+    #!/usr/bin/env python3
+    import os, resource, subprocess, sys
+    target, args = sys.argv[1], sys.argv[2:]
+    bench = "{{root}}/bench"
+    docker_bin = "/Applications/Docker.app/Contents/Resources/bin"  # Docker Desktop's credential helper
+    if os.path.isdir(docker_bin):
+        os.environ["PATH"] += os.pathsep + docker_bin
+    if target == "local":
+        vus, duration, ramp = (args + ["2000", "1m", "30s"][len(args):])[:3]
+        _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (65535 if hard == resource.RLIM_INFINITY else min(65535, hard), hard))
+        cmd = ["k6", "run", "-e", "VUS=" + vus, "-e", "DURATION=" + duration, "-e", "RAMP_UP=" + ramp,
+               "-e", "BASE_URL=http://127.0.0.1:3000", "{{repo}}/bench/load.js"]
+    elif target in ("linux", "ladder", "calibrate", "memory", "snapshot", "ab", "entries", "results"):
+        cmd = ["python3", bench + "/linux.py", "run" if target == "linux" else target] + args
+    elif target == "samples":
+        cmd = ["python3", bench + "/samples.py"] + args
+    elif target == "journey":
+        image = "twelve-ab-" + args[0] if args else "twelve-server-ours"
+        with open(bench + "/journey.py") as journey:
+            raise SystemExit(subprocess.run(["docker", "run", "--rm", "-i", "--user", "root", "--cpuset-cpus", "0", image,
+                                             "sh", "-c", "cp /home/runner/feed.db /feed.db && /app/.venv/bin/python -"],
+                                            stdin=journey).returncode)
+    elif target == "compare":
+        python = subprocess.run(["just", "_python"], cwd="{{root}}", capture_output=True, text=True, check=True).stdout.strip()
+        os.environ["PYTHON"] = python
+        cmd = ["python3", bench + "/compare.py"] + args
+    else:
+        raise SystemExit("bench target must be linux, ladder, calibrate, memory, snapshot, ab, entries, results, samples, "
+                         "journey, local or compare, got " + target)
+    raise SystemExit(subprocess.run(cmd).returncode)
+
+# the Docker VM for `just bench linux`: start | stop | status (Colima profile `bench`, 8 CPUs / 8 GB)
+[group: "perf"]
+vm action="start":
+    @case "$1" in start) colima start bench --cpu 8 --memory 8 --disk 30 --runtime docker ;; stop) colima stop bench ;; status) colima list ;; *) echo "vm action must be start, stop or status" >&2; exit 1 ;; esac
+
+# profile under k6 load: tool=pyspy (speedscope flamegraph) or cprofile (pstats dump)
+[group: "perf"]
+profile tool="pyspy" duration="30s" vus="2000":
+    #!/usr/bin/env python3
+    import os, resource, shutil, signal, subprocess, sys, time, urllib.request
+    from pathlib import Path
+
+    tool, duration, vus = sys.argv[1:4]
+    if tool not in ("pyspy", "cprofile"):
+        raise SystemExit("tool must be pyspy or cprofile, got " + tool)
+    root, repo = Path("{{root}}"), Path("{{repo}}")
+    ramp_s = 10
+    hold_s = int(duration[:-1]) * (60 if duration.endswith("m") else 1) if duration[-1] in "sm" else int(duration)
+
+    build = root / "build"
+    build.mkdir(exist_ok=True)
+    db = build / "profile.db"
+    for suffix in ("", "-wal", "-shm"):
+        Path(str(db) + suffix).unlink(missing_ok=True)
+    shutil.copy(repo / "seed" / "feed.db", db)
+    _, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    limit = 65535 if hard == resource.RLIM_INFINITY else min(65535, hard)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (limit, hard))
+
+    env = dict(os.environ, SQLITE_PATH=str(db), JWT_SECRET="{{secret}}", HOST="127.0.0.1", PORT="3000")
+    out = build / ("profile.json" if tool == "pyspy" else "profile.prof")
+    out.unlink(missing_ok=True)
+    if tool == "cprofile":
+        env["PROFILE_OUT"] = str(out)
+    server = subprocess.Popen(["{{py}}", str(root / "infra" / "ops.py"), "start"], env=env, start_new_session=True)
+
+    def stop_server():
+        if server.poll() is None:
+            os.killpg(server.pid, signal.SIGINT)
+            try:
+                server.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                os.killpg(server.pid, signal.SIGKILL)
+
+    try:
+        for _ in range(120):
+            if server.poll() is not None:
+                raise SystemExit("server exited during startup")
+            try:
+                urllib.request.urlopen("http://127.0.0.1:3000/health", timeout=1)
+                break
+            except OSError:
+                time.sleep(0.5)
+        else:
+            raise SystemExit("server never became healthy")
+
+        spy = None
+        if tool == "pyspy":
+            cmd = [str(root / ".devtools" / "bin" / "py-spy"), "record", "--pid", str(server.pid), "--subprocesses",
+                   "--duration", str(ramp_s + hold_s), "--format", "speedscope", "--output", str(out)]
+            if sys.platform == "darwin" and os.geteuid() != 0:
+                print("py-spy needs root on macOS: sudo may ask for your password", flush=True)
+                subprocess.run(["sudo", "-v"], check=True)
+                cmd = ["sudo"] + cmd
+            spy = subprocess.Popen(cmd)
+        k6 = subprocess.run(["k6", "run", "-e", "VUS=" + vus, "-e", "DURATION=%ds" % hold_s, "-e", "RAMP_UP=%ds" % ramp_s,
+                             "-e", "BASE_URL=http://127.0.0.1:3000", str(repo / "bench" / "load.js")])
+        if spy is not None:
+            spy.wait()
+    finally:
+        stop_server()
+
+    if not out.exists():
+        raise SystemExit("no profile written to %s" % out)
+    print("\nprofile:", out)
+    if tool == "pyspy":
+        print("open it at https://www.speedscope.app")
+    else:
+        subprocess.run(["{{py}}", "-c", "import pstats, sys; pstats.Stats(sys.argv[1]).sort_stats('tottime').print_stats(25)", str(out)])
+    raise SystemExit(k6.returncode)
+
+# remove build output (DB copies, profiles)
+[group: "dev"]
+clean:
+    @rm -rf build
+
+# first python >= 3.12 on PATH (honours $PYTHON)
+[private]
+_python:
+    #!/usr/bin/env python3
+    import os, shutil, subprocess
+    candidates = [os.environ.get("PYTHON", "")] + ["python3.12", "python3.13", "python3.14", "python3"]
+    for name in filter(None, candidates):
+        path = shutil.which(name)
+        if path and subprocess.run([path, "-c", "import sys; sys.exit(sys.version_info < (3, 12))"]).returncode == 0:
+            print(path)
+            raise SystemExit(0)
+    raise SystemExit("no python >= 3.12 found; set PYTHON=/path/to/python3.12+")

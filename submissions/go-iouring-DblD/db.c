@@ -282,44 +282,213 @@ int db_health(void) {
 // If anything about the database is not as expected (checked once in db_open by comparing
 // against the SQL answers), bt_on stays 0 and every read uses the SQL statements instead.
 
-// Appends the statement's current row to out. Returns the new length, or -1 if it won't fit.
-static int put_row(sqlite3_stmt *st, uint8_t *out, int n, int cap) {
-  int64_t id = sqlite3_column_int64(st, 0), likes = sqlite3_column_int64(st, 1);
-  const unsigned char *text[3];
-  uint16_t len[3];
-  int total = 16 + 6;
+// ---- Writing the JSON -----------------------------------------------------------------
+//
+// The feed and a single post are written here as finished JSON, straight into the response
+// buffer the caller passes: the text goes from SQLite's page to the bytes that are sent with
+// one copy. (Before, the rows were packed into a buffer, unpacked in Go, built into JSON in a
+// second buffer and copied into the response.) go-iouring-davidefrageri (#354) writes its
+// responses in C as well; this writer is our own.
+typedef struct {
+  uint8_t *p, *end;
+  int full; // something did not fit; the output is not to be used
+} wr_t;
+
+static inline int wr_room(wr_t *w, size_t n) {
+  if ((size_t)(w->end - w->p) >= n) return 1;
+  w->full = 1;
+  return 0;
+}
+
+static inline void wr_lit(wr_t *w, const char *s, size_t n) {
+  if (!wr_room(w, n)) return;
+  memcpy(w->p, s, n);
+  w->p += n;
+}
+#define WR(w, s) wr_lit(w, s, sizeof(s) - 1)
+
+// Decimal digits two at a time from a table: half the divisions of the one-digit loop, and
+// no division at all for a number below 10 (most like counts).
+static const char digit_pairs[] =
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
+    "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
+    "8081828384858687888990919293949596979899";
+
+static void wr_int(wr_t *w, int64_t v) {
+  if (!wr_room(w, 24)) return;
+  uint8_t *p = w->p;
+  uint64_t u = (uint64_t)v;
+  if (v < 0) {
+    *p++ = '-';
+    u = 0 - u;
+  }
+  if (u < 10) {
+    *p++ = (uint8_t)('0' + u);
+    w->p = p;
+    return;
+  }
+  char tmp[40]; // digits end at tmp[20]; the zeroed rest is so a fixed 20 bytes can be copied
+  memset(tmp + 20, 0, 20);
+  int i = 20;
+  while (u >= 100) {
+    unsigned r = (unsigned)(u % 100);
+    u /= 100;
+    i -= 2;
+    memcpy(tmp + i, digit_pairs + 2 * r, 2);
+  }
+  if (u >= 10) {
+    i -= 2;
+    memcpy(tmp + i, digit_pairs + 2 * u, 2);
+  } else {
+    tmp[--i] = (char)('0' + u);
+  }
+  memcpy(p, tmp + i, 20); // 20 - i of these are digits; the room for all 20 was checked
+  w->p = p + (20 - i);
+}
+
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
+// A JSON string, quotes included. JSON requires escaping bytes below 0x20, the quote and the
+// backslash; everything else is copied as it is.
+//
+// Text is copied and tested 16 bytes at a time (SSE2, part of every x86-64), then 8 at a time
+// with plain integer arithmetic (the same test as firstEscape in api.go), then byte by byte.
+// A block is stored to the output before it is known to be clean: if it holds a byte to
+// escape, only the bytes before that one are kept and the output continues from there.
+// json_test.go holds this to the Go version on 200,000 random strings.
+//
+// Room: before every block there is room for all the bytes left plus 24, so a block store
+// and one escape always fit, and it is checked again after each escape.
+static void wr_str(wr_t *w, const uint8_t *s, size_t n) {
+  static const char hex[] = "0123456789abcdef";
+  const uint64_t ones = 0x0101010101010101ull, highs = 0x8080808080808080ull;
+  if (!wr_room(w, n + 26)) return;
+  uint8_t *p = w->p;
+  *p++ = '"';
+  size_t i = 0;
+  for (;;) {
+    size_t k;
+#if defined(__SSE2__)
+    const __m128i quote = _mm_set1_epi8('"'), slash = _mm_set1_epi8('\\'), low = _mm_set1_epi8(0x1f);
+    while (i + 16 <= n) {
+      __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
+      _mm_storeu_si128((__m128i *)p, x);
+      // min(x, 0x1f) == x exactly where the byte, as unsigned, is 0x1f or less
+      __m128i bad = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(x, quote), _mm_cmpeq_epi8(x, slash)), _mm_cmpeq_epi8(_mm_min_epu8(x, low), x));
+      unsigned m = (unsigned)_mm_movemask_epi8(bad);
+      if (m) {
+        k = (size_t)__builtin_ctz(m);
+        goto escape;
+      }
+      p += 16;
+      i += 16;
+    }
+#endif
+    while (i + 8 <= n) {
+      uint64_t x;
+      memcpy(&x, s + i, 8);
+      memcpy(p, &x, 8);
+      uint64_t q = x ^ (ones * '"'), b = x ^ (ones * '\\');
+      uint64_t m = ((x - ones * 0x20) & ~x & highs) | ((q - ones) & ~q & highs) | ((b - ones) & ~b & highs);
+      if (m) {
+        k = (size_t)(__builtin_ctzll(m) >> 3);
+        goto escape;
+      }
+      p += 8;
+      i += 8;
+    }
+    for (k = 0; i + k < n; k++) {
+      uint8_t c = s[i + k];
+      if (c < 0x20 || c == '"' || c == '\\') goto escape;
+      p[k] = c;
+    }
+    p += k;
+    break;
+
+  escape: // s[i + k] needs escaping; the k bytes before it are already in place
+    p += k;
+    i += k;
+    uint8_t c = s[i++];
+    *p++ = '\\';
+    switch (c) {
+    case '"': case '\\': *p++ = c; break;
+    case '\n': *p++ = 'n'; break;
+    case '\r': *p++ = 'r'; break;
+    case '\t': *p++ = 't'; break;
+    default:
+      *p++ = 'u'; *p++ = '0'; *p++ = '0';
+      *p++ = hex[c >> 4]; *p++ = hex[c & 15];
+    }
+    if ((size_t)(w->end - p) < (n - i) + 24) {
+      w->full = 1;
+      return;
+    }
+  }
+  *p++ = '"';
+  w->p = p;
+}
+
+int db_json_string(const uint8_t *s, int n, uint8_t *out, int cap) {
+  wr_t w = {out, out + cap, 0};
+  wr_str(&w, s, (size_t)n);
+  return w.full ? -1 : (int)(w.p - out);
+}
+
+// One post object, in the order SPEC.md gives.
+static void wr_post(wr_t *w, int64_t id, int64_t likes, const uint8_t *body, size_t body_n, const uint8_t *at, size_t at_n, const uint8_t *name, size_t name_n) {
+  WR(w, "{\"id\":");
+  wr_int(w, id);
+  WR(w, ",\"body\":");
+  wr_str(w, body, body_n);
+  WR(w, ",\"created_at\":");
+  wr_str(w, at, at_n);
+  WR(w, ",\"author\":");
+  wr_str(w, name, name_n);
+  WR(w, ",\"like_count\":");
+  wr_int(w, likes);
+  WR(w, "}");
+}
+
+static int wr_done(wr_t *w, uint8_t *out) { return w->full ? -1 : (int)(w->p - out); }
+
+// The statement's current row as a post object.
+static void put_row(sqlite3_stmt *st, wr_t *w) {
+  const uint8_t *text[3];
+  size_t len[3];
   for (int i = 0; i < 3; i++) {
     text[i] = sqlite3_column_text(st, 2 + i);
-    len[i] = (uint16_t)sqlite3_column_bytes(st, 2 + i);
-    total += len[i];
+    len[i] = (size_t)sqlite3_column_bytes(st, 2 + i);
   }
-  if (n + total > cap) return -1;
-  memcpy(out + n, &id, 8);
-  memcpy(out + n + 8, &likes, 8);
-  memcpy(out + n + 16, len, 6);
-  n += 22;
-  for (int i = 0; i < 3; i++) {
-    memcpy(out + n, text[i], len[i]);
-    n += len[i];
-  }
-  return n;
+  wr_post(w, sqlite3_column_int64(st, 0), sqlite3_column_int64(st, 1), text[0], len[0], text[1], len[1], text[2], len[2]);
 }
 
 static int sql_feed(uint8_t *out, int cap) {
-  int n = 0, rc;
-  while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW)
-    if ((n = put_row(st_feed, out, n, cap)) < 0) break;
+  wr_t w = {out, out + cap, 0};
+  int rc, k = 0;
+  WR(&w, "{\"posts\":[");
+  while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW) {
+    if (k++) WR(&w, ",");
+    put_row(st_feed, &w);
+  }
   sqlite3_reset(st_feed);
-  return (rc == SQLITE_DONE && n >= 0) ? n : fail("feed");
+  WR(&w, "]}");
+  return (rc == SQLITE_DONE && !w.full) ? wr_done(&w, out) : fail("feed");
 }
 
 static int sql_post(int64_t id, uint8_t *out, int cap) {
   sqlite3_bind_int64(st_post, 1, id);
-  int rc = sqlite3_step(st_post), n = 0;
-  if (rc == SQLITE_ROW) n = put_row(st_post, out, 0, cap);
+  wr_t w = {out, out + cap, 0};
+  int rc = sqlite3_step(st_post);
+  if (rc == SQLITE_ROW) {
+    WR(&w, "{\"post\":");
+    put_row(st_post, &w);
+    WR(&w, "}");
+  }
   sqlite3_reset(st_post);
-  if (rc != SQLITE_ROW && rc != SQLITE_DONE) return fail("post");
-  return n;
+  if ((rc != SQLITE_ROW && rc != SQLITE_DONE) || w.full) return fail("post");
+  return wr_done(&w, out);
 }
 
 static int sql_post_exists(int64_t id) {
@@ -454,15 +623,17 @@ static int bt_likes_range(i64 lo, i64 hi, i64 *counts) {
   return rc == SQLITE_OK || rc == SQLITE_DONE ? 0 : -1;
 }
 
-// Appends post `id` in the row format. Returns the new length, n unchanged if there is no
-// such post, or -1. likes is the post's like count if the caller already has it, or -1.
-static int bt_row(i64 id, i64 likes, uint8_t *out, int n, int cap) {
+// Writes post `id` as a post object. Returns 1, 0 if there is no such post (nothing is
+// written), or -1. likes is the post's like count if the caller already has it, or -1.
+// The text is written straight from the pages: the posts cursor does not move again before
+// the row is out, and the users and likes lookups are on other cursors.
+static int bt_row(i64 id, i64 likes, wr_t *w) {
   int res;
   u32 len;
   col_t p[4], u[2];
   i64 uid;
   if (sqlite3BtreeTableMoveto(c_posts, id, 0, &res) != SQLITE_OK) return -1;
-  if (res != 0) return n;
+  if (res != 0) return 0;
   // posts: (id, user_id, body, created_at). The id is the row's key, not in the record.
   const u8 *rec = record(c_posts, &len);
   if (!rec || rec == spill || rec_cols(rec, len, 4, p) || col_int(p[1], &uid) || !col_is_text(p[2]) || !col_is_text(p[3])) return -1;
@@ -471,25 +642,23 @@ static int bt_row(i64 id, i64 likes, uint8_t *out, int n, int cap) {
   rec = record(c_users, &len);
   if (!rec || rec == spill || rec_cols(rec, len, 2, u) || !col_is_text(u[1])) return -1;
   if (likes < 0) likes = bt_likes(id);
-  if (likes < 0 || n + 22 + (int)(p[2].n + p[3].n + u[1].n) > cap) return -1;
-  uint16_t lens[3] = {(uint16_t)p[2].n, (uint16_t)p[3].n, (uint16_t)u[1].n};
-  memcpy(out + n, &id, 8);
-  memcpy(out + n + 8, &likes, 8);
-  memcpy(out + n + 16, lens, 6);
-  n += 22;
-  memcpy(out + n, p[2].p, p[2].n); n += p[2].n;
-  memcpy(out + n, p[3].p, p[3].n); n += p[3].n;
-  memcpy(out + n, u[1].p, u[1].n); n += u[1].n;
-  return n;
+  if (likes < 0) return -1;
+  wr_post(w, id, likes, p[2].p, p[2].n, p[3].p, p[3].n, u[1].p, u[1].n);
+  return 1;
 }
 
 // The read transaction for direct reads. The pass's BEGIN has already run; this starts (or
 // joins) the storage layer's read transaction, which the pass's COMMIT ends.
 static int bt_begin(void) { return sqlite3BtreeBeginTrans(bt, 0, 0) == SQLITE_OK ? 0 : -1; }
 
+static i64 feed_ids[20]; // the ids of the last feed read, for the startup check
+static int feed_k;
+
 static int bt_feed(uint8_t *out, int cap) {
-  i64 ids[20];
+  i64 *ids = feed_ids;
+  wr_t w = {out, out + cap, 0};
   int res, k = 0, n = 0;
+  feed_k = 0;
   if (bt_begin()) return -1;
   // posts_created_at_id_idx is stored newest first, so the feed is its first 20 entries.
   int rc = sqlite3BtreeFirst(c_feed, &res);
@@ -502,9 +671,12 @@ static int bt_feed(uint8_t *out, int cap) {
     k++;
   }
   if (rc != SQLITE_OK && rc != SQLITE_DONE) n = -1;
+  feed_k = k;
   if (k == 0 || n < 0) {
     bt_release();
-    return n;
+    if (n < 0) return -1;
+    WR(&w, "{\"posts\":[]}");
+    return wr_done(&w, out);
   }
   // Like counts for all of them in one walk when their ids are close together.
   static i64 counts[LIKES_SPAN];
@@ -527,7 +699,15 @@ static int bt_feed(uint8_t *out, int cap) {
   static struct { i64 uid, likes; u32 body, body_n, at, at_n, name, name_n; } row[20];
   static uint8_t aside[20 * 2600];
   int order[20], used = 0;
-  for (int i = 0; i < k; i++) { // insertion sort of 20 positions by post id
+  // Newest first is nearly always descending id, so try the reverse order before sorting:
+  // an insertion sort of a descending list is its worst case (190 moves for 20). (The
+  // reverse-first check is rust-iouring-kensac's, #264.)
+  int ascending = 1;
+  for (int i = 0; i < k; i++) {
+    order[i] = k - 1 - i;
+    if (i && ids[order[i - 1]] > ids[order[i]]) ascending = 0;
+  }
+  for (int i = 0; !ascending && i < k; i++) { // insertion sort of 20 positions by post id
     int j = i;
     for (; j > 0 && ids[order[j - 1]] > ids[i]; j--) order[j] = order[j - 1];
     order[j] = i;
@@ -567,36 +747,40 @@ static int bt_feed(uint8_t *out, int cap) {
     row[i].name = used; row[i].name_n = u[1].n;
     memcpy(aside + used, u[1].p, u[1].n); used += u[1].n;
   }
+  WR(&w, "{\"posts\":[");
   for (int i = 0; i < k; i++) {
     i64 likes = row[i].likes >= 0 ? row[i].likes : bt_likes(ids[i]);
-    if (likes < 0 || n + 22 + (int)(row[i].body_n + row[i].at_n + row[i].name_n) > cap) goto slow;
-    uint16_t lens[3] = {(uint16_t)row[i].body_n, (uint16_t)row[i].at_n, (uint16_t)row[i].name_n};
-    memcpy(out + n, &ids[i], 8);
-    memcpy(out + n + 8, &likes, 8);
-    memcpy(out + n + 16, lens, 6);
-    n += 22;
-    memcpy(out + n, aside + row[i].body, row[i].body_n); n += row[i].body_n;
-    memcpy(out + n, aside + row[i].at, row[i].at_n); n += row[i].at_n;
-    memcpy(out + n, aside + row[i].name, row[i].name_n); n += row[i].name_n;
+    if (likes < 0) goto slow;
+    if (i) WR(&w, ",");
+    wr_post(&w, ids[i], likes, aside + row[i].body, row[i].body_n, aside + row[i].at, row[i].at_n, aside + row[i].name, row[i].name_n);
   }
+  WR(&w, "]}");
   bt_release();
-  return n;
+  return wr_done(&w, out);
 
 slow: // anything unexpected: the plain way, one post at a time (and from there to SQL)
-  n = 0;
-  for (int i = 0; i < k && n >= 0; i++) {
-    int m = bt_row(ids[i], -1, out, n, cap);
-    n = m == n ? -1 : m; // a post in the index must be in the table
+  w = (wr_t){out, out + cap, 0};
+  WR(&w, "{\"posts\":[");
+  for (int i = 0; i < k; i++) {
+    if (i) WR(&w, ",");
+    if (bt_row(ids[i], -1, &w) != 1) { // a post in the index must be in the table
+      bt_release();
+      return -1;
+    }
   }
+  WR(&w, "]}");
   bt_release();
-  return n;
+  return wr_done(&w, out);
 }
 
 static int bt_post(i64 id, uint8_t *out, int cap) {
   if (bt_begin()) return -1;
-  int n = bt_row(id, -1, out, 0, cap);
+  wr_t w = {out, out + cap, 0};
+  WR(&w, "{\"post\":");
+  int found = bt_row(id, -1, &w);
+  WR(&w, "}");
   bt_release();
-  return n;
+  return found <= 0 ? found : wr_done(&w, out);
 }
 
 static int bt_post_exists(i64 id) {
@@ -649,15 +833,13 @@ static void bt_setup(void) {
     likes_key.aMem = &likes_val;
     likes_key.nField = 1;
     int n = bt_feed(a, sizeof a), m = sql_feed(b, sizeof b), ok = n >= 0 && n == m && memcmp(a, b, n) == 0;
-    for (int off = 0; ok && off < n;) { // each post of the feed, and the id after it (a miss or a hit)
-      i64 id;
-      uint16_t lens[3];
-      memcpy(&id, a + off, 8);
-      memcpy(lens, a + off + 16, 6);
-      off += 22 + lens[0] + lens[1] + lens[2];
-      for (i64 probe = id; ok && probe <= id + 1; probe++) {
-        int x = bt_post(probe, a + n, (int)sizeof a - n), y = sql_post(probe, b + n, (int)sizeof b - n);
-        ok = x >= 0 && x == y && memcmp(a + n, b + n, x) == 0 && bt_post_exists(probe) == sql_post_exists(probe);
+    i64 ids[20];
+    int k = feed_k;
+    memcpy(ids, feed_ids, sizeof ids);
+    for (int i = 0; ok && i < k; i++) { // each post of the feed, and the id after it (a miss or a hit)
+      for (i64 probe = ids[i]; ok && probe <= ids[i] + 1; probe++) {
+        int x = bt_post(probe, a, (int)sizeof a), y = sql_post(probe, b, (int)sizeof b);
+        ok = x >= 0 && x == y && memcmp(a, b, x) == 0 && bt_post_exists(probe) == sql_post_exists(probe);
       }
     }
     bt_on = ok;

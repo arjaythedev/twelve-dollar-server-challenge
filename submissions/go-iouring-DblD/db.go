@@ -5,7 +5,7 @@
 package main
 
 /*
-#cgo CFLAGS: -O2 -DSQLITE_THREADSAFE=2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DQS=0 -DHAVE_USLEEP=1
+#cgo CFLAGS: -DSQLITE_THREADSAFE=2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DQS=0 -DHAVE_USLEEP=1
 #cgo LDFLAGS: -lm
 #include <stdlib.h>
 #include "db.h"
@@ -13,7 +13,6 @@ package main
 import "C"
 
 import (
-	"encoding/binary"
 	"errors"
 	"unsafe"
 )
@@ -54,13 +53,20 @@ func dbStats() (walPages, walMax, checkpoints int) {
 
 func dbHealth() bool { return C.db_health() == 1 }
 
-// dbFeed and dbPost fill buf with packed rows and return how many bytes they wrote.
+// dbFeed and dbPost write the JSON body into buf, which is the free part of a response buffer
+// (memory outside the Go heap), and return its length; see db.h for the other values.
 func dbFeed(buf []byte) int {
-	return int(C.db_feed((*C.uint8_t)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	return int(C.db_feed((*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(buf))), C.int(len(buf))))
 }
 
 func dbPost(id int64, buf []byte) int {
-	return int(C.db_post(C.int64_t(id), (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.int(len(buf))))
+	return int(C.db_post(C.int64_t(id), (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(buf))), C.int(len(buf))))
+}
+
+// dbJSONString is the C side's string escaper, here so that json_test.go can compare it with
+// appendString (cgo cannot be used from a test file).
+func dbJSONString(dst, s []byte) int {
+	return int(C.db_json_string((*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(s))), C.int(len(s)), (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(dst))), C.int(len(dst))))
 }
 
 func dbPostExists(id int64) int { return int(C.db_post_exists(C.int64_t(id))) }
@@ -73,17 +79,8 @@ func dbCreate(userID int64, body []byte) (id int64, createdAt [24]byte, ok bool)
 	return int64(cid), createdAt, rc == 0
 }
 
-// row is one post as the shim packed it. The byte slices point into the shared buffer and
-// are only valid until the next database call.
+// row is one post, for appendPost.
 type row struct {
 	id, likes             int64
 	body, created, author []byte
-}
-
-func nextRow(b []byte) (row, []byte) {
-	r := row{id: int64(binary.LittleEndian.Uint64(b)), likes: int64(binary.LittleEndian.Uint64(b[8:]))}
-	bl, cl, al := int(binary.LittleEndian.Uint16(b[16:])), int(binary.LittleEndian.Uint16(b[18:])), int(binary.LittleEndian.Uint16(b[20:]))
-	b = b[22:]
-	r.body, r.created, r.author = b[:bl], b[bl:bl+cl], b[bl+cl:bl+cl+al]
-	return r, b[bl+cl+al:]
 }

@@ -407,3 +407,33 @@ seed and PGO binary, preferably from a separate k6 host, and collect
 p95/p99, errors, CPU/request, RAM, `enobufs`, retransmissions and TCP
 memory. A smaller receive window may hurt throughput, so **do not enable
 without an A/B win**. No performance claim until the official benchmark.
+
+
+## Follow-up to merged #486: fixed 8 KiB / 16 KiB socket receive-buffer A/B
+
+This experiment isolates whether #486's improved score comes from a
+**fixed, smaller receive-buffer limit on new TCP connections**, rather
+than from PSI-based dynamic policy changes. The official benchmark default
+uses `TCP_RCVBUF_FIXED=8192` (8 KiB *requested* on each listener; Linux
+typically reports double that with `getsockopt`). All eight listeners use
+the same policy. No existing connection is forcibly changed or closed.
+For a matched second run with the **same binary**, set
+`TCP_RCVBUF_FIXED=16384` (16 KiB requested).
+
+- Fixed 8 KiB scored default: `TCP_RCVBUF_FIXED=8192`.
+- Fixed 16 KiB alternate: `TCP_RCVBUF_FIXED=16384`; requires an explicit
+  environment override or a separate default-setting benchmark commit,
+  because the challenge scores the binary's default startup environment.
+- Restore #486's original adaptive governor for a fair A/B:
+  `TCP_RCVBUF_FIXED=0 TCP_MEM_GOVERNOR=1`.
+- With fixed sizing selected, keep cgroup PSI, socket memory and RSS
+  telemetry, but **never** dynamically resize the listener's receive buffer.
+- All #486 application, WAL, hashing, waiting, ring and
+  `ANSWERS_PER_PASS=2048` settings are unchanged.
+
+Run `bash test/run.sh submissions/c-iouring-jowinjestine` and require
+42/42. For each mode run the original `bench/load.js` with the same seed,
+one-vCPU/two-GB host and external k6 client; 60-second ramp and five-minute
+300K/310K/320K holds as needed. Collect p95, p99, failed requests, CPU per
+request, socket memory, memory pressure and `enobufs`. Under-sized receive
+buffers may *reduce* throughput; do not claim a win without the A/B.

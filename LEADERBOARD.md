@@ -1229,6 +1229,9 @@ admission at the door on by default as in #435) held **300,000** at 80 % CPU (28
 #437's `1a0a677` without the admission filter) held **290,000** at 77 % CPU (27,597 req/s, p95 21.9 / p99 184.3 ms,
 0 errors, 784 MB; 300k failed the 2-minute probe on p99 3.65 s, 320k on p99 4.63 s), below #398's 300,000, so #427 is
 still not merged.
+#437's newest head (`1c982c3`, 2026-11-17: admission at the door also closes while the loop's CPU is under 5 % idle)
+failed conformance (17 checks passed, then `POST /posts` with `alg=none` and with an expired token got no response and
+the suite hung until its timeout), so it wasn't load tested and #437 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

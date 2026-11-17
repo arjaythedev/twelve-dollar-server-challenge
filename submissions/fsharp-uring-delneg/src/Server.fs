@@ -34,6 +34,10 @@ let private oneWriteOn = env "ONEWRITE" 1 = 1
 let admitOn = env "ADMIT" 1 = 1
 let private admitMs = uint32 (env "ADMITMS" 10)
 let private admitMaxMs = uint32 (env "ADMITMAX" 2000) // accepting resumes after this long whatever waits
+let private admitHoldMs = uint32 (env "ADMITHOLD" 100) // and not sooner than this
+// It also stops while the CPU the loop runs on has been idle less than admitIdle percent of the last 200 ms
+// (/proc/stat, looked at every 50 ms): a loop that is only just keeping up has nothing to spare for a burst.
+let private admitIdle = int64 (env "ADMITIDLE" 5)
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
@@ -349,6 +353,53 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable stYields = 0L
     let mutable admitOpen = true
     let mutable admitClosedAt = 0u
+    // idle and total ticks of the loop's CPU at the last four looks, 50 ms apart
+    let cpuIdle = Array.zeroCreate<int64> 4
+    let cpuTotal = Array.zeroCreate<int64> 4
+    let cpuOf = Array.create 4 -1
+    let mutable cpuAt = 0u
+    let mutable cpuN = 0
+    let mutable lowIdle = false
+    let mutable statFd = -2
+    let statBuf = NativeMemory.Alloc(unativeint 8192) |> NativePtr.ofVoidPtr<byte>
+    /// Sets lowIdle from the "cpuN" line of /proc/stat for the CPU this thread is on.
+    let lookIdle () =
+        if statFd = -2 then statFd <- Native.``open`` ("/proc/stat\000"B, 0x80000)
+        let cpu = Native.sched_getcpu ()
+        let n = if statFd >= 0 && cpu >= 0 then int (Native.pread (statFd, NativePtr.toNativeInt statBuf, unativeint 8192, 0L)) else 0
+        let mutable i = 0
+        let mutable found = false
+        // the line "cpu<cpu> user nice system idle iowait irq softirq steal ..."
+        while not found && i + 4 < n do
+            if NativePtr.get statBuf i = 'c'B && NativePtr.get statBuf (i + 1) = 'p'B && NativePtr.get statBuf (i + 2) = 'u'B then
+                let mutable j = i + 3
+                let mutable v = -1
+                while j < n && NativePtr.get statBuf j >= '0'B && NativePtr.get statBuf j <= '9'B do
+                    v <- (max v 0) * 10 + int (NativePtr.get statBuf j - '0'B)
+                    j <- j + 1
+                if v = cpu then
+                    found <- true
+                    let mutable idle = 0L
+                    let mutable total = 0L
+                    let mutable k = 0
+                    while k < 8 && j < n && NativePtr.get statBuf j <> '\n'B do
+                        while j < n && NativePtr.get statBuf j = ' 'B do j <- j + 1
+                        let mutable x = 0L
+                        while j < n && NativePtr.get statBuf j >= '0'B && NativePtr.get statBuf j <= '9'B do
+                            x <- x * 10L + int64 (NativePtr.get statBuf j - '0'B)
+                            j <- j + 1
+                        total <- total + x
+                        if k = 3 || k = 4 then idle <- idle + x
+                        k <- k + 1
+                    let slot = cpuN &&& 3 // holds the look of 200 ms ago
+                    lowIdle <- cpuOf.[slot] = cpu && total > cpuTotal.[slot] && (idle - cpuIdle.[slot]) * 100L < admitIdle * (total - cpuTotal.[slot])
+                    cpuIdle.[slot] <- idle
+                    cpuTotal.[slot] <- total
+                    cpuOf.[slot] <- cpu
+                    cpuN <- cpuN + 1
+            while i < n && NativePtr.get statBuf i <> '\n'B do i <- i + 1
+            i <- i + 1
+        if not found then lowIdle <- false
     // classic BPF on a TCP socket sees the segment from its TCP header: byte 13 holds the flags
     let synFilter =
         let code = [| 0x30us, 0uy, 0uy, 13u // A = flags
@@ -1276,15 +1327,18 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                     rs.RqLen <- rs.RqLen - n
                     nrearm <- nrearm - n
             if admitOn then
+                if admitIdle > 0L && passMs - cpuAt >= 50u then
+                    cpuAt <- passMs
+                    lookIdle ()
                 let waiting = nreq > reqHead
                 if admitOpen then
-                    if waiting && passMs - reqs.[reqHead].Ms >= admitMs then
-                        // behind on the connections it has: no new ones until it has caught up
+                    if lowIdle || (waiting && passMs - reqs.[reqHead].Ms >= admitMs) then
+                        // behind on the connections it has, or about to be: no new ones until it has caught up
                         admitOpen <- false
                         admitClosedAt <- passMs
                         stAdmitCloses <- stAdmitCloses + 1L
                         admit false
-                elif not waiting || passMs - admitClosedAt >= admitMaxMs then
+                elif (not waiting && not lowIdle && passMs - admitClosedAt >= admitHoldMs) || passMs - admitClosedAt >= admitMaxMs then
                     admitOpen <- true
                     stAdmitClosedMs <- stAdmitClosedMs + int64 (passMs - admitClosedAt)
                     admit true

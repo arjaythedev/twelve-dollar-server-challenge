@@ -29,6 +29,9 @@ extern int setsockoptPtr(int fd, int level, int name, nativeint value, int len)
 [<DllImport(L, SetLastError = true)>]
 extern int getsockopt(int fd, int level, int name, nativeint value, int& len)
 
+[<DllImport(L)>]
+extern int sched_getcpu()
+
 [<DllImport(L, SetLastError = true)>]
 extern int bind(int fd, nativeint addr, int len)
 

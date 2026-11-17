@@ -832,24 +832,58 @@ long long dbx_likes(dbx *h, long long post_id) {
   return r < 0 ? -1 : count;
 }
 
+/* Count the likes of up to n posts in one walk of likes_post_id_idx.
+ *
+ * The rows are decoded from the page the cursor already holds instead of one dbx_record() +
+ * first_int() + dbx_next() round trip per row (87 rows on an average feed).  This is the shape
+ * rust-iouring-kensac #264 uses for the same walk (their td_count_likes): read cells out of
+ * c->pPage, write c->ix to where the read stopped, and let sqlite3BtreeNext() move the cursor on
+ * - the cursor keeps owning the page, so no page is acquired or released here.  Anything that
+ * does not fit the one-byte-size / small-integer assumptions returns 1, and the caller falls back
+ * to a seek per post.
+ *
+ * Returns 0 on success, 1 when the caller must fall back, -1 on a SQLite error. */
 int dbx_likes_many(dbx *h, const long long *ids, int n, unsigned *counts) {
   if (n <= 0) return 0;
   memset(counts, 0, sizeof(unsigned) * (size_t)n);
   int r = dbx_seek_ge(h, DBX_LIKES_IDX, ids[0]);
-  if (r < 0) return -1;
+  if (r <= 0) return r < 0 ? -1 : 0;
+  BtCursor *c = h->cur[DBX_LIKES_IDX];
+  const long long hi = ids[n - 1];
   int j = 0;
-  while (r == 1) {
-    unsigned len = 0;
-    const unsigned char *p = dbx_record(h, DBX_LIKES_IDX, &len);
-    if (!p) return -1;
-    long long pid = 0;
-    if (first_int(p, len, &pid)) return -1;
-    while (j < n && ids[j] < pid) j++;
-    if (j == n || pid > ids[n - 1]) break;
-    if (ids[j] == pid) counts[j]++;
-    r = dbx_next(h, DBX_LIKES_IDX);
+  for (;;) {
+    MemPage *pg = c->pPage;
+    int i = c->ix, last = pg->leaf ? pg->nCell : i + 1; /* interior: just this entry */
+    for (; i < last; i++) {
+      const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
+      unsigned len = cell[0];
+      const unsigned char *p = cell + 1;
+      if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 1;
+      unsigned hdr = p[0], t = p[1];
+      if (hdr >= len || hdr < 2 || t >= 0x80) return 1;
+      long long v;
+      if (t >= 1 && t <= 6) {
+        static const unsigned char sz[7] = {0, 1, 2, 3, 4, 6, 8};
+        unsigned k = sz[t];
+        if (hdr + k > len) return 1;
+        const unsigned char *q = p + hdr;
+        v = (signed char)q[0];
+        for (unsigned b = 1; b < k; b++) v = v << 8 | q[b];
+      } else if (t == 8 || t == 9) {
+        v = (long long)t - 8;
+      } else {
+        return 1;
+      }
+      if (v > hi) return 0;
+      while (j < n && ids[j] < v) j++;
+      if (j == n) return 0;
+      if (ids[j] == v) counts[j]++;
+    }
+    c->ix = (u16)(last - 1);
+    int rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) return 0;
+    if (rc != SQLITE_OK) return -1;
   }
-  return r < 0 ? -1 : 0;
 }
 
 static void check_tx(struct dbx *h) {

@@ -65,6 +65,7 @@ class Db {
   void text_put(const uint8_t* p, size_t n);
   bool author(int64_t user_id, ByteBuf& out);
   int64_t count_likes(int64_t id);
+  int count_likes_one(long long id);
   bool feed_rows();
   void feed_json(ByteBuf& out);
 

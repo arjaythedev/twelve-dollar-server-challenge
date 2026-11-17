@@ -72,7 +72,8 @@ p95 20.4 / p99 122.6 ms, 0 err, 72 % CPU, 25 µs/req, 1,041 MB, 2026-11-16; 280,
 its follow-up PR #460 (`b118b95`, merged: 8 io_uring rings, SQLite B-tree cursor reads, #264's shim credited, PGO
 profile recorded on the box; that step fell back to the plain Zig build on the box, so it was scored without PGO;
 its earlier `122da96` held 260,000 and `7c2ebfb` 219,000); its first merged #454 code (`ede8d01`) held 65,000
-(connection-capped, see ᶜ).
+(connection-capped, see ᶜ). Its later follow-up #488 (`4b2fc29`; held, not merged: it didn't beat the merged row)
+scored 219,000 (see ᶜ).
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -1034,6 +1035,11 @@ CPU, 29 µs/req, 638 MB, 2026-11-15); 270,000 and 280,000 failed the 2-minute pr
 2.65 s) and 320,000 on p95 (38 s). Its merged commit `b118b95` (all 8 rings accepting from the start, larger response
 pool, shorter idle wait) held **280,000** (26,674 req/s, p95 114.3 / p99 369.9 ms, 0 errors, 90 % CPU, 30 µs/req,
 910 MB, 2026-11-16) and is the row now; 290,000 failed the 2-minute probe on p99 (4.45 s) and 300,000 on p95 (22.8 s).
+Its follow-up **#488** (`4b2fc29`: 6 rings started on demand, 64 MiB page cache, single-pass `/posts/:id`, smaller
+response pool; the clang PGO build compiled on the box this time; held, not merged: below the merged row) held
+**219,000** (21,378 req/s, p95 16.6 / p99 98.5 ms, 0 errors, 63 % CPU, 27 µs/req, 797 MB, 2026-11-17); 230,000 passed
+the 2-minute probe but failed the 5-minute hold on p99 (8.33 s, 69 % CPU), 240,000 failed the 2-minute probe on p99
+(1.25 s) and 320,000 on p95 (36.0 s).
 
 ᴹ **C++ io_uring #442** (`8512d44`, follow-up to the merged #412's 65,000 ᶜ: rewrite into `src/`, PASSIVE checkpoints on
 a second connection) held **199,000** (19,576 req/s, p95 15.0 / p99 80.7 ms, 0 errors, 64 % CPU, 30 µs/req, 1,170 MB,

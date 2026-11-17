@@ -4,13 +4,14 @@
 // and nish/crypto's HMAC. README.md has the design and the measurements.
 //
 // Configured by SQLITE_PATH, JWT_SECRET, HOST and PORT (SPEC.md). A
-// supervisor (nish/net/prefork, restarts off) starts WORKERS serving
-// processes, which share the port with SO_REUSEPORT, and one checkpointer.
-// Each serving process holds at most SLOTS connections (60,000), under the
-// 65,535 descriptors a process gets: serving direct, every user holds a
-// keep-alive connection, so 300,000 users need five. README.md lists the
-// other optional variables.
-import { pollCreate, pollWait, tcpListenFlags } from "nish:net"
+// supervisor (nish/net/prefork, restarts off) starts the serving processes,
+// which share the port with SO_REUSEPORT, and one checkpointer. Serving
+// direct, every user holds a keep-alive connection. Where the kernel gives
+// io_uring rings, connections live in ring slots rather than descriptors, so
+// one serving process holds them all, past the 65,535 descriptors a process
+// gets. Where it does not, five processes on descriptors hold SLOTS (60,000)
+// each. README.md lists the other optional variables.
+import { NET_LISTEN_RING, netRingState, pollCreate, pollWait, tcpListenFlags } from "nish:net"
 import { getenv } from "nish:process"
 import { PREFORK_STOPPED, PreforkConfig, preforkWith } from "nish/net/prefork"
 import { Database, OPEN_READWRITE, openDatabase } from "nish/sqlite"
@@ -18,6 +19,30 @@ import { FeedServer, ServerConfig } from "./server"
 
 /** `tcpListenFlags`: SO_REUSEPORT, and TCP_NODELAY on every accepted socket. */
 const LISTEN_FLAGS: i32 = 3
+
+/** The argument that makes the program the ring probe instead of the server. */
+const PROBE_ARG: string = "--feed-ring-probe"
+
+/**
+ * The ring probe, run as a child of the supervisor before any worker starts:
+ * opens a ring listener on an ephemeral loopback port and exits 0 when it
+ * accepts into rings, 1 when the kernel refused them (Docker's default
+ * seccomp profile, a kernel without io_uring) and it would serve descriptors.
+ * A child, so that the supervisor, whose workers fork from it, never makes a
+ * ring of its own.
+ */
+const probeRings = (): i32 => {
+  const fd: i32 = tcpListenFlags("127.0.0.1", 0, 1, NET_LISTEN_RING)
+  const state: i32 = netRingState()
+  if (fd < 0 || state !== 1) {
+    console.log(`feed: no io_uring rings (${fd < 0 ? fd : state}), serving descriptors`)
+    return 1
+  }
+  return 0
+}
+
+/** Whether a probe child got rings; false when it could not be run. */
+const ringsWork = (): boolean => spawnSync([process.argv[0], PROBE_ARG]) === 0
 
 /** The environment variable `name` as a positive number, or `fallback`. */
 const envInt = (name: string, fallback: i32): i32 => {
@@ -93,6 +118,9 @@ const checkpointer = (path: string, everyMs: i32, restartFrames: i64): i32 => {
 }
 
 export const main = (): i32 => {
+  if (toI32(process.argv.length) === 2 && process.argv[1] === PROBE_ARG) {
+    return probeRings()
+  }
   const cfg = new ServerConfig()
   cfg.sqlitePath = getenv("SQLITE_PATH") ?? ""
   cfg.jwtSecret = getenv("JWT_SECRET") ?? ""
@@ -102,11 +130,14 @@ export const main = (): i32 => {
   }
   cfg.host = getenv("HOST") ?? "0.0.0.0"
   cfg.port = envInt("PORT", 3000)
-  cfg.slots = envInt("SLOTS", 60000)
   cfg.idleTimeoutMs = envInt("IDLE_TIMEOUT_MS", 600000)
   cfg.cacheKib = envInt("CACHE_KIB", 16384)
   const mmapMib: i32 = envInt("MMAP_MIB", 0)
-  const workers: i32 = envInt("WORKERS", 5)
+  // RING=0 keeps the descriptors. Otherwise a child probes for rings; the
+  // workers fork after it, so every one listens the same way.
+  const rings: boolean = (getenv("RING") ?? "1") !== "0" && ringsWork()
+  const workers: i32 = envInt("WORKERS", rings ? 1 : 5)
+  cfg.slots = envInt("SLOTS", rings ? 400000 : 60000)
   const prefork = new PreforkConfig()
   prefork.workers = workers + 1
   prefork.restart = false
@@ -132,13 +163,14 @@ export const main = (): i32 => {
   if (db === null) {
     return 1
   }
-  const listener: i32 = tcpListenFlags(cfg.host, cfg.port, 4096, LISTEN_FLAGS)
+  const listener: i32 = tcpListenFlags(cfg.host, cfg.port, 4096, rings ? LISTEN_FLAGS | NET_LISTEN_RING : LISTEN_FLAGS)
   if (listener < 0) {
     console.log(`feed: cannot listen on ${cfg.host}:${cfg.port} (${listener})`)
     return 1
   }
   if (index === 0) {
-    console.log(`feed: ${workers} workers on ${cfg.host}:${cfg.port}`)
+    const kind: string = rings && netRingState() === 1 ? "io_uring slots" : "descriptors"
+    console.log(`feed: ${workers} workers on ${cfg.host}:${cfg.port}, ${cfg.slots} connections each in ${kind}`)
   }
   return new FeedServer(cfg, listener, db).run()
 }

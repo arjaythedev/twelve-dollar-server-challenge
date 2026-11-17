@@ -42,6 +42,11 @@ let mutable private curPath = 0n
 let mutable private curBase = 0L
 let mutable private curOff = 0L
 let mutable private curFd = -1
+// The folder the server runs from, as a mapped file's name starts in /proc/self/maps. The kernel's cached copy of a
+// moved page is dropped only for the entry's own files, the ones in there: the cache of the system's files (the
+// runtime, libc) is not the entry's to drop, and the kernel takes those copies back itself when memory gets tight.
+let private own = Encoding.UTF8.GetBytes System.AppContext.BaseDirectory
+let mutable private dropped = 0L
 
 let private z (s: string) = Encoding.UTF8.GetBytes(s + "\000")
 
@@ -77,12 +82,13 @@ let private flush (kind: int) (s: int64) (e: int64) (exec: bool) (known: bool) =
                 0
     if r = 1 then
         moved <- moved + len
-        // the kernel's cached copy of these pages is now a second copy that nothing maps: dropped at once, not left
-        // for reclaim to find when memory runs short
+        // the kernel's cached copy of these pages is now a second copy that nothing maps: for a file of the entry's
+        // own it is dropped at once, not left for reclaim to find when memory runs short
         if curFd = -1 then
             curFd <- Native.openAt (curPath, 0x80000)
             if curFd < 0 then curFd <- -2
-        if curFd >= 0 then Native.posix_fadvise (curFd, curOff + (s - curBase), len, 4) |> ignore // POSIX_FADV_DONTNEED
+        if curFd >= 0 && Native.posix_fadvise (curFd, curOff + (s - curBase), len, 4) = 0 then // POSIX_FADV_DONTNEED
+            dropped <- dropped + len
     elif r = 0 then failed <- failed + len
 
 /// the pages of [a, b) that are present and still the file's own: bits 63 (present) and 61 (file page) of
@@ -91,7 +97,12 @@ let private scan (kind: int) (a: int64) (b: int64) (exec: bool) (known: bool) (p
     curPath <- path
     curBase <- a
     curOff <- off
-    curFd <- -1
+    // -2 (never opened, nothing dropped) unless the name starts with the server's own folder; the name ends in a NUL,
+    // so the comparison stops inside it
+    let name = NativePtr.ofNativeInt<byte> path
+    let mutable k = 0
+    while k < own.Length && NativePtr.get name k = own.[k] do k <- k + 1
+    curFd <- if own.Length > 1 && k = own.Length then -1 else -2
     let g = if kind = 3 then gap else 0L
     let q = NativePtr.ofNativeInt<uint64> pm
     let mutable rs = -1L
@@ -195,7 +206,8 @@ let start (logPasses: bool) =
     else
         pass ()
         pass ()
-        eprintfn "moved %d KB of code and data in use from file-backed to anonymous memory%s%s" (moved >>> 10)
+        eprintfn "moved %d KB of code and data in use from file-backed to anonymous memory (%d KB of it the entry's own files: their cached copy dropped)%s%s"
+            (moved >>> 10) (dropped >>> 10)
             (if failed > 0L then sprintf ", %d KB failed" (failed >>> 10) else "")
             (if memFd < 0 then " (no /proc/self/mem: by mprotect, shared mappings left)" else "")
         log <- logPasses

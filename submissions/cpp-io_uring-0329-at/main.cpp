@@ -208,7 +208,13 @@ class Server {
   void maybe_grow() {
     if (workers_.size() >= max_rings_) return;
     Worker& w = *workers_.back();
-    if (slot_cap_ && w.open() * 4 >= slot_cap_ * 3) add_ring();
+    /* Grow at half full, not three quarters, and catch up in one go: a ramp adds thousands of
+     * connections a second and one ring per pass cannot keep up with it, which shows up as
+     * accepts that find no free slot and drop the connection.  rust-iouring-kensac #264 starts
+     * moving accepts at 1/8 of a ring; half is the conservative version of the same idea. */
+    while (slot_cap_ && w.open() * 2 >= slot_cap_ && workers_.size() < max_rings_) {
+      if (!add_ring()) break;
+    }
   }
 
   static uint32_t now_sec() {
@@ -285,12 +291,21 @@ class Server {
       if (writes_ok_) retry_held();
       /* Only block when there is nothing left to do: an unconditional 1 ms wait per pass is
        * what pins a loop at ~70 % CPU with a backlog it can never clear (kensac/mojo both
-       * enter with min_complete 0 whenever work is queued). */
-      bool busy = last_cqes >= 8;
-      for (auto& wp : workers_) {
-        if (!wp->pending().empty() || !wp->dirty().empty()) {
-          busy = true;
-          break;
+       * enter with min_complete 0 whenever work is queued).
+       *
+       * "Work queued" means reads waiting on the FIFO and answers waiting on the ready queue -
+       * NOT dirty() (responses this pass produced that still have to be committed).  Counting
+       * dirty() made the pass after any answered request skip the wait and return immediately
+       * with nothing in the completion queue: at 20k connections the loop ran 4,000 passes a
+       * second for 2,000 requests, i.e. half of them empty, and the empty ones are pure syscall
+       * and cache cost.  rust-iouring-kensac #264's busy flag is exactly rq/ready. */
+      bool busy = last_cqes >= 8 || !ready_.empty();
+      if (!busy) {
+        for (auto& wp : workers_) {
+          if (!wp->pending().empty()) {
+            busy = true;
+            break;
+          }
         }
       }
       for (size_t k = workers_.size(); k-- > 0;) {
@@ -299,7 +314,13 @@ class Server {
           if (busy && (last_cqes != 0 || last_reqs != 0)) {
             w.ring().wait(1, 0);
           } else {
-            w.ring().wait(last_cqes >= 8 ? 64 : 1, busy ? 50000 : kWaitNs);
+            /* Wait for a batch, not for the next completion.  min_complete used to be 64 only
+             * when the previous pass had seen 8+ completions, so under a moderate load (20k
+             * connections, ~2,100 req/s) it waited for exactly one and woke 4,000 times a
+             * second to answer 2,100 requests - half the passes handled nothing.  Asking for
+             * 256 and letting the 1 ms timeout cut it short keeps the latency the same while
+             * each pass now carries several completions (rust-iouring-kensac #264 WAIT_MIN). */
+            w.ring().wait(busy ? 1 : 256, busy ? 50000 : kWaitNs);
           }
         } else {
           w.ring().submit_if_ready();

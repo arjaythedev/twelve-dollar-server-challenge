@@ -756,6 +756,12 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)sliced_ready_passes, (unsigned long long)S.poll_events,
           (unsigned long long)S.poll_ends, (unsigned long long)S.poll_rearmed,
           (unsigned long long)S.eventfd_events);
+  if (MG.enabled) fprintf(stderr,
+      " tcp_memgov rcvbuf=%d pressure=%d psi_some10=%.2f psi_full10=%.2f cg_mem=%lluMB cg_max=%lluMB cg_sock=%lluMB tcp_mem_pages=%lu changes=%llu samples=%llu\\n",
+      MG.current_rcvbuf, MG.current_rcvbuf == MG.pressure_rcvbuf, MG.psi_some10, MG.psi_full10,
+      (unsigned long long)(MG.cg_current >> 20), (unsigned long long)(MG.cg_limit >> 20),
+      (unsigned long long)(MG.cg_sock >> 20), MG.tcp_mem_pages,
+      (unsigned long long)MG.changes, (unsigned long long)MG.samples);
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -764,6 +770,98 @@ static void stats(uint64_t dt_ns) {
 static long env_long(const char *name, long def) {
   const char *v = getenv(name);
   return v && *v ? atol(v) : def;
+}
+
+/* Opt-in TCP receive-memory governor. It only changes the buffer limits
+ * inherited by FUTURE accepted sockets, never existing connections. Sampling
+ * cgroup v2 PSI and sock memory is infrequent to avoid hot-path file I/O. */
+static struct {
+  int enabled, normal_rcvbuf, pressure_rcvbuf, current_rcvbuf;
+  uint64_t last_sample_ns, samples, changes, cg_current, cg_limit, cg_sock;
+  unsigned high_streak, low_streak;
+  double psi_some10, psi_full10;
+  unsigned long tcp_mem_pages;
+} MG;
+
+static int small_read(const char *path, char *buf, size_t cap) {
+  int fd = open(path, O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return -1;
+  ssize_t n = read(fd, buf, cap - 1);
+  close(fd);
+  if (n <= 0) return -1;
+  buf[n] = 0;
+  return 0;
+}
+static uint64_t cg_read_u64(const char *path) {
+  char buf[64];
+  if (small_read(path, buf, sizeof buf) != 0 || buf[0] < '0' || buf[0] > '9') return 0;
+  return strtoull(buf, NULL, 10); /* memory.max may be 'max': treat as unbounded */
+}
+static int apply_listener_rcvbuf(int requested) {
+  for (unsigned i = 0; i < NLISTEN; i++) {
+    if (setsockopt(LFD[i], SOL_SOCKET, SO_RCVBUF, &requested, sizeof requested) < 0) {
+      fprintf(stderr, "tcp governor: SO_RCVBUF listener %u: %s\\n", i, strerror(errno));
+      return -1;
+    }
+  }
+  int effective = 0;
+  socklen_t len = sizeof effective;
+  if (!getsockopt(LFD[0], SOL_SOCKET, SO_RCVBUF, &effective, &len))
+    fprintf(stderr, "tcp governor: listener cap requested=%d effective=%d (Linux doubles requested)\\n", requested, effective);
+  MG.current_rcvbuf = requested;
+  MG.changes++;
+  return 0;
+}
+static int memgov_start(void) {
+  MG.enabled = env_long("TCP_MEM_GOVERNOR", 0) != 0;
+  if (!MG.enabled) return 0;
+  MG.normal_rcvbuf = (int)env_long("TCP_RCVBUF_NORMAL", 16384);
+  MG.pressure_rcvbuf = (int)env_long("TCP_RCVBUF_PRESSURE", 8192);
+  if (MG.pressure_rcvbuf < 4096 || MG.normal_rcvbuf > 1048576 || MG.pressure_rcvbuf > MG.normal_rcvbuf) {
+    fputs("TCP_RCVBUF_PRESSURE must be >=4096 and <= TCP_RCVBUF_NORMAL <=1048576\\n", stderr);
+    return -1;
+  }
+  return apply_listener_rcvbuf(MG.normal_rcvbuf);
+}
+static void memgov_tick(uint64_t now) {
+  if (!MG.enabled || (MG.last_sample_ns && now - MG.last_sample_ns < 2000000000ULL)) return;
+  MG.last_sample_ns = now;
+  MG.samples++;
+  MG.cg_current = cg_read_u64("/sys/fs/cgroup/memory.current");
+  MG.cg_limit = cg_read_u64("/sys/fs/cgroup/memory.max");
+  MG.cg_sock = 0;
+  MG.psi_some10 = MG.psi_full10 = 0.0;
+  char buf[8192];
+  int psi_available = 0;
+  if (small_read("/sys/fs/cgroup/memory.stat", buf, sizeof buf) == 0) {
+    const char *p = strstr(buf, "sock ");
+    if (p) MG.cg_sock = strtoull(p + 5, NULL, 10);
+  }
+  if (small_read("/sys/fs/cgroup/memory.pressure", buf, sizeof buf) == 0) {
+    const char *p = strstr(buf, "some avg10=");
+    const char *q = strstr(buf, "full avg10=");
+    if (p && q && sscanf(p, "some avg10=%lf", &MG.psi_some10) == 1 &&
+        sscanf(q, "full avg10=%lf", &MG.psi_full10) == 1) psi_available = 1;
+  }
+  MG.tcp_mem_pages = 0;
+  if (small_read("/proc/net/sockstat", buf, sizeof buf) == 0) {
+    const char *tcp = strstr(buf, "TCP:");
+    if (tcp) {
+      const char *line_end = strchr(tcp, '\\n');
+      const char *mem = strstr(tcp, " mem ");
+      if (mem && (!line_end || mem < line_end)) MG.tcp_mem_pages = strtoul(mem + 5, NULL, 10);
+    }
+  }
+  int high = (psi_available && (MG.psi_full10 >= 2.0 || MG.psi_some10 >= 10.0)) ||
+             (MG.cg_limit && MG.cg_current > MG.cg_limit * 85 / 100);
+  if (high) { MG.high_streak++; MG.low_streak = 0; }
+  else { MG.low_streak++; MG.high_streak = 0; }
+  /* Changes affect only new accepts. Never throttle, reject or close a connection. */
+  if (MG.high_streak >= 2 && MG.current_rcvbuf != MG.pressure_rcvbuf) {
+    if (apply_listener_rcvbuf(MG.pressure_rcvbuf) == 0) MG.high_streak = 0;
+  } else if (MG.low_streak >= 4 && MG.current_rcvbuf != MG.normal_rcvbuf) {
+    if (apply_listener_rcvbuf(MG.normal_rcvbuf) == 0) MG.low_streak = 0;
+  }
 }
 
 /* Keeps the binary's code and data in RAM: file-backed pages are what reclaim takes first when
@@ -1009,6 +1107,7 @@ int main(int argc, char **argv) {
     LFD[l] = listen_socket(host, atoi(port), 4096, &err);
     if (LFD[l] < 0) { fprintf(stderr, "listen %s:%s: %s: %s\n", host, port, err, strerror(errno)); return 1; }
   }
+  if (memgov_start() < 0) return 1; /* listener buffers before the first accept */
   if (ring_create(0) < 0) return 1;
   NR = 1;
   /* The rings a full load needs are made now, while the box is idle: a ring is ~1 MB of
@@ -1067,6 +1166,7 @@ int main(int argc, char **argv) {
     if (nready > S.ready_max) S.ready_max = nready;
     uint64_t te = now_ns();
     te_prev = te;
+    memgov_tick(te);
     if (te - t > S.max_turn_ns) S.max_turn_ns = te - t;
     if (t - last_stats > STATS_NS) { stats(t - last_stats); last_stats = t; }
     if (stop_requested) {

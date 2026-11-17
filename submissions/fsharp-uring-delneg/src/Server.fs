@@ -28,6 +28,12 @@ let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
 let private lifoAge = uint32 (env "LIFOAGE" 8000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
+/// Admission: the loop takes new connections only while no request has waited admitMs or longer. While one has, a
+/// socket filter on the listeners drops incoming SYNs (and nothing else: a handshake under way completes and is
+/// accepted), and the client's TCP sends its SYN again.
+let admitOn = env "ADMIT" 1 = 1
+let private admitMs = uint32 (env "ADMITMS" 10)
+let private admitMaxMs = uint32 (env "ADMITMAX" 2000) // accepting resumes after this long whatever waits
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
@@ -341,6 +347,42 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable stPasses = 0L
     let mutable stAns = 0L
     let mutable stYields = 0L
+    let mutable admitOpen = true
+    let mutable admitClosedAt = 0u
+    // classic BPF on a TCP socket sees the segment from its TCP header: byte 13 holds the flags
+    let synFilter =
+        let code = [| 0x30us, 0uy, 0uy, 13u // A = flags
+                      0x54us, 0uy, 0uy, 0x12u // A &= SYN | ACK
+                      0x15us, 0uy, 1uy, 0x02u // SYN alone?
+                      0x06us, 0uy, 0uy, 0u // drop
+                      0x06us, 0uy, 0uy, 0xFFFFFFFFu |] // pass
+        let p = Marshal.AllocHGlobal(16 + 8 * code.Length)
+        code |> Array.iteri (fun i (c, jt, jf, k) ->
+            let q = p + 16n + nativeint (8 * i)
+            wr16 q c
+            wr8 (q + 2n) jt
+            wr8 (q + 3n) jf
+            Marshal.WriteInt32(q + 4n, int k))
+        Marshal.WriteInt64(p, int64 code.Length) // struct sock_fprog: len, then the pointer
+        Marshal.WriteIntPtr(p + 8n, p + 16n)
+        p
+    /// segments the listeners' filter has dropped (SO_MEMINFO's drop count), for the log
+    let synDrops () =
+        let p = Marshal.AllocHGlobal 64
+        let mutable n = 0L
+        for fd in listenFds do
+            let mutable len = 64
+            if Native.getsockopt (fd, 1, 55, p, &len) = 0 && len >= 36 then n <- n + int64 (uint32 (Marshal.ReadInt32(p + 32n)))
+        Marshal.FreeHGlobal p
+        n
+    let admit (isOpen: bool) =
+        for fd in listenFds do
+            if isOpen then
+                let mutable z = 0
+                Native.setsockopt (fd, 1, 27, &z, 4) |> ignore // SO_DETACH_FILTER
+            else Native.setsockoptPtr (fd, 1, 26, synFilter, 16) |> ignore // SO_ATTACH_FILTER
+    let mutable stAdmitCloses = 0L
+    let mutable stAdmitClosedMs = 0L
     let mutable stWalk = 0L
     let mutable stCommitUs = 0L
     let mutable stCommitMax = 0L
@@ -481,7 +523,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         ckRide <- false
         if res = 8 then
             if ck.Rc = 0 && ck.Backfilled >= 0 then ckBackfilled <- ck.Backfilled
-            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b pace %d/%d %d ms" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold Vfs.paceHigh Vfs.paceLooks Vfs.paceMs
+            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b pace %d/%d %d ms admit closed %d times %d ms, %d SYNs dropped" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold Vfs.paceHigh Vfs.paceLooks Vfs.paceMs stAdmitCloses stAdmitClosedMs (synDrops ())
             if holdRem > 0 && not ckHold && ck.Rc = 0 && Db.walFrames >= ckHoldAt then
                 // past holdMax, hold anyway: passes aren't catching up with the writes
                 if Db.walFrames - ckBackfilled <= holdRem || Db.walFrames >= holdMax then
@@ -1233,6 +1275,19 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                         if conns.[cid].Fl &&& (LIVE ||| RECV) = LIVE then armRecv cid
                     rs.RqLen <- rs.RqLen - n
                     nrearm <- nrearm - n
+            if admitOn then
+                let waiting = nreq > reqHead
+                if admitOpen then
+                    if waiting && passMs - reqs.[reqHead].Ms >= admitMs then
+                        // behind on the connections it has: no new ones until it has caught up
+                        admitOpen <- false
+                        admitClosedAt <- passMs
+                        stAdmitCloses <- stAdmitCloses + 1L
+                        admit false
+                elif not waiting || passMs - admitClosedAt >= admitMaxMs then
+                    admitOpen <- true
+                    stAdmitClosedMs <- stAdmitClosedMs + int64 (passMs - admitClosedAt)
+                    admit true
             if not (acceptArmedAnywhere ()) then
                 let q = acceptTarget ()
                 if q >= 0 then armAccept q
@@ -1242,7 +1297,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             Pages.tick t
 
 /// Listeners: `count` SO_REUSEPORT sockets on host:port, each with its own accept queue (somaxconn deep).
-let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) =
+let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) (backlog: int) =
     [| for _ in 1 .. count do
            let fd = Native.socket (2, 1 ||| 0x80000, 0) // AF_INET, SOCK_STREAM | SOCK_CLOEXEC
            if fd < 0 then failwithf "socket: errno %d" (Native.errno ())
@@ -1263,5 +1318,5 @@ let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) =
                wr8 (sa + 4n + nativeint i) a.[i]
            if Native.bind (fd, sa, 16) < 0 then failwithf "bind %O:%d: errno %d" ip port (Native.errno ())
            Marshal.FreeHGlobal sa
-           if Native.listen (fd, 65535) < 0 then failwithf "listen: errno %d" (Native.errno ())
+           if Native.listen (fd, backlog) < 0 then failwithf "listen: errno %d" (Native.errno ())
            yield fd |]

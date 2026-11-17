@@ -23,6 +23,12 @@ extern int socket(int domain, int typ, int protocol)
 [<DllImport(L, SetLastError = true)>]
 extern int setsockopt(int fd, int level, int name, int& value, int len)
 
+[<DllImport(L, EntryPoint = "setsockopt", SetLastError = true)>]
+extern int setsockoptPtr(int fd, int level, int name, nativeint value, int len)
+
+[<DllImport(L, SetLastError = true)>]
+extern int getsockopt(int fd, int level, int name, nativeint value, int& len)
+
 [<DllImport(L, SetLastError = true)>]
 extern int bind(int fd, nativeint addr, int len)
 

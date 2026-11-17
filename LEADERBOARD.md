@@ -762,7 +762,10 @@ the tail-restart off and the entry's own database file dropped from the page cac
 req/s, p95 75.3 / p99 446.9 ms, 0 err, 78 % CPU, 26 µs/req, 1,066 MB, 2026-11-16), still below the merged row, so not
 merged: 300,000 passed the 2-minute probe but failed the 5-minute hold on p99 (1.26 s at 83 % CPU), 310,000 failed the
 2-minute probe on p95/p99 (1.40 / 2.82 s at 87 % CPU) and 320,000 on p95/p99 (1.32 / 2.07 s at 94 % CPU), all with
-0 errors. #441 stays open.
+0 errors. Its next head, **`7adce28`** (`e487a70` with the checkpoint cycle, urgent and hold-growth thresholds doubled)
+held **250,000** (24,137 req/s, p95 19.6 / p99 145.2 ms, 0 err, 67 % CPU, 25 µs/req, 1,220 MB, 2026-11-17), still
+below the merged row, so not merged: 260,000 failed the 2-minute probe on p99 (2.63 s at 69 % CPU), 280,000 on p95/p99
+(1.01 / 2.17 s at 77 % CPU) and 320,000 on p95/p99 (1.76 / 3.08 s at 95 % CPU), all with 0 errors. #441 stays open.
 **#450** (`86768ad`: the ramp-end backlog is answered before new arrivals are reaped, more answers per pass, more
 receive buffers; PGO build worked) held **280,000** (26,698 req/s, p95 60.5 / p99 706.3 ms, 0 err, 75 % CPU,
 25 µs/req, 1,256 MB, 2026-11-15), below the merged row, so not merged: 290,000 failed the 2-minute probe on p99

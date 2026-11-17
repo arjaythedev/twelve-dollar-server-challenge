@@ -800,7 +800,10 @@ all `connection refused`). #479 stays open. **#480** (`c272794`: #479's code plu
 with SHA-256/HMAC test vectors checked on the box at build time) held **270,000** (25,866 req/s, p95 36.8 / p99
 334.9 ms, 0 err, 71 % CPU, 25 µs/req, 816 MB, 2026-11-17), below the merged row, so not merged: 280,000 failed the
 2-minute probe on p95/p99 (1.16 / 2.73 s at 74 % CPU) and 320,000 on p95/p99 (1.75 / 2.26 s at 92 % CPU), all with
-0 errors. #480 stays open.
+0 errors. #480 stays open. **#482** (`5f61662`: #480's code with #441's checkpoint settings and the network switches
+off by default) held **290,000** (27,570 req/s, p95 71.6 / p99 288.4 ms, 0 err, 81 % CPU, 26 µs/req, 767 MB,
+2026-11-17), level with the merged row, so not merged: 300,000 failed the 2-minute probe on p99 (2.38 s at 83 % CPU)
+and 320,000 on p95/p99 (1.25 / 1.89 s at 92 % CPU), all with 0 errors. #482 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

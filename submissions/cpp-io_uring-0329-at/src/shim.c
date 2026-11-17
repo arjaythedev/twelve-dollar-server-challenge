@@ -41,7 +41,9 @@ static int wal_cb(void *p, sqlite3 *db, const char *name, int frames) {
   (void)name;
   struct dbx *h = (struct dbx *)p;
   atomic_store_explicit(&h->wal_frames, frames, memory_order_relaxed);
-  if (frames >= 8192 && !atomic_load_explicit(&h->gate_held, memory_order_relaxed)) {
+  /* 闸门 4,096 帧（16 MiB）：日志小一半，一次 hold 内拷完的概率大得多。基准机 3000 写/秒、
+   * 每 pass 组提交后约 7,000 帧/秒，8,192 帧的闸门 1.2 秒就满一次，检查点来不及就被迫再关。 */
+  if (frames >= 4096 && !atomic_load_explicit(&h->gate_held, memory_order_relaxed)) {
     atomic_store_explicit(&h->gate_since, mono_ns(), memory_order_relaxed);
     atomic_store_explicit(&h->gate_held, 1, memory_order_relaxed);
   }
@@ -694,13 +696,13 @@ int dbx_checkpoint(dbx *h, int *copied) {
   return done ? 0 : 1;
 }
 
-/* Non-blocking: true while the WAL is over the gate and the checkpoint thread has not caught up.
- * Writes are held, reads keep going; the hold expires after 400 ms so a checkpoint that cannot
- * finish (a long-lived reader) never stalls writes indefinitely. */
+/* 非阻塞：WAL 超过闸门且检查点线程还没追平时返回真。写被挂起、读照常；hold 最多 250 ms，
+ * 与 rust-iouring-kensac #264 一致——太短会让同一次积压被反复 hold（一次拷不完就重来），
+ * 太短也正是 220k 那次 p99 4.28 s 的形状：写请求等了几轮 hold。 */
 int dbx_writes_held(dbx *h) {
   if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
   long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);
-  if (mono_ns() - since > 120000000LL) {
+  if (mono_ns() - since > 250000000LL) {
     atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
     return 0;
   }

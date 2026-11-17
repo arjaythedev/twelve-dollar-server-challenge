@@ -9,7 +9,9 @@
 #include <cstring>
 #include <mutex>
 #include <sys/resource.h>
+#include <ctime>
 #include <thread>
+#include <unistd.h>
 
 #include "json.hpp"
 #include "shim.h"
@@ -21,6 +23,13 @@ namespace {
 // 检查点线程跑在 nice 19：单 vCPU 上，与主循环同优先级的 pass 会占满整个时间片，
 // 这种抢占直接体现在 p95 上（c-iouring-public #158 实测：nice 0 时 3 次 hold 有 2 次
 // 失败，nice 19 时 3 次全过）。
+/* 单调时钟，纳秒。用于给 hold 期间的检查点循环设时间上限。 */
+static long long mono_ns() {
+  struct timespec ts {};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
 void checkpoint_loop(dbx* h, CkState* st) {
   setpriority(PRIO_PROCESS, 0, 19);
   std::unique_lock<std::mutex> lk(st->mu);
@@ -36,9 +45,16 @@ void checkpoint_loop(dbx* h, CkState* st) {
       int copied = 0;
       int r = dbx_checkpoint(h, &copied);
       int last = copied;
-      for (int k = 0; r == 1 && k < 64 && dbx_writes_held(h); k++) {
+      /* 闸门挂起期间一直拷，直到拷完或者 hold 快到期。没拷动时让出 50 µs 再试，而不是立刻
+       * 放弃：PASSIVE 遇到主循环的写锁会返回 BUSY，让出一下就能在下一次 COMMIT 之间拿到。
+       * 原来的写法是「没进展就 break」，于是同一次积压要等 50 ms 后的下一轮，写请求便一次次
+       * 被 hold。 */
+      const long long t0 = mono_ns();
+      while (r == 1 && dbx_writes_held(h) && mono_ns() - t0 < 200000000LL) {
         r = dbx_checkpoint(h, &copied);
-        if (copied == last) break;
+        if (copied == last) {
+          usleep(50);
+        }
         last = copied;
       }
     }

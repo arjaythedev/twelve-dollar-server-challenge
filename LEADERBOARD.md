@@ -1081,6 +1081,10 @@ and 320,000 on `connection refused` (78.1 %). Follow-up #492 (`4de4148`: 8 `SO_R
 LIFO ready queue with 8 s aging) held **210,000** (20,578 req/s, p95 13.3 / p99 127.6 ms, 0 errors, 61 % CPU, 27 µs/req,
 674 MB, 2026-11-17); 220,000 and 240,000 failed the 2-minute probe on p99 (4.28 s, 2.82 s, 0 errors) and 320,000 on
 `connection refused` (78.6 %). That is below the merged 220,000, so the row stays at `a77a5bb` and #492 isn't merged.
+#492's next head `6eb10bb` (`malloc_trim` when idle, checkpoint copying while writes are held, WAL gate 4,096 frames)
+held **220,000** (21,444 req/s, p95 17.3 / p99 561.8 ms, 0 errors, 63 % CPU, 27 µs/req, 756 MB, 2026-11-17); 230,000
+failed the 2-minute probe on p99 (3.08 s, 0 errors), 240,000 and 320,000 on `connection refused` (80.3 %, 78.6 %). That
+ties the merged 220,000 without beating it, so the row stays at `a77a5bb` and #492 isn't merged.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

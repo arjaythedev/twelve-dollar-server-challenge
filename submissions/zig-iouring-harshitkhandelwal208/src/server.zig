@@ -30,18 +30,18 @@ pub const n_bufs_per_ring: u16 = 1024;
 pub const bgid: u16 = 1;
 
 pub const pool_buf_size: usize = 16384;
-pub const pool_count: usize = 16384;
+pub const pool_count: usize = 4096;
 
 pub const k_ring_count: usize = 8;
 pub const k_listener_count: usize = 8;
 pub const slots_per_ring: u32 = 65472;
 pub const max_pending_size: usize = 65535;
 
-pub const ACCEPT_DEPTH: u32 = 1024;
+pub const ACCEPT_DEPTH: u32 = 512;
 pub const READS_PER_PASS: usize = 16384;
-pub const ANSWERS_PER_PASS: u32 = 4096;
-pub const WAIT_MIN: u32 = 1;
-pub const WAIT_NS: i64 = 50_000; // 50 us
+pub const ANSWERS_PER_PASS: u32 = 2048;
+pub const WAIT_MIN: u32 = 256;
+pub const WAIT_NS: i64 = 1_000_000; // 1 ms
 
 pub const RespPool = struct {
     mem: [*]u8 = undefined,
@@ -436,9 +436,22 @@ pub const Server = struct {
         var last: anyerror = error.RingInitFailed;
 
         const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
+        const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 9;
         const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
+        const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 
-        // Try with single-issuer lockless flags + IORING_SETUP_CQSIZE
+        // 1. Try with DEFER_TASKRUN + SINGLE_ISSUER + TASKRUN_FLAG (highest throughput on Linux 6.1+)
+        for (sq_sizes) |sq| {
+            for (cq_sizes) |cq| {
+                var p = std.mem.zeroInit(linux.io_uring_params, .{
+                    .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG,
+                });
+                p.cq_entries = cq;
+                if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
+            }
+        }
+
+        // 2. Try with single-issuer lockless flags + IORING_SETUP_CQSIZE
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
@@ -640,19 +653,17 @@ pub const Server = struct {
                     break;
                 }
             }
-            const busy = (!self.rq.isEmpty() or !self.ready.isEmpty() or any_cqes or any_to_submit);
-
-            const wait_ri = self.wait_ri % self.active_rings;
-            self.wait_ri +%= 1;
+            const busy = (!self.rq.isEmpty() or !self.ready.isEmpty());
 
             // Iterate active rings in reverse order (highest down to 0)
+            // Rings N-1 down to 1 submit non-blocking; Ring 0 acts as anchor waiting for up to WAIT_MIN or WAIT_NS
             var ri: usize = self.active_rings;
             while (ri > 0) {
                 ri -= 1;
                 const w = &self.rings[ri];
                 const to_submit = w.ring.flush_sq();
 
-                if (ri == wait_ri and !busy) {
+                if (ri == 0 and !busy) {
                     _ = enterWithTimeout(w.ring.fd, to_submit, WAIT_MIN, WAIT_NS);
                 } else if (to_submit > 0 or (w.ring.flags & (1 << 13) != 0)) {
                     _ = linux.io_uring_enter(w.ring.fd, to_submit, 0, linux.IORING_ENTER_GETEVENTS, null);
@@ -1213,9 +1224,9 @@ pub const Server = struct {
                     if (self.resp_pool.acquire()) |p| {
                         const res = self.db.getPostDirect(post_id, p.ptr, keep_alive);
                         switch (res) {
-                            .ok => |total_len| {
-                                c.out = p.ptr;
-                                c.out_len = @intCast(total_len);
+                            .ok => |pos| {
+                                c.out = p.ptr + pos.start_off;
+                                c.out_len = @intCast(pos.total_len);
                                 c.out_off = 0;
                                 c.setOutPool(true);
                                 self.markTouched(@intCast(w.id), slot, c);

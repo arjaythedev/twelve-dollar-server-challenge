@@ -58,16 +58,15 @@ High-performance Zig implementation for the $12 Server Challenge (`arjaythedev/t
   - For small responses ($< 8$ KB, e.g. `/health`, `GET /posts/:id`, `POST /posts`, and likes), uses standard `prep_send` copy-in, avoiding the page-pinning and two-CQE overhead where zero-copy is counterproductive.
 
 ### 7. Direct Single-Post Length Pre-calculation & Single-Pass Linear Streaming
-- `GET /posts/:id` pre-calculates the exact HTTP `Content-Length` in $O(1)$ time via `escapedLen` and `digitsU64`.
-- Emits the HTTP header and JSON body sequentially in a single linear pass directly into the `RespPool` buffer (`dest[0..total_len]`).
-- Completely eliminates temporary stack buffers, headroom pointer offsets, and duplicate length scanning passes, shaving ~0.4 µs per single-post request.
+- `GET /posts/:id` serializes the JSON body directly starting at `dest + 128` in a single linear pass and prepends the HTTP response headers directly into the 128-byte headroom before `dest + 128`, completely eliminating the duplicate string escaping pre-scan pass.
+- In `feed`, maintains a 128-entry direct-mapped user cache and unrolls post sorting with in-place insertion sort to eliminate redundant user B-tree lookups.
 
 ### 8. Dynamic On-Box Profile-Guided Optimization (PGO) on SQLite Amalgamation
 - Generates a machine-native PGO profile dynamically during `build.sh` on the runner itself (Rule 10 compliant), without any committed binary or profile text files.
-- The training driver (`src/c/pgo_train.c`) is completely self-contained with **zero external CLI dependencies**: it initializes its own temporary scratch database and populates a realistic dataset of 50 users and 1,000 posts with multi-level B-tree index structures directly via the SQLite C API.
-- Training workload exercises multi-page index traversals (`posts_created_at_id_idx`), random point seeks across the 1,000-post keyspace, like-count range scans, and atomic WAL insertions/deletions.
-- Merges profile counters using `llvm-profdata` and compiles `src/c/shim_pgo.o` using `clang` with `-fprofile-use`, inlining hot SQLite B-tree leaf traversal branches and aligning inner cursor seek loops.
-- Seamless fallback: `build.sh` automatically compiles `src/c/shim_pgo.o` with `-fprofile-use` when `clang` and `llvm-profdata` are available, falling back cleanly to native Zig compilation if unavailable.
+- The training driver (`src/c/pgo_train.c`) is completely self-contained with **zero external CLI dependencies**: it initializes its own temporary scratch database and populates an expanded dataset of 100 users and 3,000 posts with multi-level B-tree index structures directly via the SQLite C API.
+- Training workload exercises multi-page index traversals (`posts_created_at_id_idx`), random point seeks across the keyspace, like-count range scans, and atomic WAL insertions/deletions.
+- Merges profile counters and compiles `src/c/shim_pgo.o` with `-fprofile-use`, inlining hot SQLite B-tree leaf traversal branches and aligning inner cursor seek loops (`-falign-functions=32 -falign-loops=32`).
+- Seamless fallback: `build.sh` automatically compiles `src/c/shim_pgo.o` using Clang with LLVM profile data, or GCC with `-fprofile-use` if Clang PGO linking is unavailable, falling back cleanly to native Zig compilation if neither is present.
 
 ### 9. Zero-Allocation Response Slab (`RespPool`) & cgroup Memory Budget
 - Outgoing response buffers are serviced from a pre-allocated 16,384-slot pool of 16 KiB buffers (`RespPool`), eliminating glibc `malloc`/`free` calls and lock contention during response transmission.

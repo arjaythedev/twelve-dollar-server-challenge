@@ -317,8 +317,8 @@ test "getPostDirect single post serialization" {
     var direct_dest: [1024]u8 = undefined;
     const res = db.getPostDirect(1, &direct_dest, true);
     switch (res) {
-        .ok => |total_len| {
-            const out = direct_dest[0..total_len];
+        .ok => |pos| {
+            const out = direct_dest[pos.start_off .. pos.start_off + pos.total_len];
             try std.testing.expect(std.mem.startsWith(u8, out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "));
             try std.testing.expect(std.mem.indexOf(u8, out, "\"id\":1") != null);
             try std.testing.expect(std.mem.indexOf(u8, out, "\"body\":") != null);

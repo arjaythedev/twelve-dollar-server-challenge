@@ -5,11 +5,13 @@ ZIG_VERSION=0.17.0
 ZIG_SHA256=1cbe9df9f27e6b78d14ccbca43b6703a404ef79ef1c463de901d7f088d4e2026
 ZIG_URL="https://ziglang.org/download/${ZIG_VERSION}/zig-x86_64-linux-${ZIG_VERSION}.tar.xz"
 
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y -q || true
+apt-get install -y -q curl xz-utils ca-certificates unzip build-essential clang llvm libclang-rt-18-dev sqlite3 >/dev/null || true
+
 if [ -x /opt/zig/zig ] && [ "$(/opt/zig/zig version)" = "$ZIG_VERSION" ]; then
   echo "zig $ZIG_VERSION already installed"
 else
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get install -y -q curl xz-utils ca-certificates unzip build-essential clang llvm sqlite3 >/dev/null
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   curl -fsSL --retry 5 -o "$tmp/zig.tar.xz" "$ZIG_URL"

@@ -171,8 +171,12 @@ const Row = struct {
 pub const Db = struct {
     pub const ExistsResult = enum { exists, not_found, err };
     pub const GetPostResult = enum { ok, not_found, err };
+    pub const GetPostDirectOk = struct {
+        start_off: usize,
+        total_len: usize,
+    };
     pub const GetPostDirectResult = union(enum) {
-        ok: usize,
+        ok: GetPostDirectOk,
         not_found,
         err,
     };
@@ -290,19 +294,18 @@ pub const Db = struct {
             return;
         }
 
-        // 2. Seek posts in ASCENDING id order to leverage leaf-page cursor fast path
+        // 2. Sort order array in ascending post id order using branch-friendly insertion sort (n_rows <= 20)
         var order: [FEED_LEN]usize = undefined;
         for (0..n_rows) |i| order[i] = i;
-        var s_i: usize = 0;
+        var s_i: usize = 1;
         while (s_i < n_rows) : (s_i += 1) {
-            var s_j: usize = s_i + 1;
-            while (s_j < n_rows) : (s_j += 1) {
-                if (rows[order[s_j]].id < rows[order[s_i]].id) {
-                    const tmp = order[s_i];
-                    order[s_i] = order[s_j];
-                    order[s_j] = tmp;
-                }
+            const key = order[s_i];
+            const key_id = rows[key].id;
+            var s_j: usize = s_i;
+            while (s_j > 0 and rows[order[s_j - 1]].id > key_id) : (s_j -= 1) {
+                order[s_j] = order[s_j - 1];
             }
+            order[s_j] = key;
         }
 
         const min_id: i64 = rows[order[0]].id;
@@ -318,11 +321,11 @@ pub const Db = struct {
             rows[idx].body = text(cols[2]) catch return self.feedSql(out);
         }
 
-        // 3. Fetch authors by rowid seek (caching recent authors in 16-entry direct table)
-        var author_cache: [16]struct { uid: i64 = -1, author: []const u8 = "" } = @splat(.{});
+        // 3. Fetch authors by rowid seek (caching recent authors in 128-entry direct table)
+        var author_cache: [128]struct { uid: i64 = -1, author: []const u8 = "" } = @splat(.{});
         for (0..n_rows) |i| {
             const uid = rows[i].user_id;
-            const slot = @as(usize, @intCast(uid)) & 15;
+            const slot = @as(usize, @intCast(uid ^ (uid >> 6))) & 127;
             if (author_cache[slot].uid == uid) {
                 rows[i].author = author_cache[slot].author;
             } else {
@@ -512,30 +515,10 @@ pub const Db = struct {
 
         const likes = countLikes(cl, id) catch return .err;
 
-        // Fast pre-calculated body length
-        const body_esc = bufm.escapedLen(body);
-        const author_esc = bufm.escapedLen(author);
-        const id_digits = bufm.digitsU64(@intCast(id));
-        const likes_digits = bufm.digitsU64(@intCast(likes));
+        // Serialize JSON body starting at dest + 128 in a single linear pass (no redundant escaping pre-scan)
+        const body_start = dest + 128;
+        var ptr = body_start;
 
-        const body_len = 68 + id_digits + body_esc + created.len + author_esc + likes_digits;
-
-        // Direct HTTP header serialization into dest
-        var ptr = dest;
-        if (keep_alive) {
-            const h = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ";
-            @memcpy(ptr[0..h.len], h);
-            ptr += h.len;
-        } else {
-            const h = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
-            @memcpy(ptr[0..h.len], h);
-            ptr += h.len;
-        }
-        ptr += bufm.writeU64Direct(ptr[0..24], body_len);
-        @memcpy(ptr[0..4], "\r\n\r\n");
-        ptr += 4;
-
-        // Direct JSON body serialization
         @memcpy(ptr[0..14], "{\"post\":{\"id\":");
         ptr += 14;
         ptr += bufm.writeU64Direct(ptr[0..24], @intCast(id));
@@ -560,8 +543,24 @@ pub const Db = struct {
         @memcpy(ptr[0..2], "}}");
         ptr += 2;
 
-        const total_written = @intFromPtr(ptr) - @intFromPtr(dest);
-        return .{ .ok = total_written };
+        const body_len = @intFromPtr(ptr) - @intFromPtr(body_start);
+
+        // Prepend HTTP response headers directly into the 128-byte headroom before dest + 128
+        const prefix = if (keep_alive)
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+        else
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
+        const d_len = bufm.digitsU64(body_len);
+        const hdr_len = prefix.len + d_len + 4;
+        const start_off = 128 - hdr_len;
+        var h_ptr = dest + start_off;
+        @memcpy(h_ptr[0..prefix.len], prefix);
+        h_ptr += prefix.len;
+        _ = bufm.writeU64Direct(h_ptr[0..24], body_len);
+        h_ptr += d_len;
+        @memcpy(h_ptr[0..4], "\r\n\r\n");
+
+        return .{ .ok = .{ .start_off = start_off, .total_len = hdr_len + body_len } };
     }
 
     pub fn checkPostExists(self: *Db, id: i64) ExistsResult {

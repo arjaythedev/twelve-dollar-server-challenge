@@ -9,7 +9,9 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
@@ -220,7 +222,59 @@ static int prep(const char *sql, sqlite3_stmt **st) {
   return sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, st, 0) == SQLITE_OK ? 0 : fail(sql);
 }
 
+// The memory SQLite's page cache keeps its pages in, on 2 MB pages.
+//
+// SQLite lets the application hand it one block of memory for page contents
+// (SQLITE_CONFIG_PAGECACHE); the cache itself stays SQLite's own. A 16 MB cache on the usual
+// 4 KB pages is 4,096 pages of memory, more than the CPU's address-translation cache (TLB)
+// covers, so a B-tree descent pays for page-table walks on top of its cache misses, and in
+// a virtual machine each walk is two-dimensional. On 2 MB pages the whole cache is 10 entries.
+// Linux gives a process such pages if it asks for them region by region (madvise), which is
+// a request about our own memory, not a setting of the box. The block is touched once here,
+// at startup, so the kernel finds and clears the memory before the first request, not
+// during one. If any of this fails SQLite allocates its pages the ordinary way.
+static uint8_t *page_block;
+static size_t page_block_len;
+#define CACHE_PAGES 4096 // 16 MB of 4 KB pages; PRAGMA cache_size below says the same
+static void page_memory(void) {
+  int header = 0;
+  sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &header);
+  size_t huge = 2u << 20, slot = 4096 + (size_t)((header + 7) & ~7) + 64, n = CACHE_PAGES + 512;
+  size_t len = (slot * n + huge - 1) & ~(huge - 1);
+  uint8_t *raw = mmap(0, len + huge, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (raw == MAP_FAILED) return;
+  uint8_t *block = (uint8_t *)(((uintptr_t)raw + huge - 1) & ~(uintptr_t)(huge - 1));
+  madvise(block, len, MADV_HUGEPAGE);
+  for (size_t at = 0; at < len; at += 4096) block[at] = 0;
+  if (sqlite3_config(SQLITE_CONFIG_PAGECACHE, block, (int)slot, (int)(len / slot)) != SQLITE_OK) return;
+  page_block = block;
+  page_block_len = len;
+}
+
+// For the startup log: the size of the block in kB and how much of it the kernel put on
+// 2 MB pages (from /proc/self/smaps). Where huge pages are switched off or none are free,
+// the second number is 0 and the block works as ordinary pages.
+void db_page_memory(long *block_kb, long *huge_kb) {
+  *block_kb = (long)(page_block_len >> 10);
+  *huge_kb = 0;
+  FILE *f = page_block ? fopen("/proc/self/smaps", "r") : 0;
+  if (!f) return;
+  char line[256];
+  int ours = 0;
+  while (fgets(line, sizeof line, f)) {
+    unsigned long from, to;
+    long kb;
+    if (sscanf(line, "%lx-%lx ", &from, &to) == 2) {
+      ours = from < (unsigned long)(uintptr_t)page_block + page_block_len && to > (unsigned long)(uintptr_t)page_block;
+    } else if (ours && sscanf(line, "AnonHugePages: %ld kB", &kb) == 1) {
+      *huge_kb += kb;
+    }
+  }
+  fclose(f);
+}
+
 int db_open(const char *path) {
+  page_memory();
   if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, 0) != SQLITE_OK) return fail("open");
   // WAL is already set in the seed file. synchronous=NORMAL is the weakest setting rule 6 allows.
   // cache_size: SQLite's own page cache, 16 MB instead of the default 2 MB. With 2 MB the hot

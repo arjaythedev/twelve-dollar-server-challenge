@@ -92,6 +92,14 @@ const (
 	// known again after the next commit.
 	holdMax = 250 * time.Millisecond
 	holdGap = 50 * time.Millisecond
+	// writeWindow: after a pass that committed writes, the next writes wait this long, while
+	// reads are answered as they come. One commit then carries about twenty passes' worth
+	// of writes: pages that several of them change (the end of each table and index) go to
+	// the WAL once instead of once per pass, so there is less to write, less to checkpoint
+	// and fewer commits. A write that arrives with the window open is not delayed at all.
+	// 20 ms is fsharp-uring-delneg's value (#398); it stays well under the 40 ms after which
+	// a late reply costs the kernel an extra acknowledgement.
+	writeWindow = 20 * time.Millisecond
 )
 
 // conn is everything we remember about a connection: 8 bytes, no pointers.
@@ -157,8 +165,11 @@ type server struct {
 	// The current pass's remaining answers, and the requests waiting for a later pass.
 	budget     int
 	nowNano    int64
-	backlog    deque // past the budget: answered newest first
-	heldWrites deque // writes that arrived during a write hold: answered oldest first after it
+	backlog    deque     // past the budget: answered newest first
+	heldWrites deque     // writes that wait for a write hold or the write window to end: answered oldest first
+	writesWait bool      // this pass does not execute writes (a hold, or the window is shut)
+	wrote      bool      // this pass executed a write
+	nextWrites time.Time // when the write window opens again
 	creates    []createReq
 	createFree []int
 	parkedMax  int           // largest backlog since the last stats line
@@ -212,7 +223,8 @@ func main() {
 	}
 	must(s.addRing())
 	s.armAccepts(0)
-	log.Printf("listening on %s:%s, %d slots per ring, direct B-tree reads: %v", host, port, s.slots, dbReadsDirect())
+	blockKB, hugeKB := dbPageMemory()
+	log.Printf("listening on %s:%s, %d slots per ring, direct B-tree reads: %v, page cache memory: %d MB of which %d MB on 2 MB pages", host, port, s.slots, dbReadsDirect(), blockKB>>10, hugeKB>>10)
 
 	lastStats := time.Now()
 	for {
@@ -232,6 +244,9 @@ func main() {
 		entered, reqBefore := now.Sub(before), s.requests
 		s.nowNano, s.budget = now.UnixNano(), answerCap
 		s.checkHold(now)
+		// The write window: after a pass that committed writes, writes wait for writeWindow
+		// before the next one, so one commit carries many of them (see writeWindow).
+		s.writesWait = s.holding || now.Before(s.nextWrites)
 		s.retrySends()
 		s.answerOldest()
 		completions := 0
@@ -243,6 +258,9 @@ func main() {
 		}
 		s.answerParked()
 		s.endPass()
+		if s.wrote {
+			s.wrote, s.nextWrites = false, now.Add(writeWindow)
+		}
 		for _, r := range s.rings[1:] {
 			r.u.submit()
 		}
@@ -623,7 +641,7 @@ func (s *server) onData(ri, slot int, data []byte) {
 			break // no room for another worst-case response: the rest waits for this send
 		}
 		req := s.parse(head, data[end+4:end+4+bodyLen])
-		if s.budget == 0 || (s.holding && req.isWrite()) {
+		if s.budget == 0 || (s.writesWait && req.isWrite()) {
 			if len(out) > 0 {
 				// A response for this connection is already being built in this pass, and a
 				// connection has one response in flight at a time. Leave the request in the
@@ -637,6 +655,7 @@ func (s *server) onData(ri, slot int, data []byte) {
 		}
 		data = data[end+4+bodyLen:]
 		s.budget--
+		s.wrote = s.wrote || req.isWrite()
 		out = s.execute(out, &req)
 		s.requests++
 	}
@@ -662,7 +681,7 @@ func (s *server) respondWith(ri, slot int, cn *conn, buf, n int) {
 func (s *server) park(ri, slot int, cn *conn, r request) {
 	r.ri, r.slot, r.gen, r.arrival = uint8(ri), uint32(slot), cn.gen, s.nowNano
 	q := &s.backlog
-	if s.holding && r.isWrite() {
+	if s.writesWait && r.isWrite() {
 		q = &s.heldWrites
 	}
 	q.pushBack(r)
@@ -680,6 +699,7 @@ func (s *server) answer(r *request) bool {
 	}
 	cn.queued = false
 	s.waitMax = max(s.waitMax, time.Duration(s.nowNano-r.arrival))
+	s.wrote = s.wrote || r.isWrite()
 	buf := int(s.sendFree[len(s.sendFree)-1])
 	out := s.execute(s.sendMem[buf*sendBufSize:buf*sendBufSize:(buf+1)*sendBufSize], r)
 	s.respondWith(ri, slot, cn, buf, len(out))
@@ -696,7 +716,7 @@ func (s *server) answerOldest() {
 			return
 		}
 		r := s.backlog.popFront()
-		if s.holding && r.isWrite() {
+		if s.writesWait && r.isWrite() {
 			s.heldWrites.pushBack(r)
 			continue
 		}
@@ -710,11 +730,11 @@ func (s *server) answerParked() {
 	for s.budget > 0 && len(s.sendFree) > 0 {
 		var r request
 		switch {
-		case !s.holding && s.heldWrites.n > 0:
+		case !s.writesWait && s.heldWrites.n > 0:
 			r = s.heldWrites.popFront()
 		case s.backlog.n > 0:
 			r = s.backlog.popBack()
-			if s.holding && r.isWrite() {
+			if s.writesWait && r.isWrite() {
 				s.heldWrites.pushBack(r)
 				continue
 			}
@@ -728,7 +748,7 @@ func (s *server) answerParked() {
 // waiting reports whether answerable requests are parked, in which case the loop must not
 // sleep in the kernel waiting for more: the budget would become a limit on throughput.
 func (s *server) waiting() bool {
-	return s.backlog.n > 0 || (!s.holding && s.heldWrites.n > 0)
+	return s.backlog.n > 0 || (!s.writesWait && s.heldWrites.n > 0)
 }
 
 // deque is a ring of requests in memory outside the Go heap: nothing to allocate or collect

@@ -10,8 +10,8 @@
  * it uses, so it includes nothing for them.
  * Owns: the one object readers, holding the root pages, the two key descriptors, the probe, the four
  * cursor areas, the set of open cursors and the last call's reason.
- * Threading: single owner thread, the loop thread that owns store.rs's request connection, or
- * pgo_train.c's main thread; SQLITE_THREADSAFE=0.
+ * Threading: single owner thread, the loop thread that owns store.rs's request connection;
+ * SQLITE_THREADSAFE=0.
  * Between calls: ready is 0 or 1, the cookie stays as twelve_readers_open read it, a cursor opened by a
  * twelve_feed or twelve_post call that answered TWELVE_OK, TWELVE_NOT_FOUND or TWELVE_SPACE stays open, inside
  * the caller's transaction, until twelve_readers_end, which the caller runs before it writes in, commits or
@@ -83,8 +83,7 @@ struct reader_state {
   int reason;
 };
 
-/* The process's one reader state, owned by the loop thread that owns store.rs's request connection, or by
- * pgo_train.c's main thread. */
+/* The process's one reader state, owned by the loop thread that owns store.rs's request connection. */
 static struct reader_state readers;
 
 /* A write position into one twelve_buf: a byte is stored only below cap, the position always advances. */
@@ -736,9 +735,9 @@ static int8_t slot_of(size_t i){
 
 int twelve_feed(sqlite3 *db, struct twelve_buf *out, struct twelve_buf *scratch){ // NOLINT(readability-function-size): the feed's five steps share the id, like, slot and fragment arrays and the four cursors, and each step runs once
   enum { FEED_POSTS_ITEMS = 20, SLOT_SPAN_ITEMS = 256 };
-  /* UNSAFE PATH (speed): errno not saved and restored; neither caller reads errno after a reader call: store.rs maps result codes, pgo_train.c samples errno only right after its own OS calls */
+  /* UNSAFE PATH (speed): errno not saved and restored; the one caller, store.rs, reads no errno after a reader call: it maps result codes */
   int saved_errno = TWELVE_SAFE_BUILD ? errno : 0;
-  /* UNSAFE PATH (speed): precondition asserts only in the safe build; store.rs and pgo_train.c call the readers only after a 0 from twelve_readers_open, on that connection, with their own buffers */
+  /* UNSAFE PATH (speed): precondition asserts only in the safe build; store.rs calls the readers only after a 0 from twelve_readers_open, on that connection, with its own buffers */
   assert_hot(readers.ready == 1);
   assert_hot(db == readers.db);
   assert_hot(out != NULL && (out->ptr != NULL || out->cap == 0));
@@ -1053,9 +1052,9 @@ out_close_cursors:
 }
 
 int twelve_post(sqlite3 *db, sqlite3_int64 id, struct twelve_buf *out){
-  /* UNSAFE PATH (speed): errno not saved and restored; neither caller reads errno after a reader call: store.rs maps result codes, pgo_train.c samples errno only right after its own OS calls */
+  /* UNSAFE PATH (speed): errno not saved and restored; the one caller, store.rs, reads no errno after a reader call: it maps result codes */
   int saved_errno = TWELVE_SAFE_BUILD ? errno : 0;
-  /* UNSAFE PATH (speed): precondition asserts only in the safe build; store.rs and pgo_train.c call the readers only after a 0 from twelve_readers_open, on that connection, with their own buffers */
+  /* UNSAFE PATH (speed): precondition asserts only in the safe build; store.rs calls the readers only after a 0 from twelve_readers_open, on that connection, with its own buffers */
   assert_hot(readers.ready == 1);
   assert_hot(db == readers.db);
   assert_hot(out != NULL && (out->ptr != NULL || out->cap == 0));

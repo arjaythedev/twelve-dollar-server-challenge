@@ -157,9 +157,11 @@ mod settings {
         let mut cache_kib = 32_768;
         let mut mmap_mib = 0;
         let mut wake_batch = 128;
-        let mut wake_wait_us = 2_000;
+        // The ceiling of ring 0's wait after a busy turn, or while rings 1 to 7 are active: 4,000 us by
+        // default, 0 to 10,000 us with --wake-wait-us=N.
+        let mut wake_wait_us = 4_000;
         let mut turn_cap = 1_024;
-        let mut batch_target = 64;
+        let mut batch_target = 96;
         let mut ring_spread = RingSpread::Fill;
         let mut args = args;
         while let Some(arg) = args.next() {
@@ -380,7 +382,7 @@ fn startup_line(
     )?;
     write!(
         out,
-        " effective_wal_gate={} effective_wake_batch={} effective_turn_cap={} sqlite_source_id={} readers_opened={} source_sha256={} rustflags={} c_target={} pgo={}",
+        " effective_wal_gate={} effective_wake_batch={} effective_turn_cap={} sqlite_source_id={} readers_opened={} source_sha256={} rustflags={} c_target={}",
         gate,
         settings.effective_wake_batch(),
         settings.effective_turn_cap(),
@@ -388,8 +390,7 @@ fn startup_line(
         u8::from(readers),
         env!("TWELVE_SOURCE_SHA256"),
         env!("TWELVE_RUSTFLAGS"),
-        JsonString(env!("TWELVE_C_TARGET")),
-        env!("TWELVE_PGO")
+        JsonString(env!("TWELVE_C_TARGET"))
     )?;
     write!(
         out,

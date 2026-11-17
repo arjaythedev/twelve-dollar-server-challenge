@@ -681,7 +681,10 @@ pub const Server = struct {
                     break;
                 }
             }
-            const busy = (!self.rq.isEmpty() or !self.ready.isEmpty());
+            // Do not enter an idle wait while CQEs or SQEs are already ready:
+            // with DEFER_TASKRUN that otherwise postpones progress by one
+            // timeout interval and amplifies the p99 during a connection ramp.
+            const busy = any_cqes or any_to_submit or !self.rq.isEmpty() or !self.ready.isEmpty();
 
             // With deferred task-run, a long wait on one ring can defer the
             // completions queued on every other active ring.  Once connection

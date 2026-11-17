@@ -89,10 +89,10 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 3 | rust-iouring-rkkautsar | #355 | Rust (io_uring, SQLite B-tree reads) | **300,000** ᴿ | 28,417 | 107.7 | 345.0 | 0.00 | 96 | 30 | 1,159 | 2026-11-09 |
 | 3 | swift-iouring-akbashev | #376 | Swift (io_uring, SQLite B-tree reads) | **300,000** ᴬ | 28,183 | 112.1 | 942.5 | 0.00 | 92 | 29 | 1,240 | 2026-11-09 |
 | 3 | fsharp-uring-delneg | #398 | F# (.NET 11, io_uring, SQLite B-tree reads) | **300,000** ᴱ | 28,419 | 56.4 | 404.6 | 0.00 | 82 | 26 | 1,347 | 2026-11-13 |
-| 6 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
-| 7 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
-| 7 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
-| 7 | c-iouring-jowinjestine | #404 | C (io_uring, SQLite B-tree reads) | **290,000** ᴸ | 27,567 | 77.6 | 271.7 | 0.00 | 80 | 26 | 1,146 | 2026-11-12 |
+| 3 | c-iouring-jowinjestine | #486 | C (io_uring, SQLite B-tree reads) | **300,000** ᴸ | 28,394 | 199.6 | 425.2 | 0.00 | 83 | 26 | 1,503 | 2026-11-17 |
+| 7 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
+| 8 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
+| 8 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
 | 10 | lean-derive-hargup | #153 | Lean 4 (generated C, io_uring) | **280,000** | 26,683 | 141 | 316 | 0.00 | 92 | 31 | 836 | 2026-10-28 |
 | 10 | c-iouring-unorig-username | #290 | C (io_uring, SQLite B-tree reads) | **280,000** ᴺ | 26,688 | 56.4 | 713 | 0.00 | 78 | 26 | 1,357 | 2026-11-03 |
 | 10 | csharp-kestrel-btree-mbobka | #317 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring, SQLite B-tree reads) | **280,000** | 26,686 | 190 | 385 | 0.00 | 83 | 28 | 854 | 2026-11-05 |
@@ -699,9 +699,14 @@ didn't beat the merged row) scored **230,000** (22,354 req/s, p95 32.6 / p99 285
 999 MB, 2026-11-11). 240,000 failed the 2-minute probe on p95/p99 (241 / 1,475 ms at 72 % CPU, 0 errors) and 320,000
 on p95/p99 (2,285 / 2,524 ms at 97 % CPU).
 
-ᴸ **c-iouring-jowinjestine** is scored at its follow-up PR **#404** (`1e7fb4d`, merged 2026-11-12: the tail
-checkpoint thread restarts the log itself, `BEGIN IMMEDIATE` batches, WAL-coalescing shim fix, rings created at
-startup): 290,000 held at 80 % CPU, 0 errors; 300,000 failed the 2-minute probe on p99 (3.83 s at 83 % CPU), 320,000 on
+ᴸ **c-iouring-jowinjestine** is scored at its follow-up PR **#486** (`5b6bfd3`, merged 2026-11-17: #484's code plus a
+governor that shrinks the receive buffers of newly accepted connections on its own listeners when its cgroup reports
+memory pressure): 300,000 held at 83 % CPU, 0 errors; 310,000 failed the 2-minute probe on p95/p99 (2.09 / 2.90 s at
+89 % CPU) and 320,000 on p95/p99 (1.35 / 1.61 s at 96 % CPU), all with 0 errors. Until then the row was its follow-up
+PR **#404** (`1e7fb4d`, merged 2026-11-12: the tail checkpoint thread restarts the log itself, `BEGIN IMMEDIATE`
+batches, WAL-coalescing shim fix, rings created at startup), which held **290,000** (27,567 req/s, p95 77.6 / p99
+271.7 ms, 0 err, 80 % CPU, 26 µs/req, 1,146 MB, 2026-11-12); the follow-ups below up to #485 were compared with that
+row. #404's 300,000 failed the 2-minute probe on p99 (3.83 s at 83 % CPU), 320,000 on
 p99 (21.7 s at 89 % CPU). Its first merged code, #396 (`c3fdb10`), held **270,000** (25,692 req/s, p95 114.3 / p99
 550.7 ms, 0 err, 77 % CPU, 27 µs/req, 904 MB, 2026-11-12). Its follow-up **#402** was scored at commit
 **`f2f9227`** (held, not merged: it didn't beat the merged row): **253,000** (24,302 req/s, p95 285.6 / p99 665.4 ms,

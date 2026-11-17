@@ -101,23 +101,23 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 10 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** ᵁ | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
 | 10 | c-iouring-PROGABBOMALA | #430 | C (io_uring, SQLite B-tree reads) | **280,000** | 26,712 | 151.1 | 479.1 | 0.00 | 78 | 26 | 1,550 | 2026-11-14 |
 | 10 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **280,000** | 26,674 | 114.3 | 369.9 | 0.00 | 90 | 30 | 910 | 2026-11-16 |
-| 17 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
-| 17 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
-| 19 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
-| 20 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
-| 20 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
-| 20 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
-| 20 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
-| 20 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
-| 20 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
-| 20 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
-| 20 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
-| 20 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
-| 20 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
-| 20 | holyphp-io-uring-elifoxcoder | #490 | HolyPHP (io_uring, SQLite B-tree reads) | **270,000** ᵘ | 25,816 | 234.0 | 584.6 | 0.00 | 84 | 29 | 1,325 | 2026-11-17 |
-| 31 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 32 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 32 | go-iouring-DblD | #494 | Go (io_uring, SQLite B-tree reads) | **260,000** | 24,995 | 20.9 | 366.2 | 0.00 | 78 | 28 | 681 | 2026-11-17 |
+| 10 | go-iouring-DblD | #498 | Go (io_uring, SQLite B-tree reads) | **280,000** | 26,707 | 32.0 | 803.8 | 0.00 | 80 | 27 | 738 | 2026-11-17 |
+| 18 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
+| 18 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
+| 20 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
+| 21 | crystal-epoll-faustinoaq | #193 | Crystal (io_uring) | **270,000** | 25,693 | 348 | 879 | 0.00 | 92 | 32 | 1,160 | 2026-10-29 |
+| 21 | lexlean-iouring-humuhumu33 | #287 | C (LexLean/Lean 4-generated core, io_uring, SQLite B-tree reads) | **270,000** | 25,873 | 40.2 | 206 | 0.00 | 78 | 27 | 1,067 | 2026-11-03 |
+| 21 | goose-iouring-ahmadsh2007 | #291 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᴳ | 25,770 | 261 | 906 | 0.00 | 79 | 28 | 1,106 | 2026-11-04 |
+| 21 | lean-verified-soonhokong | #286 | Lean 4 (verified handlers, io_uring, SQLite B-tree reads) | **270,000** | 25,856 | 40.2 | 282.8 | 0.00 | 74 | 26 | 954 | 2026-11-05 |
+| 21 | rust-iouring-tbsvttr | #323 | Rust (io_uring, SQLite B-tree reads) | **270,000** ᵟ | 25,818 | 97.5 | 294.2 | 0.00 | 81 | 28 | 1,307 | 2026-11-05 |
+| 21 | fortran-iouring-oh-meh | #332 | Fortran (io_uring, SQLite B-tree reads) | **270,000** | 25,823 | 189.9 | 720.5 | 0.00 | 85 | 30 | 1,041 | 2026-11-06 |
+| 21 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
+| 21 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
+| 21 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
+| 21 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
+| 21 | holyphp-io-uring-elifoxcoder | #490 | HolyPHP (io_uring, SQLite B-tree reads) | **270,000** ᵘ | 25,816 | 234.0 | 584.6 | 0.00 | 84 | 29 | 1,325 | 2026-11-17 |
+| 32 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 33 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 34 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 34 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 34 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |

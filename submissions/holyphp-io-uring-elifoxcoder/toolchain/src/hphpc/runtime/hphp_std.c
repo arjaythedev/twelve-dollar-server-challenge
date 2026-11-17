@@ -2860,9 +2860,9 @@ static uint64_t *hp_ur_chunk_diag_ns(struct hp_urchunk *c) {
  * overwritten before the next response is sent; no response content is
  * retained or reused. A small thread-local pool matches the single-threaded
  * event loop and bounds retained memory. */
-#define HP_RESP_BUF_POOL_MAX 4096
+#define HP_RESP_BUF_POOL_MAX 8192
 #define HP_RESP_BUF_POOL_CAP_MAX (16u * 1024u)
-#define HP_RESP_BUF_POOL_BYTES_MAX (4u * 1024u * 1024u)
+#define HP_RESP_BUF_POOL_BYTES_MAX (32u * 1024u * 1024u)
 typedef struct { char *data; size_t cap; } hp_resp_buf_entry;
 /* Two size classes: small buffers (most responses) and large ones (feed-sized
  * builders). One mixed stack let a run of small buffers hide every large
@@ -2941,7 +2941,7 @@ static struct hp_urchunk *hp_ur_chunk_alloc(void) {
 }
 static void hp_ur_chunk_release(struct hp_urchunk *c) {
     hp_resp_buf_release(c->data, c->cap);
-    if (g_chunk_spare_n < 32) {
+    if (g_chunk_spare_n < 4096) {
         c->next = g_chunk_spare;
         g_chunk_spare = c;
         g_chunk_spare_n++;
@@ -4133,8 +4133,13 @@ static bool hp_uring_setup(void) {
         long v = atol(env);
         if (v >= 1 && v <= 262144) hp_ur_answer_budget_limit = (uint32_t)v;
     }
-    if ((env = getenv("HPHP_CIRCULAR_QUEUES")) && *env == '1')
-        hp_ur_circular_queues = 1;
+    /* Circular FIFOs by default: the linear variant compacts with memmove
+     * whenever the tail reaches capacity, which under a sustained answer
+     * backlog moves the whole queue again and again. HPHP_CIRCULAR_QUEUES=0
+     * restores it for comparison. */
+    hp_ur_circular_queues = 1;
+    if ((env = getenv("HPHP_CIRCULAR_QUEUES")) && *env == '0')
+        hp_ur_circular_queues = 0;
     if ((env = getenv("HPHP_TASKRUN")) && (env[0] == '0' || env[0] == 'n' ||
                                            env[0] == 'N'))
         hp_ur_taskrun = 0;
@@ -5756,6 +5761,7 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
         /* Match the multi-ring Rust loop: flush all nonzero rings first, then
          * let ring 0 own the bounded wait for the whole pass. Completions on
          * the other rings are drained immediately after that wait. */
+        uint32_t posted = 0;
         for (int r = hp_ur_nrings - 1; r > 0; r--) {
             struct hp_uring_ring *rg = &hp_ur_rings[r];
             if (!hp_ur_ring_needs_enter(rg)) continue;
@@ -5766,13 +5772,18 @@ static void hp_uring_wait(HpFdList *in, HpFdList *out, int timeout_ms) {
                 hp_ur_enter(to_submit > 0 ? to_submit : 0, 0, -1);
             else
                 hp_ur_submit_only(to_submit > 0 ? to_submit : 0);
+            /* A deferred ring posts its completions only inside that enter,
+             * so nothing will wake ring 0's wait for them: count them now. */
+            posted += __atomic_load_n(hp_ur_cq_tail, __ATOMIC_ACQUIRE) - hp_ur_cqhead;
         }
         hp_ur_cur = &hp_ur_rings[0];
         long to_submit = (long)(hp_ur_sqtail -
             __atomic_load_n(hp_ur_sq_head, __ATOMIC_ACQUIRE));
-        /* With no ready work, ring 0 owns the bounded wait for the pass. */
+        /* With no ready work, ring 0 owns the bounded wait for the pass --
+         * unless the flush above already produced completions to drain. */
         long wait_us = hp_ur_batch_us > 0 ? hp_ur_batch_us : 1000;
         long min_complete = hp_ur_batch > 0 ? hp_ur_batch : 1;
+        if (posted) { wait_us = 0; min_complete = 0; }
         hp_ur_enter(to_submit, min_complete, (int)wait_us);
     } else if (ring0_wait) {
         /* The Rust loop does not block when a request/read queue or CQ work

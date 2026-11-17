@@ -12,12 +12,13 @@ export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
 # WAL tail is copied and SQLite can restart the log from frame 0. Without it
 # the WAL grew past 200 MB under sustained load. HPHP_CKPT_RESTART=0 disables.
 export HPHP_CKPT_RESTART="${HPHP_CKPT_RESTART:-1}"
-# Optional: open SQLite through another VFS, e.g. HPHP_SQLITE_VFS=unix-excl
-# (the process holds the database lock, so transactions take no fcntl()
-# locks). Off by default: the box run with unix-excl + WAL coalescing at
-# f1f8d45 held 230k with a worse tail than the default VFS at 250k, so this
-# head isolates the runtime changes.
-export HPHP_SQLITE_VFS="${HPHP_SQLITE_VFS-}"
+# Open SQLite through unix-excl: the process holds the database lock, so
+# transactions take no fcntl() locks and the WAL index lives in process memory
+# (both SQLite connections share it). Same sync calls, so durability is
+# unchanged. Mirrored A/B/B/A at 130k connections (WSL, mixed-ring loop): -6%
+# CPU per request, user and kernel time both lower.
+# HPHP_SQLITE_VFS= (empty) restores SQLite's default VFS.
+export HPHP_SQLITE_VFS="${HPHP_SQLITE_VFS-unix-excl}"
 # Write each commit's WAL frames with one pwrite through a thin wrapper over
 # the selected VFS (reads, syncs and locks flush first). Set 0 to compare the
 # old path; the default VFS itself remains unchanged.
@@ -76,8 +77,12 @@ export HPHP_FEED_BATCH_USERS="${HPHP_FEED_BATCH_USERS:-1}"
 # These typed fast-array accesses are used only with in-range feed-loop indices.
 # Set 0 to restore runtime bounds checks while diagnosing array logic.
 export HPHP_IARR_FAST="${HPHP_IARR_FAST:-1}"
-# Keep the 64-CQE default: the 256-CQE leader-style wait was not repeatable at
-# 280k-shaped WSL load and worsened p95 on the reverse-order run. Both knobs are overridable.
+# Mixed-ring loop: ring 0 waits for 64 completions or 1 ms. The all-deferred
+# loop (HPHP_DEFER_ALL=1 HPHP_FORCE_ENTER=1 HPHP_BATCH_N=256) measured cheaper
+# on WSL and an Ubuntu 6.8 VM, but on the box it cost 31 us/request against
+# 29 us for this loop (#481 at 4f268f4 vs #447 at 4c0adfb), so it stays opt-in.
+export HPHP_DEFER_ALL="${HPHP_DEFER_ALL:-0}"
+export HPHP_FORCE_ENTER="${HPHP_FORCE_ENTER:-0}"
 case "$HPHP_RINGS" in
   ''|*[!0-9]*) ;;
   *)

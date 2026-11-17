@@ -825,7 +825,7 @@ static int memgov_start(void) {
   return apply_listener_rcvbuf(MG.normal_rcvbuf);
 }
 static void memgov_tick(uint64_t now) {
-  if (!MG.enabled || (MG.last_sample_ns && now - MG.last_sample_ns < 2000000000ULL)) return;
+  if (!MG.enabled || (MG.last_sample_ns && now - MG.last_sample_ns < 500000000ULL)) return;
   MG.last_sample_ns = now;
   MG.samples++;
   MG.cg_current = cg_read_u64("/sys/fs/cgroup/memory.current");

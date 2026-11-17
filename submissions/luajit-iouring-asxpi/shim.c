@@ -1,11 +1,12 @@
 /*
  * The only C in this submission: a thin layer over the unmodified SQLite amalgamation.
  *
- * It exposes SQLite's own B-tree cursor API (seek, first, next, previous, payload) and five prepared
+ * It exposes SQLite's own B-tree cursor API (seek, first, next, payload) and five prepared
  * statements to LuaJIT. No HTTP, JWT or record decoding happens here: Lua gets the record bytes
  * SQLite returns and does the rest. The one exception is td_json_clean, a byte scan that tells
- * the JSON writer how much of a string needs no escaping. Nothing here writes SQLite's private
- * structs; cursors are only moved through sqlite3Btree* functions.
+ * the JSON writer how much of a string needs no escaping. Nothing here writes a cursor's
+ * or the B-tree's state: cursors are only moved through sqlite3Btree* functions, and the only
+ * SQLite structs filled in are the search keys handed to them (a KeyInfo per index, the likes key).
  *
  * WAL checkpoints run on a second thread with its own connection, so the event loop never waits
  * for their fsyncs. Both connections use SQLite's "unix-excl" VFS: the process owns the file and
@@ -41,7 +42,7 @@ static sqlite3 *ckdb;
 static pthread_mutex_t ck_mu = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t ck_cv = PTHREAD_COND_INITIALIZER;
 static int ck_req;
-static volatile int ck_running, ck_log = -1, ck_done = -1, ck_rounds;
+static volatile int ck_running, ck_done = -1;
 static volatile int wal_frames;
 static pid_t ck_tid;
 
@@ -217,36 +218,178 @@ static const char *td_vfs_name(void) {
   return td_vfs.zName;
 }
 
+/* ---- the page cache: pcache1 behind a wrapper that skips truncates with nothing to drop ----
+ *
+ * At the end of every transaction the pager calls the cache's xTruncate(dbSize + 1). pcache1 then
+ * walks every page with a key at or above the limit, and when its largest key is far above the
+ * limit it walks its whole hash table. B-tree balancing moves sibling pages through the lock-byte
+ * page's number ((PENDING_BYTE / page size) + 1 = 262,145) with xRekey, which raises pcache1's
+ * largest key to that number until the next truncate: each commit then scans the whole table to
+ * drop nothing (0.5% of the box's CPU at 265k users). The wrapper keeps a bitmap of the keys
+ * that may be in pcache1 (a superset: set by xFetch and by xRekey's new key, cleared by xRekey's
+ * old key and by a forwarded truncate) and skips xTruncate when no key at or above the limit can
+ * be cached, which is a no-op by the method's contract. Every other method goes to pcache1
+ * unchanged. Installed through SQLITE_CONFIG_PCACHE2, a public plugin API; the design is the one
+ * lean-c-iouring-loafecho (#239) uses. TD_PCACHE=0 leaves pcache1 alone. */
+typedef struct TdPc {
+  sqlite3_pcache *inner;
+  uint64_t *bits;              /* bit k: key k may be in pcache1 */
+  uint32_t nwords, top;        /* every set bit is below top */
+  int passthrough;             /* the bitmap could not grow: forward every truncate */
+} TdPc;
+static sqlite3_pcache_methods2 pc_in;  /* pcache1's methods */
+static long pc_skipped, pc_forwarded;
+
+static void pc_set(TdPc *w, unsigned key) {
+  if (w->passthrough) return;
+  if ((key >> 6) >= w->nwords) {
+    uint32_t n = w->nwords ? w->nwords : 2048;
+    while (n <= (key >> 6)) n *= 2;
+    uint64_t *b = sqlite3_realloc64(w->bits, (sqlite3_uint64)n * 8);
+    if (!b) { w->passthrough = 1; return; }
+    memset(b + w->nwords, 0, (size_t)(n - w->nwords) * 8);
+    w->bits = b; w->nwords = n;
+  }
+  w->bits[key >> 6] |= 1ull << (key & 63);
+  if (key >= w->top) w->top = key + 1;
+}
+static void pc_clear(TdPc *w, unsigned key) {
+  if (!w->passthrough && (key >> 6) < w->nwords) w->bits[key >> 6] &= ~(1ull << (key & 63));
+}
+/* 1 if a key >= from may be cached; lowers top when none is */
+static int pc_any_from(TdPc *w, unsigned from) {
+  if (from >= w->top) return 0;
+  unsigned i = from >> 6, last = (w->top - 1) >> 6;
+  uint64_t m = w->bits[i] & (~0ull << (from & 63));
+  for (;;) {
+    if (m) return 1;
+    if (++i > last) break;
+    m = w->bits[i];
+  }
+  w->top = from;
+  return 0;
+}
+static void pc_clear_from(TdPc *w, unsigned from) {
+  if (w->passthrough || from >= w->top) return;
+  unsigned i = from >> 6, last = (w->top - 1) >> 6;
+  w->bits[i] &= ~(~0ull << (from & 63));
+  for (i++; i <= last; i++) w->bits[i] = 0;
+  w->top = from;
+}
+static int pcInit(void *a) { (void)a; return pc_in.xInit ? pc_in.xInit(pc_in.pArg) : SQLITE_OK; }
+static void pcShutdown(void *a) { (void)a; if (pc_in.xShutdown) pc_in.xShutdown(pc_in.pArg); }
+static sqlite3_pcache *pcCreate(int szPage, int szExtra, int purgeable) {
+  TdPc *w = sqlite3_malloc(sizeof *w);
+  if (!w) return 0;
+  memset(w, 0, sizeof *w);
+  w->inner = pc_in.xCreate(szPage, szExtra, purgeable);
+  if (!w->inner) { sqlite3_free(w); return 0; }
+  return (sqlite3_pcache *)w;
+}
+static void pcCachesize(sqlite3_pcache *p, int n) { pc_in.xCachesize(((TdPc *)p)->inner, n); }
+static int pcPagecount(sqlite3_pcache *p) { return pc_in.xPagecount(((TdPc *)p)->inner); }
+static sqlite3_pcache_page *pcFetch(sqlite3_pcache *p, unsigned key, int create) {
+  TdPc *w = (TdPc *)p;
+  sqlite3_pcache_page *pg = pc_in.xFetch(w->inner, key, create);
+  if (pg) pc_set(w, key);
+  return pg;
+}
+static void pcUnpin(sqlite3_pcache *p, sqlite3_pcache_page *pg, int discard) {
+  pc_in.xUnpin(((TdPc *)p)->inner, pg, discard);
+}
+static void pcRekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned oldk, unsigned newk) {
+  TdPc *w = (TdPc *)p;
+  pc_in.xRekey(w->inner, pg, oldk, newk);
+  pc_clear(w, oldk);
+  pc_set(w, newk);
+}
+static void pcTruncate(sqlite3_pcache *p, unsigned limit) {
+  TdPc *w = (TdPc *)p;
+  if (!w->passthrough && !pc_any_from(w, limit)) { pc_skipped++; return; }
+  pc_forwarded++;
+  pc_in.xTruncate(w->inner, limit);
+  pc_clear_from(w, limit);
+}
+static void pcDestroy(sqlite3_pcache *p) {
+  TdPc *w = (TdPc *)p;
+  pc_in.xDestroy(w->inner);
+  sqlite3_free(w->bits);
+  sqlite3_free(w);
+}
+static void pcShrink(sqlite3_pcache *p) { pc_in.xShrink(((TdPc *)p)->inner); }
+static void td_pcache_install(void) {
+  const char *e = getenv("TD_PCACHE");
+  if (e && e[0] == '0') return;
+  if (sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &pc_in) != SQLITE_OK || !pc_in.xCreate) return;
+  sqlite3_pcache_methods2 m = {1, 0, pcInit, pcShutdown, pcCreate, pcCachesize, pcPagecount,
+                               pcFetch, pcUnpin, pcRekey, pcTruncate, pcDestroy, pcShrink};
+  if (sqlite3_config(SQLITE_CONFIG_PCACHE2, &m) != SQLITE_OK) memset(&pc_in, 0, sizeof pc_in);
+}
+long td_pcache_skipped(void) { return pc_skipped; }
+long td_pcache_forwarded(void) { return pc_forwarded; }
+
 /* our own descriptors of the two files, for syncing and cache advice from the checkpoint thread.
    Never closed: closing any descriptor of a file drops the process's locks on it. */
 static int own_db_fd = -1, own_wal_fd = -1;
 static char wal_path[1024];
 
+static double ck_clock(int id) {
+  struct timespec t;
+  clock_gettime(id, &t);
+  return t.tv_sec * 1e3 + t.tv_nsec * 1e-6;
+}
+
+/* run-queue wait of this thread so far, in ms (schedstat: cpu ns, wait ns, slices) */
+static double ck_waited(void) {
+  char b[128]; double cpu = 0, wait = 0;
+  int fd = open("/proc/thread-self/schedstat", O_RDONLY | O_CLOEXEC);
+  if (fd < 0) return 0;
+  int n = (int)read(fd, b, sizeof b - 1);
+  close(fd);
+  if (n <= 0) return 0;
+  b[n] = 0;
+  if (sscanf(b, "%lf %lf", &cpu, &wait) != 2) return 0;
+  return wait * 1e-6;
+}
+
 static void *ck_main(void *arg) {
   (void)arg;
   struct sched_param sp = {0};
   ck_tid = (pid_t)syscall(SYS_gettid);
-  sched_setscheduler(ck_tid, SCHED_IDLE, &sp);     /* runs when the event loop sleeps */
+  /* The thread runs at normal priority and sleeps between rounds. (At SCHED_IDLE between rounds
+     its rounds queued 260-350 ms behind the busy loop for ~20 ms of work.) */
+  /* TD_STATS=1: one line per round on stderr (wall and CPU time of the round, time in the
+     extra fdatasync, frames in the log and copied), to tell a CPU-starved round from a
+     disk-bound one. */
+  const char *se = getenv("TD_STATS");
+  int stats = se && se[0] && se[0] != '0';
   for (;;) {
     pthread_mutex_lock(&ck_mu);
     while (!ck_req) pthread_cond_wait(&ck_cv, &ck_mu);
     ck_req = 0;
     pthread_mutex_unlock(&ck_mu);
     int nlog = -1, ndone = -1;
+    double w0 = stats ? ck_clock(CLOCK_MONOTONIC) : 0, c0 = stats ? ck_clock(CLOCK_THREAD_CPUTIME_ID) : 0;
+    double q0 = stats ? ck_waited() : 0;
+    double sync_ms = 0;
     sqlite3_wal_checkpoint_v2(ckdb, 0, SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
+    double w1 = stats ? ck_clock(CLOCK_MONOTONIC) : 0;
     if (nlog >= 0 && ndone < nlog) {
       /* An incomplete round: SQLite only syncs the database file at the end of a round that
          copied the whole log, which here is the round that runs while writes are held. Sync
          what this round wrote now, off the loop, so that sync has little left to do. */
       if (own_db_fd >= 0) fdatasync(own_db_fd);
+      if (stats) sync_ms = ck_clock(CLOCK_MONOTONIC) - w1;
     } else if (nlog >= 0) {
       /* The whole log is copied: nobody reads these pages again, so let the kernel drop them
          instead of keeping up to hundreds of megabytes of old log in its cache. */
       if (own_wal_fd < 0 && wal_path[0]) own_wal_fd = open(wal_path, O_RDONLY | O_CLOEXEC);
       if (own_wal_fd >= 0) posix_fadvise(own_wal_fd, 0, 0, POSIX_FADV_DONTNEED);
     }
-    ck_log = nlog; ck_done = ndone;
-    ck_rounds++;
+    if (stats)
+      fprintf(stderr, "ckround log=%d done=%d wall_ms=%.1f cpu_ms=%.1f runq_ms=%.1f sync_ms=%.1f\n", nlog, ndone,
+              w1 - w0, ck_clock(CLOCK_THREAD_CPUTIME_ID) - c0, ck_waited() - q0, sync_ms);
+    ck_done = ndone;
     __atomic_store_n(&ck_running, 0, __ATOMIC_RELEASE);
   }
   return 0;
@@ -262,25 +405,26 @@ int td_ckpt_start(void) {
   pthread_mutex_unlock(&ck_mu);
   return 1;
 }
-/* The thread normally runs at idle priority, so a checkpoint never takes the CPU from the event
-   loop. When the loop is saturated that would starve it and let the log grow without bound:
-   on = 1 gives it normal priority until the log is small again. */
-int td_ckpt_boost(int on) {
-  struct sched_param sp = {0};
-  if (!ck_tid) return -1;
-  return sched_setscheduler(ck_tid, on ? SCHED_OTHER : SCHED_IDLE, &sp);
-}
 int td_ckpt_running(void) { return __atomic_load_n(&ck_running, __ATOMIC_ACQUIRE); }
-/* frames left in the log after the last round (0 = everything is in the database file) */
-int td_ckpt_left(void) { return (ck_log < 0 || ck_done < 0) ? -1 : ck_log - ck_done; }
-int td_ckpt_rounds(void) { return ck_rounds; }
 /* frames the last round had copied into the database file when it ended */
 int td_ckpt_done(void) { return ck_done; }
 
-int td_open(const char *path, int cache_kb, int autockpt) {
+/* PRAGMA mmap_size for the main connection: SQLite reads database pages straight from the
+   kernel's page cache through a read-only mapping instead of copying them with pread into its own
+   cache (rule 5 names mmap as allowed). Writes still go through pwrite, and pages the WAL holds
+   are still read from the WAL. TD_MMAP_MB, default 0 (off): with a mapping SQLite consults the
+   WAL index on every page access, which cost ~1 µs per request on the test box and
+   4-12% of CPU in other entries' measurements. */
+static long long mmap_bytes(void) {
+  const char *e = getenv("TD_MMAP_MB");
+  long long mb = e && e[0] ? atoll(e) : 0;
+  return mb < 0 ? 0 : mb * 1024 * 1024;
+}
+
+int td_open(const char *path, int cache_kb) {
   int rc;
-  char sql[256];
-  (void)autockpt;
+  char sql[320];
+  td_pcache_install();
   sqlite3_initialize();
   const char *vfs = td_vfs_name();
   own_db_fd = open(path, O_RDWR | O_CLOEXEC);
@@ -289,7 +433,7 @@ int td_open(const char *path, int cache_kb, int autockpt) {
   if (rc) return fail("open", rc);
   sqlite3_snprintf(sizeof sql, sql,
     "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;"
-    "PRAGMA cache_size=-%d; PRAGMA wal_autocheckpoint=0;", cache_kb);
+    "PRAGMA cache_size=-%d; PRAGMA wal_autocheckpoint=0; PRAGMA mmap_size=%lld;", cache_kb, mmap_bytes());
   rc = sqlite3_exec(db, sql, 0, 0, 0);
   if (rc) return fail("pragma", rc);
   sqlite3_wal_hook(db, wal_hook, 0);
@@ -473,16 +617,6 @@ int td_next(int c, uint8_t *buf, uint32_t cap) {
   if (rc) return -1;
   return payload(c, buf, cap);
 }
-
-int td_prev(int c, uint8_t *buf, uint32_t cap) {
-  int rc = sqlite3BtreePrevious(cur[c], 0);
-  if (rc == SQLITE_DONE) return 0;
-  if (rc) return -1;
-  return payload(c, buf, cap);
-}
-
-/* rowid of the entry a table cursor is on */
-int64_t td_rowid(int c) { return sqlite3BtreeIntegerKey(cur[c]); }
 
 /* Positions the likes_post_id_idx cursor on its first entry with post_id >= the argument, like
    OP_SeekGE. 1 = on an entry, 0 = none, -1 = error. */

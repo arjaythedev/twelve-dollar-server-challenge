@@ -761,6 +761,9 @@ let openDb (path: string) (cacheKB: int) (warm: bool) =
     // ones the kernel may have to read back from disk first
     exec "PRAGMA journal_size_limit=0"
     exec ("PRAGMA cache_size=-" + string cacheKB)
+    // A WAL left by an earlier run of the server (it may be gigabytes) is copied into the database and emptied now,
+    // before the first request, so this run's WAL starts at zero. Nothing to do on a database that has none.
+    sqlite3_exec (db, z "PRAGMA wal_checkpoint(TRUNCATE)", 0n, 0n, 0n) |> ignore
     sqlite3_wal_hook (db, Marshal.GetFunctionPointerForDelegate walHook, 0n) |> ignore
     // CHUNK_MB: the database file grows this many MiB at a time (SQLITE_FCNTL_CHUNK_SIZE), so a checkpoint's writes past
     // its end don't each extend the file
@@ -818,6 +821,7 @@ type Checkpointer(path: string, nice: int) =
     let mutable backfilled = -1
     let mutable wallUs = 0L
     let mutable cpuUs = 0L
+    let mutable syncDb = false
     let frameBytes = walFrameBytes ()
     let run () =
         if nice <> 0 then Native.setpriority (0, Native.gettid (), nice) |> ignore
@@ -857,6 +861,10 @@ type Checkpointer(path: string, nice: int) =
             if walFd < 0 && cdb <> 0n then walFd <- Native.``open`` (z (path + "-wal"), 0x80000) // kept open, as above
             if walFd >= 0 && r = 0 && done' > 0 then
                 Native.posix_fadvise (walFd, 0L, 32L + int64 done' * int64 frameBytes, 4) |> ignore
+            // The loop asks for this on the passes that lead up to a write hold: the pages the passes have written so
+            // far reach the disk now, while writes flow, so the sync SQLite does at the end of the held pass (the one
+            // that copies the whole WAL) has only that pass's pages left to write.
+            if Volatile.Read &syncDb && dropFd >= 0 && r = 0 then Native.fdatasync dropFd |> ignore
             Volatile.Write(&cpuUs, Native.threadCpuUs () - c0)
             Volatile.Write(&wallUs, int64 (Diagnostics.Stopwatch.GetElapsedTime(t0).TotalMicroseconds))
             Volatile.Write(&backfilled, done')
@@ -867,7 +875,10 @@ type Checkpointer(path: string, nice: int) =
         let t = Thread(run, 256 * 1024, IsBackground = true, Name = "checkpoint")
         t.Start()
     member _.Fd = efd
-    member _.Request() = wake.Set() |> ignore
+    /// asks for a pass; sync: the thread also syncs the database file after it
+    member _.Request(sync: bool) =
+        Volatile.Write(&syncDb, sync)
+        wake.Set() |> ignore
     /// the last pass: SQLite's rc and the frames it backfilled (-1 unknown)
     member _.Rc = Volatile.Read &rc
     member _.Backfilled = Volatile.Read &backfilled

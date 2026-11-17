@@ -617,9 +617,12 @@ class Server {
               w.full() = true;
           } else {
             static int accept_errs = 0;
-            if (accept_errs < 20)
+            if (accept_errs < 20) {
+              uint32_t inflight = 0;
+              for (uint32_t li = 0; li < kListeners; li++) inflight += w.accepts()[li];
               std::fprintf(stderr, "accept fail res=%d errno=%d open=%u accepts=%u\n", res, -res,
-                           w.open(), w.accepts());
+                           w.open(), inflight);
+            }
             accept_errs++;
             if (res == -ENFILE) w.full() = true;
           }

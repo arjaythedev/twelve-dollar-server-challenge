@@ -41,6 +41,7 @@ target("server")
     if is_plat("linux") then
         add_cflags("-march=native", "-fno-plt", "-fno-semantic-interposition", "-falign-functions=32", "-falign-loops=32", "-fipa-pta", "-mprefer-vector-width=256")
         add_cxxflags("-march=native", "-fno-plt", "-fno-semantic-interposition", "-falign-functions=32", "-falign-loops=32", "-fipa-pta", "-mprefer-vector-width=256")
+        add_cxxflags("-Wformat=2")
         add_ldflags("-flto-partition=one")
         if os.isfile("/usr/bin/mold") then
             add_ldflags("-fuse-ld=mold")

@@ -26,8 +26,9 @@
 namespace {
 
 constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
-constexpr uint32_t kMaxRingsLimit = 8;     /* hard cap on rings, whatever the table size */
-constexpr uint32_t kAcceptDepth = 2048;
+constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-kensac #264 uses 16) */
+constexpr uint32_t kAcceptDepth = 2048;   /* total, divided by the live ring count */
+constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
 constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 8192;
 constexpr unsigned kCqEntries = 65536;
@@ -57,7 +58,7 @@ class Worker {
     index_ = index;
     listener_ = listener;
     accepting_ = true;
-    if (!ring_.init(kSqEntries, cq, slots, err)) {
+    if (!ring_.init(kSqEntries, cq, slots, index == 0, err)) {
       std::fprintf(stderr, "ring %u setup failed (slots=%u, cq=%u): %s\n", index, slots, cq,
                    std::strerror(static_cast<int>(*err)));
       return Init::RingFail;
@@ -295,7 +296,7 @@ class Server {
             w.ring().wait(last_cqes >= 8 ? 64 : 1, busy ? 50000 : kWaitNs);
           }
         } else {
-          w.ring().enter();
+          w.ring().submit_if_ready();
         }
       }
       const uint64_t p1 = now_ns();
@@ -382,7 +383,9 @@ class Server {
   }
 
   void arm_accept(Worker& w, uint32_t wi) {
-    while (w.accepts() < kAcceptDepth / workers_.size() && w.listener() >= 0) {
+    uint32_t depth = static_cast<uint32_t>(kAcceptDepth / workers_.size());
+    if (depth < kAcceptsPerRing) depth = kAcceptsPerRing;
+    while (w.accepts() < depth && w.listener() >= 0) {
       io_uring_sqe* sqe = w.ring().sqe(1);
       if (!sqe) return;
       io_uring_prep_accept_direct(sqe, w.listener(), nullptr, nullptr, 0,

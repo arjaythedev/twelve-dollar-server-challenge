@@ -19,6 +19,6 @@ struct Request {
 
 enum class Parsed { Done, Partial, Bad };
 
-Parsed parse(const uint8_t* buf, size_t len, Request& req, size_t& used);
+[[nodiscard]] Parsed parse(const uint8_t* buf, size_t len, Request& req, size_t& used);
 
 }

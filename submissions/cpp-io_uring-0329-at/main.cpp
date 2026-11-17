@@ -529,7 +529,7 @@ class Server {
   // 把收到的字节留在连接上，本 pass 不回答。
   void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
              size_t n) {
-    if (!c.part) c.part = new std::vector<uint8_t>();
+    if (!c.part) c.part = std::make_unique<std::vector<uint8_t>>();
     c.part->insert(c.part->end(), data, data + n);
     if (!c.ready_queued) {
       c.ready_queued = true;
@@ -566,8 +566,7 @@ class Server {
     bool joined = false;
     if (c.part) {
       part = std::move(*c.part);
-      delete c.part;
-      c.part = nullptr;
+      c.part.reset();
       joined = !part.empty();
     }
     const uint8_t* buf;
@@ -585,7 +584,7 @@ class Server {
       app::http::Request req;
       size_t used = 0;
       app::http::Parsed pr = app::http::parse(buf + off, len - off, req, used);
-      if (pr == app::http::Parsed::Done) {
+      if (pr == app::http::Parsed::Done) [[likely]] {
         if (answers_left_ == 0) {
           // 本 pass 的答案额度已用完：把这个请求（以及它后面的内容）留在连接上，放到就绪队列尾部，
           // 队列按最老优先处理。
@@ -609,9 +608,9 @@ class Server {
         c.answered = true;
         app_->handle(req, out_of(c), writes_ok_);
         off += used;
-      } else if (pr == app::http::Parsed::Partial) {
+      } else if (pr == app::http::Parsed::Partial) [[likely]] {
         break;
-      } else {
+      } else [[unlikely]] {
         mark(w, idx);
         c.answered = true;
         app::error(out_of(c), 400, "bad request");
@@ -622,10 +621,10 @@ class Server {
     }
     if (off < len) {
       if (!joined) {
-        c.part = new std::vector<uint8_t>(buf + off, buf + len);
+        c.part = std::make_unique<std::vector<uint8_t>>(buf + off, buf + len);
       } else {
         part.erase(part.begin(), part.begin() + static_cast<ptrdiff_t>(off));
-        c.part = new std::vector<uint8_t>(std::move(part));
+        c.part = std::make_unique<std::vector<uint8_t>>(std::move(part));
       }
     }
   }
@@ -677,10 +676,10 @@ class Server {
             if (has) w.bufs().give(bid);
             break;
           }
-          if (res > 0) {
+          if (res > 0) [[likely]] {
             if (has) {
               c.last_active = now_sec_;
-              if (answers_left_ == 0) {
+              if (answers_left_ == 0) [[unlikely]] {
                 defer(w, wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
               } else {
                 serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
@@ -691,7 +690,7 @@ class Server {
               c.read = net::ReadState::Queued;
               w.pending().push_back(idx);
             }
-          } else if (res == -ENOBUFS) {
+          } else if (res == -ENOBUFS) [[unlikely]] {
             c.read = net::ReadState::Queued;
             w.pending().push_back(idx);
           } else {
@@ -783,7 +782,7 @@ class Server {
             const uint16_t g = c.gen;
             app::give_buf(pool_, c.out);
             app::give_buf(pool_, c.wire);
-            delete c.part;
+            c.part.reset();
             c = net::Connection{};
             c.gen = g;
             w.open()--;

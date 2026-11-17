@@ -99,7 +99,7 @@ class Ring {
   // 完成由内核即时投递，循环可以直接从共享内存读它们的队列
   // （c-iouring-pavlyhalim #245 的做法；每个 pass 都 enter 每个 ring，在全部 ring 繁忙时
   // 是每批 4.7 次系统调用）。
-  bool init(unsigned sq, unsigned cq, unsigned slots, bool defer, unsigned* err) {
+  [[nodiscard]] bool init(unsigned sq, unsigned cq, unsigned slots, bool defer, unsigned* err) {
     struct io_uring_params p {};
     p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
     if (defer) p.flags |= IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_TASKRUN_FLAG;
@@ -127,7 +127,7 @@ class Ring {
     return c[kind];
   }
 
-  io_uring_sqe* sqe(unsigned room) {
+  [[nodiscard]] io_uring_sqe* sqe(unsigned room) {
     for (unsigned tries = 0;; tries++) {
       if (io_uring_sq_space_left(&ring_) >= room) {
         io_uring_sqe* s = io_uring_get_sqe(&ring_);

@@ -29,7 +29,10 @@
 #define N_BUFS_PER_RING 1024
 #define BUF_SIZE 2048
 #define BGID 1
-#define POOL_COUNT 4096
+/* Keep enough pre-reserved response slots for a connection ramp.  With only
+ * 4,096 slots, acquire_pool fell back to unbounded 16 KiB heap allocations
+ * and the process was OOM-killed above 85k users. */
+#define POOL_COUNT 16384
 #define POOL_BUF_SIZE 16384
 #define K_LISTENER_COUNT 8
 
@@ -1224,7 +1227,8 @@ int main(int argc, char **argv) {
     sqlite3_prepare_v3(db, "DELETE FROM likes WHERE user_id = ? AND post_id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_unlike, NULL);
     sqlite3_prepare_v3(db, "SELECT count(*) FROM likes WHERE post_id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_count, NULL);
 
-    // Initialize RespPool (4096 * 16384 bytes = 64 MB)
+    // Initialize RespPool (16384 * 16384 bytes = 256 MB virtual; pages are
+    // committed on demand, avoiding the unbounded fallback under bursts).
     size_t pool_bytes = POOL_COUNT * POOL_BUF_SIZE;
     resp_pool.mem = mmap(NULL, pool_bytes, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
     madvise(resp_pool.mem, pool_bytes, MADV_HUGEPAGE);

@@ -539,12 +539,17 @@ class Server {
 
   // 在 pass 还有答案额度时，按最老优先回答被延后的连接。
   void run_ready() {
+    uint32_t turn = 0;
     while (!ready_.empty() && answers_left_ > 0) {
       const uint64_t now = now_ns();
-      /* 队尾是最老的：它已经等过 8 s 就轮到它，否则取队首（最新）。 */
+      /* 队尾是最老的。它等过 8 s 之后**拿一半的额度**（objc-uring-delneg #326：the oldest get
+       * half of each pass），而不是一旦老化就整批取队尾——backlog 持续时队尾会一直老化，全取
+       * 队尾就退化成最老优先，新请求又被拖回原来的问题里（基准机 230k 探针 p99 3.08 s 就是
+       * 这个形状）。连接内部顺序不变，`serve()` 按自己的 part 缓冲顺序处理。 */
       const bool aged = (now - ready_.back().ts) > kAgedAfterNs;
-      const ReadyRef r = aged ? ready_.back() : ready_.front();
-      if (aged) {
+      const bool take_old = aged && ((turn++ & 1u) == 0);
+      const ReadyRef r = take_old ? ready_.back() : ready_.front();
+      if (take_old) {
         ready_.pop_back();
       } else {
         ready_.pop_front();

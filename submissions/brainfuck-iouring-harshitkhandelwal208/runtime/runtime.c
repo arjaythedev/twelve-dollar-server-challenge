@@ -1148,7 +1148,7 @@ int main(int argc, char **argv) {
     }
 
     start_time = time(NULL);
-    const char *port_str = getenv("PORT"); int port = port_str ? atoi(port_str) : 3000;
+    const char *port_str = getenv("PORT"); int port = port_str ? atoi(port_str) : 80;
     const char *db_path = getenv("SQLITE_PATH"); if (!db_path) db_path = "feed.db";
     const char *secret = getenv("JWT_SECRET"); if (!secret) secret = "twelve-dollar-challenge";
     strncpy(jwt_secret, secret, sizeof(jwt_secret)-1);

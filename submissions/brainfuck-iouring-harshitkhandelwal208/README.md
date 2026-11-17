@@ -6,6 +6,7 @@ A genuinely self-hosting **Brainfuck** HTTP server implementation for the $12 Se
 
 ## Technical Highlights & Stack
 
+* **Front**: direct (serves 0.0.0.0:80)
 * **Application Logic Language**: **Pure Brainfuck** ([`src/bf/server.bf`](src/bf/server.bf) and [`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf)). All HTTP routing, endpoint matching, post ID accumulation, body validation, and error branching are executed on the Brainfuck memory tape.
 * **Genuinely Self-Hosting Compiler**: The Brainfuck compiler ([`src/compiler/bf_compiler.bf`](src/compiler/bf_compiler.bf)) is a general-purpose compiler written entirely in 8-instruction Brainfuck. It reads arbitrary Brainfuck source from stdin, handles nested loops, emits valid x86-64 GNU assembly, performs instruction coalescing and pattern lowering, and compiles itself to achieve bit-for-bit fixed-point reproducibility (`stage1.s` == `stage2.s`).
 * **Bootstrap Pipeline**: Bootstrapped via a minimal AOT C compiler ([`runtime/stage0.c`](runtime/stage0.c)) that shares the exact language semantics, followed by full self-compilation in Stage 1.
@@ -161,6 +162,7 @@ bash test/run_tests.sh
 
 The runtime ([`runtime/runtime.c`](runtime/runtime.c)) provides the underlying network, SQLite, and cryptographic bindings for the Brainfuck application:
 
+* **Front**: Direct (serves `0.0.0.0:80` via 8 `SO_REUSEPORT` TCP listeners, completely bypassing Nginx pursuant to Rule 9; port defaults to 80 or `$PORT` if set).
 * **Execution Model**: The server runs on a **single OS thread** executing a single-threaded reactor event loop.
 * **8 io_uring Rings**: 8 separate `io_uring` instances are initialized to spread descriptor queues across 523,776 direct descriptor slots ($8 \times 65,472$). The single event loop polls and drains CQEs across all 8 rings in round-robin sequence. Describing these rings as "8 parallel worker threads" would be inaccurate: they are 8 kernel completion queues serviced cooperatively by one thread.
 * **TCP Fragmentation & Request Body Accumulation**:

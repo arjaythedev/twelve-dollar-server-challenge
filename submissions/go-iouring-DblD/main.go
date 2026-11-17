@@ -131,7 +131,6 @@ type server struct {
 	secret    []byte
 	verify    verifier
 
-	rows []byte // rows from SQLite for the request being answered (see db.h for the format)
 	json []byte // the JSON body being built for it
 
 	// Send buffers: a slab outside the Go heap, with a free list of indexes.
@@ -198,7 +197,7 @@ func main() {
 	must(dbOpen(mustEnv("SQLITE_PATH")))
 
 	s := &server{started: time.Now(), partial: map[uint64][]byte{}, backlog: newDeque(), heldWrites: newDeque(), secret: []byte(mustEnv("JWT_SECRET")), verify: newVerifier([]byte(mustEnv("JWT_SECRET"))),
-		rows: mmapAnon(sendBufSize), json: make([]byte, 0, sendBufSize),
+		json:    make([]byte, 0, sendBufSize),
 		sendMem: mmapAnon(sendBufCount * sendBufSize), sendLen: make([]int32, sendBufCount), sendOff: make([]int32, sendBufCount), sendSlot: make([]int32, sendBufCount)}
 	for i := sendBufCount - 1; i >= 0; i-- {
 		s.sendFree = append(s.sendFree, int32(i))

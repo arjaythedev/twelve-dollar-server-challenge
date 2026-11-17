@@ -185,40 +185,53 @@ func (s *server) health(out []byte) []byte {
 	return appendResponse(out, 200, append(b, '}'))
 }
 
-func (s *server) feed(out []byte) []byte {
-	n := -1
-	if s.txn() {
-		n = dbFeed(s.rows)
-	}
-	if n < 0 {
-		return internal(out)
-	}
-	b := append(s.json[:0], `{"posts":[`...)
-	for rows := s.rows[:n]; len(rows) > 0; {
-		var r row
-		r, rows = nextRow(rows)
-		b = appendPost(b, r)
-		if len(rows) > 0 {
-			b = append(b, ',')
+// okHead is the header of a 200 response whose body C writes directly after it. The length
+// is not known until the body is there, so its field is left as spaces and the digits are
+// written into it afterwards, right-aligned (HTTP allows spaces before a header's value).
+const (
+	okHead   = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length:       \r\n\r\n"
+	okDigits = len(okHead) - 4 // the length's last digit goes just before this index
+)
+
+// setLength writes n into the length field of the okHead that starts at out[at].
+func setLength(out []byte, at, n int) {
+	for i := at + okDigits - 1; ; i-- {
+		out[i] = byte('0' + n%10)
+		if n /= 10; n == 0 {
+			return
 		}
 	}
-	return appendResponse(out, 200, append(b, "]}"...))
+}
+
+func (s *server) feed(out []byte) []byte {
+	at := len(out)
+	out = append(out, okHead...)
+	n := -1
+	if s.txn() {
+		n = dbFeed(out[len(out):cap(out)])
+	}
+	if n < 0 {
+		return internal(out[:at])
+	}
+	setLength(out, at, n)
+	return out[:len(out)+n]
 }
 
 func (s *server) getPost(out []byte, id int64) []byte {
+	at := len(out)
+	out = append(out, okHead...)
 	n := -1
 	if s.txn() {
-		n = dbPost(id, s.rows)
+		n = dbPost(id, out[len(out):cap(out)])
 	}
 	switch {
 	case n < 0:
-		return internal(out)
+		return internal(out[:at])
 	case n == 0:
-		return fail(out, 404, "post not found")
+		return fail(out[:at], 404, "post not found")
 	}
-	r, _ := nextRow(s.rows[:n])
-	b := appendPost(append(s.json[:0], `{"post":`...), r)
-	return appendResponse(out, 200, append(b, '}'))
+	setLength(out, at, n)
+	return out[:len(out)+n]
 }
 
 func (s *server) like(out []byte, uid, id int64) []byte {
@@ -514,24 +527,28 @@ func parseID(b []byte) (int64, bool) {
 // header returns the value of the named header (name is lower-case and ends with ':'),
 // or nil. Header names are matched case-insensitively.
 func header(head []byte, name string) []byte {
-	for i := 0; i+1+len(name) <= len(head); i++ {
-		if head[i] != '\n' {
-			continue
+	// From line to line: IndexByte finds the next line end many bytes at a time, and only
+	// the start of each line is compared with the name. (This walked the head byte by byte,
+	// twice per request, and was 2 % of the server's instructions.)
+	for {
+		i := bytes.IndexByte(head, '\n')
+		if i < 0 || len(head)-i-1 < len(name) {
+			return nil
 		}
+		head = head[i+1:]
 		j := 0
-		for j < len(name) && head[i+1+j]|0x20 == name[j] {
+		for j < len(name) && head[j]|0x20 == name[j] {
 			j++
 		}
 		if j < len(name) {
 			continue
 		}
-		v := head[i+1+j:]
+		v := head[j:]
 		if end := bytes.IndexByte(v, '\r'); end >= 0 {
 			v = v[:end]
 		}
 		return bytes.TrimSpace(v)
 	}
-	return nil
 }
 
 func contentLength(head []byte) int {

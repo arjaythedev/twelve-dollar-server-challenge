@@ -1,16 +1,11 @@
 // The SQLite shim. The server's loop is Go; SQLite is C. Crossing between the two costs
 // about 50-100 ns per call, so each request crosses ONCE: one function per endpoint, which
-// runs the prepared statement to completion and writes the rows into a buffer the Go side
-// owns. Go then turns those rows into JSON.
+// does its reads or its write to completion.
 //
 // This file and db.c are shared, byte for byte, with the Rust entry.
 //
-// Row format written by db_feed and db_post, little-endian, repeated per post:
-//
-//   int64  id
-//   int64  like_count
-//   uint16 body_len, uint16 created_at_len, uint16 author_len
-//   bytes  body, created_at, author
+// db_feed and db_post write finished JSON into the buffer they are given, which is the
+// response buffer itself (see "Writing the JSON" in db.c).
 #ifndef DB_H
 #define DB_H
 
@@ -45,11 +40,17 @@ int db_reads_direct(void);
 // 1 if `SELECT 1` works.
 int db_health(void);
 
-// The 20 newest posts. Returns bytes written to out, or -1.
+// The 20 newest posts as {"posts":[...]}. Returns bytes written to out, or -1 (also if it
+// does not fit).
 int db_feed(uint8_t *out, int cap);
 
-// One post. Returns bytes written, 0 if there is no such post, or -1.
+// One post as {"post":{...}}. Returns bytes written, 0 if there is no such post, or -1.
 int db_post(int64_t id, uint8_t *out, int cap);
+
+// s as a JSON string with its quotes. Returns bytes written, or -1 if it does not fit; it
+// asks for up to 26 bytes more room than the result needs.
+// (Used by db_feed and db_post; exported so a test can hold it to the Go version.)
+int db_json_string(const uint8_t *s, int n, uint8_t *out, int cap);
 
 // 1 if the post exists, 0 if not, -1 on error.
 int db_post_exists(int64_t id);

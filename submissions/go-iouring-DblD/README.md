@@ -4,7 +4,7 @@
 |---|---|
 | Language | Go 1.27.1 (official tarball, sha256-pinned in `install.sh`) |
 | HTTP | Hand-written on io_uring through raw system calls. No HTTP or io_uring library. |
-| SQLite | 3.53.4, the official amalgamation, sha256-pinned in `build.sh`, unmodified. `db.c` includes it, so it is compiled as part of that file. Writes are plain SQL. Reads use SQLite's own B-tree cursor functions, with the SQL statements kept as a fallback. |
+| SQLite | 3.54.1, the official amalgamation, sha256-pinned in `build.sh`, unmodified. `db.c` includes it, so it is compiled as part of that file. Writes are plain SQL. Reads use SQLite's own B-tree cursor functions, with the SQL statements kept as a fallback. |
 | Front | **Direct** on `0.0.0.0:80`, no Nginx |
 | Dependencies | None besides SQLite |
 
@@ -23,6 +23,8 @@ One thread runs one loop: wait for a batch of events, answer every request in it
 - **Tokens without garbage.** HMAC-SHA256 from the saved hash states of the two key pads, base64 into reused buffers, and a scanner for flat JSON objects. Any token the scanner does not read exactly goes to a standard-library version of the same check. `auth_test.go` runs 78 tokens through both (missing, repeated or mistyped `exp`, `alg` and `sub`, non-canonical base64, wrong signatures, 10 KB tokens) and requires the same answer.
 - **Checkpoints off the loop, a few per WAL cycle** (the scheme of `go-iouring-davidefrageri` #354 and `swift-iouring-akbashev` #376, see Credits)**.** SQLite's automatic checkpoint is off. Nothing happens until the WAL reaches 12,288 pages. Then a lower-priority thread (nice 5) runs `PASSIVE` checkpoints with writes still flowing and syncs the database file itself, until what is left to copy is small.
 - **Write hold** (as in several entries, see Credits)**.** A checkpoint can only finish, and the WAL only start over, if no commit lands while it runs. So once the early copying has caught up, the loop stops committing writes (reads continue) while a second, normal-priority thread copies the short tail. At 200,000 users that is typically 30 to 70 ms about every four seconds; it is cut off at 250 ms.
+- **C writes the response body.** For the feed and a single post, Go writes the response header into the send buffer with the `Content-Length` field left blank, C writes the JSON straight after it from SQLite's pages, and Go fills in the digits. The text is copied once on its way from the page to the socket. Strings are copied and tested for characters to escape 16 bytes at a time. If the body does not fit in what is left of the buffer, C writes nothing usable and reports it, and the request gets a 500; `json_test.go` checks the refusal.
+- **Compiler flags for the one C file.** `db.c` and the SQLite inside it are built with `-O3 -march=native` and without the stack canary, checked `memcpy`, stack probes and branch-tracking markers that Ubuntu's gcc adds by default (`build.sh`). The server is built on the box it runs on. `build.sh` also names the pinned SQLite release in a flag, because Go does not look at an included C file when deciding whether to compile again.
 - **Go runtime.** One locked OS thread, raw system calls for `io_uring_enter`, the periodic garbage collector off with a 64 MB ceiling. Everything the kernel reads or writes is in mmap'd memory outside the Go heap. Each request crosses into C once or twice.
 
 ## Rules
@@ -65,6 +67,31 @@ Changes that were measured on this box, each against the version before it, whol
 | Feed in key order, likes in one walk | 52.5 % | 48.9 % |
 | JSON strings scanned eight bytes at a time | 48.9 % | 46.9 % |
 
+### Official result of the first version
+
+PR #487 (commit `7200286`) was scored at **228,000 users**: 22,143 requests/s, p95 14.0 ms, p99 211.9 ms, no errors, 72 % CPU, 30 µs of CPU per request. That is the scorer's number, not ours. The table above is that version on our machines; it predicted the score (200,000 three times of three, 235,000 once of two).
+
+### This version against the first, by counters
+
+Since #487 the work has been on CPU per request in our own process, measured with `perf stat` on the server process at 150,000 users (16,000 requests/s), user space apart from kernel:
+
+| Per request, user space | #487 | this version | `go-iouring-davidefrageri` | `rust-iouring-kensac` |
+|---|---:|---:|---:|---:|
+| Instructions | 46,500 | 31,490 | 28,200 | 29,400 |
+| Cycles | 29,000 | 23,430 | 17,200 | 21,100 |
+
+Kernel instructions per request are the same for all four (21,000 to 24,000). Whole-VM CPU at 150,000 users, five runs of each version in alternation: median 49.0 % before, 46.2 % now; the server process 30.3 % before, 27.2 % now.
+
+| Step | User instructions per request after it |
+|---|---:|
+| C writes the feed and post JSON into the send buffer | 40,800 |
+| Strings 16 bytes at a time, integers two digits at a time | 39,300 |
+| The feed tries the reverse order before sorting ids; header lookup line by line | 37,970 |
+| `-O3 -march=native` and no hardening instrumentation for `db.c` | 33,770 |
+| SQLite 3.54.1 (reads the row key inline in `sqlite3BtreeTableMoveto`; 3.53.4 called `sqlite3GetVarint` for every probe) | 31,490 |
+
+**We make no level claim for this version.** On our machines `go-iouring-davidefrageri` (270,000 official), `rust-iouring-kensac` (310,000 official) and this entry all pass 235,000 and fail 250,000, so the pair cannot rank entries above about 235,000. It has also turned out noisier at some hours than at others: the first version passed 200,000 three times one evening and failed it once of two the next morning, with several times as many host pauses in the failing hour.
+
 ## What is new in this entry
 
 Only what we did not find in another entry's README, and measured ourselves.
@@ -75,6 +102,9 @@ Only what we did not find in another entry's README, and measured ourselves.
 - **A calibration of the rig against a scored entry.** `go-iouring-davidefrageri` (#354, official 270,000) run on the same two machines the same night: numbers under Measured. It says how far our numbers are from the scorer's, which our own runs alone could not.
 - **Host pauses on shared-CPU guests.** Both rented machines are stopped by their hosts for 50 to 200 ms now and then, and it does not show as steal time. Three observers caught the same pause in the same second: a 100-per-second ping from the other machine, a 10 ms heartbeat process on the target, and the server's own longest `io_uring_enter`. A pause on the load generator stops every user at once and looks like a server stall in the results.
 - **A load generator's garbage collector can fail a server.** Our first generator's collections stalled all its users for up to seconds and inflated p99; a second version with pooled buffers was checked against `go-nethttp-tbsvttr`'s official score (#18: passes 53,000, fails 60,000). Every level result under Measured is from the second version. The before-and-after rows for the earlier changes (checkpoint cycles, B-tree reads, the answer budget, the copier's priority) were taken with the first, so their p99 values are less certain than their CPU and counter values.
+
+- **Instructions per request as the yardstick.** Whole-VM CPU on a shared host differs by up to four points between identical runs, and most single changes are worth one or two. User-space instructions per request, counted on the process, repeat within about one percent and do not move when the host pauses the guest. Every step in the table above was decided by that number in one four-minute run. A second counter, cycles per instruction by function, showed where the remaining gap is not instruction count but memory: the table seek and the page cache.
+- **A Go build trap with an included C file.** `db.c` includes `sqlite/sqlite3.c`. Go decides whether to compile `db.c` again from `db.c` and the flags, not from the file it includes, and keeps an existing binary whose build id matches. After changing the SQLite pin, `build.sh` kept producing a binary with the old SQLite inside, even after `go clean -cache`. A fresh clone is not affected. `build.sh` now passes the pinned release as a flag.
 
 ### Tried and not kept
 
@@ -87,12 +117,16 @@ Each alone, against the version before it, on the same machines in the same half
 | Database file grown in 64 MB steps | seconds in the delayed-ACK state, 200,000 for 5 min | 16 and 22 | 21 |
 | No write hold while the copier is still at work | 225,000 users | no difference | |
 | Our own page cache through `SQLITE_CONFIG_PCACHE2` (an array indexed by page number, clock eviction) | VM CPU at 150,000, three runs in alternation | 47.5, 48.5, 47.6 % | 49.7, 45.2, 46.4 % |
+| The same page cache, on this version | user cycles per request | 23,490 | 23,330 |
+| One `io_uring_enter` per ring per pass (the other rings submit and collect in one call before ring 0 waits) | 150,000, five runs in alternation, medians | process 31.4 %, p95 5.2 ms | process 29.2 %, p95 3.0 ms |
 
-The last one agrees with `go-iouring-davidefrageri`'s README, which found SQLite's own cache as fast as a direct-indexed one on the scoring box. At 150,000 users the 16 MB cache misses about 470 times a second, one request in thirty.
+The page cache agrees with `go-iouring-davidefrageri`'s README, which found SQLite's own cache as fast as a direct-indexed one on the scoring box. A profile had made it look promising: `pcache1Fetch` takes 2,640 cycles per request for 1,810 instructions. With our cache in its place those cycles moved into the next function that touches the page; the wait is for the page's memory, not for the lookup. At 150,000 users the 16 MB cache misses about 470 times a second, one request in thirty. The single-enter loop made 1,200 fewer system calls a second and was slower all the same.
 
 ## Known gaps
 
-- CPU per request is still about a sixth above `go-iouring-davidefrageri` at the same load (47 % against 40 % of the VM at 150,000 users), all of it in our own code: fetching pages from SQLite's page cache, decoding records, and building the response in Go from rows that C copied out.
+- User-space cycles per request are still about a third above `go-iouring-davidefrageri` (23,430 against 17,200) with nearly the same instruction count: our instructions run slower. A cycle profile puts it in `sqlite3BtreeTableMoveto` (a binary search over pages that are not in the CPU's cache, 22 % of our cache misses) and in fetching pages. Theirs reads keys from the page below the cursor functions, which we do not do.
+- The Go side (request parsing, the token's JSON and base64) is about 3,100 instructions per request against about 900 in `go-iouring-davidefrageri`.
+- The WAL is written with two `pwrite` calls per frame (7,400 a second at 150,000 users); `unix-excl` and a write-combining VFS are not used yet.
 - Near 235,000 users a host pause of 100 ms or so can open a backlog of 30,000 requests that takes seconds to drain, which is what failed one of the two runs there. With less CPU per request the same pause passes.
 - Under memory pressure the kernel reclaims the file cache in lumps (the WAL's pages are written once and never read again); we do nothing about that yet.
 - New posts still go through the standard library's JSON decoder, and writes are plain SQL.
@@ -116,4 +150,7 @@ The last one agrees with `go-iouring-davidefrageri`'s README, which found SQLite
 | Feed posts looked up in ascending id order for `TableMoveto`'s next-row step | `rust-iouring-kensac` #264 | idea | authors in id order too, repeats skipped; a per-post fallback |
 | Record decoding: the names `col_t` and `rec_cols` | `go-iouring-davidefrageri` #354 | names | the body uses SQLite's `getVarint32` and `sqlite3VdbeSerialTypeLen` |
 | HMAC from saved hash states of the key pads | `go-iouring-trungdlp` #343 | idea | done through the standard library's state marshalling; a standard-library fallback and a test |
-| SQLite version and checksum | `go-nethttp-tbsvttr` #18 | value | none |
+| SQLite 3.54.1 and its checksum | `rust-iouring-kensac` #264 | value | none (the first version used `go-nethttp-tbsvttr` #18's pin of 3.53.4) |
+| Compiler flags for the C file: `-O3 -march=native`, no stack protector, fortify, stack-clash or CET instrumentation, given through `CGO_CFLAGS` | `go-iouring-davidefrageri` #354 (`build.sh`), `rust-iouring-kensac` #264 (`build.rs`) | the flag set | `-DPINNED_SQLITE` added |
+| C writes the response from the rows | `go-iouring-davidefrageri` #354 | idea | our own writer; Go still writes the header and one call is made per request, not per pass |
+| Trying the reverse of the feed order before sorting the ids | `rust-iouring-kensac` #264 (`src/db.rs`) | idea | none |

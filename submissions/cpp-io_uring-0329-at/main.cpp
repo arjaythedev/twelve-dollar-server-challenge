@@ -47,7 +47,12 @@ constexpr unsigned kCqEntries = 65536;
 constexpr size_t kBufSize = 2048;
 constexpr uint16_t kBufCount = 2048;
 constexpr uint32_t kWaitNs = 1000000;
-constexpr size_t kDrainBudget = 512;
+/* 每个 ring 每个 pass 最多处理多少个完成。读远多于答是有意的：读一个请求的成本是它那么大
+ * 的一次拷贝，而把它留在 socket 里要占 3–4 KB 的内核缓冲，所以 socket 要尽早抽干，超出的
+ * 回答丢进就绪队列由后续 pass 处理（rust-iouring-kensac #264 与 c-iouring-jowinjestine #404
+ * 都用 16,384 的读配额配 2,048 的答案配额；我们原来是 512/ring，ramp 期要几十个 pass 才能
+ * 消化完积压的完成，backlog 就是这么堆起来的）。 */
+constexpr size_t kDrainBudget = 2048;
 
 // 单个 pass 最多答多少个请求。读不受此限：超过上限的接收数据留在连接上，由后续 pass 按
 // 最老优先回答，所以一个繁忙的 pass 不会把它后面排队的所有请求一起拖慢

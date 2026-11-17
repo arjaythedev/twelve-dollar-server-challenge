@@ -25,7 +25,7 @@
 
 namespace {
 
-constexpr uint32_t kTargetConns = 320000;  /* connection ceiling the ring count must cover */
+constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
 constexpr uint32_t kMaxRingsLimit = 8;     /* hard cap on rings, whatever the table size */
 constexpr uint32_t kAcceptDepth = 2048;
 constexpr size_t kHeldPerPass = 1024;

@@ -31,6 +31,7 @@ fi
 
 echo "==> [Production] Compiling Brainfuck server using Pure Brainfuck Compiler (stage1)..."
 "$DIR/build/stage1" < "$DIR/src/bf/server.bf" > "$DIR/build/server_bf.s"
+python3 "$DIR/runtime/opt_bf_asm.py" "$DIR/build/server_bf.s" "$DIR/build/server_bf.s"
 as -o "$DIR/build/server_bf.o" "$DIR/build/server_bf.s"
 
 # ==============================================================================
@@ -75,16 +76,16 @@ if [ -f "$SEED_DB" ]; then
         wait "$PGO_PID" 2>/dev/null || true
         rm -f "$SCRATCH_PGO_DB"*
         echo "==> [PGO Stage 3] Recompiling final production server with profile feedback..."
-        gcc -O3 -flto -march=native -Wno-deprecated-declarations -fprofile-use="$PGO_DIR" -fprofile-correction -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto || \
-            gcc -O3 -flto -march=native -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+        gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -fprofile-use="$PGO_DIR" -fprofile-correction -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto || \
+            gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
         rm -rf "$PGO_DIR"
     else
         echo "==> Linking high-performance server binary (bin/server)..."
-        gcc -O3 -flto -march=native -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+        gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
     fi
 else
     echo "==> Linking high-performance server binary (bin/server)..."
-    gcc -O3 -flto -march=native -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+    gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
 fi
 
 cp "$DIR/build/stage1" "$DIR/bin/stage1"

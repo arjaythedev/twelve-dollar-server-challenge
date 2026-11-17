@@ -715,6 +715,14 @@ static void flush_replies(int commit_failed) {
   cur = NULL;
 }
 
+static struct {
+  int enabled, normal_rcvbuf, pressure_rcvbuf, current_rcvbuf;
+  uint64_t last_sample_ns, samples, changes, cg_current, cg_limit, cg_sock;
+  unsigned high_streak, low_streak;
+  double psi_some10, psi_full10;
+  unsigned long tcp_mem_pages;
+} MG;
+
 /* ---------- housekeeping ---------- */
 
 static uint64_t T_reqs, T_accepts, T_closes;
@@ -775,13 +783,6 @@ static long env_long(const char *name, long def) {
 /* Opt-in TCP receive-memory governor. It only changes the buffer limits
  * inherited by FUTURE accepted sockets, never existing connections. Sampling
  * cgroup v2 PSI and sock memory is infrequent to avoid hot-path file I/O. */
-static struct {
-  int enabled, normal_rcvbuf, pressure_rcvbuf, current_rcvbuf;
-  uint64_t last_sample_ns, samples, changes, cg_current, cg_limit, cg_sock;
-  unsigned high_streak, low_streak;
-  double psi_some10, psi_full10;
-  unsigned long tcp_mem_pages;
-} MG;
 
 static int small_read(const char *path, char *buf, size_t cap) {
   int fd = open(path, O_RDONLY | O_CLOEXEC);

@@ -20,6 +20,8 @@
 #include <string>
 #include <vector>
 
+#include "src/shim.h"
+
 #include "src/app.hpp"
 #include "src/io/ring.hpp"
 #include "src/net/connection.hpp"
@@ -31,12 +33,11 @@ constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-ke
 constexpr uint32_t kAcceptDepth = 2048;   /* total, divided by the live ring count */
 constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
 
-/* Independent SO_REUSEPORT listeners on the one port, shared by every ring.  Each listens
- * with its own accept queue (capped at net.core.somaxconn), so eight of them hold eight
- * queues of pending connections through a ramp instead of one per ring - which is what
- * rust-iouring-kensac #264 does (LISTENERS = 8) and what keeps a 230k ramp from backing
- * up into SYN retransmits (1 s / 3 s / 7 s) that show up as a multi-second p99 with
- * zero errors. */
+// 同一端口上相互独立的 SO_REUSEPORT listener，由所有 ring 共享。每个 listener 有自己的
+// accept 队列（受 net.core.somaxconn 限制），所以 8 个 listener 在 ramp 期就是 8 条待建连接
+// 队列，而不是每个 ring 一条——这正是 rust-iouring-kensac #264 的做法（LISTENERS = 8），也是
+// 230k 的 ramp 不会积压成 SYN 重传（1 秒/3 秒/7 秒）的原因；那种积压表现为「零错误但 p99
+// 高达数秒」。
 constexpr uint32_t kListeners = 8;
 constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 8192;
@@ -46,10 +47,9 @@ constexpr uint16_t kBufCount = 2048;
 constexpr uint32_t kWaitNs = 1000000;
 constexpr size_t kDrainBudget = 512;
 
-/* Answers a single pass may produce.  Reads are not bounded by this: a receive past the limit
- * is kept on its connection and answered by a later pass, oldest first, so one busy
- * pass cannot stretch the wait of everything queued behind it (rust-iouring-kensac #264
- * answers at most 2,048 and keeps a ready queue the same way). */
+// 单个 pass 最多答多少个请求。读不受此限：超过上限的接收数据留在连接上，由后续 pass 按
+// 最老优先回答，所以一个繁忙的 pass 不会把它后面排队的所有请求一起拖慢
+// （rust-iouring-kensac #264 同样限制 2,048，并用就绪队列保序）。
 constexpr uint32_t kAnswersPerPass = 2048;
 constexpr uint32_t kIdleSeconds = 90;
 
@@ -59,10 +59,15 @@ constexpr uint64_t kEvSend = 3;
 constexpr uint64_t kEvShutdown = 4;
 constexpr uint64_t kEvClose = 5;
 constexpr uint64_t kEvRead = 6;
-/* Every diagnostic goes through std::format: the format string is checked at compile time
- * against the arguments, so a mismatch like the %u-printing-a-pointer that CI caught once is now
- * a build error here rather than undefined behaviour.  (GCC 13 ships std::format, so this needs
- * no third-party formatting library.) */
+// 所有诊断输出都走 std::format：格式串在编译期与实参逐一检查，所以像 CI 抓到过的
+// 「%u 打印指针」这类错误，现在这里是编译错误而不是未定义行为。
+// （GCC 13 自带 std::format，因此不需要任何第三方格式化库。）
+/* shim.c 的诊断（C 文件，格式串仍是 printf 风格）从这里出来，与其他日志共用一个出口。 */
+static void shim_log_sink(const char* s, size_t n) {
+  std::fwrite(s, 1, n, stderr);
+  std::fputc('\n', stderr);
+}
+
 template <typename... Args>
 void errlog(std::format_string<Args...> fmt, Args&&... args) {
   const std::string line = std::format(fmt, std::forward<Args>(args)...);
@@ -112,8 +117,7 @@ class Worker {
   bool& accepting() { return accepting_; }
   bool& full() { return full_; }
 
-  /* A full ring stops arming accepts; the listeners themselves are shared and stay open for the
-   * other rings. */
+  // ring 满了就停止继续投递 accept；listener 本身是共享的，为其他 ring 保持打开。
   void stop_accepting() { accepting_ = false; }
 
  private:
@@ -145,11 +149,10 @@ class Server {
     return add_ring();
   }
 
-  /* Rings are created on demand: one is enough until its descriptor table is close to full, and
-   * every extra ring costs an io_uring_enter per pass on a 1-vCPU box (6 rings measured 15.9k
-   * req/s against 22.5k with 2, same binary otherwise).  Growth keeps the low-connection path
-   * as cheap as a single ring and still gives the 300k-connection path a second CQ, buffer ring
-   * and listen queue. */
+  // ring 按需创建：一个就够，直到它的描述符表接近满；在单 vCPU 上每多一个 ring，每个 pass 就
+  // 多一次 io_uring_enter（实测 6 个 ring 是 15.9k req/s，2 个是 22.5k，其余完全相同）。按需
+  // 增长让低连接数路径保持单 ring 的成本，同时给 300k 连接路径提供第二个 CQ、buffer ring 和
+  // listen 队列。
   bool add_ring() {
     if (workers_.size() >= max_rings_) return false;
     struct in_addr addr {};
@@ -192,9 +195,8 @@ class Server {
         break;
       }
       if (r == Worker::Init::BufFail) return false;
-      /* Completions first, then the descriptor table: a runner with a small RLIMIT_MEMLOCK or a
-       * restricted io_uring refuses the 262,144-entry sparse table (CI did), and halving it is
-       * enough to come up with a smaller connection ceiling instead of failing the build. */
+      // 先降完成队列，再降描述符表：RLIMIT_MEMLOCK 很小或 io_uring 受限的 runner 会拒绝 262,144 项
+      // 的稀疏表（CI 就发生过），把它减半就足以用更小的连接上限起来，而不是让构建失败。
       if (cq > 8192) {
         cq /= 2;
         continue;
@@ -226,14 +228,12 @@ class Server {
     return true;
   }
 
-  /* Add a ring once the newest one is three quarters full, so the next accepts have a home. */
   void maybe_grow() {
     if (workers_.size() >= max_rings_) return;
     Worker& w = *workers_.back();
-    /* Grow at half full, not three quarters, and catch up in one go: a ramp adds thousands of
-     * connections a second and one ring per pass cannot keep up with it, which shows up as
-     * accepts that find no free slot and drop the connection.  rust-iouring-kensac #264 starts
-     * moving accepts at 1/8 of a ring; half is the conservative version of the same idea. */
+    // 半满就增长，而不是四分之三，并且一次补齐：ramp 每秒增加几千个连接，一个 pass 只加一个 ring
+    // 跟不上，表现为 accept 找不到空槽、连接被丢弃。rust-iouring-kensac #264 在 ring 的 1/8 处就
+    // 开始迁移 accept；用一半是同一思路的保守版本。
     while (slot_cap_ && w.open() * 2 >= slot_cap_ && workers_.size() < max_rings_) {
       if (!add_ring()) break;
     }
@@ -251,8 +251,8 @@ class Server {
     return static_cast<uint64_t>(ts.tv_sec) * 1000000000ULL + static_cast<uint64_t>(ts.tv_nsec);
   }
 
-  /* Idle-connection sweep, a slice at a time: walking all 6 rings' slot tables costs 25-70 ms
-   * on the loop (measured), which is a p99 cliff on a 1 vCPU box. 1/32 of one ring per pass. */
+  // 空闲连接清扫按片进行：一次走完所有 ring 的槽位表要 25–70 ms（实测），在单 vCPU 上就是 p99
+  // 悬崖。每个 pass 扫一个 ring 的 1/32。
   void sweep_slice() {
     if (workers_.empty() || sweep_ring_ >= workers_.size()) return;
     Worker& w = *workers_[sweep_ring_];
@@ -274,9 +274,8 @@ class Server {
     }
   }
 
-  /* Answer the requests the WAL gate held. Hold-once: a request that was held is executed here
-   * unconditionally, so its latency is bounded by one extra pass instead of a new 400 ms window.
-   * kHeldPerPass bounds the work a single pass does. */
+  // 回答被 WAL 闸门挂起的请求。一次性放行：被挂起的请求在这里无条件执行，所以它的延迟最多多一个
+  // pass，而不是再等一个新的 400 ms 窗口。kHeldPerPass 限制单个 pass 的工作量。
   void retry_held() {
     size_t budget = kHeldPerPass;
     for (uint32_t wi = 0; wi < workers_.size() && budget; wi++) {
@@ -308,19 +307,14 @@ class Server {
       const uint64_t p0 = now_ns();
       writes_ok_ = !app_->db.writes_held();
       if (!writes_ok_) held_gate++;
-      /* The gate can open between two passes: the requests it held must be replayed here, or
-       * they would wait for a close that never happens again. */
+      // 闸门可能在两个 pass 之间打开：它挂起的请求必须在这里重放，否则会一直等一个再也不会到来的关闭。
       if (writes_ok_) retry_held();
-      /* Only block when there is nothing left to do: an unconditional 1 ms wait per pass is
-       * what pins a loop at ~70 % CPU with a backlog it can never clear (kensac/mojo both
-       * enter with min_complete 0 whenever work is queued).
-       *
-       * "Work queued" means reads waiting on the FIFO and answers waiting on the ready queue -
-       * NOT dirty() (responses this pass produced that still have to be committed).  Counting
-       * dirty() made the pass after any answered request skip the wait and return immediately
-       * with nothing in the completion queue: at 20k connections the loop ran 4,000 passes a
-       * second for 2,000 requests, i.e. half of them empty, and the empty ones are pure syscall
-       * and cache cost.  rust-iouring-kensac #264's busy flag is exactly rq/ready. */
+      // 只在确实没事可做时才阻塞：每个 pass 无条件等 1 ms，正是把循环钉在 ~70% CPU 却永远清不掉
+      // 积压的原因（kensac/mojo 在有工作时都用 min_complete 0 进入）。「有工作」指等待读的 FIFO 和
+      // 等待回答的就绪队列——不包括 dirty()（本 pass 产生、还没提交的响应）。把 dirty() 算进去，会让
+      // 任何答过请求的 pass 都跳过等待、在完成队列为空时立刻返回：20k 连接时循环每秒跑 4,000 个 pass
+      // 却只处理 2,000 个请求，一半是空转，而空转纯属系统调用和缓存开销。
+      // rust-iouring-kensac #264 的 busy 标志就是 rq/ready。
       bool busy = last_cqes >= 8 || !ready_.empty();
       if (!busy) {
         for (auto& wp : workers_) {
@@ -336,12 +330,10 @@ class Server {
           if (busy && (last_cqes != 0 || last_reqs != 0)) {
             w.ring().wait(1, 0);
           } else {
-            /* Wait for a batch, not for the next completion.  min_complete used to be 64 only
-             * when the previous pass had seen 8+ completions, so under a moderate load (20k
-             * connections, ~2,100 req/s) it waited for exactly one and woke 4,000 times a
-             * second to answer 2,100 requests - half the passes handled nothing.  Asking for
-             * 256 and letting the 1 ms timeout cut it short keeps the latency the same while
-             * each pass now carries several completions (rust-iouring-kensac #264 WAIT_MIN). */
+            // 等一批，而不是等下一个完成。min_complete 以前只在上一 pass 看到 8 个以上完成时才取 64，于是
+            // 中等负载下（20k 连接、约 2,100 req/s）它只等一个，每秒醒 4,000 次来回答 2,100 个请求——一半的
+            // pass 什么也没做。改成要 256 个、由 1 ms 超时截断，延迟不变而每个 pass 现在携带多个完成
+            // （rust-iouring-kensac #264 的 WAIT_MIN）。
             w.ring().wait(busy ? 1 : 256, busy ? 50000 : kWaitNs);
           }
         } else {
@@ -353,8 +345,8 @@ class Server {
       last_cqes = 0;
       for (size_t i = 0; i < workers_.size(); i++)
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
-      /* What earlier passes had to defer, before anything this pass read: that is what keeps a
-       * request from waiting behind every request that arrived after it. */
+      // 先处理更早的 pass 不得不延后的请求，再处理本 pass 读到的：这样请求才不会排在它之后到达的
+      // 所有请求后面。
       run_ready();
       const uint64_t p2 = now_ns();
       for (size_t i = 0; i < workers_.size(); i++) run_reads(*workers_[i], static_cast<uint32_t>(i));
@@ -363,8 +355,8 @@ class Server {
       commit_and_flush();
       const uint64_t p4 = now_ns();
       if (!writes_ok_) writes_ok_ = !app_->db.writes_held();
-      /* Time-driven, not pass-driven: the pass rate is not bounded from below under load, and a
-       * pass-cadence sweep would then walk the whole slot table many times a second. */
+      // 按时间而不是按 pass 驱动：负载下 pass 频率没有下界，按 pass 节奏清扫会在每秒把整张槽位表
+      // 走很多遍。
       if (p4 - last_sweep >= 50000000ULL) {
         last_sweep = p4;
         now_sec_ = now_sec();
@@ -501,7 +493,7 @@ class Server {
     uint16_t gen;
   };
 
-  /* Keep received bytes on the connection without answering them this pass. */
+  // 把收到的字节留在连接上，本 pass 不回答。
   void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
              size_t n) {
     if (!c.part) c.part = new std::vector<uint8_t>();
@@ -512,7 +504,7 @@ class Server {
     }
   }
 
-  /* Answer deferred connections, oldest first, while the pass still has answers. */
+  // 在 pass 还有答案额度时，按最老优先回答被延后的连接。
   void run_ready() {
     while (!ready_.empty() && answers_left_ > 0) {
       const ReadyRef r = ready_.front();
@@ -555,8 +547,8 @@ class Server {
       app::http::Parsed pr = app::http::parse(buf + off, len - off, req, used);
       if (pr == app::http::Parsed::Done) {
         if (answers_left_ == 0) {
-          /* This pass has spent its answers: keep the request (and whatever follows it) on the
-           * connection and put it at the back of the ready queue, which is worked oldest first. */
+          // 本 pass 的答案额度已用完：把这个请求（以及它后面的内容）留在连接上，放到就绪队列尾部，
+          // 队列按最老优先处理。
           if (!c.ready_queued) {
             c.ready_queued = true;
             ready_.push_back(ReadyRef{wi, idx, c.gen});
@@ -564,8 +556,8 @@ class Server {
           break;
         }
         if (!writes_ok_ && is_write(req)) {
-          /* The WAL gate is closed: keep this request (and anything behind it) on the
-           * connection and answer it in a later pass. Nothing is written, so no response. */
+          // WAL 闸门关闭：把这个请求（以及它后面的内容）留在连接上，稍后的 pass 再回答。什么都没写，
+          // 所以也不发响应。
           if (!c.held) {
             c.held = true;
             w.held().push_back(idx);
@@ -836,23 +828,21 @@ class Server {
   size_t sweep_off_ = 0;
 };
 
-/* Direct-descriptor slots per ring, and therefore the connection table per ring. Sized for the
- * target connection count (6 x 131,072 = 786,432, against a scored peak of ~320,000), not by
- * RLIMIT_NOFILE: the old 1M-per-ring tables were 288 MB of preallocated, pre-faulted memory that
- * the box cannot spare at 300k connections. */
+// 每个 ring 的直接描述符槽位上限，同样决定每个 ring 的连接表大小。它按目标连接数的上限定，
+// 而不是按 RLIMIT_NOFILE：早先每 ring 1M 的表是 288 MB 预分配并预触的内存，2 GB 的机器在
+// 300k 连接时腾不出来。
 constexpr uint32_t kSlotsPerRing = 262144;
 
-/* The descriptor table follows the environment's hard limit, capped at the size this server
- * wants: rust-iouring-kensac #264 does exactly this (min(hard NOFILE, 1M)) and it is why their
- * build runs on a CI runner whose NOFILE is small —a fixed 262,144-entry sparse table there is
- * refused by io_uring_register_files_sparse and the server never comes up. */
+// 描述符表跟随环境的硬限制，上限是本服务想要的大小：rust-iouring-kensac #264 就是这么做的
+// （min(硬 NOFILE, 1M)），这也是他们的构建能在 NOFILE 很小的 CI runner 上跑起来的原因——固定
+// 262,144 项的稀疏表在那里会被 io_uring_register_files_sparse 拒绝，服务根本起不来。
 uint32_t descriptor_slots() {
   struct rlimit rl {};
   getrlimit(RLIMIT_NOFILE, &rl);
   rlim_t want = rl.rlim_max;
-  /* A service usually arrives with LimitNOFILE=65535, which caps one ring's file table at 65,535
-   * connections.  As root the hard limit can be raised to /proc/sys/fs/nr_open; when that fails
-   * (unprivileged) the ring count below makes up the difference instead. */
+  // 服务通常带着 LimitNOFILE=65535 启动，这把单个 ring 的文件表上限卡在 65,535 个连接。以 root
+  // 运行时可以把硬限制提到 /proc/sys/fs/nr_open；提不上去（非特权）时，下面的 ring 数量会补上
+  // 差额。
   if (std::FILE* f = std::fopen("/proc/sys/fs/nr_open", "r")) {
     unsigned long long nr_open = 0;
     if (std::fscanf(f, "%llu", &nr_open) == 1 && nr_open > want) want = static_cast<rlim_t>(nr_open);
@@ -909,6 +899,7 @@ int main() {
   auto app = std::make_unique<app::App>(std::move(db),
                                         reinterpret_cast<const uint8_t*>(secret),
                                         std::strlen(secret));
+  dbx_set_logger(shim_log_sink);
   constexpr unsigned cq = kCqEntries;
   const uint32_t slots = descriptor_slots();
   uint32_t rings_needed = (kTargetConns + slots - 1) / slots;

@@ -149,6 +149,27 @@ static sqlite3_stmt *prep(sqlite3 *db, const char *sql) {
   return s;
 }
 
+/* 诊断输出的统一出口。C 里没有 std::format，所以格式串仍是 printf 风格（由 -Wformat 检查）；
+ * 但输出本身可以交给 C++ 侧，让所有日志走同一个目的地。 */
+static void (*g_log)(const char *, size_t);
+void dbx_set_logger(void (*cb)(const char *, size_t)) { g_log = cb; }
+
+static void shim_log(const char *fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  if (n < 0) return;
+  if (n > (int)sizeof buf - 1) n = (int)sizeof buf - 1;
+  if (g_log) {
+    g_log(buf, (size_t)n);
+  } else {
+    fwrite(buf, 1, (size_t)n, stderr);
+    fputc(10, stderr);
+  }
+}
+
 static void close_cursors(struct dbx *h) {
   if (!h->in_tx) return;
   for (int i = 0; i < 4; i++) sqlite3BtreeCloseCursor(h->cur[i]);
@@ -602,11 +623,11 @@ int dbx_begin(dbx *h) {
   }
   int rc = step_reset(h->st_begin);
   if (rc != SQLITE_DONE) {
-    fprintf(stderr, "db begin failed: %s (%d)\n", sqlite3_errmsg(h->db), rc);
+    shim_log("db begin failed: %s (%d)", sqlite3_errmsg(h->db), rc);
     return -1;
   }
   if (sqlite3BtreeBeginTrans(h->bt, 0, 0) != SQLITE_OK) {
-    fprintf(stderr, "btree begin failed: %s\n", sqlite3_errmsg(h->db));
+    shim_log("btree begin failed: %s", sqlite3_errmsg(h->db));
     step_reset(h->st_rollback);
     return -1;
   }
@@ -646,7 +667,7 @@ int dbx_commit(dbx *h) {
       }
     }
     if (rc != SQLITE_DONE) {
-      fprintf(stderr, "db commit failed: rc=%d err=%s (%d)\n", rc, sqlite3_errmsg(h->db), ec);
+      shim_log("db commit failed: rc=%d err=%s (%d)", rc, sqlite3_errmsg(h->db), ec);
       step_reset(h->st_rollback);
       return -1;
     }
@@ -664,7 +685,7 @@ int dbx_checkpoint(dbx *h, int *copied) {
   int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
   if (copied) *copied = ndone;
   if (rc != SQLITE_OK) {
-    fprintf(stderr, "checkpoint failed: %s (%d)\n", sqlite3_errmsg(h->ckdb), rc);
+    shim_log("checkpoint failed: %s (%d)", sqlite3_errmsg(h->ckdb), rc);
     return -1;
   }
   int done = (nlog == 0 || ndone >= nlog);

@@ -94,11 +94,11 @@ class Ring {
   Ring(const Ring&) = delete;
   Ring& operator=(const Ring&) = delete;
 
-  /* `defer` is set on the ring the loop blocks on: DEFER_TASKRUN batches the kernel's task work
-   * behind that one enter, which is what lets the wait park the thread cheaply.  The other rings
-   * must not defer, so their completions are posted by the kernel as they happen and the loop can
-   * read their queues straight from shared memory (c-iouring-pavlyhalim #245, c-iouring-oix7 style:
-   * entering every ring every pass was 4.7 syscalls a batch with all rings busy). */
+  // `defer` 只设在循环阻塞等待的那个 ring 上：DEFER_TASKRUN 把内核的 task work 攒到
+  // 那一次 enter 后面，正是让等待能低成本停靠线程的原因。其他 ring 不能 defer，它们的
+  // 完成由内核即时投递，循环可以直接从共享内存读它们的队列
+  // （c-iouring-pavlyhalim #245 的做法；每个 pass 都 enter 每个 ring，在全部 ring 繁忙时
+  // 是每批 4.7 次系统调用）。
   bool init(unsigned sq, unsigned cq, unsigned slots, bool defer, unsigned* err) {
     struct io_uring_params p {};
     p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
@@ -119,9 +119,9 @@ class Ring {
     return true;
   }
 
-  /* Where the kernel entries come from, so a syscall-heavy loop can be attributed instead of
-   * guessed at: 0 = the blocking wait, 1 = a full submission queue forcing a flush inside sqe(),
-   * 2 = the per-pass enter of the other rings.  STATS=1 prints the three counters. */
+  // 内核入口的来源，便于把系统调用密集的循环归因到具体位置而不是靠猜：0 = 阻塞等待，
+  // 1 = 提交队列满迫使 sqe() 内部冲刷，2 = 其他 ring 的每 pass enter。STATS=1 会打印
+  // 这三个计数器。
   static unsigned long& enters(int kind) {
     static unsigned long c[3] = {0, 0, 0};
     return c[kind];
@@ -143,9 +143,9 @@ class Ring {
     }
   }
 
-  /* Publish this ring's SQEs if any are waiting.  No get_events: a ring that does not defer its
-   * task work needs no integer for its completions, and entering it every pass is exactly the
-   * syscall bill that kept the loop from scaling with more rings. */
+  // 如果这个 ring 的 SQE 有积压，就发布出去。不调用 get_events：一个不 defer task work
+  // 的 ring 不需要为了完成而进入内核，而每个 pass 都 enter 它正是让循环无法随 ring 数
+  // 扩展的那笔系统调用账。
   void submit_if_ready() {
     if (io_uring_sq_ready(&ring_) > 0) {
       enters(2)++;
@@ -153,7 +153,7 @@ class Ring {
     }
   }
 
-  /* CQEs the kernel has already posted, read from shared memory with no syscall. */
+  // 内核已经投递的 CQE，直接从共享内存读取，不发系统调用。
   unsigned ready_cqes() { return io_uring_cq_ready(&ring_); }
 
   int wait(unsigned min_complete, unsigned ns) {

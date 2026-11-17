@@ -70,8 +70,8 @@ constexpr B64Table kB64{};
 
 bool b64url(const uint8_t* s, size_t n, ByteBuf& out) {
   if (n % 4 == 1) return false;
-  /* Reserve once: decoding 190 bytes through buf_append() was ~63 capacity checks and 3-byte
-   * memcpys per token. */
+  // 只预留一次：通过 buf_append() 解码 190 字节，原本每个 token 要 ~63 次容量检查和
+  // 3 字节拷贝。
   buf_reserve(out, out.len + static_cast<uint32_t>(n / 4 * 3 + 3));
   size_t i = 0;
   for (; i + 4 <= n; i += 4) {
@@ -213,9 +213,8 @@ void Sha256::update(const void* data, size_t n) {
 
 void Sha256::final(uint8_t out[32]) {
   uint64_t bits = bytes * 8;
-  /* The padding used to be pushed one byte at a time - up to 63 calls to update(), each a memcpy
-   * plus a fill check, twice per request (inner and outer HMAC).  Build the tail in one buffer and
-   * hash it with one call. */
+  // padding 原本是一个字节一个字节推给 update() 的——最多 63 次调用，每次一个 memcpy
+  // 加一次填充检查，每请求两次（内层和外层 HMAC）。改成在一个缓冲里构造尾部、一次哈希。
   uint8_t tail[72];
   size_t n = 0;
   tail[n++] = 0x80;

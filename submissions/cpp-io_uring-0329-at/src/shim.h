@@ -1,10 +1,12 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct dbx dbx;
+void dbx_set_logger(void (*cb)(const char *, size_t));
 
 enum { DBX_POSTS = 0, DBX_USERS = 1, DBX_FEED_IDX = 2, DBX_LIKES_IDX = 3 };
 

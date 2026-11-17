@@ -380,13 +380,13 @@ not be mistaken for a five-minute score.
 
 ## Experiment: latency-debt scheduler (independent follow-up to #484)
 
-This opt-in controller targets long *event-loop turns* and old ready-queue
+This experiment-enabled-by-default controller targets long *event-loop turns* and old ready-queue
 entries. It does not change database transactions, reorder requests, suppress
 network completions, or cache responses.
 
-- Control (the unchanged #484 behavior): `DEBT_SCHED=0` (default),
+- Control (the unchanged #484 behavior): `DEBT_SCHED=0`,
   `ANSWERS_PER_PASS=2048`.
-- Experiment: `DEBT_SCHED=1` with the same `ANSWERS_PER_PASS=2048`.
+- Experiment (default for this PR's official benchmark): `DEBT_SCHED=1` with the same `ANSWERS_PER_PASS=2048`.
   Each connection records a timestamp only when it enters the FIFO ready
   queue (8 bytes additional connection state). After a committed batch,
   sample the oldest live ready item, turn duration, and adjust the next

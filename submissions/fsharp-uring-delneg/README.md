@@ -52,22 +52,32 @@
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
   waits without bound.
-- **Checkpoints.** SQLite's automatic checkpoints are off (a WAL hook counts frames). Every 4,000 new frames the loop
-  asks the checkpoint thread for a PASSIVE checkpoint and learns it finished from an eventfd its ring reads. Under
-  steady writes a checkpoint never ends with the WAL fully copied, so it can't rewind: past 16,384 frames, writes wait
-  (reads go on) for one more pass, and the first write after it rewinds the WAL, alone in its commit. A hold lasts at
-  most 250 ms, with one exception. Late in a long run a pass can take a second or more on the disk. A hold that times out
-  lets writes in, but the next hold starts at once on the same pass, and the writes it lets in keep the WAL from
-  rewinding when that pass ends. Without the exception, no hold would complete and the WAL would grow. So the hold that
-  starts on a pass an earlier hold already timed out on waits up to 1.5 s for it (`HOLDRIDE`), and the pass after it
-  gets the usual 250 ms. A hold pass needs more CPU than that share
-  gives it at once, so once a hold has waited 20 ms for a running pass, the loop also sleeps 200 µs per pass until it
-  ends (`HOLDYIELD`). After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader goes back to
-  them), so a WAL that grows while the disk is slow doesn't fill memory. The database file's pages go too (the server
-  reads through SQLite's own page cache), but only after the pass that syncs the file: SQLite syncs it only at the end
-  of a pass that copied the whole WAL with no commit coming in, i.e. a held pass. Dropping after the other passes
-  started writeback of every page each of them wrote, a hot index page once per pass; left dirty until that sync, each
-  page is written once, and the disk got about 60 % fewer write requests per request on the test box.
+- **Checkpoints, and writes that don't wait for them.** SQLite's automatic checkpoints are off (a WAL hook counts
+  frames). Every 16,000 new frames the loop asks the checkpoint thread for a PASSIVE checkpoint and learns it
+  finished from an eventfd its ring reads. Under steady writes a pass never ends with the WAL fully copied, so the WAL
+  can't rewind unless writes stop for a pass. They used to: past 16,384 frames (64 MB), about every 3 s at 300k users,
+  writes waited (reads went on) until a pass had copied everything. On the test box a pass was running 22 % of the
+  time and each hold kept writes ~200 ms. With the server's disk writes capped at 25 MB/s (it writes ~21 MB/s at
+  300k) a pass took 0.45 s (up to 1.1 s), nearly every hold ran into its 250 ms timeout (186 in one run), the WAL
+  passed twice its mark, and p95 / p99 went to 154-163 / 590-875 ms with no more CPU used: the tail of a slow disk.
+  Now the WAL is left to grow and writes don't wait: same cap, p95 / p99 16 / 215 ms in a run that reached the WAL's
+  bound three times (see below; 15 / 73 ms in one that didn't), 15 / 28 ms without the cap. A reader loses nothing by a
+  long WAL: it looks up only the frames not copied yet (SQLite starts a read at the first frame that isn't in the
+  database), and the passes keep those to about one pass's worth. The passes copy and the WAL is synced as before;
+  what is put off is only the rewind. A longer pass also writes less: the writes land on about 13,000 index pages,
+  and a pass writes each page once however many of its frames hold it, so a pass over 16,000 frames writes fewer
+  pages per frame than one over 4,000: the disk got 4-5 times fewer write requests under the cap (26,091-28,911 a run
+  against 145,203-154,034).
+  The WAL has a bound: 4 GB, or half of the free space on the database's disk at startup if that is less (the startup
+  line says which). Near it the passes follow one another, each a little shorter, and the checkpoint thread also
+  syncs the database file after each (while writes flow); when a pass leaves at most 2,000 frames, writes wait for one
+  more, short pass (up to 1.5 s, `HOLDRIDE`; SQLite's own sync at its end has only that pass's pages left), and the
+  first write after it rewinds the WAL, alone in its commit. At 300k users the WAL grows about 16 MB a second, so
+  with 4 GB that is once in four minutes; under the 25 MB/s cap such a hold kept writes 0.2 to 1.4 s. A WAL
+  left by an earlier run is copied into the database and emptied at startup (`wal_checkpoint(TRUNCATE)`), so every
+  run starts at zero. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader
+  goes back to them), so the file's length doesn't cost memory. The database file's pages go too, after the pass
+  that syncs the file (the held one).
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
@@ -164,7 +174,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
 

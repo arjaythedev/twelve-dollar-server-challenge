@@ -102,11 +102,11 @@
   (`MADV_POPULATE_WRITE` for a writable one; a read-only or executable one by writing its own bytes back through
   `/proc/self/mem`, which the kernel allows on a private mapping without a change of protection, the way a debugger
   plants a breakpoint), and a run of pages of a read-only shared mapping (the runtime maps assemblies whole that
-  way) is replaced by an anonymous copy with one `mremap`. An anonymous page can't be reclaimed without swap, and the
-  kernel's cached copy of each moved page, which nothing maps any more, is dropped at once (`POSIX_FADV_DONTNEED`),
-  so the move costs no memory. The
-  same test afterwards: 0 major faults on the loop thread. The 8 MB lock stays, for pages not used yet. `ANON=0`
-  turns it off.
+  way) is replaced by an anonymous copy with one `mremap`. An anonymous page can't be reclaimed without swap. The
+  kernel's cached copy of a moved page, which nothing maps any more, is dropped at once (`POSIX_FADV_DONTNEED`) when
+  the file is one of the entry's own (the ones in its `out/` folder); the cache of the system's files (the runtime,
+  libc) is left alone, and the kernel takes those copies back itself when memory gets tight. The same test
+  afterwards: 0 major faults on the loop thread. The 8 MB lock stays, for pages not used yet. `ANON=0` turns it off.
 
 ## Reads walk SQLite's B-trees
 

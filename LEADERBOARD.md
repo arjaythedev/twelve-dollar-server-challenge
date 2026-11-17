@@ -1225,6 +1225,10 @@ merged.
 admission at the door on by default as in #435) held **300,000** at 80 % CPU (28,406 req/s, p95 32.3 / p99 377.3 ms,
 0 errors, 1,369 MB; TCP connect p95 1.05 s / p99 3.11 s; 310k failed the 2-minute probe on p99 1.15 s, 320k on p99
 1.06 s), a tie with #398's 300,000 and not above it, so #437 is still not merged.
+#427's newest head (`bbc6546`, 2026-11-17: the checkpoint thread paces its own database writes through a shim VFS, as
+#437's `1a0a677` without the admission filter) held **290,000** at 77 % CPU (27,597 req/s, p95 21.9 / p99 184.3 ms,
+0 errors, 784 MB; 300k failed the 2-minute probe on p99 3.65 s, 320k on p99 4.63 s), below #398's 300,000, so #427 is
+still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

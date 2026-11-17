@@ -407,3 +407,29 @@ seed and PGO binary, preferably from a separate k6 host, and collect
 p95/p99, errors, CPU/request, RAM, `enobufs`, retransmissions and TCP
 memory. A smaller receive window may hurt throughput, so **do not enable
 without an A/B win**. No performance claim until the official benchmark.
+
+
+## Follow-up to merged #486: fixed 16 KiB TCP receive buffers
+
+This experiment completes the fixed-buffer comparison against #486's
+adaptive governor (300K) and #496's fixed 8 KiB experiment (280K).
+The scored default is `TCP_RCVBUF_FIXED=16384`, which requests a fixed
+16 KiB `SO_RCVBUF` on all eight listeners before accepting connections.
+Linux normally doubles this value internally. The listener setting is
+never dynamically adjusted while fixed mode is selected. Existing accepted
+sockets are not resized. Memory PSI and TCP socket memory are still sampled
+and logged for comparison.
+
+- **Scored default:** `TCP_RCVBUF_FIXED=16384` (fixed 16 KiB).
+- **Fixed 8 KiB control:** `TCP_RCVBUF_FIXED=8192` (equivalent to #496).
+- **Adaptive #486 control:** `TCP_RCVBUF_FIXED=0 TCP_MEM_GOVERNOR=1`.
+- **Unchanged:** `ANSWERS_PER_PASS=2048`, SQLite/WAL semantics, hashing,
+  checkpoint policy, io_uring scheduling, and request/response handling.
+
+Require the official 42/42 correctness suite and compare the same seed,
+one-vCPU/two-GB challenge host, and separate k6 generator. Run 60-second
+ramp and **five-minute** holds at 280K, 290K, 300K, then 310K/320K if
+the lower stages pass. Collect p95, p99, errors, req/s, CPU/request,
+peak RSS, memory PSI, `enobufs`, ready queue depth, and TCP memory.
+This is a controlled experiment; no performance improvement is claimed
+before the official benchmark.

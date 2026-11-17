@@ -26,6 +26,11 @@
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
 static unsigned answers_per_pass = 2048, wait_min = 256;
+/* Optional queue-age and observed turn-time controller; opt in with DEBT_SCHED=1. */
+static int debt_sched;
+static unsigned debt_cap = 2048, debt_min = 512, debt_max = 4096;
+static uint64_t debt_age_max_ns, debt_max_turn_ns;
+static uint64_t debt_cuts, debt_raises;
 static int poll_idle = 0; /* IDLE_POLL=1: idle sockets wait on a multishot poll instead of a multishot receive */
 static int eventfd_wake = 0; /* EVENTFD_WAKE=1: other rings wake ring 0 through an eventfd (more, smaller batches: more CPU) */
 static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
@@ -75,6 +80,7 @@ struct conn {
   uint32_t pad;
   uint8_t *pend;
   struct arena *send_arena;
+  uint64_t ready_since_ns; /* only used by DEBT_SCHED; generation guards stale list entries */
 };
 
 struct rs {
@@ -226,6 +232,7 @@ static void conn_freed(unsigned ri, struct conn *c) {
   free(c->pend);
   c->pend = NULL;
   c->pend_len = c->pend_cap = 0;
+  c->ready_since_ns = 0;
   if (c->send_arena) {
     arena_unref(c->send_arena);
     c->send_arena = NULL;
@@ -340,6 +347,7 @@ static void received(unsigned ri, uint32_t slot, struct conn *c, const uint8_t *
     pend_append(c, p, n);
     if (!(c->flags & (CF_READY | CF_HELD))) {
       c->flags |= CF_READY;
+      if (debt_sched) c->ready_since_ns = now_ns();
       list_push(&ready, &nready, &ready_cap, REF(ri, c->gen, slot));
     }
     S.deferred++;
@@ -514,6 +522,7 @@ static void on_send(unsigned ri, struct io_uring_cqe *cqe) {
   if (cqe->res < 0 || (c->flags & CF_CLOSE_AFTER)) { conn_close(ri, slot, c); return; }
   if (c->pend_len && !(c->flags & (CF_READY | CF_HELD))) { /* pipelined input waited for this send */
     c->flags |= CF_READY;
+    if (debt_sched) c->ready_since_ns = now_ns();
     list_push(&ready, &nready, &ready_cap, REF(ri, c->gen, slot));
   }
 }
@@ -641,6 +650,12 @@ static void run_ready(void) {
   unsigned n = nready, i = 0, since = 0;
   /* Only time-slice an established backlog. Normal batches follow the original fast path. */
   uint64_t deadline = backlog_slice_us && nready > 1024 ? now_ns() + (uint64_t)backlog_slice_us * 1000ULL : 0;
+  /* Under the controller, never let one ready backlog monopolize an entire turn.
+   * This is a soft bound: DB commits and CQE draining are still completed. */
+  if (debt_sched && nready > 512) {
+    uint64_t soft = now_ns() + 8000000ULL; /* 8 ms */
+    if (!deadline || soft < deadline) deadline = soft;
+  }
   for (; i < n && answers_left; i++) {
     if (deadline && (i & 127u) == 0 && now_ns() >= deadline) {
       /* Save all unprocessed ready references for the next committed batch.
@@ -660,6 +675,7 @@ static void run_ready(void) {
     struct conn *c = ref_conn(ref);
     if (c->gen != UD_GEN(ref)) continue;
     c->flags &= (uint16_t)~CF_READY;
+    c->ready_since_ns = 0;
     if (!(c->flags & CF_OPEN) || (c->flags & (CF_CLOSING | CF_SENDING | CF_HELD | CF_REPLIED))) continue;
     answers_left--;
     conn_feed(UD_RING(ref), UD_SLOT(ref), c, NULL, 0);
@@ -715,6 +731,37 @@ static void flush_replies(int commit_failed) {
   cur = NULL;
 }
 
+/* Queue-age controller runs only after each committed pass. It never reorders
+ * requests, discards CQEs or alters the transaction boundary. Under long turns
+ * shrink work per pass; when the oldest ready request is waiting and turns are
+ * short, grow moderately. Use hysteresis to avoid rapid oscillation. */
+static void debt_control(uint64_t now, uint64_t turn_ns) {
+  if (turn_ns > debt_max_turn_ns) debt_max_turn_ns = turn_ns;
+  uint64_t age = 0;
+  /* The first valid queued connection is oldest: ready[] is FIFO. */
+  for (unsigned i = 0; i < nready && i < 64; i++) {
+    uint64_t ref = ready[i];
+    struct conn *c = ref_conn(ref);
+    if (ref_live(ref, c) && (c->flags & CF_READY) && c->ready_since_ns) {
+      age = now >= c->ready_since_ns ? now - c->ready_since_ns : 0;
+      break;
+    }
+  }
+  if (age > debt_age_max_ns) debt_age_max_ns = age;
+  if (turn_ns > 12000000ULL && debt_cap > debt_min) { /* 12ms pass */
+    unsigned next = debt_cap - (debt_cap >> 2);
+    debt_cap = next < debt_min ? debt_min : next;
+    debt_cuts++;
+  } else if (age > 25000000ULL && turn_ns < 6000000ULL && debt_cap < debt_max) {
+    unsigned next = debt_cap + 256;
+    debt_cap = next > debt_max ? debt_max : next;
+    debt_raises++;
+  } else if (!nready && debt_cap != answers_per_pass) {
+    if (debt_cap < answers_per_pass) debt_cap = (debt_cap + 256 > answers_per_pass) ? answers_per_pass : debt_cap + 256;
+    else debt_cap = (debt_cap < answers_per_pass + 256) ? answers_per_pass : debt_cap - 256;
+  }
+}
+
 /* ---------- housekeeping ---------- */
 
 static uint64_t T_reqs, T_accepts, T_closes;
@@ -756,6 +803,10 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)sliced_ready_passes, (unsigned long long)S.poll_events,
           (unsigned long long)S.poll_ends, (unsigned long long)S.poll_rearmed,
           (unsigned long long)S.eventfd_events);
+  if (debt_sched) fprintf(stderr, " debt_sched cap=%u max_age_ms=%.1f max_turn_ms=%.1f cuts=%llu raises=%llu\n", debt_cap,
+                          (double)debt_age_max_ns / 1e6, (double)debt_max_turn_ns / 1e6,
+                          (unsigned long long)debt_cuts, (unsigned long long)debt_raises);
+  debt_age_max_ns = debt_max_turn_ns = debt_cuts = debt_raises = 0;
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -974,6 +1025,12 @@ int main(int argc, char **argv) {
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
+  debt_sched = env_long("DEBT_SCHED", 0) != 0;
+  debt_cap = answers_per_pass;
+  if (debt_sched && (debt_cap < debt_min || debt_cap > debt_max)) {
+    fprintf(stderr, "DEBT_SCHED requires ANSWERS_PER_PASS between %u and %u\n", debt_min, debt_max);
+    return 1;
+  }
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
   poll_idle = env_long("IDLE_POLL", 0) != 0;
   eventfd_wake = env_long("EVENTFD_WAKE", 0) != 0;
@@ -1044,7 +1101,7 @@ int main(int argc, char **argv) {
     A.now = (int64_t)time(NULL);
     writes_ok = !A.db.writes_held;
     if (writes_ok && db_begin_write(&A.db) < 0) writes_ok = 0; /* the tail thread is restarting the log: this batch reads only */
-    answers_left = answers_per_pass;
+    answers_left = debt_sched ? debt_cap : answers_per_pass;
     run_ready(); /* oldest first: what earlier batches read, before this batch's arrivals can take the answer slots */
     unsigned ncq = reap_all();
     ncq += read_rounds();
@@ -1068,6 +1125,7 @@ int main(int argc, char **argv) {
     uint64_t te = now_ns();
     te_prev = te;
     if (te - t > S.max_turn_ns) S.max_turn_ns = te - t;
+    if (debt_sched) debt_control(te, te - t);
     if (t - last_stats > STATS_NS) { stats(t - last_stats); last_stats = t; }
     if (stop_requested) {
       stats(t - last_stats);

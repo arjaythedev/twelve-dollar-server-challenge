@@ -376,3 +376,31 @@ and failed requests **below 1%** on the entire five-minute hold.
 An official result also requires the challenge operator's evaluation
 on the specified 1-vCPU/2-GB environment. A 320K probe failure should
 not be mistaken for a five-minute score.
+
+
+## Experiment: latency-debt scheduler (independent follow-up to #484)
+
+This opt-in controller targets long *event-loop turns* and old ready-queue
+entries. It does not change database transactions, reorder requests, suppress
+network completions, or cache responses.
+
+- Control (the unchanged #484 behavior): `DEBT_SCHED=0` (default),
+  `ANSWERS_PER_PASS=2048`.
+- Experiment: `DEBT_SCHED=1` with the same `ANSWERS_PER_PASS=2048`.
+  Each connection records a timestamp only when it enters the FIFO ready
+  queue (8 bytes additional connection state). After a committed batch,
+  sample the oldest live ready item, turn duration, and adjust the next
+  pass's answer cap within 512..4096. A >12ms turn reduces the cap by 25%.
+  When queue age exceeds 25ms and turns are <6ms, increase by 256.
+  As the backlog clears, return toward the configured 2048 baseline.
+  When there is a large ready queue, a soft 8ms time slice lets the pass
+  commit and flush, then continue next pass.
+- The 10-second statistics add `debt_sched cap=...`,
+  `max_age_ms`, `max_turn_ms`, and cap adjustment counts.
+
+**Risk:** An adaptive cap can increase transaction overhead or lengthen
+queues. The thresholds are hypotheses, not tuned on the challenge VM.
+Compare 300K/310K/320K at the *same* five-minute k6 workload, fresh seed,
+same PGO and environment, with the control, changing only `DEBT_SCHED`.
+Observe CPU/request, p95/p99, `ready_max`, `enobufs`, and queue age.
+Require 42/42 functional checks. No claim of a higher benchmark score.

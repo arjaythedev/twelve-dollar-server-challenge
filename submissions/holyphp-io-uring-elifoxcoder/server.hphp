@@ -1091,11 +1091,12 @@ class Server {
                 } else {
                     $this->send_json($fd, 404, '{"error":"not found"}');
                 }
-                if (!(iarr_get($this->socks, $fd) != 0)) { return; }
                 $np = $he + 4;                          /* EXPERIMENT R */
                 if ($np == $bufLen) { return; }          /* no substr for the
                                                            last request in
                                                            the packet */
+                /* more bytes follow: stop if the handler closed the socket */
+                if (!(iarr_get($this->socks, $fd) != 0)) { return; }
                 $buf = substr($buf, $np);
                 if ($buf == "") { return; }
                 continue;

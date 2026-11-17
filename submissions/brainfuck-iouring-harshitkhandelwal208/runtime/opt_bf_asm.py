@@ -8,6 +8,110 @@ and lowers them directly into constant-time O(1) x86-64 arithmetic instructions.
 
 import sys
 
+TAPE_CELLS = 256
+OPS = set("><+-.,[]")
+
+
+def audit_tape(program_file):
+    """Prove the fixed server program never leaves its caller-provided tape."""
+    with open(program_file, "r") as f:
+        program = "".join(c for c in f.read() if c in OPS)
+
+    def walk(pos):
+        delta = low = high = 0
+        while pos < len(program):
+            op = program[pos]
+            pos += 1
+            if op == '>':
+                delta += 1
+            elif op == '<':
+                delta -= 1
+            elif op == '[':
+                pos, loop_delta, loop_low, loop_high = walk(pos)
+                if loop_delta:
+                    raise ValueError("loop changes the tape pointer")
+                low = min(low, delta + loop_low)
+                high = max(high, delta + loop_high)
+            elif op == ']':
+                return pos, delta, low, high
+            low = min(low, delta)
+            high = max(high, delta)
+        return pos, delta, low, high
+
+    pos, _, low, high = walk(0)
+    if pos != len(program):
+        raise ValueError("unmatched closing bracket")
+    if low < 0 or high >= TAPE_CELLS:
+        raise ValueError(f"server uses tape cells [{low}, {high}], outside 0..{TAPE_CELLS - 1}")
+    return low, high
+
+
+def strip_proven_bounds_checks(asm_text):
+    """Remove only compiler-emitted checks immediately following an r12 move."""
+    lines = asm_text.splitlines()
+    out = []
+    removed = 0
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if i + 2 < len(lines) and ("addq $" in line or "subq $" in line) and "%r12" in line:
+            cmp_line = lines[i + 1].strip()
+            branch_line = lines[i + 2].strip()
+            upper = cmp_line == "cmpq %r15, %r12" and branch_line == "jae .L_tape_overflow"
+            lower = cmp_line == "cmpq %r14, %r12" and branch_line == "jb .L_tape_underflow"
+            if upper or lower:
+                out.append(line)
+                removed += 1
+                i += 3
+                continue
+        # The compiler uses this temporary-address form for boolean lowering.
+        # It is still a fixed displacement from r12 and is covered by the same
+        # whole-program tape proof above.
+        if i + 2 < len(lines) and line.strip().startswith("leaq ") and "(%r12), %rax" in line:
+            cmp_line = lines[i + 1].strip()
+            branch_line = lines[i + 2].strip()
+            if cmp_line == "cmpq %r15, %rax" and branch_line == "jae .L_tape_overflow":
+                removed += 1
+                i += 3
+                continue
+        out.append(line)
+        i += 1
+    if removed == 0:
+        raise ValueError("no compiler-emitted tape bounds checks found")
+    return "\n".join(out), removed
+
+
+def strip_dead_bounds_abi(asm_text):
+    """Drop callee-save and default-bound setup made dead by specialization."""
+    prologue = """    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    pushq %rbx
+    pushq %rbp
+    subq $8, %rsp
+    movq %rdi, %r12
+    testq %rsi, %rsi
+    jnz 1f
+    leaq -4000000(%rdi), %rsi
+    leaq 4000000(%rdi), %rdx
+1:
+    movq %rsi, %r14
+    movq %rdx, %r15"""
+    epilogue = """    addq $8, %rsp
+    popq %rbp
+    popq %rbx
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    ret"""
+    if asm_text.count(prologue) != 1 or asm_text.count(epilogue) != 1:
+        raise ValueError("unexpected compiler ABI prologue/epilogue")
+    asm_text = asm_text.replace(prologue, "    pushq %r12\n    movq %rdi, %r12", 1)
+    asm_text = asm_text.replace(epilogue, "    popq %r12\n    ret", 1)
+    return asm_text
+
 def optimize_asm(asm_text):
     lines = asm_text.splitlines()
     i = 0
@@ -85,15 +189,19 @@ def optimize_asm(asm_text):
     return "\n".join(out), opt_count
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: opt_bf_asm.py <input.s> <output.s>", file=sys.stderr)
+    if len(sys.argv) != 4:
+        print("Usage: opt_bf_asm.py <input.s> <output.s> <server.bf>", file=sys.stderr)
         sys.exit(1)
     in_file = sys.argv[1]
     out_file = sys.argv[2]
+    program_file = sys.argv[3]
+    low, high = audit_tape(program_file)
     with open(in_file, "r") as f:
         src = f.read()
     opt, n = optimize_asm(src)
+    opt, removed = strip_proven_bounds_checks(opt)
+    opt = strip_dead_bounds_abi(opt)
     with open(out_file, "w") as f:
         f.write(opt)
         f.write("\n")
-    print(f"Peephole optimized {n} linear loops in {out_file}", file=sys.stderr)
+    print(f"Peephole optimized {n} linear loops; verified tape cells {low}..{high}; removed {removed} redundant bound checks in {out_file}", file=sys.stderr)

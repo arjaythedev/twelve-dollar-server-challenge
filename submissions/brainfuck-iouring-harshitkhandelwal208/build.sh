@@ -31,7 +31,7 @@ fi
 
 echo "==> [Production] Compiling Brainfuck server using Pure Brainfuck Compiler (stage1)..."
 "$DIR/build/stage1" < "$DIR/src/bf/server.bf" > "$DIR/build/server_bf.s"
-python3 "$DIR/runtime/opt_bf_asm.py" "$DIR/build/server_bf.s" "$DIR/build/server_bf.s"
+python3 "$DIR/runtime/opt_bf_asm.py" "$DIR/build/server_bf.s" "$DIR/build/server_bf.s" "$DIR/src/bf/server.bf"
 as -o "$DIR/build/server_bf.o" "$DIR/build/server_bf.s"
 
 # ==============================================================================

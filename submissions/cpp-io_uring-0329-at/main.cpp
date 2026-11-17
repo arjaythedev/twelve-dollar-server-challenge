@@ -29,6 +29,14 @@ constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count 
 constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-kensac #264 uses 16) */
 constexpr uint32_t kAcceptDepth = 2048;   /* total, divided by the live ring count */
 constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
+
+/* Independent SO_REUSEPORT listeners on the one port, shared by every ring.  Each listens
+ * with its own accept queue (capped at net.core.somaxconn), so eight of them hold eight
+ * queues of pending connections through a ramp instead of one per ring - which is what
+ * rust-iouring-kensac #264 does (LISTENERS = 8) and what keeps a 230k ramp from backing
+ * up into SYN retransmits (1 s / 3 s / 7 s) that show up as a multi-second p99 with
+ * zero errors. */
+constexpr uint32_t kListeners = 8;
 constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 8192;
 constexpr unsigned kCqEntries = 65536;
@@ -60,9 +68,9 @@ class Worker {
  public:
   enum class Init { Ok, RingFail, BufFail };
 
-  Init init(uint32_t index, uint32_t slots, int listener, unsigned cq, unsigned* err) {
+  Init init(uint32_t index, uint32_t slots, const int* listeners, unsigned cq, unsigned* err) {
     index_ = index;
-    listener_ = listener;
+    for (uint32_t li = 0; li < kListeners; li++) listeners_[li] = listeners[li];
     accepting_ = true;
     if (!ring_.init(kSqEntries, cq, slots, index == 0, err)) {
       std::fprintf(stderr, "ring %u setup failed (slots=%u, cq=%u): %s\n", index, slots, cq,
@@ -84,21 +92,17 @@ class Worker {
   std::vector<uint32_t>& dirty() { return dirty_; }
   std::deque<uint32_t>& pending() { return pending_; }
   std::deque<uint32_t>& held() { return held_; }
-  int listener() const { return listener_; }
-  uint32_t& accepts() { return accepts_; }
+  const int* listeners() const { return listeners_; }
+  uint32_t* accepts() { return accepts_; }
   int& efd() { return efd_; }
   uint32_t& open() { return open_; }
   uint32_t& reads() { return reads_; }
   bool& accepting() { return accepting_; }
   bool& full() { return full_; }
 
-  void close_listener() {
-    if (listener_ >= 0) {
-      ::close(listener_);
-      listener_ = -1;
-    }
-    accepting_ = false;
-  }
+  /* A full ring stops arming accepts; the listeners themselves are shared and stay open for the
+   * other rings. */
+  void stop_accepting() { accepting_ = false; }
 
  private:
   uint32_t index_ = 0;
@@ -108,9 +112,9 @@ class Worker {
   std::vector<uint32_t> dirty_;
   std::deque<uint32_t> pending_;
   std::deque<uint32_t> held_;
-  int listener_ = -1;
+  int listeners_[kListeners] = {-1, -1, -1, -1, -1, -1, -1, -1};
   int efd_ = -1;
-  uint32_t accepts_ = 0;
+  uint32_t accepts_[kListeners] = {0, 0, 0, 0, 0, 0, 0, 0};
   uint32_t open_ = 0;
   uint32_t reads_ = 0;
   bool accepting_ = false;
@@ -142,32 +146,40 @@ class Server {
       return false;
     }
     const uint32_t i = static_cast<uint32_t>(workers_.size());
-    int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (fd < 0) return false;
-    const int one = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) < 0) { ::close(fd); return false; }
-    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    struct sockaddr_in a {};
-    a.sin_family = AF_INET;
-    a.sin_port = htons(port_);
-    a.sin_addr = addr;
-    if (bind(fd, reinterpret_cast<struct sockaddr*>(&a), sizeof a) < 0 ||
-        listen(fd, 65535) < 0) {
-      ::close(fd);
-      return false;
+    if (listeners_[0] < 0) {
+      struct sockaddr_in a {};
+      a.sin_family = AF_INET;
+      a.sin_port = htons(port_);
+      a.sin_addr = addr;
+      const int one = 1;
+      for (uint32_t li = 0; li < kListeners; li++) {
+        int fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) return false;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one) < 0) {
+          ::close(fd);
+          return false;
+        }
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        if (bind(fd, reinterpret_cast<struct sockaddr*>(&a), sizeof a) < 0 ||
+            listen(fd, 65535) < 0) {
+          ::close(fd);
+          return false;
+        }
+        listeners_[li] = fd;
+      }
     }
     auto w = std::make_unique<Worker>();
     unsigned cq = cq_;
     unsigned slots = slots_;
     for (;;) {
       unsigned err = 0;
-      Worker::Init r = w->init(i, slots, fd, cq, &err);
+      Worker::Init r = w->init(i, slots, listeners_, cq, &err);
       if (r == Worker::Init::Ok) {
         slot_cap_ = slots;
         break;
       }
-      if (r == Worker::Init::BufFail) { ::close(fd); return false; }
+      if (r == Worker::Init::BufFail) return false;
       /* Completions first, then the descriptor table: a runner with a small RLIMIT_MEMLOCK or a
        * restricted io_uring refuses the 262,144-entry sparse table (CI did), and halving it is
        * enough to come up with a smaller connection ceiling instead of failing the build. */
@@ -180,11 +192,9 @@ class Server {
         std::fprintf(stderr, "ring %u: descriptor table reduced to %u slots\n", i, slots);
         continue;
       }
-      ::close(fd);
       return false;
     }
     workers_.push_back(std::move(w));
-    listeners_.push_back(fd);
     arm_accept(*workers_.back(), i);
     if (i > 0) {
       int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
@@ -416,13 +426,19 @@ class Server {
   void arm_accept(Worker& w, uint32_t wi) {
     uint32_t depth = static_cast<uint32_t>(kAcceptDepth / workers_.size());
     if (depth < kAcceptsPerRing) depth = kAcceptsPerRing;
-    while (w.accepts() < depth && w.listener() >= 0) {
-      io_uring_sqe* sqe = w.ring().sqe(1);
-      if (!sqe) return;
-      io_uring_prep_accept_direct(sqe, w.listener(), nullptr, nullptr, 0,
-                                  IORING_FILE_INDEX_ALLOC);
-      sqe->user_data = ev(kEvAccept, wi, 0, 0);
-      w.accepts()++;
+    const uint32_t per = depth / kListeners;
+    if (per < 16) return;
+    for (uint32_t li = 0; li < kListeners; li++) {
+      const int fd = w.listeners()[li];
+      if (fd < 0) continue;
+      uint32_t& n = w.accepts()[li];
+      while (n < per) {
+        io_uring_sqe* sqe = w.ring().sqe(1);
+        if (!sqe) return;
+        io_uring_prep_accept_direct(sqe, fd, nullptr, nullptr, 0, IORING_FILE_INDEX_ALLOC);
+        sqe->user_data = ev(kEvAccept, wi, 0, li);
+        n++;
+      }
     }
   }
 
@@ -587,7 +603,7 @@ class Server {
       const uint32_t idx = static_cast<uint32_t>(u);
       switch (op) {
         case kEvAccept: {
-          w.accepts()--;
+          if (idx < kListeners && w.accepts()[idx] > 0) w.accepts()[idx]--;
           if (res >= 0) {
             net::Connection& c = w.table().at(static_cast<size_t>(res));
             const uint16_t g = static_cast<uint16_t>(c.gen + 1);
@@ -736,9 +752,9 @@ class Server {
     }
     io_uring_cq_advance(&w.ring().raw(), static_cast<unsigned>(n));
     w.bufs().publish();
-    if (w.accepting() && w.listener() >= 0) {
+    if (w.accepting()) {
       if (w.full()) {
-        w.close_listener();
+        w.stop_accepting();
       } else {
         arm_accept(w, wi);
       }
@@ -789,7 +805,7 @@ class Server {
 
   std::vector<std::unique_ptr<Worker>> workers_;
   uint32_t now_sec_ = 0;
-  std::vector<int> listeners_;
+  int listeners_[kListeners] = {-1, -1, -1, -1, -1, -1, -1, -1};
   app::App* app_;
   app::Pool pool_;
   uint32_t slots_;

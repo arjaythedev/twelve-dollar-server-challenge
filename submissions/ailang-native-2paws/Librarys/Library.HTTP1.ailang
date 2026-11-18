@@ -893,8 +893,6 @@ Function.HTTP1.Unshare {
                 HTTP1.CSet(conn, HTTP1Off.BUF, b)
                 HTTP1.CSet(conn, HTTP1Off.PRIV_IN, b)
             }
-        } ElseBlock: {
-            IfCondition EqualTo(fill, 0) ThenBlock: { HTTP1.ReleaseIn(conn) }
         }
         pending = 0
         IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.DEFER), 1) ThenBlock: { pending = 1 }

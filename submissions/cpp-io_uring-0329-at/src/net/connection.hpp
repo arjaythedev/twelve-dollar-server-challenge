@@ -36,6 +36,7 @@ struct Connection {
   bool held = false;
   bool ready_queued = false;
   bool zbuf_done = false; /* 零拷贝发送的 NOTIF 已到 */
+  bool zc_used = false;   /* 这次发送用的是 SEND_ZC（决定要不要等 NOTIF） */
   uint32_t sent = 0;
   uint32_t last_active = 0;
   app::ByteBuf* out = nullptr;

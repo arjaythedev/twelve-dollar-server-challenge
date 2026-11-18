@@ -503,6 +503,7 @@ class Server {
      * post/like 的响应只有几百字节，多一个 NOTIF 反而不划算（本地 20k 连接上就量到
      * sys 53 → 62 µs）。关闭中的响应也不用，避免关闭路径上还挂着 NOTIF。 */
     const bool zc = c.sent == 0 && !c.zbuf_done && zc_ok_ && !c.close_after && c.wire->len >= 4096;
+    c.zc_used = zc;
     if (zc) {
       io_uring_prep_send_zc(sqe, static_cast<int>(idx), c.wire->p, c.wire->len, MSG_NOSIGNAL, 0);
     } else {
@@ -520,6 +521,7 @@ class Server {
     c.wire = nullptr;
     c.write = net::WriteState::Idle;
     c.zbuf_done = false;
+    c.zc_used = false;
     if ((c.out && c.out->len) || c.close_after) {
       mark(w, idx);
     } else {
@@ -800,10 +802,16 @@ class Server {
             c.write = net::WriteState::Idle;
             app::give_buf(pool_, c.wire);
             c.wire = nullptr;
+            c.zbuf_done = false;
+            c.zc_used = false;
             app::give_buf(pool_, c.out);
             c.close_after = true;
             mark(w, idx);
           } else {
+            /* IORING_CQE_F_MORE 缺席 = 内核不会发 NOTIF（例如完成被合并，或本次没有走到
+             * 零拷贝路径）。c-iouring-public 的 loop.c 也是这么处理的：否则连接会永远停在
+             * Flushed 等一个不会到来的完成。 */
+            if (c.zc_used && !(flags & IORING_CQE_F_MORE)) c.zbuf_done = true;
             c.sent += static_cast<uint32_t>(res);
             if (c.sent < c.wire->len) {
               arm_send(w, wi, idx, c);

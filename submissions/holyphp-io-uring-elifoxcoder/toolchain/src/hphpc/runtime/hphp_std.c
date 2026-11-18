@@ -2705,6 +2705,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_REGISTER_FILES2       13   /* sparse table registration */
 #define HP_UR_RSRC_REGISTER_SPARSE  (1U << 0)
 #define HP_UR_REGISTER_EVENTFD      4
+#define HP_UR_REGISTER_EVENTFD_ASYNC 7
 #define HP_UR_REGISTER_PBUF_RING    22
 /* Match the Rust leader: a small SQ is enough because submitted multishot
  * receives remain in the kernel; a deep CQ absorbs completion bursts. */
@@ -4048,12 +4049,18 @@ static bool hp_ur_ring_setup(struct hp_uring_ring *r, int defer_taskrun) {
     /* HPHP_RING_EVENTFD=0 skips the registration: the kernel then signals no
      * eventfd on CQ posts (a locked wakeup per flush), and a multi-ring loop
      * relies on ring 0's bounded wait, as the multi-ring Rust loop does. */
+    /* HPHP_RING_EVENTFD=async registers with IORING_REGISTER_EVENTFD_ASYNC:
+     * completions posted inline while this thread is inside io_uring_enter
+     * (most sends) signal nothing, since the loop drains the CQ right after;
+     * completions posted later (receives, deferred sends) still wake it. */
     const char *efd_env = getenv("HPHP_RING_EVENTFD");
     if (!(efd_env && strcmp(efd_env, "0") == 0)) {
+        long reg_op = (efd_env && strcmp(efd_env, "async") == 0)
+            ? HP_UR_REGISTER_EVENTFD_ASYNC : HP_UR_REGISTER_EVENTFD;
         int evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (evfd >= 0) {
             if (syscall(SYS_io_uring_register, (long)fd,
-                        HP_UR_REGISTER_EVENTFD, (long)&evfd, 1L) == 0)
+                        reg_op, (long)&evfd, 1L) == 0)
                 r->efd = evfd;
             else
                 close(evfd);

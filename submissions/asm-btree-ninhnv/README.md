@@ -126,8 +126,10 @@ straight from those bytes. There is no bytecode engine and no `sqlite3_column_*`
   kernel ever refuses a ring for that limit, the lock is dropped and the ring retried.
 - **A crash leaves a line in the log** (signal, faulting address, instruction pointer) before the
   signal takes its default course.
-- **Batch size.** Each pass waits on ring 0 for 256 completions or 1 ms, whichever comes first
-  (never while reads or answers are queued). It was 4 ms: in the sandbox, at ~18k req/s over
+- **Batch size.** Each pass waits on ring 0 for 256 completions or 125 µs, whichever comes first
+  (never while reads or answers are queued). This improvement proposes 125 µs instead of the
+  previously benchmarked 1 ms setting; the official challenge run will measure its effect. An
+  earlier 4 ms setting, at ~18k req/s over
   18,000 connections, that cut server CPU from 17.8 to 16.0 µs per request for 2–3 ms more median
   latency. Near a full vCPU it works the other way. A pass and its wait last about
   wait / (1 − load), so at 85% load the 4 ms wait became 25 ms of median latency. On a droplet
@@ -203,9 +205,10 @@ benchmark droplet.
 | 200 busy connections, closed loop | 94–97k req/s | 88–94k req/s |
 | two 2 s `SIGSTOP` stalls under load: worst request | 2,010 ms | 2,010 ms |
 
-The latency difference is the 4 ms batching wait this server had when these were measured (it now
-waits 1 ms, see above); both are far inside the 500 ms / 1 s limits. About two thirds of the CPU per request is the kernel's (TCP and io_uring), which is the same for
-both servers.
+The latency difference is the 4 ms batching wait this server had when these were measured (the
+then-current version waited 1 ms; this improvement proposes 125 µs, see above); both are far inside
+the 500 ms / 1 s limits. About two thirds of the CPU per request is the kernel's (TCP and io_uring),
+which is the same for both servers.
 
 The normal-priority checkpoint tail, the page-cache fix (then a reset of the cache's largest key
 before each commit, since replaced by the wrapper above) and the INSERT without `RETURNING`, same

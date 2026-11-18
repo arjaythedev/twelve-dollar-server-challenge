@@ -1309,6 +1309,10 @@ p99 8.01 s, 320k on p99 2.31 s), a tie with #398's 300,000 and not above it, so 
 id instead of one shared pair) held **285,000** at 77 % CPU (27,145 req/s, p95 22.4 / p99 191.8 ms, 0 errors, 1,083 MB;
 the 300k 5-minute hold failed on p99 3.40 s, 310k failed the 2-minute probe on p99 1.20 s, 320k on p99 7.32 s), below
 #437's 310,000, so #427 is not merged.
+The follow-up **#516** (`b2c9bdb`, 2026-11-18: back to the `d0cf229` line, i.e. without the page moves, startup
+truncate, checkpoint fdatasync and growing-WAL bound, plus `TCP_QUICKACK` off) held **270,000** at 72 % CPU (25,880
+req/s, p95 20.2 / p99 138.1 ms, 0 errors, 827 MB; 280k failed the 2-minute probe on p99 2.07 s, 320k on p99 5.71 s),
+below #437's 310,000, so #516 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

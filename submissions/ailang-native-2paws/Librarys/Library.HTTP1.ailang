@@ -82,7 +82,15 @@ FixedPool.HTTP1St {
     "efd_buf": Initialize=0, CanChange=True
     "pbuf_ring": Initialize=0, CanChange=True
     "pbuf_base": Initialize=0, CanChange=True
-    "pbuf_n": Initialize=1024, CanChange=True
+    "pbuf_n": Initialize=4096, CanChange=True
+    "pbuf_sz": Initialize=2048, CanChange=True
+    "starve_h": Initialize=0, CanChange=True
+    "stats": Initialize=0, CanChange=True
+    "st_t": Initialize=0, CanChange=True
+    "st_pass": Initialize=0, CanChange=True
+    "st_cqe": Initialize=0, CanChange=True
+    "st_maxcq": Initialize=0, CanChange=True
+    "st_nobuf": Initialize=0, CanChange=True
     "starve": Initialize=0, CanChange=True
     "starve_n": Initialize=0, CanChange=True
     "direct": Initialize=0, CanChange=True
@@ -321,7 +329,7 @@ Function.HTTP1.AddRing {
         HTTP1St.ring_cur = r
         np = HTTP1St.pbuf_n
         pr = SystemCall(9, 0, Multiply(np, PBufOff.SIZE), 3, 34, -1, 0)
-        pb = SystemCall(9, 0, Multiply(np, HTTP1St.bufsz), 3, 34, -1, 0)
+        pb = SystemCall(9, 0, Multiply(np, HTTP1St.pbuf_sz), 3, 34, -1, 0)
         IfCondition Or(LessThan(pr, 4096), LessThan(pb, 4096)) ThenBlock: { ReturnValue(-1) }
         WRMEM_64(Add(rec, HTTP1Rg.PBUF_RING), pr)
         WRMEM_64(Add(rec, HTTP1Rg.PBUF_BASE), pb)
@@ -428,7 +436,7 @@ Function.HTTP1.Listen {
         HTTP1St.rings = Allocate(Multiply(HTTP1St.maxring, HTTP1Rg.SIZE))
         total = Multiply(nslot, HTTP1St.maxring)
         HTTP1St.slots = SystemCall(9, 0, Multiply(total, HTTP1Off.SLOT), 3, 34, -1, 0)
-        HTTP1St.starve = SystemCall(9, 0, Multiply(total, 16), 3, 34, -1, 0)
+        HTTP1St.starve = SystemCall(9, 0, Multiply(total, 32), 3, 34, -1, 0)
         HTTP1St.starve_n = 0
         HTTP1St.waitarg = Allocate(48)
         HTTP1St.defer_list = Allocate(4096)
@@ -498,8 +506,8 @@ Function.HTTP1.FindFree {
 Function.HTTP1.PbufPut {
     Input: bid: Integer
     Body: {
-        addr = Add(HTTP1St.pbuf_base, Multiply(bid, HTTP1St.bufsz))
-        IoUring.PBufRingAdd(HTTP1St.pbuf_ring, addr, HTTP1St.bufsz, bid, Subtract(HTTP1St.pbuf_n, 1))
+        addr = Add(HTTP1St.pbuf_base, Multiply(bid, HTTP1St.pbuf_sz))
+        IoUring.PBufRingAdd(HTTP1St.pbuf_ring, addr, HTTP1St.pbuf_sz, bid, Subtract(HTTP1St.pbuf_n, 1))
     }
 }
 
@@ -527,7 +535,7 @@ Function.HTTP1.QueueRecv {
         }
         IfCondition EqualTo(fill, 0) ThenBlock: {
             HTTP1.ReleaseIn(conn)
-            IoUring.PrepRecvBuf(fd, HTTP1St.bufsz, HTTP1C.BGID, ud, HTTP1St.sflags)
+            IoUring.PrepRecvBuf(fd, HTTP1St.pbuf_sz, HTTP1C.BGID, ud, HTTP1St.sflags)
         } ElseBlock: {
             buf = HTTP1.CGet(conn, HTTP1Off.BUF)
             IfCondition EqualTo(buf, HTTP1St.scratch_in) ThenBlock: {
@@ -1185,6 +1193,7 @@ Function.HTTP1.OnRecv {
         }
         IfCondition EqualTo(BitwiseAnd(flags, IoUringCqe.F_MORE), 0) ThenBlock: { HTTP1.CSet(conn, HTTP1Off.RXARM, 0) }
         IfCondition EqualTo(res, HTTP1C.ENOBUFS) ThenBlock: {
+            HTTP1St.st_nobuf = Add(HTTP1St.st_nobuf, 1)
             e = Add(HTTP1St.starve, Multiply(HTTP1St.starve_n, 16))
             WRMEM_64(e, idx)
             WRMEM_64(Add(e, 8), gen)
@@ -1226,7 +1235,7 @@ Function.HTTP1.OnRecv {
                 HTTP1.ClearConn(conn)
                 ReturnValue(0)
             }
-            MemoryCopy(Add(HTTP1.CGet(conn, HTTP1Off.BUF), fill), Add(HTTP1St.pbuf_base, Multiply(bid, HTTP1St.bufsz)), res)
+            MemoryCopy(Add(HTTP1.CGet(conn, HTTP1Off.BUF), fill), Add(HTTP1St.pbuf_base, Multiply(bid, HTTP1St.pbuf_sz)), res)
             HTTP1.PbufPut(bid)
         }
         HTTP1.CSet(conn, HTTP1Off.FILL, Add(fill, res))
@@ -1387,6 +1396,7 @@ Function.HTTP1.Drain {
             HTTP1.UseRing(r)
             cqe = IoUring.PeekCqe()
             IfCondition EqualTo(cqe, 0) ThenBlock: { BreakLoop }
+            HTTP1St.st_cqe = Add(HTTP1St.st_cqe, 1)
             cqe_res = IoUring.CqeRes(cqe)
             cqe_ud = IoUring.CqeUserData(cqe)
             cqe_flags = IoUring.CqeFlags(cqe)
@@ -1399,6 +1409,40 @@ Function.HTTP1.Drain {
             IfCondition EqualTo(op, HTTP1Op.ACCEPT) ThenBlock: { HTTP1.OnAccept(data, cqe_res, cqe_flags) }
             IfCondition EqualTo(op, HTTP1Op.POLL) ThenBlock: { HTTP1.OnPoll(data, cqe_flags) }
         }
+    }
+}
+
+// HTTP_STATS=1: one line per 10 s with passes, completions, the largest ring-0
+// batch, receives that found no buffer, and live connections per ring
+Function.HTTP1.Stats {
+    Input: cq0: Integer
+    Body: {
+        HTTP1St.st_pass = Add(HTTP1St.st_pass, 1)
+        IfCondition GreaterThan(cq0, HTTP1St.st_maxcq) ThenBlock: { HTTP1St.st_maxcq = cq0 }
+        t = SystemCall(201, 0)
+        IfCondition EqualTo(HTTP1St.st_t, 0) ThenBlock: { HTTP1St.st_t = t }
+        IfCondition LessThan(t, Add(HTTP1St.st_t, 10)) ThenBlock: { ReturnValue(0) }
+        HTTP1St.st_t = t
+        PrintMessage("stat pass=")
+        PrintNumber(HTTP1St.st_pass)
+        PrintMessage(" cqe=")
+        PrintNumber(HTTP1St.st_cqe)
+        PrintMessage(" maxcq0=")
+        PrintNumber(HTTP1St.st_maxcq)
+        PrintMessage(" nobuf=")
+        PrintNumber(HTTP1St.st_nobuf)
+        PrintMessage(" live=")
+        r = 0
+        WhileLoop LessThan(r, HTTP1St.nring) {
+            PrintNumber(RDMEM_64(Add(HTTP1.RingRec(r), HTTP1Rg.LIVE)))
+            PrintMessage(",")
+            r = Add(r, 1)
+        }
+        PrintMessage("\n")
+        HTTP1St.st_pass = 0
+        HTTP1St.st_cqe = 0
+        HTTP1St.st_maxcq = 0
+        HTTP1St.st_nobuf = 0
     }
 }
 
@@ -1417,8 +1461,9 @@ Function.HTTP1.Serve {
                 r = Add(r, 1)
             }
             HTTP1.UseRing(0)
+            c0 = HTTP1St.st_cqe
             busy = 0
-            IfCondition GreaterThan(HTTP1St.starve_n, 0) ThenBlock: { busy = 1 }
+            IfCondition GreaterThan(HTTP1St.starve_n, HTTP1St.starve_h) ThenBlock: { busy = 1 }
             IfCondition EqualTo(busy, 1) ThenBlock: {
                 IoUring.Enter(IoUring.SqPending(), 0, IoUringEnter.GETEVENTS)
             } ElseBlock: {
@@ -1429,19 +1474,37 @@ Function.HTTP1.Serve {
                 }
             }
             HTTP1.Drain(0)
+            IfCondition EqualTo(HTTP1St.stats, 1) ThenBlock: { HTTP1.Stats(Subtract(HTTP1St.st_cqe, c0)) }
 
-            // Recvs that found the buffer ring empty; every buffer is back by now
-            sn = HTTP1St.starve_n
-            HTTP1St.starve_n = 0
-            s = 0
-            WhileLoop LessThan(s, sn) {
-                e = Add(HTTP1St.starve, Multiply(s, 16))
+            // Receives that found their buffer ring empty, oldest first. Re-arming them all at
+            // once would drain the ring again in the same pass, so at most half a ring's worth go
+            // per pass; ring 0 doesn't wait while any are left.
+            h = HTTP1St.starve_h
+            stop = HTTP1St.starve_n
+            budget = Divide(HTTP1St.pbuf_n, 2)
+            IfCondition GreaterThan(Subtract(stop, h), budget) ThenBlock: { stop = Add(h, budget) }
+            WhileLoop LessThan(h, stop) {
+                e = Add(HTTP1St.starve, Multiply(h, 16))
                 sidx = RDMEM_64(e)
                 sconn = HTTP1.ConnAt(sidx)
                 IfCondition EqualTo(BitwiseAnd(HTTP1.CGet(sconn, HTTP1Off.GEN), 255), RDMEM_64(Add(e, 8))) ThenBlock: {
                     IfCondition GreaterThan(HTTP1.CGet(sconn, HTTP1Off.FD), 0) ThenBlock: { HTTP1.QueueRecv(sidx) }
                 }
-                s = Add(s, 1)
+                h = Add(h, 1)
+            }
+            HTTP1St.starve_h = h
+            IfCondition EqualTo(h, HTTP1St.starve_n) ThenBlock: {
+                HTTP1St.starve_h = 0
+                HTTP1St.starve_n = 0
+            } ElseBlock: {
+                // Each connection is queued at most once, so the live part is never larger than
+                // the table; slide it back to the front once the head has moved far enough
+                IfCondition GreaterThan(h, Divide(Multiply(HTTP1St.nslot, HTTP1St.maxring), 2)) ThenBlock: {
+                    n = Subtract(HTTP1St.starve_n, h)
+                    MemoryCopy(HTTP1St.starve, Add(HTTP1St.starve, Multiply(h, 16)), Multiply(n, 16))
+                    HTTP1St.starve_h = 0
+                    HTTP1St.starve_n = n
+                }
             }
 
             IfCondition GreaterThan(HTTP1St.defer_n, 0) ThenBlock: {

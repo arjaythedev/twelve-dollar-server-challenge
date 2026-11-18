@@ -948,6 +948,11 @@ SubRoutine.Main {
     HTTP1St.direct = Env.GetInt("HTTP_DIRECT")
     IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: { fronts = 0 }
     HTTP1St.rxmulti = Env.GetInt("HTTP_RXMULTI")
+    HTTP1St.stats = Env.GetInt("HTTP_STATS")
+    pn = Env.GetInt("HTTP_PBUF_N")
+    IfCondition GreaterThan(pn, 0) ThenBlock: { HTTP1St.pbuf_n = pn }
+    pz = Env.GetInt("HTTP_PBUF_SZ")
+    IfCondition GreaterThan(pz, 0) ThenBlock: { HTTP1St.pbuf_sz = pz }
     IfCondition EqualTo(Env.GetInt("HTTP_DEFER_TASKRUN"), 1) ThenBlock: {
         IoUring.setup_flags = BitwiseOr(IoUringSetup.SINGLE_ISSUER, IoUringSetup.DEFER_TASKRUN)
     }

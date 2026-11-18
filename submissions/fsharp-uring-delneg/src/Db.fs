@@ -835,7 +835,6 @@ type Checkpointer(path: string, nice: int) =
                         sqlite3_file_control (cdb, main, 6, &bytes) |> ignore
                     // kept open: closing any descriptor of the file would drop the process's POSIX locks on it
                     dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
-                    if dropFd >= 0 && Environment.GetEnvironmentVariable "PACE" <> "0" then Vfs.pace dropFd
             let mutable log = -1
             let mutable done' = -1
             let t0 = Diagnostics.Stopwatch.GetTimestamp()

@@ -21,7 +21,9 @@
   at a high-water mark (a quarter of its slots, at most 4,096, below full) while another ring has room, since an
   accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues,
   so a ramp's new connections wait there instead of being refused. A connection is accepted when its handshake
-  completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives).
+  completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives). The
+  listeners have `TCP_QUICKACK` off, and accepted sockets inherit it, so a connection's first request is acknowledged
+  by its response instead of by a bare ACK of its own (`QUICKACK=1` restores the kernel default).
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -51,7 +53,10 @@
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
   first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
-  waits without bound.
+  waits without bound. In that newest-first walk the cheaper requests go before feeds (a feed reads 20 posts, their
+  authors and like counts and answers 5 KB): feeds wait, in order, up to 16 passes' worth, and get what the others
+  leave of each pass. With a fixed shortfall of CPU, fewer requests then wait past their deadline (`CHEAPFIRST=0`
+  turns it off).
 - **Checkpoints, and writes that don't wait for them.** SQLite's automatic checkpoints are off (a WAL hook counts
   frames). Every 16,000 new frames the loop asks the checkpoint thread for a PASSIVE checkpoint and learns it
   finished from an eventfd its ring reads. Under steady writes a pass never ends with the WAL fully copied, so the WAL
@@ -78,16 +83,6 @@
   run starts at zero. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader
   goes back to them), so the file's length doesn't cost memory. The database file's pages go too, after the pass
   that syncs the file (the held one).
-  The checkpoint thread also paces its own writes to the database file (a second thin wrapper in the VFS shim, on
-  the database file's `xWrite`; the bytes and their order are SQLite's). A pass writes thousands of pages in a
-  fraction of a second, and when that lifts the kernel's dirty memory past the point where it pauses writers, the
-  next writer it pauses is the loop, in its WAL write. So after each MiB the thread reads `nr_dirty`, `nr_writeback`
-  and the two thresholds from `/proc/vmstat`; within a quarter of the level where writers start being paused, it
-  sends its own pages to the disk (`sync_file_range` on the database file) and waits up to 250 ms for the rest to
-  drain. Measured with the dirty limits set to 12 / 24 MB and the 25 MB/s cap: without it the loop was paused in
-  `balance_dirty_pages` 10 times in a run (up to 183 ms, 1.3 s in all), with it never, in two runs. At the default
-  limits it found dirty memory high 0 times in 771 looks and changes nothing: the pages stay dirty and the kernel
-  still writes each once however many passes wrote it.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
@@ -184,7 +179,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `PACE` (1; 0: the checkpoint thread's database writes unpaced), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
 

@@ -27,6 +27,7 @@ let private lifoOn = env "LIFO" 1 = 1
 let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
 let private lifoAge = uint32 (env "LIFOAGE" 8000)
+let private cheapFirst = env "CHEAPFIRST" 1 = 1 // in a backlog, the newest-first walk answers everything but feeds first
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
@@ -481,7 +482,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         ckRide <- false
         if res = 8 then
             if ck.Rc = 0 && ck.Backfilled >= 0 then ckBackfilled <- ck.Backfilled
-            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b pace %d/%d %d ms" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold Vfs.paceHigh Vfs.paceLooks Vfs.paceMs
+            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold
             if holdRem > 0 && not ckHold && ck.Rc = 0 && Db.walFrames >= ckHoldAt then
                 // past holdMax, hold anyway: passes aren't catching up with the writes
                 if Db.walFrames - ckBackfilled <= holdRem || Db.walFrames >= holdMax then
@@ -959,7 +960,14 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                                         hold <- true
                     i <- i + 1
             if lifo then
+                // Cheapest first: a feed costs a few times what any other request does (20 posts, their authors and
+                // like counts, a 5 KB answer), so while the loop is behind, the walk from the newest end answers the
+                // other requests and leaves the feeds where they are (w marks the feeds kept at the top, in their
+                // order, at most 16 passes' worth); feeds are answered, newest first, with whatever the other
+                // requests left of the pass. In a backlog worth D seconds of CPU, fewer requests then wait past
+                // their deadline.
                 let mutable k = nreq
+                let mutable w = nreq
                 let mutable stop2 = false
                 while not stop2 && k > i && answered < budget do
                     stWalk <- stWalk + 1L
@@ -970,6 +978,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                             conns.[cid].Queued <- conns.[cid].Queued - 1
                             k <- k - 1
                         elif conns.[cid].Queued - conns.[cid].Held > 1 then stop2 <- true // pipelined: its older request goes first
+                        elif cheapFirst && r.Route = RFeed && conns.[cid].Held = 0 && nreq - w < budget * 16 then
+                            if w <> k then reqs.[w - 1] <- reqs.[k - 1]
+                            w <- w - 1
+                            k <- k - 1
                         else
                             let isWrite = r.Route = RCreate || r.Route = RLike
                             if conns.[cid].Held > 0 || (hold && isWrite) then toHeld &r cid
@@ -984,7 +996,20 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                                         hold <- true
                             k <- k - 1
                     else k <- k - 1
-                nreq <- k
+                // the kept feeds, newest first, with what is left of the budget
+                while w < nreq && answered < budget do
+                    let r = &reqs.[nreq - 1]
+                    let cid = r.Cid
+                    if conns.[cid].Gen = r.Gen then
+                        if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then conns.[cid].Queued <- conns.[cid].Queued - 1
+                        else
+                            answer &r cid
+                            answered <- answered + 1
+                    nreq <- nreq - 1
+                // what is still kept moves down to close the gap the walk left
+                let kept = nreq - w
+                if kept > 0 && w <> k then Array.Copy(reqs, w, reqs, k, kept)
+                nreq <- k + kept
             if wrote then lastWriteMs <- passMs
             nHeldNow <- wqLen
             let mutable ok = true
@@ -1264,4 +1289,9 @@ let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) =
            if Native.bind (fd, sa, 16) < 0 then failwithf "bind %O:%d: errno %d" ip port (Native.errno ())
            Marshal.FreeHGlobal sa
            if Native.listen (fd, 65535) < 0 then failwithf "listen: errno %d" (Native.errno ())
+           // TCP_QUICKACK 0 on the listener (after listen()); accepted sockets inherit it, so a connection's first
+           // request is acknowledged by its response, as every later one is, instead of by a bare ACK of its own.
+           if env "QUICKACK" 0 = 0 then
+               let mutable zero = 0
+               Native.setsockopt (fd, 6, 12, &zero, 4) |> ignore // TCP_QUICKACK
            yield fd |]

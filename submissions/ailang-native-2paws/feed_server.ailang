@@ -257,20 +257,44 @@ Function.Feed.PutEscByte {
     }
 }
 
+// Most text needs no escaping: test 8 bytes at a time for a control byte, '"' or
+// '\\' (bytes >= 0x80, UTF-8, never match) and copy the whole run when none is found
 Function.Feed.PutEscN {
     Input: p: Address
     Input: n: Integer
     Body: {
         IfCondition EqualTo(p, 0) ThenBlock: { ReturnValue(0) }
         IfCondition LessEqual(n, 0) ThenBlock: { ReturnValue(0) }
-        i = 0
+        ones = 72340172838076673
+        hi = Multiply(ones, 128)
+        c20 = Multiply(ones, 32)
+        q = Multiply(ones, 34)
+        bs = Multiply(ones, 92)
         need = 0
-        WhileLoop LessThan(i, n) {
-            ch = RDMEM_8(p, i)
-            IfCondition EqualTo(ch, 34) ThenBlock: { need = 1 }
-            IfCondition EqualTo(ch, 92) ThenBlock: { need = 1 }
-            IfCondition LessThan(ch, 32) ThenBlock: { need = 1 }
-            i = Add(i, 1)
+        i = 0
+        WhileLoop LessEqual(Add(i, 8), n) {
+            w = RDMEM_64(Add(p, i))
+            nw = BitwiseXor(w, -1)
+            wq = BitwiseXor(w, q)
+            wb = BitwiseXor(w, bs)
+            t = BitwiseAnd(BitwiseAnd(Subtract(w, c20), nw), hi)
+            t = BitwiseOr(t, BitwiseAnd(BitwiseAnd(Subtract(wq, ones), BitwiseXor(wq, -1)), hi))
+            t = BitwiseOr(t, BitwiseAnd(BitwiseAnd(Subtract(wb, ones), BitwiseXor(wb, -1)), hi))
+            IfCondition NotEqual(t, 0) ThenBlock: {
+                need = 1
+                BreakLoop
+            }
+            i = Add(i, 8)
+        }
+        IfCondition EqualTo(need, 0) ThenBlock: {
+            WhileLoop LessThan(i, n) {
+                ch = RDMEM_8(p, i)
+                IfCondition Or(Or(EqualTo(ch, 34), EqualTo(ch, 92)), LessThan(ch, 32)) ThenBlock: {
+                    need = 1
+                    BreakLoop
+                }
+                i = Add(i, 1)
+            }
         }
         IfCondition EqualTo(need, 0) ThenBlock: {
             Feed.Put(p, n)

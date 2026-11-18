@@ -859,6 +859,58 @@ Function.JSON.ParseArray {
     }
 }
 
+// Four hex digits at buffer offset pos, or -1
+Function.JSON.Hex4 {
+    Input: pos: Integer
+    Output: Integer
+    Body: {
+        IfCondition GreaterThan(Add(pos, 4), JParse.size) ThenBlock: { ReturnValue(-1) }
+        v = 0
+        k = 0
+        WhileLoop LessThan(k, 4) {
+            c = RDMEM_8(Add(JParse.buffer, Add(pos, k)), 0)
+            d = -1
+            IfCondition And(GreaterEqual(c, 48), LessEqual(c, 57)) ThenBlock: { d = Subtract(c, 48) }
+            IfCondition And(GreaterEqual(c, 97), LessEqual(c, 102)) ThenBlock: { d = Subtract(c, 87) }
+            IfCondition And(GreaterEqual(c, 65), LessEqual(c, 70)) ThenBlock: { d = Subtract(c, 55) }
+            IfCondition LessThan(d, 0) ThenBlock: { ReturnValue(-1) }
+            v = Add(LeftShift(v, 4), d)
+            k = Add(k, 1)
+        }
+        ReturnValue(v)
+    }
+}
+
+// Write code point cp as UTF-8 at str+dst; returns the new dst
+Function.JSON.PutUtf8 {
+    Input: str: Address
+    Input: dst: Integer
+    Input: cp: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(cp, 128) ThenBlock: {
+            WRMEM_8(str, dst, cp)
+            ReturnValue(Add(dst, 1))
+        }
+        IfCondition LessThan(cp, 2048) ThenBlock: {
+            WRMEM_8(str, dst, BitwiseOr(192, RightShift(cp, 6)))
+            WRMEM_8(str, Add(dst, 1), BitwiseOr(128, BitwiseAnd(cp, 63)))
+            ReturnValue(Add(dst, 2))
+        }
+        IfCondition LessThan(cp, 65536) ThenBlock: {
+            WRMEM_8(str, dst, BitwiseOr(224, RightShift(cp, 12)))
+            WRMEM_8(str, Add(dst, 1), BitwiseOr(128, BitwiseAnd(RightShift(cp, 6), 63)))
+            WRMEM_8(str, Add(dst, 2), BitwiseOr(128, BitwiseAnd(cp, 63)))
+            ReturnValue(Add(dst, 3))
+        }
+        WRMEM_8(str, dst, BitwiseOr(240, RightShift(cp, 18)))
+        WRMEM_8(str, Add(dst, 1), BitwiseOr(128, BitwiseAnd(RightShift(cp, 12), 63)))
+        WRMEM_8(str, Add(dst, 2), BitwiseOr(128, BitwiseAnd(RightShift(cp, 6), 63)))
+        WRMEM_8(str, Add(dst, 3), BitwiseOr(128, BitwiseAnd(cp, 63)))
+        ReturnValue(Add(dst, 4))
+    }
+}
+
 Function.JSON.ParseString {
     Output: Address
     Body: {
@@ -934,9 +986,27 @@ Function.JSON.ParseString {
                         WRMEM_8(str, dst, 12)
                         dst = Add(dst, 1)
                     } ElseBlock: {
+                    cp = -1
+                    IfCondition EqualTo(esc, 117) ThenBlock: { cp = JSON.Hex4(Add(JParse.pos, 1)) }
+                    IfCondition GreaterEqual(cp, 0) ThenBlock: {
+                        JParse.pos = Add(JParse.pos, 4)
+                        // A high surrogate followed by \uDC00-\uDFFF is one code point
+                        IfCondition And(GreaterEqual(cp, 55296), LessThan(cp, 56320)) ThenBlock: {
+                            IfCondition EqualTo(RDMEM_8(Add(JParse.buffer, Add(JParse.pos, 1)), 0), 92) ThenBlock: {
+                                IfCondition EqualTo(RDMEM_8(Add(JParse.buffer, Add(JParse.pos, 2)), 0), 117) ThenBlock: {
+                                    lo = JSON.Hex4(Add(JParse.pos, 3))
+                                    IfCondition And(GreaterEqual(lo, 56320), LessThan(lo, 57344)) ThenBlock: {
+                                        cp = Add(65536, Add(LeftShift(Subtract(cp, 55296), 10), Subtract(lo, 56320)))
+                                        JParse.pos = Add(JParse.pos, 6)
+                                    }
+                                }
+                            }
+                        }
+                        dst = JSON.PutUtf8(str, dst, cp)
+                    } ElseBlock: {
                         WRMEM_8(str, dst, esc)
                         dst = Add(dst, 1)
-                    }}}}}}}}
+                    }}}}}}}}}
                     JParse.pos = Add(JParse.pos, 1)
                 }
             } ElseBlock: {

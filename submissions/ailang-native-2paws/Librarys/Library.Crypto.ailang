@@ -14,6 +14,10 @@ FixedPool.CryptoSt {
     "wtab": Initialize=0, CanChange=True
     "pad": Initialize=0, CanChange=True
     "inited": Initialize=0, CanChange=True
+    "istate": Initialize=0, CanChange=True
+    "ostate": Initialize=0, CanChange=True
+    "hkey": Initialize=0, CanChange=True
+    "hkey_n": Initialize=-1, CanChange=True
 }
 
 FixedPool.SHA256H {
@@ -43,126 +47,6 @@ FixedPool.SHA256W {
 FixedPool.JWTOut {
     "uid": Initialize=0, CanChange=True
     "name": Initialize=0, CanChange=True
-}
-
-Function.Crypto.U32 {
-    Input: n: Integer
-    Output: Integer
-    Body: {
-        ReturnValue(BitwiseAnd(n, 4294967295))
-    }
-}
-
-Function.Crypto.Rotr {
-    Input: x: Integer
-    Input: n: Integer
-    Output: Integer
-    Body: {
-        ux = BitwiseAnd(x, 4294967295)
-        left_n = Subtract(32, n)
-        hi = RightShift(ux, n)
-        lo = LeftShift(ux, left_n)
-        ReturnValue(BitwiseAnd(BitwiseOr(hi, lo), 4294967295))
-    }
-}
-
-Function.Crypto.Ch {
-    Input: x: Integer
-    Input: y: Integer
-    Input: z: Integer
-    Output: Integer
-    Body: {
-        ux = BitwiseAnd(x, 4294967295)
-        uy = BitwiseAnd(y, 4294967295)
-        uz = BitwiseAnd(z, 4294967295)
-        n_x = BitwiseXor(ux, 4294967295)
-        xy = BitwiseAnd(ux, uy)
-        nxz = BitwiseAnd(n_x, uz)
-        ReturnValue(BitwiseAnd(BitwiseXor(xy, nxz), 4294967295))
-    }
-}
-
-Function.Crypto.Maj {
-    Input: x: Integer
-    Input: y: Integer
-    Input: z: Integer
-    Output: Integer
-    Body: {
-        ux = BitwiseAnd(x, 4294967295)
-        uy = BitwiseAnd(y, 4294967295)
-        uz = BitwiseAnd(z, 4294967295)
-        xy = BitwiseAnd(ux, uy)
-        xz = BitwiseAnd(ux, uz)
-        yz = BitwiseAnd(uy, uz)
-        t = BitwiseXor(xy, xz)
-        ReturnValue(BitwiseAnd(BitwiseXor(t, yz), 4294967295))
-    }
-}
-
-Function.Crypto.BSIG0 {
-    Input: x: Integer
-    Output: Integer
-    Body: {
-        r2 = Crypto.Rotr(x, 2)
-        r13 = Crypto.Rotr(x, 13)
-        r22 = Crypto.Rotr(x, 22)
-        t = BitwiseXor(r2, r13)
-        ReturnValue(BitwiseXor(t, r22))
-    }
-}
-
-Function.Crypto.BSIG1 {
-    Input: x: Integer
-    Output: Integer
-    Body: {
-        r6 = Crypto.Rotr(x, 6)
-        r11 = Crypto.Rotr(x, 11)
-        r25 = Crypto.Rotr(x, 25)
-        t = BitwiseXor(r6, r11)
-        ReturnValue(BitwiseXor(t, r25))
-    }
-}
-
-Function.Crypto.SSIG0 {
-    Input: x: Integer
-    Output: Integer
-    Body: {
-        r7 = Crypto.Rotr(x, 7)
-        r18 = Crypto.Rotr(x, 18)
-        shr = RightShift(BitwiseAnd(x, 4294967295), 3)
-        t = BitwiseXor(r7, r18)
-        ReturnValue(BitwiseXor(t, shr))
-    }
-}
-
-Function.Crypto.SSIG1 {
-    Input: x: Integer
-    Output: Integer
-    Body: {
-        r17 = Crypto.Rotr(x, 17)
-        r19 = Crypto.Rotr(x, 19)
-        shr = RightShift(BitwiseAnd(x, 4294967295), 10)
-        t = BitwiseXor(r17, r19)
-        ReturnValue(BitwiseXor(t, shr))
-    }
-}
-
-Function.Crypto.LoadBE32 {
-    Input: buf: Address
-    Input: off: Integer
-    Output: Integer
-    Body: {
-        b0 = RDMEM_8(buf, off)
-        b1 = RDMEM_8(buf, Add(off, 1))
-        b2 = RDMEM_8(buf, Add(off, 2))
-        b3 = RDMEM_8(buf, Add(off, 3))
-        s1 = LeftShift(b0, 24)
-        s2 = LeftShift(b1, 16)
-        s3 = LeftShift(b2, 8)
-        t = BitwiseOr(s1, s2)
-        t2 = BitwiseOr(t, s3)
-        ReturnValue(BitwiseOr(t2, b3))
-    }
 }
 
 Function.Crypto.StoreBE32 {
@@ -274,76 +158,75 @@ Function.Crypto.EnsureInit {
         CryptoSt.ktab = Allocate(512)
         CryptoSt.wtab = Allocate(512)
         CryptoSt.pad = Allocate(128)
+        CryptoSt.istate = Allocate(64)
+        CryptoSt.ostate = Allocate(64)
         Crypto.FillK()
         CryptoSt.inited = 1
     }
 }
 
+// One 64-byte block into SHA256H. Everything stays in locals: a 32-bit rotate of x
+// is a shift of xx = x | x<<32, so each sigma is shifts, XORs and one mask.
 Function.Crypto.SHA256_Compress {
     Input: block: Address
     Body: {
         wtab = CryptoSt.wtab
         ktab = CryptoSt.ktab
+        m32 = 4294967295
         i = 0
         WhileLoop LessThan(i, 16) {
-            off = Multiply(i, 4)
-            word = Crypto.LoadBE32(block, off)
-            WRMEM_64(Add(wtab, Multiply(i, 8)), word)
+            v = RDMEM_32(Add(block, Multiply(i, 4)))
+            be = BitwiseOr(BitwiseOr(LeftShift(BitwiseAnd(v, 255), 24), LeftShift(BitwiseAnd(v, 65280), 8)), BitwiseOr(BitwiseAnd(RightShift(v, 8), 65280), RightShift(v, 24)))
+            WRMEM_64(Add(wtab, Multiply(i, 8)), be)
             i = Add(i, 1)
         }
         WhileLoop LessThan(i, 64) {
             w2 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 2), 8)))
-            w7 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 7), 8)))
             w15 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 15), 8)))
+            x2 = BitwiseOr(w2, LeftShift(w2, 32))
+            x15 = BitwiseOr(w15, LeftShift(w15, 32))
+            s1 = BitwiseXor(BitwiseXor(BitwiseAnd(RightShift(x2, 17), m32), BitwiseAnd(RightShift(x2, 19), m32)), RightShift(w2, 10))
+            s0 = BitwiseXor(BitwiseXor(BitwiseAnd(RightShift(x15, 7), m32), BitwiseAnd(RightShift(x15, 18), m32)), RightShift(w15, 3))
+            w7 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 7), 8)))
             w16 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 16), 8)))
-            s1 = Crypto.SSIG1(w2)
-            s0 = Crypto.SSIG0(w15)
-            sum1 = Add(s1, w7)
-            sum2 = Add(sum1, s0)
-            sum3 = Add(sum2, w16)
-            WRMEM_64(Add(wtab, Multiply(i, 8)), Crypto.U32(sum3))
+            WRMEM_64(Add(wtab, Multiply(i, 8)), BitwiseAnd(Add(Add(s1, w7), Add(s0, w16)), m32))
             i = Add(i, 1)
         }
-        SHA256W.a = SHA256H.h0
-        SHA256W.b = SHA256H.h1
-        SHA256W.c = SHA256H.h2
-        SHA256W.d = SHA256H.h3
-        SHA256W.e = SHA256H.h4
-        SHA256W.f = SHA256H.h5
-        SHA256W.g = SHA256H.h6
-        SHA256W.h = SHA256H.h7
+        a = SHA256H.h0
+        b = SHA256H.h1
+        c = SHA256H.h2
+        d = SHA256H.h3
+        e = SHA256H.h4
+        f = SHA256H.h5
+        g = SHA256H.h6
+        h = SHA256H.h7
         i = 0
         WhileLoop LessThan(i, 64) {
-            ki = RDMEM_64(Add(ktab, Multiply(i, 8)))
-            wi = RDMEM_64(Add(wtab, Multiply(i, 8)))
-            se = Crypto.BSIG1(SHA256W.e)
-            ch = Crypto.Ch(SHA256W.e, SHA256W.f, SHA256W.g)
-            t1a = Add(SHA256W.h, se)
-            t1b = Add(t1a, ch)
-            t1c = Add(t1b, ki)
-            t1d = Add(t1c, wi)
-            SHA256W.t1 = Crypto.U32(t1d)
-            sa = Crypto.BSIG0(SHA256W.a)
-            mj = Crypto.Maj(SHA256W.a, SHA256W.b, SHA256W.c)
-            SHA256W.t2 = Crypto.U32(Add(sa, mj))
-            SHA256W.h = SHA256W.g
-            SHA256W.g = SHA256W.f
-            SHA256W.f = SHA256W.e
-            SHA256W.e = Crypto.U32(Add(SHA256W.d, SHA256W.t1))
-            SHA256W.d = SHA256W.c
-            SHA256W.c = SHA256W.b
-            SHA256W.b = SHA256W.a
-            SHA256W.a = Crypto.U32(Add(SHA256W.t1, SHA256W.t2))
+            xe = BitwiseOr(e, LeftShift(e, 32))
+            se = BitwiseAnd(BitwiseXor(BitwiseXor(RightShift(xe, 6), RightShift(xe, 11)), RightShift(xe, 25)), m32)
+            ch = BitwiseXor(g, BitwiseAnd(e, BitwiseXor(f, g)))
+            t1 = Add(Add(Add(h, se), Add(ch, RDMEM_64(Add(ktab, Multiply(i, 8))))), RDMEM_64(Add(wtab, Multiply(i, 8))))
+            xa = BitwiseOr(a, LeftShift(a, 32))
+            sa = BitwiseAnd(BitwiseXor(BitwiseXor(RightShift(xa, 2), RightShift(xa, 13)), RightShift(xa, 22)), m32)
+            mj = BitwiseOr(BitwiseAnd(a, b), BitwiseAnd(c, BitwiseOr(a, b)))
+            h = g
+            g = f
+            f = e
+            e = BitwiseAnd(Add(d, t1), m32)
+            d = c
+            c = b
+            b = a
+            a = BitwiseAnd(Add(t1, Add(sa, mj)), m32)
             i = Add(i, 1)
         }
-        SHA256H.h0 = Crypto.U32(Add(SHA256H.h0, SHA256W.a))
-        SHA256H.h1 = Crypto.U32(Add(SHA256H.h1, SHA256W.b))
-        SHA256H.h2 = Crypto.U32(Add(SHA256H.h2, SHA256W.c))
-        SHA256H.h3 = Crypto.U32(Add(SHA256H.h3, SHA256W.d))
-        SHA256H.h4 = Crypto.U32(Add(SHA256H.h4, SHA256W.e))
-        SHA256H.h5 = Crypto.U32(Add(SHA256H.h5, SHA256W.f))
-        SHA256H.h6 = Crypto.U32(Add(SHA256H.h6, SHA256W.g))
-        SHA256H.h7 = Crypto.U32(Add(SHA256H.h7, SHA256W.h))
+        SHA256H.h0 = BitwiseAnd(Add(SHA256H.h0, a), m32)
+        SHA256H.h1 = BitwiseAnd(Add(SHA256H.h1, b), m32)
+        SHA256H.h2 = BitwiseAnd(Add(SHA256H.h2, c), m32)
+        SHA256H.h3 = BitwiseAnd(Add(SHA256H.h3, d), m32)
+        SHA256H.h4 = BitwiseAnd(Add(SHA256H.h4, e), m32)
+        SHA256H.h5 = BitwiseAnd(Add(SHA256H.h5, f), m32)
+        SHA256H.h6 = BitwiseAnd(Add(SHA256H.h6, g), m32)
+        SHA256H.h7 = BitwiseAnd(Add(SHA256H.h7, h), m32)
     }
 }
 
@@ -367,6 +250,18 @@ Function.Crypto.SHA256 {
     Body: {
         Crypto.EnsureInit()
         Crypto.SHA256_ResetH()
+        ReturnValue(Crypto.SHA256_Finish(buf, len, 0))
+    }
+}
+
+// Hash buf on from the current SHA256H, where prefix bytes were already
+// compressed into it, and return the 32-byte digest
+Function.Crypto.SHA256_Finish {
+    Input: buf: Address
+    Input: len: Integer
+    Input: prefix: Integer
+    Output: Address
+    Body: {
         i = 0
         WhileLoop LessEqual(Add(i, 64), len) {
             Crypto.SHA256_Compress(Add(buf, i))
@@ -376,14 +271,14 @@ Function.Crypto.SHA256 {
         pad = CryptoSt.pad
         z = 0
         WhileLoop LessThan(z, 128) {
-            WRMEM_8(pad, z, 0)
-            z = Add(z, 1)
+            WRMEM_64(Add(pad, z), 0)
+            z = Add(z, 8)
         }
         IfCondition GreaterThan(rem, 0) ThenBlock: {
             MemoryCopy(pad, Add(buf, i), rem)
         }
         WRMEM_8(pad, rem, 128)
-        bitlen = Multiply(len, 8)
+        bitlen = Multiply(Add(prefix, len), 8)
         IfCondition LessThan(rem, 56) ThenBlock: {
             Crypto.StoreBE64(pad, 56, bitlen)
             Crypto.SHA256_Compress(pad)
@@ -436,6 +331,9 @@ Function.Crypto.DigestHex {
     }
 }
 
+// HMAC-SHA256. The ipad and opad blocks depend only on the key, so their
+// compressed states are kept per key (the most recent one); every message is
+// still hashed in full.
 Function.Crypto.HMAC_SHA256 {
     Input: key: Address
     Input: key_len: Integer
@@ -443,38 +341,78 @@ Function.Crypto.HMAC_SHA256 {
     Input: msg_len: Integer
     Output: Address
     Body: {
+        Crypto.EnsureInit()
+        IfCondition Or(NotEqual(key, CryptoSt.hkey), NotEqual(key_len, CryptoSt.hkey_n)) ThenBlock: {
+            Crypto.HmacKey(key, key_len)
+        }
+        Crypto.SHA256_LoadH(CryptoSt.istate)
+        inner = Crypto.SHA256_Finish(msg, msg_len, 64)
+        Crypto.SHA256_LoadH(CryptoSt.ostate)
+        ReturnValue(Crypto.SHA256_Finish(inner, 32, 64))
+    }
+}
+
+Function.Crypto.HmacKey {
+    Input: key: Address
+    Input: key_len: Integer
+    Body: {
         kptr = key
         klen = key_len
-        hashed = 0
         IfCondition GreaterThan(key_len, 64) ThenBlock: {
-            hashed = Crypto.SHA256(key, key_len)
-            kptr = hashed
+            kptr = Crypto.SHA256(key, key_len)
             klen = 32
         }
-        ipad = Allocate(64)
-        opad = Allocate(64)
+        blk = CryptoSt.pad
         i = 0
         WhileLoop LessThan(i, 64) {
             kb = 0
-            IfCondition LessThan(i, klen) ThenBlock: {
-                kb = RDMEM_8(kptr, i)
-            }
-            WRMEM_8(ipad, i, BitwiseXor(kb, 54))
-            WRMEM_8(opad, i, BitwiseXor(kb, 92))
+            IfCondition LessThan(i, klen) ThenBlock: { kb = RDMEM_8(kptr, i) }
+            WRMEM_8(blk, i, BitwiseXor(kb, 54))
             i = Add(i, 1)
         }
-        inner_len = Add(64, msg_len)
-        inner = Allocate(inner_len)
-        MemoryCopy(inner, ipad, 64)
-        IfCondition GreaterThan(msg_len, 0) ThenBlock: {
-            MemoryCopy(Add(inner, 64), msg, msg_len)
+        Crypto.SHA256_ResetH()
+        Crypto.SHA256_Compress(blk)
+        Crypto.SHA256_SaveH(CryptoSt.istate)
+        i = 0
+        WhileLoop LessThan(i, 64) {
+            kb = 0
+            IfCondition LessThan(i, klen) ThenBlock: { kb = RDMEM_8(kptr, i) }
+            WRMEM_8(blk, i, BitwiseXor(kb, 92))
+            i = Add(i, 1)
         }
-        inner_dig = Crypto.SHA256(inner, inner_len)
-        outer = Allocate(96)
-        MemoryCopy(outer, opad, 64)
-        MemoryCopy(Add(outer, 64), inner_dig, 32)
-        out = Crypto.SHA256(outer, 96)
-        ReturnValue(out)
+        Crypto.SHA256_ResetH()
+        Crypto.SHA256_Compress(blk)
+        Crypto.SHA256_SaveH(CryptoSt.ostate)
+        CryptoSt.hkey = key
+        CryptoSt.hkey_n = key_len
+    }
+}
+
+Function.Crypto.SHA256_SaveH {
+    Input: st: Address
+    Body: {
+        WRMEM_64(st, SHA256H.h0)
+        WRMEM_64(Add(st, 8), SHA256H.h1)
+        WRMEM_64(Add(st, 16), SHA256H.h2)
+        WRMEM_64(Add(st, 24), SHA256H.h3)
+        WRMEM_64(Add(st, 32), SHA256H.h4)
+        WRMEM_64(Add(st, 40), SHA256H.h5)
+        WRMEM_64(Add(st, 48), SHA256H.h6)
+        WRMEM_64(Add(st, 56), SHA256H.h7)
+    }
+}
+
+Function.Crypto.SHA256_LoadH {
+    Input: st: Address
+    Body: {
+        SHA256H.h0 = RDMEM_64(st)
+        SHA256H.h1 = RDMEM_64(Add(st, 8))
+        SHA256H.h2 = RDMEM_64(Add(st, 16))
+        SHA256H.h3 = RDMEM_64(Add(st, 24))
+        SHA256H.h4 = RDMEM_64(Add(st, 32))
+        SHA256H.h5 = RDMEM_64(Add(st, 40))
+        SHA256H.h6 = RDMEM_64(Add(st, 48))
+        SHA256H.h7 = RDMEM_64(Add(st, 56))
     }
 }
 

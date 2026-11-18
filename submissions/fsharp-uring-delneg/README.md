@@ -142,6 +142,11 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
   requests in a pass ask for the same rows, SQLite's move returns at once from a cursor already there; every request
   still decodes the rows from SQLite's pages. Like counts take one range walk of `likes_post_id_idx` when the 20 ids
   lie within 512 of each other, a seek per post otherwise.
+- **Post:** `GET /posts/:id` reads post X and its author through cursor pair X mod 32 (`POSTSLOTS`, 0 for one
+  shared pair). The posts asked for are the few that feeds list, so a pair mostly stays on one of them and the move
+  returns at once instead of descending from the root; the row and its like count are still read for every request.
+  Test box, 300,000 requests for the 20 newest posts at random on 3,000 connections: 4,780 user-space instructions per
+  request against 6,700 with one shared pair (2,620 cycles against 3,400).
 - **Live reads:** every request reads its rows while it is served (rule 5). Only prepared statements, cursors, key
   descriptions and the four root pages are kept, and the schema cookie is checked on every read. A read transaction
   that read-only passes share always sees the latest commit: only the loop writes, and a pass that writes commits.

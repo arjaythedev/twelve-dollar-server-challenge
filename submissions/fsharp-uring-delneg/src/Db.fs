@@ -187,12 +187,23 @@ let private CFeedPost = 4
 [<Literal>]
 let private CAuthor = 24
 [<Literal>]
-let private CCount = 44
+let private CPostSlot = 44
+[<Literal>]
+let private CPostAuthor = 76
+[<Literal>]
+let private CCount = 108
+/// GET /posts/:id reads post X and its author through cursor pair X mod POSTSLOTS (32; 0: one shared pair)
+let private postSlots =
+    match Int32.TryParse(Environment.GetEnvironmentVariable "POSTSLOTS") with
+    | true, v when v >= 0 && v <= 32 -> v
+    | _ -> 32
 
 /// Cursors stay open for the rest of the transaction (closed before COMMIT/ROLLBACK), which read-only passes share; a write in between makes
 /// SQLite save and reseek them, as for any open statement cursor. The feed reads its n-th post and that post's author
 /// through cursors of their own: requests in one pass mostly ask for the same rows, and sqlite3BtreeTableMoveto returns
-/// at once from a cursor already on the key. The row is still decoded from SQLite's page for each request.
+/// at once from a cursor already on the key. GET /posts/:id does the same with a cursor pair per post id modulo 32: the
+/// posts asked for are the few that feeds list, so each pair mostly stays on one of them. The row is still decoded from
+/// SQLite's page for each request.
 let private curs = Array.zeroCreate<nativeint> CCount
 let private isOpen = Array.zeroCreate<bool> CCount
 let mutable private searchMem = 0n
@@ -205,7 +216,7 @@ let private cur (i: int) =
         let root, key =
             if i = CTop then rootTop, topKey
             elif i = CLikes then rootLikes, likesKey
-            elif i = CUsers || i >= CAuthor then rootUsers, 0n
+            elif i = CUsers || (i >= CAuthor && i < CPostSlot) || i >= CPostAuthor then rootUsers, 0n
             else rootPosts, 0n
         NativeMemory.Clear(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> c), unativeint (sqlite3BtreeCursorSize ()))
         sqlite3BtreeCursorZero c
@@ -516,8 +527,9 @@ let private btFeed (o: Json.Out) =
 let private btPost (id: int64) (o: Json.Out) =
     if not (beginRead ()) then -1
     else
-        let pc = cur CPosts
-        let uc = cur CUsers
+        let slot = if postSlots > 0 then int (id % int64 postSlots) else -1
+        let pc = if slot >= 0 then cur (CPostSlot + abs slot) else cur CPosts
+        let uc = if slot >= 0 then cur (CPostAuthor + abs slot) else cur CUsers
         let lc = cur CLikes
         if pc = 0n || uc = 0n || lc = 0n then -1
         else

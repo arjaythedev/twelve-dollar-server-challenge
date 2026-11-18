@@ -17,7 +17,6 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Native.fs" />
-    <Compile Include="Pages.fs" />
     <Compile Include="Ring.fs" />
     <Compile Include="Sqlite.fs" />
     <Compile Include="Vfs.fs" />

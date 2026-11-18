@@ -148,7 +148,7 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
   Test box, 300,000 requests for the 20 newest posts at random on 3,000 connections: 4,780 user-space instructions per
   request against 6,700 with one shared pair (2,620 cycles against 3,400).
 - **Live reads:** every request reads its rows while it is served (rule 5). Only prepared statements, cursors, key
-  descriptions and the four root pages are kept, and the schema cookie is checked on every read. A read transaction
+  descriptions and the four root pages are kept, and the schema cookie is checked once per transaction. A read transaction
   that read-only passes share always sees the latest commit: only the loop writes, and a pass that writes commits.
 - **Fallbacks to SQL:** a row the decoder doesn't cover (a record spilling onto overflow pages, an unexpected type, a
   post without its user) is read with the reference SQL query. At startup the server checks the column order of each

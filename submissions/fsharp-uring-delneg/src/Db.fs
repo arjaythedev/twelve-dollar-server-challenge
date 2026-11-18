@@ -225,19 +225,29 @@ let private cur (i: int) =
             isOpen.[i] <- true
             c
 
+/// The read transaction's B-tree check (read transaction open, schema cookie unchanged) passed once in this transaction:
+/// later reads in it skip that part (the inside-BEGIN test stays). Only this process opens the file (unix-excl) and it
+/// runs no DDL, so the cookie can't change inside a transaction; the flag drops with the cursors, at COMMIT/ROLLBACK.
+let mutable private readOk = false
+
 let private endCursors () =
+    readOk <- false
     for i in 0 .. CCount - 1 do
         if isOpen.[i] then
             sqlite3BtreeCloseCursor curs.[i] |> ignore
             isOpen.[i] <- false
 
 let private beginRead () =
-    if sqlite3_get_autocommit db <> 0 then false // only inside the pass's BEGIN
+    if sqlite3_get_autocommit db <> 0 then // only inside the pass's BEGIN (also catches a rollback SQLite made itself)
+        readOk <- false
+        false
+    elif readOk then true
     elif sqlite3BtreeBeginTrans (bt, 0, 0n) <> OK then false
     else
         let mutable c = 0u
         sqlite3BtreeGetMeta (bt, BTREE_SCHEMA_VERSION, &c)
-        c = cookie
+        readOk <- c = cookie
+        readOk
 
 /// Moves the likes_post_id_idx cursor to its first entry with post_id >= id. 0: on an entry, 1: none, -1: error.
 let private likesSeek (c: nativeint) (id: int64) =

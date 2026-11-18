@@ -80,6 +80,7 @@ FixedPool.IoUringCqe {
 // ---- IOSQE_* for accept multishot ----
 FixedPool.IoUringAccept {
     "MULTISHOT": Initialize=1
+    "RECV_MULTISHOT": Initialize=2
     "FILE_INDEX_ALLOC": Initialize=4294967295
     "RSRC_SPARSE": Initialize=1
     "STATE_SIZE": Initialize=128
@@ -217,6 +218,7 @@ FixedPool.IoUring {
     "sq_entries": Initialize=0, CanChange=True
     "cq_entries": Initialize=0, CanChange=True
     "params": Initialize=0, CanChange=True
+    "setup_flags": Initialize=4096, CanChange=True
 }
 
 
@@ -270,8 +272,9 @@ Function.IoUring.Setup {
         }
         IoUring.params = params
 
-        // SINGLE_ISSUER only — DEFER_TASKRUN starves WiFi/other softirqs on shared machines
-        flags = IoUringSetup.SINGLE_ISSUER
+        // SINGLE_ISSUER by default. DEFER_TASKRUN is opt-in: it runs completion work only
+        // inside io_uring_enter, which starved a desktop's WiFi softirqs under load.
+        flags = IoUring.setup_flags
         IoUring.WrParam32(params, IoUringParamsOff.FLAGS, flags)
 
         // syscall: io_uring_setup(entries, params)
@@ -757,6 +760,27 @@ Function.IoUring.PrepRecvBuf {
         IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
         IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
         IoUring.SqeSetLen(sqe, len)
+        IoUring.SqeSetFlags(sqe, BitwiseOr(IoUringSqe.BUFFER_SELECT, sflags))
+        IoUring.SqeSetBufGroup(sqe, bgid)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// A receive that stays armed: each arrival takes a provided buffer and posts a CQE
+// with CQE_F_MORE; a CQE without it means the receive has ended
+Function.IoUring.PrepRecvMulti {
+    Input: fd: Integer
+    Input: bgid: Integer
+    Input: user_data: Integer
+    Input: sflags: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
+        WRMEM_IO_16(sqe, SqeOff.IOPRIO, IoUringAccept.RECV_MULTISHOT)
         IoUring.SqeSetFlags(sqe, BitwiseOr(IoUringSqe.BUFFER_SELECT, sflags))
         IoUring.SqeSetBufGroup(sqe, bgid)
         IoUring.SqeSetUserData(sqe, user_data)

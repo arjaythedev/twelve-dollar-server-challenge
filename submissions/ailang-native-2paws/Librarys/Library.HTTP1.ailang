@@ -37,6 +37,9 @@ FixedPool.HTTP1Off {
     "VIDX": Initialize=184
     "VGEN": Initialize=192
     "WSEQ": Initialize=200
+    "RXARM": Initialize=208
+    "TXBUSY": Initialize=216
+    "EOF": Initialize=224
     "SLOT": Initialize=256
 }
 
@@ -91,6 +94,7 @@ FixedPool.HTTP1St {
     "margin": Initialize=1024, CanChange=True
     "waitarg": Initialize=0, CanChange=True
     "sflags": Initialize=0, CanChange=True
+    "rxmulti": Initialize=0, CanChange=True
 }
 
 // One record per io_uring instance: the IoUring state block, then its own
@@ -248,7 +252,8 @@ Function.HTTP1.ClearConn {
         }
         HTTP1.CSet(conn, HTTP1Off.FD, -1)
         HTTP1.ReleaseIn(conn)
-        HTTP1.ReleaseOut(conn)
+        // The kernel may still be reading an in-flight send's buffer; OnSend frees it
+        IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.TXBUSY), 0) ThenBlock: { HTTP1.ReleaseOut(conn) }
     }
 }
 
@@ -505,10 +510,21 @@ Function.HTTP1.QueueRecv {
     Body: {
         HTTP1.UseRing(HTTP1.RingOf(idx))
         conn = HTTP1.ConnAt(idx)
+        IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.EOF), 1) ThenBlock: {
+            HTTP1.ClearConn(conn)
+            ReturnValue(0)
+        }
         fd = HTTP1.IoFd(conn)
         fill = HTTP1.CGet(conn, HTTP1Off.FILL)
         gen = BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255)
         ud = HTTP1.EncodeUD(HTTP1Op.RECV, Add(idx, 1), gen)
+        IfCondition EqualTo(HTTP1St.rxmulti, 1) ThenBlock: {
+            IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.RXARM), 0) ThenBlock: {
+                HTTP1.CSet(conn, HTTP1Off.RXARM, 1)
+                IoUring.PrepRecvMulti(fd, HTTP1C.BGID, ud, HTTP1St.sflags)
+            }
+            ReturnValue(0)
+        }
         IfCondition EqualTo(fill, 0) ThenBlock: {
             HTTP1.ReleaseIn(conn)
             IoUring.PrepRecvBuf(fd, HTTP1St.bufsz, HTTP1C.BGID, ud, HTTP1St.sflags)
@@ -536,6 +552,7 @@ Function.HTTP1.QueueSend {
         left = Subtract(HTTP1.CGet(conn, HTTP1Off.OUT_LEN), sent)
         gen = BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255)
         ud = HTTP1.EncodeUD(HTTP1Op.SEND, Add(idx, 1), gen)
+        HTTP1.CSet(conn, HTTP1Off.TXBUSY, 1)
         IoUring.PrepSend(HTTP1.IoFd(conn), Add(out, sent), left, ud, HTTP1St.sflags)
     }
 }
@@ -1124,6 +1141,13 @@ Function.HTTP1.OnAccept {
         HTTP1.CSet(conn, HTTP1Off.GEN, Add(HTTP1.CGet(conn, HTTP1Off.GEN), 1))
         HTTP1.ResetParse(conn)
         HTTP1.CSet(conn, HTTP1Off.FILL, 0)
+        HTTP1.CSet(conn, HTTP1Off.RXARM, 0)
+        HTTP1.CSet(conn, HTTP1Off.EOF, 0)
+        IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.TXBUSY), 1) ThenBlock: {
+            HTTP1.CSet(conn, HTTP1Off.PRIV_OUT, 0)
+            HTTP1.CSet(conn, HTTP1Off.OUT, HTTP1St.scratch_out)
+            HTTP1.CSet(conn, HTTP1Off.TXBUSY, 0)
+        }
         HTTP1.CSet(conn, HTTP1Off.CAP, HTTP1St.bufsz)
         HTTP1.QueueRecv(idx)
         IfCondition EqualTo(r, HTTP1St.acc_ring) ThenBlock: {
@@ -1159,6 +1183,7 @@ Function.HTTP1.OnRecv {
             IfCondition GreaterEqual(bid, 0) ThenBlock: { HTTP1.PbufPut(bid) }
             ReturnValue(0)
         }
+        IfCondition EqualTo(BitwiseAnd(flags, IoUringCqe.F_MORE), 0) ThenBlock: { HTTP1.CSet(conn, HTTP1Off.RXARM, 0) }
         IfCondition EqualTo(res, HTTP1C.ENOBUFS) ThenBlock: {
             e = Add(HTTP1St.starve, Multiply(HTTP1St.starve_n, 16))
             WRMEM_64(e, idx)
@@ -1168,10 +1193,33 @@ Function.HTTP1.OnRecv {
         }
         IfCondition LessEqual(res, 0) ThenBlock: {
             IfCondition GreaterEqual(bid, 0) ThenBlock: { HTTP1.PbufPut(bid) }
+            // End of input with requests still buffered or answering: finish them, then close
+            IfCondition EqualTo(res, 0) ThenBlock: {
+                pend = HTTP1.CGet(conn, HTTP1Off.FILL)
+                IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.DEFER), 1) ThenBlock: { pend = 1 }
+                IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.TXBUSY), 1) ThenBlock: { pend = 1 }
+                IfCondition GreaterThan(pend, 0) ThenBlock: {
+                    HTTP1.CSet(conn, HTTP1Off.EOF, 1)
+                    ReturnValue(0)
+                }
+            }
             HTTP1.ClearConn(conn)
             ReturnValue(0)
         }
         fill = HTTP1.CGet(conn, HTTP1Off.FILL)
+        // With a multishot receive, data can arrive while a response is still pending;
+        // it waits in a private buffer and is parsed once that response is out
+        busy = 0
+        IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.DEFER), 1) ThenBlock: { busy = 1 }
+        IfCondition LessThan(HTTP1.CGet(conn, HTTP1Off.OUT_SENT), HTTP1.CGet(conn, HTTP1Off.OUT_LEN)) ThenBlock: { busy = 1 }
+        IfCondition EqualTo(busy, 1) ThenBlock: {
+            IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.BUF), HTTP1St.scratch_in) ThenBlock: {
+                pb = HTTP1.PoolGet()
+                IfCondition GreaterThan(fill, 0) ThenBlock: { MemoryCopy(pb, HTTP1St.scratch_in, fill) }
+                HTTP1.CSet(conn, HTTP1Off.BUF, pb)
+                HTTP1.CSet(conn, HTTP1Off.PRIV_IN, pb)
+            }
+        }
         IfCondition GreaterEqual(bid, 0) ThenBlock: {
             IfCondition GreaterThan(res, Subtract(HTTP1.CGet(conn, HTTP1Off.CAP), fill)) ThenBlock: {
                 HTTP1.PbufPut(bid)
@@ -1182,7 +1230,7 @@ Function.HTTP1.OnRecv {
             HTTP1.PbufPut(bid)
         }
         HTTP1.CSet(conn, HTTP1Off.FILL, Add(fill, res))
-        HTTP1.Pump(idx)
+        IfCondition EqualTo(busy, 0) ThenBlock: { HTTP1.Pump(idx) }
     }
 }
 
@@ -1257,8 +1305,12 @@ Function.HTTP1.OnSend {
         conn = HTTP1.ConnAt(idx)
         cur_gen = BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255)
         IfCondition NotEqual(cur_gen, gen) ThenBlock: { ReturnValue(0) }
+        HTTP1.CSet(conn, HTTP1Off.TXBUSY, 0)
         fd = HTTP1.CGet(conn, HTTP1Off.FD)
-        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            HTTP1.ReleaseOut(conn)
+            ReturnValue(0)
+        }
 
         IfCondition LessEqual(res, 0) ThenBlock: {
             HTTP1.ClearConn(conn)

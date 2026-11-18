@@ -947,6 +947,10 @@ SubRoutine.Main {
     // process holds connections past the descriptor limit without fronts
     HTTP1St.direct = Env.GetInt("HTTP_DIRECT")
     IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: { fronts = 0 }
+    HTTP1St.rxmulti = Env.GetInt("HTTP_RXMULTI")
+    IfCondition EqualTo(Env.GetInt("HTTP_DEFER_TASKRUN"), 1) ThenBlock: {
+        IoUring.setup_flags = BitwiseOr(IoUringSetup.SINGLE_ISSUER, IoUringSetup.DEFER_TASKRUN)
+    }
     IfCondition GreaterThan(fronts, 0) ThenBlock: {
         IfCondition EqualTo(Front.Setup(fronts), 0) ThenBlock: {
             PrintMessage("FAIL front setup\n")

@@ -39,6 +39,9 @@ roughly 250–290k on the benchmark box. See "Running locally" for how that was 
 - Group commit (io_uring): all writes of one event-loop pass share one transaction, committed before the
   loop hands any reply to the kernel, so each 201 still waits for its commit (rule 6). Max req/s went up
   ~48% (blast 30k → 45k); at 150k users p95 fell from 4–27 ms to 1.5–3.7 ms.
+- Reads share the pass's transaction too: one WAL snapshot per pass instead of one per statement (~3 per
+  GET /feed). Each request still runs its own queries (rule 5). /feed alone: 18–20 → 12–13 µs; at 200k
+  users, CPU at the same request rate 89–98% → 83–93% (3 alternating pairs, lower in each).
 - GET /feed: when the 20 newest posts have consecutive ids (the usual case), their like counts come from
   one range scan instead of 20 lookups; otherwise the plain query. Same JSON, live data on every request.
   Blast ~+12% req/s; at 200k users p95 fell from 12–43 ms to 4–18 ms.
@@ -58,6 +61,7 @@ The code is our own, in Julia, but most of the design follows what other entries
 - **[rust-epoll-scooter1337](../rust-epoll-scooter1337/)**: the feed range scan: find the 20 newest ids,
   fetch rows and like counts with range scans when they are close together, and fall back to the plain
   query otherwise. Ours is a narrower variant (only consecutive ids; the counts come from one scan).
+  Also, with crystal-epoll-faustinoaq: one transaction per loop pass for the reads as well as the writes.
 - **[crystal-epoll-faustinoaq](../crystal-epoll-faustinoaq/)**: no garbage collection on the request path,
   multishot receives into a provided-buffer ring (an idle connection holds no buffer), and responses sent
   from arenas that stay pinned until the kernel has finished sending.
@@ -253,4 +257,11 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P2: aot generic cpu | – | – | 48,639 (-8%), n=3 |
 | P2: jit | – | 250,000 (480 MB) | 51,076 (+5%), n=6 |
 | P2: aot native | – | 250,000 (234 MB) | 51,396 (+1%), n=3 |
+| P8.2: read txn per pass | – | 250,000 (234 MB) | 52,437 (+2%), n=2 |
+| P8.2: read txn off | – | 250,000 (238 MB) | 50,815 (-3%), n=3 |
+| P8.5: batch 32 | – | 200,000 (197 MB) | – |
+| P8.5: batch off | – | 200,000 (196 MB) | – |
+| P8.5: batch 128 | – | 200,000 (211 MB) | – |
+| P8.6: journal_size_limit=0 | – | 225,000 (204 MB) | – |
+| P8.6: journal_size_limit default | – | 225,000 (199 MB) | – |
 <!-- results:end -->

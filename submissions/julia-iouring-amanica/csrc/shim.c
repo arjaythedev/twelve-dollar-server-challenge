@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <unistd.h>
 #include "sqlite3.h"
@@ -112,6 +113,10 @@ int jr_ckpt_start(sqlite3 *main_db, const char *path, int threshold_pages, int h
     int rc = sqlite3_open_v2(path, &ck_db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL);
     if (rc != SQLITE_OK) return rc;
     sqlite3_exec(ck_db, "PRAGMA synchronous=NORMAL", NULL, NULL, NULL);
+    /* dev A/B only (dev/ct.sh PRAGMAS=): the event loop's extra statements, here too. Some act where the WAL
+     * restarts, which is usually this connection (journal_size_limit: the restarting commit truncates). */
+    const char *extra = getenv("JR_PRAGMAS");
+    if (extra && *extra) sqlite3_exec(ck_db, extra, NULL, NULL, NULL);
     sqlite3_busy_timeout(ck_db, 0);
     sqlite3_stmt *st;
     int uv = 0;

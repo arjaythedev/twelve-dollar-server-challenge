@@ -52,16 +52,22 @@ end
 # (one descent instead of 20), merged here.
 const RANGE_NOLIKES_SQL = "SELECT p.id, p.body, p.created_at, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id BETWEEN ?1 AND ?2 ORDER BY p.id DESC"
 const LIKES_RANGE_SQL = "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id"
+# PLAN 8.8 (from c-iouring-meros): the likes' post ids only, counted here instead of by GROUP BY.
+const LIKES_ROWS_SQL = "SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2"
 const COUNTS = zeros(Int, 20)
 
-function feed_two!(b::J.Buf, ids, rows, likes)
+function feed_two!(b::J.Buf, ids, rows, likes; count_here = false)
     hi = contiguous_hi(ids)
     hi < 0 && return J.feed_plain!(b)
     lo = hi - 19
     fill!(COUNTS, 0)
     J.bind_int(likes, 1, lo); J.bind_int(likes, 2, hi)
     while J.step(likes) == J.SQLITE_ROW
-        COUNTS[J.col_int(likes, 0) - lo + 1] = J.col_int(likes, 1)
+        if count_here
+    COUNTS[J.col_int(likes, 0) - lo + 1] += 1
+else
+    COUNTS[J.col_int(likes, 0) - lo + 1] = J.col_int(likes, 1)
+end
     end
     J.reset(likes)
     J.bind_int(rows, 1, lo); J.bind_int(rows, 2, hi)
@@ -86,6 +92,19 @@ end
 
 json(f) = (b = J.Buf(); f(b); String(b.data[1:b.len]))
 
+# f wrapped so that every n calls share one BEGIN ... COMMIT (end_txn() closes the last one).
+autocommit() = ccall((:sqlite3_get_autocommit, J.LIBJR), Cint, (Ptr{Cvoid},), J.DB[]) != 0
+end_txn() = autocommit() || J.db_exec("COMMIT")
+function in_txn(f, n)
+    k = Ref(0)
+    b -> begin
+        autocommit() && (J.db_exec("BEGIN"); k[] = 0)
+        f(b)
+        (k[] += 1) == n && J.db_exec("COMMIT")
+        true
+    end
+end
+
 function bench(name, f, ref)
     b = J.Buf()
     for _ in 1:1000; J.reset!(b); f(b); end           # warm up
@@ -109,8 +128,16 @@ function run_all(label)
     bench("ids + range + likes", b -> feed_range!(b, ids, rl), ref)
     rn = J.db_prepare(RANGE_NOLIKES_SQL); lr = J.db_prepare(LIKES_RANGE_SQL)
     bench("ids + range, likes apart", b -> feed_two!(b, ids, rn, lr), ref)
+    lrows = J.db_prepare(LIKES_ROWS_SQL)
+    bench("  likes counted here", b -> feed_two!(b, ids, rn, lrows; count_here = true), ref)
+    bench("ids + range, likes apart", b -> feed_two!(b, ids, rn, lr), ref)
+    ccall((:sqlite3_finalize, J.LIBJR), Cint, (Ptr{Cvoid},), lrows)
     bench("current (again)", b -> J.feed_plain!(b), ref)
     bench("server feed! (src/db.jl)", b -> J.feed!(J.READ, b), ref)
+    # PLAN 8.2: the same feeds, 64 to one explicit read transaction (as one event-loop pass would share),
+    # instead of one autocommit read transaction per statement.
+    bench("  64 per read txn", in_txn(b -> J.feed!(J.READ, b), 64), ref)
+    end_txn()
     # Where the time goes (different JSON on purpose): without like counts, without the users join.
     nolikes = J.db_prepare("SELECT p.id, p.body, p.created_at, u.username, 0 FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20")
     nousers = J.db_prepare("SELECT p.id, p.body, p.created_at, 'x', (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p ORDER BY p.created_at DESC, p.id DESC LIMIT 20")

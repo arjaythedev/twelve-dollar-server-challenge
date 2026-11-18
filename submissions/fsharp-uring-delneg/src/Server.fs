@@ -27,11 +27,21 @@ let private lifoOn = env "LIFO" 1 = 1
 let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
 let private lifoAge = uint32 (env "LIFOAGE" 8000)
+let private cheapFirst = env "CHEAPFIRST" 1 = 1 // in a backlog, the newest-first walk answers everything but feeds first
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
-let private ckPass = env "CKPASS" 4000
-let private ckHoldAt = env "HOLD" 16384
+let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
+/// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 4 GB of them, or half of the
+/// free space on the database's disk at startup when that is less.
+let walCap =
+    let want = env "HOLDMAX" 1048576
+    try
+        let dir = IO.Path.GetDirectoryName(IO.Path.GetFullPath(Environment.GetEnvironmentVariable "SQLITE_PATH"))
+        max 16384 (int (min (int64 want) (IO.DriveInfo(dir).AvailableFreeSpace / 2L / 4120L)))
+    with _ -> min want 65536
+// from here on passes follow one another, and writes are held for the first one that leaves at most HOLDREM frames
+let private ckHoldAt = env "HOLD" (walCap - walCap / 16)
 let private batchN = env "BATCH" 128
 let private batchWaitUs = env "BWAIT" 1000
 let private batchThresh = env "BTHRESH" 8
@@ -40,14 +50,14 @@ let private poolMax = env "POOLMAX" 4096
 let private cqSize = env "CQ" 65536
 let private statsOn = env "STATS" 0 = 1
 let private taskrunFlag = env "TASKRUN_FLAG" 1 = 1
-let private holdRem = env "HOLDREM" 0 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
-let private holdMax = env "HOLDMAX" 262144 // with HOLDREM: past this many frames (1 GB of WAL), hold after any pass
+let private holdRem = env "HOLDREM" 2000 // a hold starts only after a pass leaves at most this many frames (0: at HOLD)
+let private holdMax = walCap // past this many frames, hold after any pass
 let private holdMs = int64 (env "HOLDMS" 250) // a hold longer than this ends without its checkpoint pass
 // A hold that starts while the pass a timed-out hold waited on is still running waits up to this long for it (0: off)
 let private holdRideMs = int64 (env "HOLDRIDE" 1500)
 // A hold that has waited HOLDYIELDAFTER ms for a running checkpoint pass, while requests are queued (so the loop never
-// waits in the kernel), sleeps HOLDYIELD us each pass: the checkpoint thread runs at nice 19 and otherwise gets ~1.5 %
-// of the CPU, so at saturation the 15-30 ms of CPU its pass needs would take seconds (0: off)
+// waits in the kernel), sleeps HOLDYIELD us each pass: the checkpoint thread runs at low priority (CKNICE) and gets a
+// small share of the CPU, so at saturation the 15-30 ms of CPU its pass needs would take long (0: off)
 let private holdYieldUs = uint32 (env "HOLDYIELD" 200)
 let private holdYieldAfter = int64 (env "HOLDYIELDAFTER" 20)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
@@ -436,15 +446,18 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     // ---------- checkpoints ----------
     // The checkpoint thread runs PASSIVE checkpoints on its own connection so the loop never waits on their fsyncs.
     // The loop asks for one every ckPass new WAL frames. Under constant writes a pass never ends with the WAL fully
-    // copied, so it can't rewind. Past ckHoldAt frames, passes go on with writes flowing until one leaves at most
-    // holdRem frames uncopied; then writes wait (reads are still answered) for one short pass, after which the next
-    // write rewinds the WAL. A pass's time is mostly its random page writes and fsyncs, so a hold that starts only
-    // when little is left stays short, and a long pass copies a page written many times once.
+    // copied, so it can't rewind, and writes don't wait for that: the WAL is left to grow. A reader looks up only the
+    // frames not copied yet, which the passes keep to about one pass's worth however long the file is. Only past
+    // ckHoldAt frames (near walCap) do passes go on back to back until one leaves at most holdRem frames uncopied;
+    // then writes wait (reads are still answered) for one short pass, after which the next write rewinds the WAL.
+    // A pass's time is mostly its page writes and fsyncs: a pass over many frames copies a page written many times
+    // once.
 
     let ckArmRead () = R.[0].Ring.Read(ck.Fd, ckSink, 8, ud UdCkpt 0 0u)
 
     let ckRequest () =
-        ck.Request()
+        // near the WAL's bound the passes before the hold also sync the database, so the held pass's own sync is short
+        ck.Request(holdRem > 0 && not ckHold && Db.walFrames >= ckHoldAt)
         ckBusy <- true
         ckFrom <- Db.walFrames
 
@@ -455,7 +468,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             if holdRem > 0 then
                 // passes run without holding writes until one leaves at most holdRem frames uncopied; ckDone then holds
                 // writes for one short pass that copies the rest, and the WAL rewinds
-                if not ckHold && not ckBusy && (f - ckBackfilled >= ckPass || f >= ckHoldAt) then ckRequest ()
+                // (not while a rewind is due: a pass running when the next write begins would keep it from rewinding)
+                if not ckHold && not ckBusy && not ckRewind && (f - ckBackfilled >= ckPass || f >= ckHoldAt) then ckRequest ()
             elif not ckHold && f >= ckHoldAt then
                 ckHold <- true
                 ckClock.Restart()
@@ -946,7 +960,14 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                                         hold <- true
                     i <- i + 1
             if lifo then
+                // Cheapest first: a feed costs a few times what any other request does (20 posts, their authors and
+                // like counts, a 5 KB answer), so while the loop is behind, the walk from the newest end answers the
+                // other requests and leaves the feeds where they are (w marks the feeds kept at the top, in their
+                // order, at most 16 passes' worth); feeds are answered, newest first, with whatever the other
+                // requests left of the pass. In a backlog worth D seconds of CPU, fewer requests then wait past
+                // their deadline.
                 let mutable k = nreq
+                let mutable w = nreq
                 let mutable stop2 = false
                 while not stop2 && k > i && answered < budget do
                     stWalk <- stWalk + 1L
@@ -957,6 +978,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                             conns.[cid].Queued <- conns.[cid].Queued - 1
                             k <- k - 1
                         elif conns.[cid].Queued - conns.[cid].Held > 1 then stop2 <- true // pipelined: its older request goes first
+                        elif cheapFirst && r.Route = RFeed && conns.[cid].Held = 0 && nreq - w < budget * 16 then
+                            if w <> k then reqs.[w - 1] <- reqs.[k - 1]
+                            w <- w - 1
+                            k <- k - 1
                         else
                             let isWrite = r.Route = RCreate || r.Route = RLike
                             if conns.[cid].Held > 0 || (hold && isWrite) then toHeld &r cid
@@ -971,7 +996,20 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                                         hold <- true
                             k <- k - 1
                     else k <- k - 1
-                nreq <- k
+                // the kept feeds, newest first, with what is left of the budget
+                while w < nreq && answered < budget do
+                    let r = &reqs.[nreq - 1]
+                    let cid = r.Cid
+                    if conns.[cid].Gen = r.Gen then
+                        if conns.[cid].Fl &&& (LIVE ||| CLOSEAFTER) = 0uy then conns.[cid].Queued <- conns.[cid].Queued - 1
+                        else
+                            answer &r cid
+                            answered <- answered + 1
+                    nreq <- nreq - 1
+                // what is still kept moves down to close the gap the walk left
+                let kept = nreq - w
+                if kept > 0 && w <> k then Array.Copy(reqs, w, reqs, k, kept)
+                nreq <- k + kept
             if wrote then lastWriteMs <- passMs
             nHeldNow <- wqLen
             let mutable ok = true
@@ -1194,7 +1232,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             if holdYieldUs > 0u && ckHold && ckBusy && nreq > reqHead && ckClock.ElapsedMilliseconds >= holdYieldAfter then
                 Native.usleep holdYieldUs |> ignore
                 stYields <- stYields + 1L
-            if ckHold && ckClock.ElapsedMilliseconds > (if ckRide then holdRideMs else holdMs) then
+            // a hold at the WAL's bound is rare (once per walCap frames) and is for one short pass: it gets the long wait
+            if ckHold && ckClock.ElapsedMilliseconds > (if ckRide || holdRem > 0 then holdRideMs else holdMs) then
                 // the checkpoint pass is slow: let writes in. The next hold starts at once on the same pass (the
                 // writes it holds can't rewind the WAL before that pass ends), so that one waits for the pass.
                 ckHold <- false
@@ -1225,6 +1264,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             if statsOn && now <> lastStats then
                 lastStats <- now
                 stats ()
+            Pages.tick t
 
 /// Listeners: `count` SO_REUSEPORT sockets on host:port, each with its own accept queue (somaxconn deep).
 let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) =

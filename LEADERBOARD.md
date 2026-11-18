@@ -850,7 +850,11 @@ not merged: 290,000 failed the 2-minute probe on p95/p99 (0.52 / 0.85 s at 79 % 
 (27,098 req/s, p95 203.6 / p99 529.2 ms, 0 err, 78 % CPU, 26 µs/req, 1,125 MB, 2026-11-18), below #486's 300,000, so
 not merged: 300,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (0.58 / 1.58 s at 84 % CPU),
 310,000 failed the 2-minute probe on p95/p99 (0.77 / 1.34 s at 87 % CPU) and 320,000 on p95/p99 (1.61 / 2.26 s at
-91 % CPU), all with 0 errors. #502 stays open.
+91 % CPU), all with 0 errors. #502 stays open. **#503** (`44a48e8`: #486 with a socket-memory growth predictor
+added to the memory governor) held **280,000** (26,689 req/s, p95 115.5 / p99 493.6 ms, 0 err, 77 % CPU, 26 µs/req,
+772 MB, 2026-11-18), below #486's 300,000, so not merged: 290,000 failed the 2-minute probe on p95/p99 (0.61 / 0.96 s
+at 81 % CPU), 300,000 on p95/p99 (0.68 / 1.11 s at 84 % CPU) and 320,000 on p95/p99 (1.70 / 2.01 s at 94 % CPU), all
+with 0 errors. #503 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

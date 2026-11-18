@@ -353,7 +353,10 @@ probe on p95/p99 (943 ms / 1.5 s) and 320,000 on p95/p99 (2.2 / 3.0 s). Its foll
 walk and 1 ms group commit; not merged: not above 270,000) held **266,000** (25,457 req/s, p95 234.0 / p99 685.5 ms,
 0 err, 82 % CPU, 29 µs/req, 1,202 MB, 2026-11-18); 280,000 passed the 2-minute probe but failed the 5-minute hold on
 p95/p99 (828 ms / 1.2 s, 88 % CPU), 290,000 failed the 2-minute probe on p99 (1.6 s) and 300,000 on p95/p99
-(1.1 / 1.9 s). Before that
+(1.1 / 1.9 s). Its follow-up **#511** (`82f5a50`, 16 KiB receive buffers and kernel-default send buffers; not
+merged: ties 270,000, not above it) held **270,000** (25,849 req/s, p95 138.1 / p99 359.0 ms, 0 err, 84 % CPU,
+29 µs/req, 911 MB, 2026-11-18); 280,000 failed the 2-minute probe on p95/p99 (567 / 845 ms, 87 % CPU) and 320,000 on
+p95/p99 (2.6 / 2.8 s). Before that
 it was scored at **#447** at commit **`4c0adfb`** (**260,000**, 24,961 req/s, p95 154.1 / p99 658.8 ms, 79 % CPU, 29
 µs/req, 782 MB, 2026-11-16; per-ring receive-recovery FIFO, buffer reserve fix, pooled multi-seek result structs on
 top of the shim VFS and per-batch B-tree cursors; merged 2026-11-16, above #418's 250,000 row). That 260,000 hold had

@@ -1,8 +1,5 @@
 server
 build/
+vendor/
 .xmake/
 *.o
-sqlite3.c
-sqlite3.h
-picohttpparser.c
-picohttpparser.h

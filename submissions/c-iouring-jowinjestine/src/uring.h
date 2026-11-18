@@ -13,6 +13,8 @@
 #include <linux/io_uring.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
+#include <sys/eventfd.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdint.h>
@@ -38,6 +40,9 @@
 #endif
 #ifndef IORING_RECV_MULTISHOT
 #define IORING_RECV_MULTISHOT (1U << 1)
+#endif
+#ifndef IORING_POLL_ADD_MULTI
+#define IORING_POLL_ADD_MULTI (1U << 0)
 #endif
 #ifndef IORING_ACCEPT_MULTISHOT
 #define IORING_ACCEPT_MULTISHOT (1U << 0)
@@ -155,12 +160,12 @@ static void prefault(void *p, size_t n) {
 /* Creates a ring: sq_entries SQEs, cq_entries CQEs, a sparse direct-descriptor table of nslots,
  * nbufs receive buffers of bufsz bytes. Returns 0, or -1 with *err naming the failed step. */
 static int ring_init(struct ring *r, unsigned sq_entries, unsigned cq_entries, unsigned nslots, unsigned nbufs,
-                     unsigned bufsz, const char **err) {
+                     unsigned bufsz, int defer_taskrun, const char **err) {
   memset(r, 0, sizeof *r);
   struct io_uring_params p;
   memset(&p, 0, sizeof p);
-  p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE |
-            IORING_SETUP_NO_SQARRAY;
+  p.flags = IORING_SETUP_SINGLE_ISSUER | (defer_taskrun ? IORING_SETUP_DEFER_TASKRUN : 0) |
+            IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE | IORING_SETUP_NO_SQARRAY;
   p.cq_entries = cq_entries;
   int fd = sys_io_uring_setup(sq_entries, &p);
   if (fd < 0 && errno == EINVAL) { /* a kernel before 6.6: no NO_SQARRAY */
@@ -217,6 +222,20 @@ fail:
   return -1;
 }
 
+/* Ring-to-ring notifications let ring 0 sleep while another ring receives CQEs.
+ * Nonzero rings must not use DEFER_TASKRUN for notifications to arrive without
+ * a userspace enter() on that same ring. */
+static inline int ring_register_eventfd(struct ring *r) {
+  int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+  if (efd < 0) return -1;
+  if (sys_io_uring_register(r->fd, IORING_REGISTER_EVENTFD, &efd, 1) < 0) {
+    int err = errno;
+    close(efd);
+    errno = err;
+    return -1;
+  }
+  return efd;
+}
 static inline unsigned ring_pending_submit(const struct ring *r) { return r->sq_local - r->sq_pushed; }
 
 /* Publishes the SQEs written so far and enters the kernel: submits them, runs the ring's
@@ -275,6 +294,26 @@ static inline void sqe_recv_multishot(struct io_uring_sqe *s, unsigned slot, uin
   s->buf_group = 0;
   s->user_data = ud;
 }
+/* Low-memory idle mode: a multishot poll has no pending receive buffer and, on
+ * Linux 6.8, uses less per-socket kernel state than a multishot recv.  A poll
+ * completion queues a separate nonblocking read for this socket. */
+static inline void sqe_poll_multishot_conn(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
+  s->opcode = IORING_OP_POLL_ADD;
+  s->flags = IOSQE_FIXED_FILE;
+  s->fd = (int)slot;
+  s->len = IORING_POLL_ADD_MULTI;
+  s->poll32_events = POLLIN | POLLRDHUP;
+  s->user_data = ud;
+}
+/* Wake the controlling ring when the eventfd belonging to another io_uring
+ * gets a completion. */
+static inline void sqe_poll_eventfd(struct io_uring_sqe *s, int fd, uint64_t ud) {
+  s->opcode = IORING_OP_POLL_ADD;
+  s->fd = fd;
+  s->len = IORING_POLL_ADD_MULTI;
+  s->poll32_events = POLLIN;
+  s->user_data = ud;
+}
 /* One read, MSG_DONTWAIT: if nothing is left it ends with EAGAIN instead of waiting. */
 static inline void sqe_recv_once(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
   s->opcode = IORING_OP_RECV;
@@ -313,6 +352,28 @@ static inline void sqe_cancel_ud(struct io_uring_sqe *s, uint64_t target, uint64
   s->opcode = IORING_OP_ASYNC_CANCEL;
   s->addr = target;
   s->user_data = ud;
+}
+/* For polled sockets, cancel by poll user_data before shutdown and close.
+ * Hard-linking allows the close to proceed even when the poll already ended
+ * (ASYNC_CANCEL returns -ENOENT), and avoids O(n) cancellation by fd. */
+static inline void sqe_shutdown_close_poll(struct ring *r, unsigned slot, uint64_t poll_ud,
+                                           uint64_t ud_cancel, uint64_t ud_shutdown, uint64_t ud_close) {
+  struct io_uring_sqe *s = ring_sqe(r);
+  s->opcode = IORING_OP_ASYNC_CANCEL;
+  s->fd = -1;
+  s->addr = poll_ud;
+  s->flags = IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
+  s->user_data = ud_cancel;
+  s = ring_sqe(r);
+  s->opcode = IORING_OP_SHUTDOWN;
+  s->fd = (int)slot;
+  s->flags = IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
+  s->len = SHUT_RDWR;
+  s->user_data = ud_shutdown;
+  s = ring_sqe(r);
+  s->opcode = IORING_OP_CLOSE;
+  s->file_index = slot + 1;
+  s->user_data = ud_close;
 }
 /* A listening socket on host:port: SO_REUSEPORT (several share the port), TCP_NODELAY (inherited
  * by accepted sockets). */

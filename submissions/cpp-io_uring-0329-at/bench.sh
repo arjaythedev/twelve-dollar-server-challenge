@@ -8,7 +8,6 @@ VUS=${VUS:-20000}
 RAMP=${RAMP:-30s}
 DUR=${DUR:-60s}
 PORT=${PORT:-3000}
-CURSORS=${SHIM_CURSORS:-1}
 SRV_CPU=${SRV_CPU:-0}
 K6_CPUS=${K6_CPUS:-1-7}
 
@@ -35,10 +34,9 @@ if ! bash "$HERE/build.sh" >/tmp/build.log 2>&1; then
 fi
 echo "   ok"
 
-echo "== 4. start (cursors=$CURSORS, server on cpu $SRV_CPU)"
-taskset -c "$SRV_CPU" env SHIM_CURSORS=$CURSORS SQLITE_PATH="$DB" \
-  JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=$PORT \
-  ./server >/tmp/run.log 2>&1 &
+echo "== 4. start (server on cpu $SRV_CPU)"
+taskset -c "$SRV_CPU" env SQLITE_PATH="$DB" JWT_SECRET=twelve-dollar-challenge \
+  HOST=0.0.0.0 PORT=$PORT ./server >/tmp/run.log 2>&1 &
 sleep 2
 
 if [ "$(live)" -lt 1 ]; then
@@ -81,10 +79,8 @@ awk '/^VmRSS/{printf "   current RSS= %.0f MB\n", $2/1024}' /proc/"$PID"/status
 echo "   threads    = $(awk '/^Threads/{print $2}' /proc/"$PID"/status)"
 echo "   cpus used  = $(awk '/^Cpus_allowed_list/{print $2}' /proc/"$PID"/status)"
 
-echo "== 8. wal / fallback"
+echo "== 8. wal"
 ls -lh "$DB" "$DB-wal" 2>/dev/null | awk '{printf "   %-6s %s\n", $5, $9}'
-n=$(grep -c 'shim:' /tmp/run.log 2>/dev/null || true)
-echo "   shim notes = ${n:-0}"
 
 echo "== 9. stop"
 pkill -9 -x server 2>/dev/null

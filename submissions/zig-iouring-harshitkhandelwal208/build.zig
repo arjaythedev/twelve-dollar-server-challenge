@@ -3,6 +3,8 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const use_pgo = b.option(bool, "pgo", "Link PGO optimized SQLite shim") orelse false;
+    const strip = b.option(bool, "strip", "Strip binary") orelse (optimize != .debug);
 
     const translate = b.addTranslateC(.{
         .root_source_file = b.path("deps/sqlite-amalgamation-3540100/sqlite3.h"),
@@ -18,7 +20,7 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .single_threaded = false,
-            .strip = (optimize != .debug),
+            .strip = strip,
         }),
     });
 
@@ -26,6 +28,10 @@ pub fn build(b: *std.Build) void {
 
     const sqlite_flags = [_][]const u8{
         "-O3",
+        "-march=native",
+        "-fno-stack-protector",
+        "-fomit-frame-pointer",
+        "-fno-semantic-interposition",
         "-DSQLITE_THREADSAFE=2",
         "-DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1",
         "-DSQLITE_DEFAULT_MEMSTATUS=0",
@@ -45,10 +51,15 @@ pub fn build(b: *std.Build) void {
     };
 
     exe.root_module.addIncludePath(b.path("deps/sqlite-amalgamation-3540100"));
-    exe.root_module.addCSourceFile(.{
-        .file = b.path("deps/sqlite-amalgamation-3540100/sqlite3.c"),
-        .flags = &sqlite_flags,
-    });
+
+    if (use_pgo) {
+        exe.root_module.addObjectFile(b.path("src/c/shim_pgo.o"));
+    } else {
+        exe.root_module.addCSourceFile(.{
+            .file = b.path("src/shim.c"),
+            .flags = &sqlite_flags,
+        });
+    }
     exe.root_module.link_libc = true;
 
     // Output directly to bin/server
@@ -56,4 +67,28 @@ pub fn build(b: *std.Build) void {
         .dest_dir = .{ .override = .{ .custom = "../bin" } },
     });
     b.getInstallStep().dependOn(&install_exe.step);
+
+    const tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/tests.zig"),
+            .target = target,
+            .optimize = optimize,
+            .single_threaded = false,
+        }),
+    });
+    tests.root_module.addImport("c", c_mod);
+    tests.root_module.addIncludePath(b.path("deps/sqlite-amalgamation-3540100"));
+    if (use_pgo) {
+        tests.root_module.addObjectFile(b.path("src/c/shim_pgo.o"));
+    } else {
+        tests.root_module.addCSourceFile(.{
+            .file = b.path("src/shim.c"),
+            .flags = &sqlite_flags,
+        });
+    }
+    tests.root_module.link_libc = true;
+
+    const run_tests = b.addRunArtifact(tests);
+    const test_step = b.step("test", "Run unit tests");
+    test_step.dependOn(&run_tests.step);
 }

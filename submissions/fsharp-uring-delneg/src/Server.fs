@@ -60,6 +60,12 @@ let private holdRideMs = int64 (env "HOLDRIDE" 1500)
 let private holdYieldUs = uint32 (env "HOLDYIELD" 200)
 let private holdYieldAfter = int64 (env "HOLDYIELDAFTER" 20)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
+// A request answered more than 40 ms after it arrived was acknowledged by the kernel's delayed-ACK timer, and that takes
+// the connection out of the mode in which a request's ACK waits for its answer (TCP_QUICKACK 0, set on the listener):
+// its next request, seconds later, is acknowledged at once by a bare ACK, one more packet to send. So an answer that is
+// LATEACK ms late (the kernel got the request up to a pass before the loop stamped it) sets TCP_QUICKACK 0 on the
+// connection again, in the ring (0: off)
+let private lateAckMs = uint32 (env "LATEACK" 30)
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
 
@@ -69,6 +75,7 @@ let UdSend = 3UL
 let UdClose = 4UL
 let UdCkpt = 6UL
 let UdIgnore = 7UL
+let UdOpt = 8UL
 let NoGen = 0xFFFFFFu
 
 let inline private ud (t: uint64) (slot: int) (gen: uint32) =
@@ -310,6 +317,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable warena = GC.AllocateUninitializedArray<byte>(1 <<< 16, pinned = true)
     let mutable warenaLen = 0
     let dirty = List<int>(1024)
+    let mutable lateAck = lateAckMs > 0u
+    let zeroInt = NativeMemory.AllocZeroed(unativeint 4) |> NativePtr.ofVoidPtr<byte> |> NativePtr.toNativeInt
     // request strings (new posts' text, token usernames) for the requests in the batch
     let mutable arena = GC.AllocateUninitializedArray<byte>(1 <<< 20, pinned = true)
     let mutable arenaLen = 0
@@ -834,6 +843,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         if conns.[cid].Fl &&& DIRTY = 0uy then
             conns.[cid].Fl <- conns.[cid].Fl ||| DIRTY
             dirty.Add cid
+        if lateAck && passMs - r.Ms >= lateAckMs && not r.Close then
+            (ringOf cid).SetSockOptInt(fslot cid, 6u, 12u, zeroInt, ud UdOpt cid NoGen) // TCP_QUICKACK 0
 
     /// Moves a request to the held queue: a write waiting out a hold, or a later request on a connection that has one
     /// there (a connection's requests keep their order). A new post's strings move to the queue's own arena, so the
@@ -1124,6 +1135,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 rs.Full <- false
                 if rs.High && rs.Live + lowGap < highWater then rs.High <- false
         | 6UL -> ckDone res
+        | 8UL -> if res = -22 || res = -95 then lateAck <- false // a kernel without the command: EINVAL, EOPNOTSUPP
         | _ -> ()
 
     let reap (k: int) =

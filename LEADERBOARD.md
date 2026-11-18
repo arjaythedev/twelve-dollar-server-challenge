@@ -1305,6 +1305,10 @@ the suite hung until its timeout), so it wasn't load tested and #437 is still no
 p99 8.01 s, 320k on p99 2.31 s), a tie with #398's 300,000 and not above it, so #437 is still not merged.
 #437's next head (`da7cf01`, 2026-11-18: `8f726e4` with the checkpoint thread at nice 19 instead of 10) held
 **310,000** (29,243 req/s, p95 35.7 / p99 483.9 ms), above #398's 300,000, so #437 was merged there.
+#427's newest head (`76af661`, 2026-11-18: `GET /posts/:id` reads through one of 32 B-tree cursor pairs chosen by post
+id instead of one shared pair) held **285,000** at 77 % CPU (27,145 req/s, p95 22.4 / p99 191.8 ms, 0 errors, 1,083 MB;
+the 300k 5-minute hold failed on p99 3.40 s, 310k failed the 2-minute probe on p99 1.20 s, 320k on p99 7.32 s), below
+#437's 310,000, so #427 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

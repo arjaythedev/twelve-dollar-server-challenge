@@ -230,6 +230,37 @@ from this round and changes two defaults in `start.sh`:
   connections (WSL), and about −10 % CPU for the same requests on the Ubuntu
   6.8 VM at 80k users. 42/42 Direct and 42/42 Classic pass.
 
+On the box (#490 at `bcf0061`) that held 270,000 at 84 % CPU and 29 µs/request
+(p95 234 ms / p99 585 ms); 280,000 failed narrowly at 88 %.
+
+A first follow-up (#497 at `08da156`) stacked a feed tail walk, 1,024 instead of
+4,096 provided receive buffers per ring, and no eventfd on the rings. Locally
+(mirrored runs, 130k connections, WSL) each saved 1–2 %; on the box CPU stayed
+at 29 µs/request and the tail got worse: 257,000 held, 270,000 failed its hold
+on p99 (1.1 s at 83 %). The smaller buffer pool runs dry four times sooner
+when the loop stalls (requests then wait in kernel socket queues), and without
+the eventfd the secondary rings wait for ring 0's bounded wait. Both are back
+at the #490 settings; the runtime keeps `HPHP_PBUF_N`, `HPHP_RING_EVENTFD=0`
+and a new `HPHP_RING_EVENTFD=async` (io-wq completions only) as opt-in knobs.
+
+This head keeps only the user-space and write-path part:
+
+- **Feed tail in one walk** (`HPHP_FEED_TAIL_BATCH=1`): the newest posts come
+  from one generic B-tree tail walk plus batched payload/key reads (three
+  builtin calls) instead of ~100 per-row cursor calls; overflow records fall
+  back to the per-row path. Mirrored runs: 39.3 → 38.8 µs/request.
+- `parse()` checks a socket's generation only when more pipelined bytes
+  follow, not after every GET.
+- **Group commit** (`HPHP_WRITE_GROUP_MS=1`): queued writes wait up to 1 ms
+  (or until 256 are queued) so several poll cycles share one COMMIT. Replies
+  still go out only after their commit. Every commit rewrites the hot pages
+  (page 1, the posts/likes tails and their index leaves) into the WAL, so fewer
+  commits mean fewer page writes, checksums and checkpoint copies. Mirrored
+  runs at 130k: about −2.7 % CPU per request, 20 % fewer write syscalls, 9 %
+  fewer bytes written, +0.5 ms p95. Set 0 to commit every poll cycle.
+
+42/42 Direct and 42/42 Classic pass with these defaults.
+
 ### The allocation round (`2f8507b` … `d75dd29`)
 
 Instrumentation first: `runtime_stats()` exposes generic runtime counters

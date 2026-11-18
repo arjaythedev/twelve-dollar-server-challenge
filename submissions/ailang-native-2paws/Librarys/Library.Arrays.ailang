@@ -46,10 +46,10 @@ Function.Helpers.StringCopy {
         new_str = Arena_Alloc(Add(len, 1))
         idx = 0
         WhileLoop LessThan(idx, len) {
-            SetByte(new_str, idx, GetByte(str, idx))
+            WRMEM_8(new_str, idx, RDMEM_8(str, idx))
             idx = Add(idx, 1)
         }
-        SetByte(new_str, len, 0)
+        WRMEM_8(new_str, len, 0)
         ReturnValue(new_str)
     }
 }
@@ -125,12 +125,12 @@ Function.Queue.Create {
     Body: {
         Arrays_EnsureArena()
         queue = Arena_Alloc64()
-        StoreValue(queue, capacity)
-        StoreValue(Add(queue, 8), 0)
-        StoreValue(Add(queue, 16), 0)
-        StoreValue(Add(queue, 24), 0)
+        WRMEM_64(queue, capacity)
+        WRMEM_64(Add(queue, 8), 0)
+        WRMEM_64(Add(queue, 16), 0)
+        WRMEM_64(Add(queue, 24), 0)
         data = Arena_ArrayCreate(capacity)
-        StoreValue(Add(queue, 32), data)
+        WRMEM_64(Add(queue, 32), data)
         ReturnValue(queue)
     }
 }
@@ -140,17 +140,17 @@ Function.Queue.Enqueue {
     Input: value: Integer
     Output: Integer
     Body: {
-        capacity = Dereference(queue)
-        size = Dereference(Add(queue, 8))
+        capacity = RDMEM_64(queue)
+        size = RDMEM_64(Add(queue, 8))
         IfCondition GreaterEqual(size, capacity) ThenBlock: {
             ReturnValue(0)
         }
-        tail = Dereference(Add(queue, 24))
-        data = Dereference(Add(queue, 32))
+        tail = RDMEM_64(Add(queue, 24))
+        data = RDMEM_64(Add(queue, 32))
         ArraySet(data, tail, value)
         new_tail = Modulo(Add(tail, 1), capacity)
-        StoreValue(Add(queue, 24), new_tail)
-        StoreValue(Add(queue, 8), Add(size, 1))
+        WRMEM_64(Add(queue, 24), new_tail)
+        WRMEM_64(Add(queue, 8), Add(size, 1))
         ReturnValue(1)
     }
 }
@@ -159,17 +159,17 @@ Function.Queue.Dequeue {
     Input: queue: Address
     Output: Integer
     Body: {
-        size = Dereference(Add(queue, 8))
+        size = RDMEM_64(Add(queue, 8))
         IfCondition EqualTo(size, 0) ThenBlock: {
             ReturnValue(Collections.XERROR)
         }
-        capacity = Dereference(queue)
-        head = Dereference(Add(queue, 16))
-        data = Dereference(Add(queue, 32))
+        capacity = RDMEM_64(queue)
+        head = RDMEM_64(Add(queue, 16))
+        data = RDMEM_64(Add(queue, 32))
         value = ArrayGet(data, head)
         new_head = Modulo(Add(head, 1), capacity)
-        StoreValue(Add(queue, 16), new_head)
-        StoreValue(Add(queue, 8), Subtract(size, 1))
+        WRMEM_64(Add(queue, 16), new_head)
+        WRMEM_64(Add(queue, 8), Subtract(size, 1))
         ReturnValue(value)
     }
 }
@@ -181,7 +181,7 @@ Function.Queue.Destroy {
         IfCondition EqualTo(queue, 0) ThenBlock: {
             ReturnValue(0)
         }
-        data = Dereference(Add(queue, 32))
+        data = RDMEM_64(Add(queue, 32))
         Arena_ArrayDestroy(data)
         Arena_Free64(queue)
         ReturnValue(1)
@@ -211,15 +211,15 @@ Function.IHash.Create {
     Body: {
         Arrays_EnsureArena()
         hash_table = Arena_Alloc(24)
-        StoreValue(hash_table, bucket_count)
-        StoreValue(Add(hash_table, 8), 0)
+        WRMEM_64(hash_table, bucket_count)
+        WRMEM_64(Add(hash_table, 8), 0)
         buckets = Arena_ArrayCreate(bucket_count)
         idx = 0
         WhileLoop LessThan(idx, bucket_count) {
             ArraySet(buckets, idx, 0)
             idx = Add(idx, 1)
         }
-        StoreValue(Add(hash_table, 16), buckets)
+        WRMEM_64(Add(hash_table, 16), buckets)
         ReturnValue(hash_table)
     }
 }
@@ -230,17 +230,17 @@ Function.IHash.Insert {
     Input: value: Integer
     Output: Integer
     Body: {
-        bucket_count = Dereference(hash_table)
-        buckets = Dereference(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
+        buckets = RDMEM_64(Add(hash_table, 16))
         hash = IHash.HashInt(key, bucket_count)
         new_node = Arena_Alloc(24)
-        StoreValue(new_node, key)
-        StoreValue(Add(new_node, 8), value)
+        WRMEM_64(new_node, key)
+        WRMEM_64(Add(new_node, 8), value)
         head = ArrayGet(buckets, hash)
-        StoreValue(Add(new_node, 16), head)
+        WRMEM_64(Add(new_node, 16), head)
         ArraySet(buckets, hash, new_node)
-        item_count = Dereference(Add(hash_table, 8))
-        StoreValue(Add(hash_table, 8), Add(item_count, 1))
+        item_count = RDMEM_64(Add(hash_table, 8))
+        WRMEM_64(Add(hash_table, 8), Add(item_count, 1))
         ReturnValue(1)
     }
 }
@@ -250,16 +250,16 @@ Function.IHash.Lookup {
     Input: key: Integer
     Output: Integer
     Body: {
-        bucket_count = Dereference(hash_table)
-        buckets = Dereference(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
+        buckets = RDMEM_64(Add(hash_table, 16))
         hash = IHash.HashInt(key, bucket_count)
         current = ArrayGet(buckets, hash)
         WhileLoop NotEqual(current, 0) {
-            node_key = Dereference(current)
+            node_key = RDMEM_64(current)
             IfCondition EqualTo(node_key, key) ThenBlock: {
-                ReturnValue(Dereference(Add(current, 8)))
+                ReturnValue(RDMEM_64(Add(current, 8)))
             }
-            current = Dereference(Add(current, 16))
+            current = RDMEM_64(Add(current, 16))
         }
         ReturnValue(Collections.XERROR)
     }
@@ -272,13 +272,13 @@ Function.IHash.Destroy {
         IfCondition EqualTo(hash_table, 0) ThenBlock: {
             ReturnValue(0)
         }
-        buckets = Dereference(Add(hash_table, 16))
-        bucket_count = Dereference(hash_table)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
         idx = 0
         WhileLoop LessThan(idx, bucket_count) {
             current = ArrayGet(buckets, idx)
             WhileLoop NotEqual(current, 0) {
-                next = Dereference(Add(current, 16))
+                next = RDMEM_64(Add(current, 16))
                 Arena_Free(current, 24)
                 current = next
             }
@@ -300,8 +300,8 @@ Function.SHash.Create {
     Body: {
         Arrays_EnsureArena()
         hash_table = Arena_Alloc(24)
-        StoreValue(hash_table, bucket_count)
-        StoreValue(Add(hash_table, 8), 0)
+        WRMEM_64(hash_table, bucket_count)
+        WRMEM_64(Add(hash_table, 8), 0)
         buckets = Arena_ArrayCreate(bucket_count)
         MemorySet(Add(buckets, 8), 0, Multiply(bucket_count, 8))
         idx = 0
@@ -309,7 +309,7 @@ Function.SHash.Create {
             ArraySet(buckets, idx, 0)
             idx = Add(idx, 1)
         }
-        StoreValue(Add(hash_table, 16), buckets)
+        WRMEM_64(Add(hash_table, 16), buckets)
         ReturnValue(hash_table)
     }
 }
@@ -324,37 +324,37 @@ Function.SHash.Insert {
         idx = 0
         key_len = StringLength(key)
         WhileLoop LessThan(idx, key_len) {
-            byte = GetByte(key, idx)
+            byte = RDMEM_8(key, idx)
             hash_value = Add(Multiply(hash_value, 31), byte)
             idx = Add(idx, 1)
         }
         IfCondition LessThan(hash_value, 0) ThenBlock: {
             hash_value = Multiply(hash_value, -1)
         }
-        bucket_count = Dereference(hash_table)
+        bucket_count = RDMEM_64(hash_table)
         bucket_idx = Modulo(hash_value, bucket_count)
-        buckets = Dereference(Add(hash_table, 16))
+        buckets = RDMEM_64(Add(hash_table, 16))
         
         current = ArrayGet(buckets, bucket_idx)
         WhileLoop NotEqual(current, 0) {
-            stored_key = Dereference(current)
+            stored_key = RDMEM_64(current)
             cmp = StringCompare(stored_key, key)
             IfCondition EqualTo(cmp, 0) ThenBlock: {
-                StoreValue(Add(current, 8), value)
+                WRMEM_64(Add(current, 8), value)
                 ReturnValue(0)
             }
-            current = Dereference(Add(current, 16))
+            current = RDMEM_64(Add(current, 16))
         }
         
         new_node = Arena_Alloc(24)
         key_copy = Helpers.StringCopy(key)
-        StoreValue(new_node, key_copy)
-        StoreValue(Add(new_node, 8), value)
+        WRMEM_64(new_node, key_copy)
+        WRMEM_64(Add(new_node, 8), value)
         head = ArrayGet(buckets, bucket_idx)
-        StoreValue(Add(new_node, 16), head)
+        WRMEM_64(Add(new_node, 16), head)
         ArraySet(buckets, bucket_idx, new_node)
-        item_count = Dereference(Add(hash_table, 8))
-        StoreValue(Add(hash_table, 8), Add(item_count, 1))
+        item_count = RDMEM_64(Add(hash_table, 8))
+        WRMEM_64(Add(hash_table, 8), Add(item_count, 1))
         ReturnValue(1)
     }
 }
@@ -368,24 +368,24 @@ Function.SHash.Lookup {
         idx = 0
         key_len = StringLength(key)
         WhileLoop LessThan(idx, key_len) {
-            byte = GetByte(key, idx)
+            byte = RDMEM_8(key, idx)
             hash_value = Add(Multiply(hash_value, 31), byte)
             idx = Add(idx, 1)
         }
         IfCondition LessThan(hash_value, 0) ThenBlock: {
             hash_value = Multiply(hash_value, -1)
         }
-        bucket_count = Dereference(hash_table)
+        bucket_count = RDMEM_64(hash_table)
         bucket_idx = Modulo(hash_value, bucket_count)
-        buckets = Dereference(Add(hash_table, 16))
+        buckets = RDMEM_64(Add(hash_table, 16))
         current = ArrayGet(buckets, bucket_idx)
         WhileLoop NotEqual(current, 0) {
-            stored_key = Dereference(current)
+            stored_key = RDMEM_64(current)
             cmp = StringCompare(stored_key, key)
             IfCondition EqualTo(cmp, 0) ThenBlock: {
-                ReturnValue(Dereference(Add(current, 8)))
+                ReturnValue(RDMEM_64(Add(current, 8)))
             }
-            current = Dereference(Add(current, 16))
+            current = RDMEM_64(Add(current, 16))
         }
         ReturnValue(Collections.XNULL)
     }
@@ -410,38 +410,38 @@ Function.SHash.Delete {
         idx = 0
         key_len = StringLength(key)
         WhileLoop LessThan(idx, key_len) {
-            byte = GetByte(key, idx)
+            byte = RDMEM_8(key, idx)
             hash_value = Add(Multiply(hash_value, 31), byte)
             idx = Add(idx, 1)
         }
         IfCondition LessThan(hash_value, 0) ThenBlock: {
             hash_value = Multiply(hash_value, -1)
         }
-        bucket_count = Dereference(hash_table)
+        bucket_count = RDMEM_64(hash_table)
         bucket_idx = Modulo(hash_value, bucket_count)
-        buckets = Dereference(Add(hash_table, 16))
+        buckets = RDMEM_64(Add(hash_table, 16))
         current = ArrayGet(buckets, bucket_idx)
         prev = 0
         WhileLoop NotEqual(current, 0) {
-            stored_key = Dereference(current)
+            stored_key = RDMEM_64(current)
             cmp = StringCompare(stored_key, key)
             IfCondition EqualTo(cmp, 0) ThenBlock: {
-                value = Dereference(Add(current, 8))
-                next = Dereference(Add(current, 16))
+                value = RDMEM_64(Add(current, 8))
+                next = RDMEM_64(Add(current, 16))
                 IfCondition EqualTo(prev, 0) ThenBlock: {
                     ArraySet(buckets, bucket_idx, next)
                 } ElseBlock: {
-                    StoreValue(Add(prev, 16), next)
+                    WRMEM_64(Add(prev, 16), next)
                 }
                 sk_len = StringLength(stored_key)
                 Deallocate(stored_key, Add(sk_len, 1))
                 Arena_Free(current, 24)
-                item_count = Dereference(Add(hash_table, 8))
-                StoreValue(Add(hash_table, 8), Subtract(item_count, 1))
+                item_count = RDMEM_64(Add(hash_table, 8))
+                WRMEM_64(Add(hash_table, 8), Subtract(item_count, 1))
                 ReturnValue(value)
             }
             prev = current
-            current = Dereference(Add(current, 16))
+            current = RDMEM_64(Add(current, 16))
         }
         ReturnValue(Collections.XNULL)
     }
@@ -452,16 +452,16 @@ Function.SHash.Keys {
     Output: Address
     Body: {
         keys = Array.Create(16)
-        buckets = Dereference(Add(hash_table, 16))
-        bucket_count = Dereference(hash_table)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
         i = 0
         WhileLoop LessThan(i, bucket_count) {
             current = ArrayGet(buckets, i)
             WhileLoop NotEqual(current, 0) {
-                key = Dereference(current)
+                key = RDMEM_64(current)
                 key_copy = Helpers.StringCopy(key)
                 Array.Push(keys, key_copy)
-                current = Dereference(Add(current, 16))
+                current = RDMEM_64(Add(current, 16))
             }
             i = Add(i, 1)
         }
@@ -476,14 +476,14 @@ Function.SHash.Destroy {
         IfCondition EqualTo(hash_table, 0) ThenBlock: {
             ReturnValue(0)
         }
-        buckets = Dereference(Add(hash_table, 16))
-        bucket_count = Dereference(hash_table)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
         idx = 0
         WhileLoop LessThan(idx, bucket_count) {
             current = ArrayGet(buckets, idx)
             WhileLoop NotEqual(current, 0) {
-                next = Dereference(Add(current, 16))
-                key = Dereference(current)
+                next = RDMEM_64(Add(current, 16))
+                key = RDMEM_64(current)
                 key_len = StringLength(key)
                 Deallocate(key, Add(key_len, 1))
                 Arena_Free(current, 24)
@@ -508,35 +508,35 @@ Function.SHash.InsertAddr {
         idx = 0
         key_len = StringLength(key)
         WhileLoop LessThan(idx, key_len) {
-            byte = GetByte(key, idx)
+            byte = RDMEM_8(key, idx)
             hash_value = Add(Multiply(hash_value, 31), byte)
             idx = Add(idx, 1)
         }
         IfCondition LessThan(hash_value, 0) ThenBlock: {
             hash_value = Multiply(hash_value, -1)
         }
-        bucket_count = Dereference(hash_table)
+        bucket_count = RDMEM_64(hash_table)
         bucket_idx = Modulo(hash_value, bucket_count)
-        buckets = Dereference(Add(hash_table, 16))
+        buckets = RDMEM_64(Add(hash_table, 16))
         current = ArrayGet(buckets, bucket_idx)
         WhileLoop NotEqual(current, 0) {
-            stored_key = Dereference(current)
+            stored_key = RDMEM_64(current)
             cmp = StringCompare(stored_key, key)
             IfCondition EqualTo(cmp, 0) ThenBlock: {
-                StoreValue(Add(current, 8), value)
+                WRMEM_64(Add(current, 8), value)
                 ReturnValue(0)
             }
-            current = Dereference(Add(current, 16))
+            current = RDMEM_64(Add(current, 16))
         }
         new_node = Arena_Alloc(24)
         key_copy = Helpers.StringCopy(key)
-        StoreValue(new_node, key_copy)
-        StoreValue(Add(new_node, 8), value)
+        WRMEM_64(new_node, key_copy)
+        WRMEM_64(Add(new_node, 8), value)
         head = ArrayGet(buckets, bucket_idx)
-        StoreValue(Add(new_node, 16), head)
+        WRMEM_64(Add(new_node, 16), head)
         ArraySet(buckets, bucket_idx, new_node)
-        item_count = Dereference(Add(hash_table, 8))
-        StoreValue(Add(hash_table, 8), Add(item_count, 1))
+        item_count = RDMEM_64(Add(hash_table, 8))
+        WRMEM_64(Add(hash_table, 8), Add(item_count, 1))
         ReturnValue(1)
     }
 }
@@ -550,24 +550,24 @@ Function.SHash.LookupAddr {
         idx = 0
         key_len = StringLength(key)
         WhileLoop LessThan(idx, key_len) {
-            byte = GetByte(key, idx)
+            byte = RDMEM_8(key, idx)
             hash_value = Add(Multiply(hash_value, 31), byte)
             idx = Add(idx, 1)
         }
         IfCondition LessThan(hash_value, 0) ThenBlock: {
             hash_value = Multiply(hash_value, -1)
         }
-        bucket_count = Dereference(hash_table)
+        bucket_count = RDMEM_64(hash_table)
         bucket_idx = Modulo(hash_value, bucket_count)
-        buckets = Dereference(Add(hash_table, 16))
+        buckets = RDMEM_64(Add(hash_table, 16))
         current = ArrayGet(buckets, bucket_idx)
         WhileLoop NotEqual(current, 0) {
-            stored_key = Dereference(current)
+            stored_key = RDMEM_64(current)
             cmp = StringCompare(stored_key, key)
             IfCondition EqualTo(cmp, 0) ThenBlock: {
-                ReturnValue(Dereference(Add(current, 8)))
+                ReturnValue(RDMEM_64(Add(current, 8)))
             }
-            current = Dereference(Add(current, 16))
+            current = RDMEM_64(Add(current, 16))
         }
         ReturnValue(Collections.XNULL)
     }
@@ -592,38 +592,38 @@ Function.SHash.DeleteAddr {
         idx = 0
         key_len = StringLength(key)
         WhileLoop LessThan(idx, key_len) {
-            byte = GetByte(key, idx)
+            byte = RDMEM_8(key, idx)
             hash_value = Add(Multiply(hash_value, 31), byte)
             idx = Add(idx, 1)
         }
         IfCondition LessThan(hash_value, 0) ThenBlock: {
             hash_value = Multiply(hash_value, -1)
         }
-        bucket_count = Dereference(hash_table)
+        bucket_count = RDMEM_64(hash_table)
         bucket_idx = Modulo(hash_value, bucket_count)
-        buckets = Dereference(Add(hash_table, 16))
+        buckets = RDMEM_64(Add(hash_table, 16))
         current = ArrayGet(buckets, bucket_idx)
         prev = 0
         WhileLoop NotEqual(current, 0) {
-            stored_key = Dereference(current)
+            stored_key = RDMEM_64(current)
             cmp = StringCompare(stored_key, key)
             IfCondition EqualTo(cmp, 0) ThenBlock: {
-                value = Dereference(Add(current, 8))
-                next = Dereference(Add(current, 16))
+                value = RDMEM_64(Add(current, 8))
+                next = RDMEM_64(Add(current, 16))
                 IfCondition EqualTo(prev, 0) ThenBlock: {
                     ArraySet(buckets, bucket_idx, next)
                 } ElseBlock: {
-                    StoreValue(Add(prev, 16), next)
+                    WRMEM_64(Add(prev, 16), next)
                 }
                 sk_len = StringLength(stored_key)
                 Deallocate(stored_key, Add(sk_len, 1))
                 Arena_Free(current, 24)
-                item_count = Dereference(Add(hash_table, 8))
-                StoreValue(Add(hash_table, 8), Subtract(item_count, 1))
+                item_count = RDMEM_64(Add(hash_table, 8))
+                WRMEM_64(Add(hash_table, 8), Subtract(item_count, 1))
                 ReturnValue(value)
             }
             prev = current
-            current = Dereference(Add(current, 16))
+            current = RDMEM_64(Add(current, 16))
         }
         ReturnValue(Collections.XNULL)
     }
@@ -638,9 +638,9 @@ Function.List.Create {
     Body: {
         Arrays_EnsureArena()
         list = Arena_Alloc(24)
-        StoreValue(list, 0)
-        StoreValue(Add(list, 8), 0)
-        StoreValue(Add(list, 16), 0)
+        WRMEM_64(list, 0)
+        WRMEM_64(Add(list, 8), 0)
+        WRMEM_64(Add(list, 16), 0)
         ReturnValue(list)
     }
 }
@@ -651,19 +651,19 @@ Function.List.Append {
     Output: Integer
     Body: {
         new_node = Arena_Alloc(24)
-        StoreValue(new_node, value)
-        StoreValue(Add(new_node, 8), 0)
-        head = Dereference(list)
-        tail = Dereference(Add(list, 8))
+        WRMEM_64(new_node, value)
+        WRMEM_64(Add(new_node, 8), 0)
+        head = RDMEM_64(list)
+        tail = RDMEM_64(Add(list, 8))
         IfCondition EqualTo(head, 0) ThenBlock: {
-            StoreValue(list, new_node)
-            StoreValue(Add(list, 8), new_node)
+            WRMEM_64(list, new_node)
+            WRMEM_64(Add(list, 8), new_node)
         } ElseBlock: {
-            StoreValue(Add(tail, 8), new_node)
-            StoreValue(Add(list, 8), new_node)
+            WRMEM_64(Add(tail, 8), new_node)
+            WRMEM_64(Add(list, 8), new_node)
         }
-        size = Dereference(Add(list, 16))
-        StoreValue(Add(list, 16), Add(size, 1))
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Add(size, 1))
         ReturnValue(1)
     }
 }
@@ -674,15 +674,15 @@ Function.List.Prepend {
     Output: Integer
     Body: {
         new_node = Arena_Alloc(24)
-        StoreValue(new_node, value)
-        head = Dereference(list)
-        StoreValue(Add(new_node, 8), head)
-        StoreValue(list, new_node)
+        WRMEM_64(new_node, value)
+        head = RDMEM_64(list)
+        WRMEM_64(Add(new_node, 8), head)
+        WRMEM_64(list, new_node)
         IfCondition EqualTo(head, 0) ThenBlock: {
-            StoreValue(Add(list, 8), new_node)
+            WRMEM_64(Add(list, 8), new_node)
         }
-        size = Dereference(Add(list, 16))
-        StoreValue(Add(list, 16), Add(size, 1))
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Add(size, 1))
         ReturnValue(1)
     }
 }
@@ -691,18 +691,18 @@ Function.List.PopFront {
     Input: list: Address
     Output: Integer
     Body: {
-        head = Dereference(list)
+        head = RDMEM_64(list)
         IfCondition EqualTo(head, 0) ThenBlock: {
             ReturnValue(0)
         }
-        value = Dereference(head)
-        next_node = Dereference(Add(head, 8))
-        StoreValue(list, next_node)
+        value = RDMEM_64(head)
+        next_node = RDMEM_64(Add(head, 8))
+        WRMEM_64(list, next_node)
         IfCondition EqualTo(next_node, 0) ThenBlock: {
-            StoreValue(Add(list, 8), 0)
+            WRMEM_64(Add(list, 8), 0)
         }
-        size = Dereference(Add(list, 16))
-        StoreValue(Add(list, 16), Subtract(size, 1))
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Subtract(size, 1))
         Arena_Free(head, 24)
         ReturnValue(value)
     }
@@ -712,29 +712,29 @@ Function.List.PopBack {
     Input: list: Address
     Output: Integer
     Body: {
-        tail = Dereference(Add(list, 8))
+        tail = RDMEM_64(Add(list, 8))
         IfCondition EqualTo(tail, 0) ThenBlock: {
             ReturnValue(0)
         }
-        head = Dereference(list)
+        head = RDMEM_64(list)
         IfCondition EqualTo(head, tail) ThenBlock: {
-            value = Dereference(tail)
+            value = RDMEM_64(tail)
             Arena_Free(tail, 24)
-            StoreValue(list, 0)
-            StoreValue(Add(list, 8), 0)
-            StoreValue(Add(list, 16), 0)
+            WRMEM_64(list, 0)
+            WRMEM_64(Add(list, 8), 0)
+            WRMEM_64(Add(list, 16), 0)
             ReturnValue(value)
         }
         current = head
-        WhileLoop NotEqual(Dereference(Add(current, 8)), tail) {
-            current = Dereference(Add(current, 8))
+        WhileLoop NotEqual(RDMEM_64(Add(current, 8)), tail) {
+            current = RDMEM_64(Add(current, 8))
         }
-        value = Dereference(tail)
+        value = RDMEM_64(tail)
         Arena_Free(tail, 24)
-        StoreValue(Add(current, 8), 0)
-        StoreValue(Add(list, 8), current)
-        size = Dereference(Add(list, 16))
-        StoreValue(Add(list, 16), Subtract(size, 1))
+        WRMEM_64(Add(current, 8), 0)
+        WRMEM_64(Add(list, 8), current)
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Subtract(size, 1))
         ReturnValue(value)
     }
 }
@@ -743,7 +743,7 @@ Function.List.Size {
     Input: list: Address
     Output: Integer
     Body: {
-        ReturnValue(Dereference(Add(list, 16)))
+        ReturnValue(RDMEM_64(Add(list, 16)))
     }
 }
 
@@ -754,9 +754,9 @@ Function.List.Destroy {
         IfCondition EqualTo(list, 0) ThenBlock: {
             ReturnValue(0)
         }
-        head = Dereference(list)
+        head = RDMEM_64(list)
         WhileLoop NotEqual(head, 0) {
-            next = Dereference(Add(head, 8))
+            next = RDMEM_64(Add(head, 8))
             Arena_Free(head, 24)
             head = next
         }
@@ -772,10 +772,10 @@ Function.List.DestroyDeep {
         IfCondition EqualTo(list, 0) ThenBlock: {
             ReturnValue(0)
         }
-        head = Dereference(list)
+        head = RDMEM_64(list)
         WhileLoop NotEqual(head, 0) {
-            next = Dereference(Add(head, 8))
-            value = Dereference(head)
+            next = RDMEM_64(Add(head, 8))
+            value = RDMEM_64(head)
             IfCondition NotEqual(value, 0) ThenBlock: {
                 value_len = StringLength(value)
                 Deallocate(value, Add(value_len, 1))

@@ -103,22 +103,22 @@ Function.Hash.Create {
         capacity = p
 
         header = Allocate(80)
-        StoreValue(header, HashMagic.MAGIC)
-        StoreValue(Add(header, 8),  capacity)
-        StoreValue(Add(header, 16), 0)
+        WRMEM_64(header, HashMagic.MAGIC)
+        WRMEM_64(Add(header, 8),  capacity)
+        WRMEM_64(Add(header, 16), 0)
 
         // 32 bytes per slot: [hash:8][key_ptr:8][value:8][_pad:8]
         bytes = Multiply(capacity, 32)
         entries = Allocate(bytes)
         MemorySet(entries, 0, bytes)
 
-        StoreValue(Add(header, 24), entries)
-        StoreValue(Add(header, 32), Array.Create(8))
-        StoreValue(Add(header, 40), 0)
-        StoreValue(Add(header, 48), 0)
-        StoreValue(Add(header, 56), 0)
-        StoreValue(Add(header, 64), 0)
-        StoreValue(Add(header, 72), 0)
+        WRMEM_64(Add(header, 24), entries)
+        WRMEM_64(Add(header, 32), Array.Create(8))
+        WRMEM_64(Add(header, 40), 0)
+        WRMEM_64(Add(header, 48), 0)
+        WRMEM_64(Add(header, 56), 0)
+        WRMEM_64(Add(header, 64), 0)
+        WRMEM_64(Add(header, 72), 0)
         ReturnValue(header)
     }
 }
@@ -144,7 +144,7 @@ Function.Hash.IsHash {
         IfCondition LessThan(addr, 1000000) ThenBlock: {
             ReturnValue(0)
         }
-        IfCondition EqualTo(Dereference(addr), HashMagic.MAGIC) ThenBlock: {
+        IfCondition EqualTo(RDMEM_64(addr), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(1)
         }
         ReturnValue(0)
@@ -167,7 +167,7 @@ Function.Hash.FindSlot {
         i = 0
         WhileLoop LessThan(i, cap) {
             off = Multiply(slot, 32)
-            sh  = Dereference(Add(ents, off))
+            sh  = RDMEM_64(Add(ents, off))
 
             // Empty — key definitely not present
             IfCondition EqualTo(sh, 0) ThenBlock: {
@@ -177,7 +177,7 @@ Function.Hash.FindSlot {
             // Tombstone — skip (sh == -1 never equals a valid CRC32 hash)
             IfCondition NotEqual(sh, -1) ThenBlock: {
                 IfCondition EqualTo(sh, h) ThenBlock: {
-                    sk = Dereference(Add(ents, Add(off, 8)))
+                    sk = RDMEM_64(Add(ents, Add(off, 8)))
                     IfCondition EqualTo(StringCompare(sk, key), 0) ThenBlock: {
                         ReturnValue(slot)
                     }
@@ -197,7 +197,7 @@ Function.Hash.FindSlot {
 Function.Hash.Resize {
     Input: table: Address
     Body: {
-        Hash.RehashTo(table, Multiply(Dereference(Add(table, 8)), 2))
+        Hash.RehashTo(table, Multiply(RDMEM_64(Add(table, 8)), 2))
     }
 }
 
@@ -206,8 +206,8 @@ Function.Hash.RehashTo {
     Input: table: Address
     Input: new_cap: Integer
     Body: {
-        old_cap     = Dereference(Add(table, 8))
-        old_entries = Dereference(Add(table, 24))
+        old_cap     = RDMEM_64(Add(table, 8))
+        old_entries = RDMEM_64(Add(table, 24))
 
         new_bytes = Multiply(new_cap, 32)
         new_entries = Allocate(new_bytes)
@@ -218,19 +218,19 @@ Function.Hash.RehashTo {
         i = 0
         WhileLoop LessThan(i, old_cap) {
             off = Multiply(i, 32)
-            h   = Dereference(Add(old_entries, off))
+            h   = RDMEM_64(Add(old_entries, off))
 
             IfCondition GreaterThan(h, 0) ThenBlock: {
-                k = Dereference(Add(old_entries, Add(off, 8)))
-                v = Dereference(Add(old_entries, Add(off, 16)))
+                k = RDMEM_64(Add(old_entries, Add(off, 8)))
+                v = RDMEM_64(Add(old_entries, Add(off, 16)))
 
                 slot = BitwiseAnd(h, mask)
                 WhileLoop EqualTo(0, 0) {
                     noff = Multiply(slot, 32)
-                    IfCondition EqualTo(Dereference(Add(new_entries, noff)), 0) ThenBlock: {
-                        StoreValue(Add(new_entries, noff),        h)
-                        StoreValue(Add(new_entries, Add(noff, 8)),  k)
-                        StoreValue(Add(new_entries, Add(noff, 16)), v)
+                    IfCondition EqualTo(RDMEM_64(Add(new_entries, noff)), 0) ThenBlock: {
+                        WRMEM_64(Add(new_entries, noff),        h)
+                        WRMEM_64(Add(new_entries, Add(noff, 8)),  k)
+                        WRMEM_64(Add(new_entries, Add(noff, 16)), v)
                         BreakLoop
                     }
                     slot = BitwiseAnd(Add(slot, 1), mask)
@@ -241,9 +241,9 @@ Function.Hash.RehashTo {
         }
 
         Deallocate(old_entries, Multiply(old_cap, 32))
-        StoreValue(Add(table, 8),  new_cap)
-        StoreValue(Add(table, 24), new_entries)
-        StoreValue(Add(table, 72), 0)
+        WRMEM_64(Add(table, 8),  new_cap)
+        WRMEM_64(Add(table, 24), new_entries)
+        WRMEM_64(Add(table, 72), 0)
     }
 }
 
@@ -269,16 +269,16 @@ Function.Hash.KeyBytes {
 
         picked = 0
         prev_cell = 0
-        cell = Dereference(Add(table, 64))
+        cell = RDMEM_64(Add(table, 64))
         WhileLoop NotEqual(cell, 0) {
-            usable = Subtract(Dereference(cell), 8)
-            next = Dereference(Add(cell, 8))
+            usable = Subtract(RDMEM_64(cell), 8)
+            next = RDMEM_64(Add(cell, 8))
             IfCondition GreaterThan(usable, klen) ThenBlock: {
                 IfCondition EqualTo(prev_cell, 0) ThenBlock: {
-                    StoreValue(Add(table, 64), next)
+                    WRMEM_64(Add(table, 64), next)
                 }
                 IfCondition NotEqual(prev_cell, 0) ThenBlock: {
-                    StoreValue(Add(prev_cell, 8), next)
+                    WRMEM_64(Add(prev_cell, 8), next)
                 }
                 picked = Add(cell, 8)
                 BreakLoop
@@ -288,8 +288,8 @@ Function.Hash.KeyBytes {
         }
 
         IfCondition EqualTo(picked, 0) ThenBlock: {
-            bump = Dereference(Add(table, 40))
-            bend = Dereference(Add(table, 48))
+            bump = RDMEM_64(Add(table, 40))
+            bend = RDMEM_64(Add(table, 48))
             room = 0
             IfCondition NotEqual(bump, 0) ThenBlock: {
                 room = Subtract(bend, bump)
@@ -301,23 +301,23 @@ Function.Hash.KeyBytes {
                     chunk_sz = need_sz
                 }
                 chunk = Allocate(chunk_sz)
-                prev = Dereference(Add(table, 56))
-                StoreValue(chunk, prev)
-                StoreValue(Add(chunk, 8), chunk_sz)
-                StoreValue(Add(table, 56), chunk)
+                prev = RDMEM_64(Add(table, 56))
+                WRMEM_64(chunk, prev)
+                WRMEM_64(Add(chunk, 8), chunk_sz)
+                WRMEM_64(Add(table, 56), chunk)
                 bump = Add(chunk, 16)
                 bend = Add(chunk, chunk_sz)
-                StoreValue(Add(table, 48), bend)
+                WRMEM_64(Add(table, 48), bend)
             }
-            StoreValue(bump, reserved)
+            WRMEM_64(bump, reserved)
             picked = Add(bump, 8)
-            StoreValue(Add(table, 40), Add(bump, reserved))
+            WRMEM_64(Add(table, 40), Add(bump, reserved))
         }
 
         IfCondition GreaterThan(klen, 0) ThenBlock: {
             MemoryCopy(picked, key, klen)
         }
-        SetByte(picked, klen, 0)
+        WRMEM_8(picked, klen, 0)
         ReturnValue(picked)
     }
 }
@@ -327,9 +327,9 @@ Function.Hash.OrderPush {
     Input: ord:   Address
     Input: value: Address
     Body: {
-        capacity = Dereference(Add(ord, 8))
-        size     = Dereference(Add(ord, 16))
-        data     = Dereference(Add(ord, 24))
+        capacity = RDMEM_64(Add(ord, 8))
+        size     = RDMEM_64(Add(ord, 16))
+        data     = RDMEM_64(Add(ord, 24))
         IfCondition GreaterEqual(size, capacity) ThenBlock: {
             new_capacity = Multiply(capacity, 2)
             new_data = Allocate(Multiply(new_capacity, 8))
@@ -337,12 +337,12 @@ Function.Hash.OrderPush {
                 MemoryCopy(new_data, data, Multiply(size, 8))
             }
             Deallocate(data, Multiply(capacity, 8))
-            StoreValue(Add(ord, 8), new_capacity)
-            StoreValue(Add(ord, 24), new_data)
+            WRMEM_64(Add(ord, 8), new_capacity)
+            WRMEM_64(Add(ord, 24), new_data)
             data = new_data
         }
-        StoreValue(Add(data, Multiply(size, 8)), value)
-        StoreValue(Add(ord, 16), Add(size, 1))
+        WRMEM_64(Add(data, Multiply(size, 8)), value)
+        WRMEM_64(Add(ord, 16), Add(size, 1))
     }
 }
 
@@ -355,8 +355,8 @@ Function.Hash.KeyRecycle {
             ReturnValue(0)
         }
         cell = Subtract(sk, 8)
-        StoreValue(sk, Dereference(Add(table, 64)))
-        StoreValue(Add(table, 64), cell)
+        WRMEM_64(sk, RDMEM_64(Add(table, 64)))
+        WRMEM_64(Add(table, 64), cell)
     }
 }
 
@@ -364,17 +364,17 @@ Function.Hash.KeyRecycle {
 Function.Hash.FreeChunks {
     Input: table: Address
     Body: {
-        chunk = Dereference(Add(table, 56))
+        chunk = RDMEM_64(Add(table, 56))
         WhileLoop NotEqual(chunk, 0) {
-            prev = Dereference(chunk)
-            sz = Dereference(Add(chunk, 8))
+            prev = RDMEM_64(chunk)
+            sz = RDMEM_64(Add(chunk, 8))
             Deallocate(chunk, sz)
             chunk = prev
         }
-        StoreValue(Add(table, 40), 0)
-        StoreValue(Add(table, 48), 0)
-        StoreValue(Add(table, 56), 0)
-        StoreValue(Add(table, 64), 0)
+        WRMEM_64(Add(table, 40), 0)
+        WRMEM_64(Add(table, 48), 0)
+        WRMEM_64(Add(table, 56), 0)
+        WRMEM_64(Add(table, 64), 0)
     }
 }
 
@@ -389,26 +389,26 @@ Function.Hash.Set {
     Input: value: Integer
     Output: Integer
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(0)
         }
 
-        cap  = Dereference(Add(table, 8))
-        size = Dereference(Add(table, 16))
-        ents = Dereference(Add(table, 24))
+        cap  = RDMEM_64(Add(table, 8))
+        size = RDMEM_64(Add(table, 16))
+        ents = RDMEM_64(Add(table, 24))
 
         // Rebuild at 70% load, tombstones included: deletes leave tombstones,
         // and a table full of them has no empty slot to end a probe. Double
         // only when the live entries need it.
-        tombs = Dereference(Add(table, 72))
+        tombs = RDMEM_64(Add(table, 72))
         IfCondition GreaterThan(Add(size, tombs), Divide(Multiply(cap, 7), 10)) ThenBlock: {
             IfCondition GreaterThan(size, Divide(Multiply(cap, 7), 20)) ThenBlock: {
                 Hash.Resize(table)
             } ElseBlock: {
                 Hash.RehashTo(table, cap)
             }
-            cap  = Dereference(Add(table, 8))
-            ents = Dereference(Add(table, 24))
+            cap  = RDMEM_64(Add(table, 8))
+            ents = RDMEM_64(Add(table, 24))
         }
 
         h    = Hash.HashString(key)
@@ -419,24 +419,24 @@ Function.Hash.Set {
         i = 0
         WhileLoop LessThan(i, cap) {
             off = Multiply(slot, 32)
-            sh  = Dereference(Add(ents, off))
-            sk  = Dereference(Add(ents, Add(off, 8)))
+            sh  = RDMEM_64(Add(ents, off))
+            sk  = RDMEM_64(Add(ents, Add(off, 8)))
 
             // Empty slot — insert here, or at first tombstone if one was seen
             IfCondition EqualTo(sh, 0) ThenBlock: {
                 ins = slot
                 IfCondition NotEqual(tomb, -1) ThenBlock: {
                     ins = tomb
-                    StoreValue(Add(table, 72), Subtract(Dereference(Add(table, 72)), 1))
+                    WRMEM_64(Add(table, 72), Subtract(RDMEM_64(Add(table, 72)), 1))
                 }
                 ioff  = Multiply(ins, 32)
                 klen  = StringLength(key)
                 kcopy = Hash.KeyBytes(table, key, klen)
-                StoreValue(Add(ents, ioff),        h)
-                StoreValue(Add(ents, Add(ioff, 8)),  kcopy)
-                StoreValue(Add(ents, Add(ioff, 16)), value)
-                StoreValue(Add(table, 16), Add(size, 1))
-                ord = Dereference(Add(table, 32))
+                WRMEM_64(Add(ents, ioff),        h)
+                WRMEM_64(Add(ents, Add(ioff, 8)),  kcopy)
+                WRMEM_64(Add(ents, Add(ioff, 16)), value)
+                WRMEM_64(Add(table, 16), Add(size, 1))
+                ord = RDMEM_64(Add(table, 32))
                 IfCondition EqualTo(Array.IsArray(ord), 1) ThenBlock: {
                     Hash.OrderPush(ord, kcopy)
                 }
@@ -453,7 +453,7 @@ Function.Hash.Set {
             // Live slot — update if key matches
             IfCondition EqualTo(sh, h) ThenBlock: {
                 IfCondition EqualTo(StringCompare(sk, key), 0) ThenBlock: {
-                    StoreValue(Add(ents, Add(off, 16)), value)
+                    WRMEM_64(Add(ents, Add(off, 16)), value)
                     ReturnValue(0)
                 }
             }
@@ -467,12 +467,12 @@ Function.Hash.Set {
             ioff  = Multiply(tomb, 32)
             klen  = StringLength(key)
             kcopy = Hash.KeyBytes(table, key, klen)
-            StoreValue(Add(ents, ioff),        h)
-            StoreValue(Add(ents, Add(ioff, 8)),  kcopy)
-            StoreValue(Add(ents, Add(ioff, 16)), value)
-            StoreValue(Add(table, 16), Add(size, 1))
-            StoreValue(Add(table, 72), Subtract(Dereference(Add(table, 72)), 1))
-            ord = Dereference(Add(table, 32))
+            WRMEM_64(Add(ents, ioff),        h)
+            WRMEM_64(Add(ents, Add(ioff, 8)),  kcopy)
+            WRMEM_64(Add(ents, Add(ioff, 16)), value)
+            WRMEM_64(Add(table, 16), Add(size, 1))
+            WRMEM_64(Add(table, 72), Subtract(RDMEM_64(Add(table, 72)), 1))
+            ord = RDMEM_64(Add(table, 32))
             IfCondition EqualTo(Array.IsArray(ord), 1) ThenBlock: {
                 Hash.OrderPush(ord, kcopy)
             }
@@ -490,19 +490,19 @@ Function.Hash.Get {
     Input: key:   Address
     Output: Integer
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(0)
         }
 
-        cap  = Dereference(Add(table, 8))
-        ents = Dereference(Add(table, 24))
+        cap  = RDMEM_64(Add(table, 8))
+        ents = RDMEM_64(Add(table, 24))
         h    = Hash.HashString(key)
         slot = Hash.FindSlot(ents, cap, h, key)
         IfCondition EqualTo(slot, -1) ThenBlock: {
             ReturnValue(0)
         }
         off = Multiply(slot, 32)
-        ReturnValue(Dereference(Add(ents, Add(off, 16))))
+        ReturnValue(RDMEM_64(Add(ents, Add(off, 16))))
     }
 }
 
@@ -514,12 +514,12 @@ Function.Hash.Contains {
     Input: key:   Address
     Output: Integer
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(0)
         }
 
-        cap  = Dereference(Add(table, 8))
-        ents = Dereference(Add(table, 24))
+        cap  = RDMEM_64(Add(table, 8))
+        ents = RDMEM_64(Add(table, 24))
         h    = Hash.HashString(key)
         slot = Hash.FindSlot(ents, cap, h, key)
         IfCondition EqualTo(slot, -1) ThenBlock: {
@@ -538,27 +538,27 @@ Function.Hash.Delete {
     Input: key:   Address
     Output: Integer
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(0)
         }
 
-        cap  = Dereference(Add(table, 8))
-        size = Dereference(Add(table, 16))
-        ents = Dereference(Add(table, 24))
+        cap  = RDMEM_64(Add(table, 8))
+        size = RDMEM_64(Add(table, 16))
+        ents = RDMEM_64(Add(table, 24))
         h    = Hash.HashString(key)
         slot = Hash.FindSlot(ents, cap, h, key)
         IfCondition EqualTo(slot, -1) ThenBlock: {
             ReturnValue(0)
         }
         off = Multiply(slot, 32)
-        sk  = Dereference(Add(ents, Add(off, 8)))
+        sk  = RDMEM_64(Add(ents, Add(off, 8)))
         Hash.OrderRemove(table, key)
         Hash.KeyRecycle(table, sk)
-        StoreValue(Add(ents, off),        -1)
-        StoreValue(Add(ents, Add(off, 8)),  0)
-        StoreValue(Add(ents, Add(off, 16)), 0)
-        StoreValue(Add(table, 16), Subtract(size, 1))
-        StoreValue(Add(table, 72), Add(Dereference(Add(table, 72)), 1))
+        WRMEM_64(Add(ents, off),        -1)
+        WRMEM_64(Add(ents, Add(off, 8)),  0)
+        WRMEM_64(Add(ents, Add(off, 16)), 0)
+        WRMEM_64(Add(table, 16), Subtract(size, 1))
+        WRMEM_64(Add(table, 72), Add(RDMEM_64(Add(table, 72)), 1))
         ReturnValue(1)
     }
 }
@@ -570,10 +570,10 @@ Function.Hash.Size {
     Input: table: Address
     Output: Integer
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(0)
         }
-        ReturnValue(Dereference(Add(table, 16)))
+        ReturnValue(RDMEM_64(Add(table, 16)))
     }
 }
 
@@ -583,19 +583,19 @@ Function.Hash.Size {
 Function.Hash.Clear {
     Input: table: Address
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(0)
         }
 
-        cap  = Dereference(Add(table, 8))
-        ents = Dereference(Add(table, 24))
+        cap  = RDMEM_64(Add(table, 8))
+        ents = RDMEM_64(Add(table, 24))
         Hash.FreeChunks(table)
         MemorySet(ents, 0, Multiply(cap, 32))
-        StoreValue(Add(table, 16), 0)
-        StoreValue(Add(table, 72), 0)
-        old_ord = Dereference(Add(table, 32))
+        WRMEM_64(Add(table, 16), 0)
+        WRMEM_64(Add(table, 72), 0)
+        old_ord = RDMEM_64(Add(table, 32))
         IfCondition EqualTo(Array.IsArray(old_ord), 1) ThenBlock: { Array.Destroy(old_ord) }
-        StoreValue(Add(table, 32), Array.Create(8))
+        WRMEM_64(Add(table, 32), Array.Create(8))
     }
 }
 
@@ -603,7 +603,7 @@ Function.Hash.OrderRemove {
     Input: table: Address
     Input: key: Address
     Body: {
-        ord = Dereference(Add(table, 32))
+        ord = RDMEM_64(Add(table, 32))
         IfCondition EqualTo(Array.IsArray(ord), 0) ThenBlock: {
             ReturnValue(0)
         }
@@ -627,12 +627,12 @@ Function.Hash.Keys {
     Input: table: Address
     Output: Address
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(Array.Create(0))
         }
 
-        size = Dereference(Add(table, 16))
-        ord  = Dereference(Add(table, 32))
+        size = RDMEM_64(Add(table, 16))
+        ord  = RDMEM_64(Add(table, 32))
         IfCondition EqualTo(Array.IsArray(ord), 1) ThenBlock: {
             IfCondition EqualTo(Array.Size(ord), size) ThenBlock: {
                 result = Array.Create(size)
@@ -645,16 +645,16 @@ Function.Hash.Keys {
             }
         }
 
-        cap    = Dereference(Add(table, 8))
-        ents   = Dereference(Add(table, 24))
+        cap    = RDMEM_64(Add(table, 8))
+        ents   = RDMEM_64(Add(table, 24))
         result = Array.Create(size)
 
         i = 0
         WhileLoop LessThan(i, cap) {
             off = Multiply(i, 32)
-            sh  = Dereference(Add(ents, off))
+            sh  = RDMEM_64(Add(ents, off))
             IfCondition GreaterThan(sh, 0) ThenBlock: {
-                Array.Push(result, Dereference(Add(ents, Add(off, 8))))
+                Array.Push(result, RDMEM_64(Add(ents, Add(off, 8))))
             }
             i = Add(i, 1)
         }
@@ -712,12 +712,12 @@ Function.Hash.Items {
 Function.Hash.Destroy {
     Input: table: Address
     Body: {
-        IfCondition NotEqual(Dereference(table), HashMagic.MAGIC) ThenBlock: {
+        IfCondition NotEqual(RDMEM_64(table), HashMagic.MAGIC) ThenBlock: {
             ReturnValue(0)
         }
 
-        cap  = Dereference(Add(table, 8))
-        ents = Dereference(Add(table, 24))
+        cap  = RDMEM_64(Add(table, 8))
+        ents = RDMEM_64(Add(table, 24))
         Hash.FreeChunks(table)
         Deallocate(ents, Multiply(cap, 32))
         Deallocate(table, 80)

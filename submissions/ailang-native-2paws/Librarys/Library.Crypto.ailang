@@ -152,10 +152,10 @@ Function.Crypto.LoadBE32 {
     Input: off: Integer
     Output: Integer
     Body: {
-        b0 = GetByte(buf, off)
-        b1 = GetByte(buf, Add(off, 1))
-        b2 = GetByte(buf, Add(off, 2))
-        b3 = GetByte(buf, Add(off, 3))
+        b0 = RDMEM_8(buf, off)
+        b1 = RDMEM_8(buf, Add(off, 1))
+        b2 = RDMEM_8(buf, Add(off, 2))
+        b3 = RDMEM_8(buf, Add(off, 3))
         s1 = LeftShift(b0, 24)
         s2 = LeftShift(b1, 16)
         s3 = LeftShift(b2, 8)
@@ -171,10 +171,10 @@ Function.Crypto.StoreBE32 {
     Input: val: Integer
     Body: {
         u = BitwiseAnd(val, 4294967295)
-        SetByte(buf, off, BitwiseAnd(RightShift(u, 24), 255))
-        SetByte(buf, Add(off, 1), BitwiseAnd(RightShift(u, 16), 255))
-        SetByte(buf, Add(off, 2), BitwiseAnd(RightShift(u, 8), 255))
-        SetByte(buf, Add(off, 3), BitwiseAnd(u, 255))
+        WRMEM_8(buf, off, BitwiseAnd(RightShift(u, 24), 255))
+        WRMEM_8(buf, Add(off, 1), BitwiseAnd(RightShift(u, 16), 255))
+        WRMEM_8(buf, Add(off, 2), BitwiseAnd(RightShift(u, 8), 255))
+        WRMEM_8(buf, Add(off, 3), BitwiseAnd(u, 255))
     }
 }
 
@@ -193,7 +193,7 @@ Function.Crypto.KSet {
     Input: i: Integer
     Input: val: Integer
     Body: {
-        StoreValue(Add(CryptoSt.ktab, Multiply(i, 8)), val)
+        WRMEM_64(Add(CryptoSt.ktab, Multiply(i, 8)), val)
     }
 }
 
@@ -288,20 +288,20 @@ Function.Crypto.SHA256_Compress {
         WhileLoop LessThan(i, 16) {
             off = Multiply(i, 4)
             word = Crypto.LoadBE32(block, off)
-            StoreValue(Add(wtab, Multiply(i, 8)), word)
+            WRMEM_64(Add(wtab, Multiply(i, 8)), word)
             i = Add(i, 1)
         }
         WhileLoop LessThan(i, 64) {
-            w2 = Dereference(Add(wtab, Multiply(Subtract(i, 2), 8)))
-            w7 = Dereference(Add(wtab, Multiply(Subtract(i, 7), 8)))
-            w15 = Dereference(Add(wtab, Multiply(Subtract(i, 15), 8)))
-            w16 = Dereference(Add(wtab, Multiply(Subtract(i, 16), 8)))
+            w2 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 2), 8)))
+            w7 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 7), 8)))
+            w15 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 15), 8)))
+            w16 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 16), 8)))
             s1 = Crypto.SSIG1(w2)
             s0 = Crypto.SSIG0(w15)
             sum1 = Add(s1, w7)
             sum2 = Add(sum1, s0)
             sum3 = Add(sum2, w16)
-            StoreValue(Add(wtab, Multiply(i, 8)), Crypto.U32(sum3))
+            WRMEM_64(Add(wtab, Multiply(i, 8)), Crypto.U32(sum3))
             i = Add(i, 1)
         }
         SHA256W.a = SHA256H.h0
@@ -314,8 +314,8 @@ Function.Crypto.SHA256_Compress {
         SHA256W.h = SHA256H.h7
         i = 0
         WhileLoop LessThan(i, 64) {
-            ki = Dereference(Add(ktab, Multiply(i, 8)))
-            wi = Dereference(Add(wtab, Multiply(i, 8)))
+            ki = RDMEM_64(Add(ktab, Multiply(i, 8)))
+            wi = RDMEM_64(Add(wtab, Multiply(i, 8)))
             se = Crypto.BSIG1(SHA256W.e)
             ch = Crypto.Ch(SHA256W.e, SHA256W.f, SHA256W.g)
             t1a = Add(SHA256W.h, se)
@@ -376,13 +376,13 @@ Function.Crypto.SHA256 {
         pad = CryptoSt.pad
         z = 0
         WhileLoop LessThan(z, 128) {
-            SetByte(pad, z, 0)
+            WRMEM_8(pad, z, 0)
             z = Add(z, 1)
         }
         IfCondition GreaterThan(rem, 0) ThenBlock: {
             MemoryCopy(pad, Add(buf, i), rem)
         }
-        SetByte(pad, rem, 128)
+        WRMEM_8(pad, rem, 128)
         bitlen = Multiply(len, 8)
         IfCondition LessThan(rem, 56) ThenBlock: {
             Crypto.StoreBE64(pad, 56, bitlen)
@@ -401,7 +401,7 @@ Function.Crypto.SHA256 {
         Crypto.StoreBE32(out, 20, SHA256H.h5)
         Crypto.StoreBE32(out, 24, SHA256H.h6)
         Crypto.StoreBE32(out, 28, SHA256H.h7)
-        SetByte(out, 32, 0)
+        WRMEM_8(out, 32, 0)
         ReturnValue(out)
     }
 }
@@ -424,14 +424,14 @@ Function.Crypto.DigestHex {
         out = Allocate(65)
         i = 0
         WhileLoop LessThan(i, 32) {
-            b = GetByte(dig, i)
+            b = RDMEM_8(dig, i)
             hi = Crypto.HexDigit(RightShift(b, 4))
             lo = Crypto.HexDigit(BitwiseAnd(b, 15))
-            SetByte(out, Multiply(i, 2), hi)
-            SetByte(out, Add(Multiply(i, 2), 1), lo)
+            WRMEM_8(out, Multiply(i, 2), hi)
+            WRMEM_8(out, Add(Multiply(i, 2), 1), lo)
             i = Add(i, 1)
         }
-        SetByte(out, 64, 0)
+        WRMEM_8(out, 64, 0)
         ReturnValue(out)
     }
 }
@@ -457,10 +457,10 @@ Function.Crypto.HMAC_SHA256 {
         WhileLoop LessThan(i, 64) {
             kb = 0
             IfCondition LessThan(i, klen) ThenBlock: {
-                kb = GetByte(kptr, i)
+                kb = RDMEM_8(kptr, i)
             }
-            SetByte(ipad, i, BitwiseXor(kb, 54))
-            SetByte(opad, i, BitwiseXor(kb, 92))
+            WRMEM_8(ipad, i, BitwiseXor(kb, 54))
+            WRMEM_8(opad, i, BitwiseXor(kb, 92))
             i = Add(i, 1)
         }
         inner_len = Add(64, msg_len)
@@ -526,42 +526,42 @@ Function.Crypto.Base64UrlEncode {
         i = 0
         WhileLoop LessThan(i, full) {
             base = Multiply(i, 3)
-            b0 = GetByte(data, base)
-            b1 = GetByte(data, Add(base, 1))
-            b2 = GetByte(data, Add(base, 2))
+            b0 = RDMEM_8(data, base)
+            b1 = RDMEM_8(data, Add(base, 1))
+            b2 = RDMEM_8(data, Add(base, 2))
             v0 = BitwiseAnd(RightShift(b0, 2), 63)
             v1 = BitwiseAnd(BitwiseOr(LeftShift(b0, 4), RightShift(b1, 4)), 63)
             v2 = BitwiseAnd(BitwiseOr(LeftShift(b1, 2), RightShift(b2, 6)), 63)
             v3 = BitwiseAnd(b2, 63)
-            SetByte(out, oi, Crypto.B64UrlByte(v0))
-            SetByte(out, Add(oi, 1), Crypto.B64UrlByte(v1))
-            SetByte(out, Add(oi, 2), Crypto.B64UrlByte(v2))
-            SetByte(out, Add(oi, 3), Crypto.B64UrlByte(v3))
+            WRMEM_8(out, oi, Crypto.B64UrlByte(v0))
+            WRMEM_8(out, Add(oi, 1), Crypto.B64UrlByte(v1))
+            WRMEM_8(out, Add(oi, 2), Crypto.B64UrlByte(v2))
+            WRMEM_8(out, Add(oi, 3), Crypto.B64UrlByte(v3))
             oi = Add(oi, 4)
             i = Add(i, 1)
         }
         IfCondition EqualTo(rem, 1) ThenBlock: {
             base = Multiply(full, 3)
-            b0 = GetByte(data, base)
+            b0 = RDMEM_8(data, base)
             v0 = BitwiseAnd(RightShift(b0, 2), 63)
             v1 = BitwiseAnd(LeftShift(b0, 4), 63)
-            SetByte(out, oi, Crypto.B64UrlByte(v0))
-            SetByte(out, Add(oi, 1), Crypto.B64UrlByte(v1))
+            WRMEM_8(out, oi, Crypto.B64UrlByte(v0))
+            WRMEM_8(out, Add(oi, 1), Crypto.B64UrlByte(v1))
             oi = Add(oi, 2)
         }
         IfCondition EqualTo(rem, 2) ThenBlock: {
             base = Multiply(full, 3)
-            b0 = GetByte(data, base)
-            b1 = GetByte(data, Add(base, 1))
+            b0 = RDMEM_8(data, base)
+            b1 = RDMEM_8(data, Add(base, 1))
             v0 = BitwiseAnd(RightShift(b0, 2), 63)
             v1 = BitwiseAnd(BitwiseOr(LeftShift(b0, 4), RightShift(b1, 4)), 63)
             v2 = BitwiseAnd(LeftShift(b1, 2), 63)
-            SetByte(out, oi, Crypto.B64UrlByte(v0))
-            SetByte(out, Add(oi, 1), Crypto.B64UrlByte(v1))
-            SetByte(out, Add(oi, 2), Crypto.B64UrlByte(v2))
+            WRMEM_8(out, oi, Crypto.B64UrlByte(v0))
+            WRMEM_8(out, Add(oi, 1), Crypto.B64UrlByte(v1))
+            WRMEM_8(out, Add(oi, 2), Crypto.B64UrlByte(v2))
             oi = Add(oi, 3)
         }
-        SetByte(out, oi, 0)
+        WRMEM_8(out, oi, 0)
         ReturnValue(out)
     }
 }
@@ -573,7 +573,7 @@ Function.Crypto.Base64UrlDecode {
     Body: {
         IfCondition EqualTo(src_len, 0) ThenBlock: {
             z = Allocate(1)
-            SetByte(z, 0, 0)
+            WRMEM_8(z, 0, 0)
             ReturnValue(z)
         }
         rem4 = Modulo(src_len, 4)
@@ -585,40 +585,40 @@ Function.Crypto.Base64UrlDecode {
         oi = 0
         i = 0
         WhileLoop LessThan(i, src_len) {
-            c0 = Crypto.B64UrlVal(GetByte(src, i))
+            c0 = Crypto.B64UrlVal(RDMEM_8(src, i))
             IfCondition LessThan(c0, 0) ThenBlock: { ReturnValue(0) }
             c1 = -1
             c2 = -1
             c3 = -1
             IfCondition LessThan(Add(i, 1), src_len) ThenBlock: {
-                c1 = Crypto.B64UrlVal(GetByte(src, Add(i, 1)))
+                c1 = Crypto.B64UrlVal(RDMEM_8(src, Add(i, 1)))
                 IfCondition LessThan(c1, 0) ThenBlock: { ReturnValue(0) }
             }
             IfCondition LessThan(Add(i, 2), src_len) ThenBlock: {
-                c2 = Crypto.B64UrlVal(GetByte(src, Add(i, 2)))
+                c2 = Crypto.B64UrlVal(RDMEM_8(src, Add(i, 2)))
                 IfCondition LessThan(c2, 0) ThenBlock: { ReturnValue(0) }
             }
             IfCondition LessThan(Add(i, 3), src_len) ThenBlock: {
-                c3 = Crypto.B64UrlVal(GetByte(src, Add(i, 3)))
+                c3 = Crypto.B64UrlVal(RDMEM_8(src, Add(i, 3)))
                 IfCondition LessThan(c3, 0) ThenBlock: { ReturnValue(0) }
             }
             IfCondition LessThan(c1, 0) ThenBlock: { ReturnValue(0) }
             b0 = BitwiseOr(LeftShift(c0, 2), RightShift(c1, 4))
-            SetByte(out, oi, BitwiseAnd(b0, 255))
+            WRMEM_8(out, oi, BitwiseAnd(b0, 255))
             oi = Add(oi, 1)
             IfCondition GreaterEqual(c2, 0) ThenBlock: {
                 b1 = BitwiseOr(LeftShift(BitwiseAnd(c1, 15), 4), RightShift(c2, 2))
-                SetByte(out, oi, BitwiseAnd(b1, 255))
+                WRMEM_8(out, oi, BitwiseAnd(b1, 255))
                 oi = Add(oi, 1)
             }
             IfCondition GreaterEqual(c3, 0) ThenBlock: {
                 b2 = BitwiseOr(LeftShift(BitwiseAnd(c2, 3), 6), c3)
-                SetByte(out, oi, BitwiseAnd(b2, 255))
+                WRMEM_8(out, oi, BitwiseAnd(b2, 255))
                 oi = Add(oi, 1)
             }
             i = Add(i, 4)
         }
-        SetByte(out, oi, 0)
+        WRMEM_8(out, oi, 0)
         ReturnValue(out)
     }
 }
@@ -630,7 +630,7 @@ Function.Crypto.FindDot {
     Body: {
         i = start
         WhileLoop 1 {
-            c = GetByte(s, i)
+            c = RDMEM_8(s, i)
             IfCondition EqualTo(c, 0) ThenBlock: { ReturnValue(-1) }
             IfCondition EqualTo(c, 46) ThenBlock: { ReturnValue(i) }
             i = Add(i, 1)
@@ -651,7 +651,7 @@ Function.Crypto.SliceZ {
         IfCondition GreaterThan(n, 0) ThenBlock: {
             MemoryCopy(out, Add(s, start), n)
         }
-        SetByte(out, n, 0)
+        WRMEM_8(out, n, 0)
         ReturnValue(out)
     }
 }
@@ -661,14 +661,14 @@ Function.Crypto.ParsePosInt {
     Output: Integer
     Body: {
         IfCondition EqualTo(s, 0) ThenBlock: { ReturnValue(0) }
-        IfCondition EqualTo(GetByte(s, 0), 0) ThenBlock: { ReturnValue(0) }
-        IfCondition EqualTo(GetByte(s, 0), 48) ThenBlock: {
-            IfCondition EqualTo(GetByte(s, 1), 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(RDMEM_8(s, 0), 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(RDMEM_8(s, 0), 48) ThenBlock: {
+            IfCondition EqualTo(RDMEM_8(s, 1), 0) ThenBlock: { ReturnValue(0) }
         }
         result = 0
         i = 0
         WhileLoop 1 {
-            ch = GetByte(s, i)
+            ch = RDMEM_8(s, i)
             IfCondition EqualTo(ch, 0) ThenBlock: { ReturnValue(result) }
             IfCondition Or(LessThan(ch, 48), GreaterThan(ch, 57)) ThenBlock: {
                 ReturnValue(0)
@@ -688,8 +688,8 @@ Function.Crypto.MacEqual32 {
         x = 0
         i = 0
         WhileLoop LessThan(i, 32) {
-            ba = GetByte(a, i)
-            bb = GetByte(b, i)
+            ba = RDMEM_8(a, i)
+            bb = RDMEM_8(b, i)
             x = BitwiseOr(x, BitwiseXor(ba, bb))
             i = Add(i, 1)
         }
@@ -721,7 +721,7 @@ Function.Crypto.JWT_HS256 {
         pay = Crypto.SliceZ(token, d1n, d2)
         sig_len = 0
         WhileLoop 1 {
-            sc = GetByte(token, Add(d2n, sig_len))
+            sc = RDMEM_8(token, Add(d2n, sig_len))
             IfCondition EqualTo(sc, 0) ThenBlock: { BreakLoop }
             sig_len = Add(sig_len, 1)
         }

@@ -1,8 +1,8 @@
 // Library.StringUtils.ailang — string combinations in pure AiLang
 //
-// The old StringUtils library used a deprecated two-arg Dereference form
+// The old StringUtils library used a deprecated two-arg RDMEM_64 form
 // and was retired. This replacement is written against the current core
-// (GetByte, SetByte, Allocate, StringLength, StringConcat, …) and focuses
+// (RDMEM_8, WRMEM_8, Allocate, StringLength, StringConcat, …) and focuses
 // on COMBINATIONS — functions that compose the basic string primitives
 // into the patterns users actually reach for: parse, prefix/suffix test,
 // search, pad, trim, repeat.
@@ -13,7 +13,7 @@
 //     Address (a new allocated string).
 //   * Allocated results live in the Arena; caller doesn't free.
 //
-// Requires: LibraryImport.Arena  (for Allocate / SetByte on new strings)
+// Requires: LibraryImport.Arena  (for Allocate / WRMEM_8 on new strings)
 //
 // Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
 // Released under the MIT License, as required for submissions to this challenge.
@@ -34,7 +34,7 @@ Function.StringToInt {
         result = 0
         i = 0
         WhileLoop 1 {
-            ch = GetByte(s, i)
+            ch = RDMEM_8(s, i)
             IfCondition Or(LessThan(ch, 48), GreaterThan(ch, 57)) ThenBlock: {
                 ReturnValue(result)
             }
@@ -58,11 +58,11 @@ Function.StringStartsWith {
     Body: {
         i = 0
         WhileLoop 1 {
-            p = GetByte(prefix, i)
+            p = RDMEM_8(prefix, i)
             IfCondition EqualTo(p, 0) ThenBlock: {
                 ReturnValue(1)
             }
-            c = GetByte(s, i)
+            c = RDMEM_8(s, i)
             IfCondition NotEqual(c, p) ThenBlock: {
                 ReturnValue(0)
             }
@@ -86,8 +86,8 @@ Function.StringEndsWith {
         offset = Subtract(s_len, suf_len)
         i = 0
         WhileLoop LessThan(i, suf_len) {
-            a = GetByte(s, Add(offset, i))
-            b = GetByte(suffix, i)
+            a = RDMEM_8(s, Add(offset, i))
+            b = RDMEM_8(suffix, i)
             IfCondition NotEqual(a, b) ThenBlock: { ReturnValue(0) }
             i = Add(i, 1)
         }
@@ -118,8 +118,8 @@ Function.StringIndexOf {
             j = 0
             match = 1
             WhileLoop LessThan(j, n_len) {
-                a = GetByte(haystack, Add(i, j))
-                b = GetByte(needle, j)
+                a = RDMEM_8(haystack, Add(i, j))
+                b = RDMEM_8(needle, j)
                 IfCondition NotEqual(a, b) ThenBlock: {
                     match = 0
                     j = n_len
@@ -172,17 +172,17 @@ Function.StringPadLeft {
         // Left pad
         i = 0
         WhileLoop LessThan(i, pad_count) {
-            SetByte(buf, i, pad_char)
+            WRMEM_8(buf, i, pad_char)
             i = Add(i, 1)
         }
 
         // Copy s
         j = 0
         WhileLoop LessThan(j, s_len) {
-            SetByte(buf, Add(pad_count, j), GetByte(s, j))
+            WRMEM_8(buf, Add(pad_count, j), RDMEM_8(s, j))
             j = Add(j, 1)
         }
-        SetByte(buf, out_len, 0)
+        WRMEM_8(buf, out_len, 0)
         ReturnValue(buf)
     }
 }
@@ -203,17 +203,17 @@ Function.StringPadRight {
         // Copy s
         i = 0
         WhileLoop LessThan(i, s_len) {
-            SetByte(buf, i, GetByte(s, i))
+            WRMEM_8(buf, i, RDMEM_8(s, i))
             i = Add(i, 1)
         }
 
         // Right pad
         j = s_len
         WhileLoop LessThan(j, out_len) {
-            SetByte(buf, j, pad_char)
+            WRMEM_8(buf, j, pad_char)
             j = Add(j, 1)
         }
-        SetByte(buf, out_len, 0)
+        WRMEM_8(buf, out_len, 0)
         ReturnValue(buf)
     }
 }
@@ -234,7 +234,7 @@ Function.StringTrim {
         // Find first non-ws
         start = 0
         WhileLoop LessThan(start, s_len) {
-            c = GetByte(s, start)
+            c = RDMEM_8(s, start)
             is_ws = Or(Or(EqualTo(c, 32), EqualTo(c, 9)),
                        Or(EqualTo(c, 10), EqualTo(c, 13)))
             IfCondition EqualTo(is_ws, 0) ThenBlock: { start = s_len }
@@ -244,7 +244,7 @@ Function.StringTrim {
         // Re-compute properly:
         start = 0
         WhileLoop LessThan(start, s_len) {
-            c = GetByte(s, start)
+            c = RDMEM_8(s, start)
             is_ws = Or(Or(EqualTo(c, 32), EqualTo(c, 9)),
                        Or(EqualTo(c, 10), EqualTo(c, 13)))
             IfCondition EqualTo(is_ws, 0) ThenBlock: {
@@ -253,7 +253,7 @@ Function.StringTrim {
                 start_final = start
                 // jump to tail trim
                 WhileLoop GreaterThan(end, start_final) {
-                    c2 = GetByte(s, Subtract(end, 1))
+                    c2 = RDMEM_8(s, Subtract(end, 1))
                     is_ws2 = Or(Or(EqualTo(c2, 32), EqualTo(c2, 9)),
                                 Or(EqualTo(c2, 10), EqualTo(c2, 13)))
                     IfCondition EqualTo(is_ws2, 0) ThenBlock: {
@@ -261,17 +261,17 @@ Function.StringTrim {
                         buf = Allocate(Add(out_len, 1))
                         k = 0
                         WhileLoop LessThan(k, out_len) {
-                            SetByte(buf, k, GetByte(s, Add(start_final, k)))
+                            WRMEM_8(buf, k, RDMEM_8(s, Add(start_final, k)))
                             k = Add(k, 1)
                         }
-                        SetByte(buf, out_len, 0)
+                        WRMEM_8(buf, out_len, 0)
                         ReturnValue(buf)
                     }
                     end = Subtract(end, 1)
                 }
                 // All whitespace after start_final — return empty
                 empty = Allocate(1)
-                SetByte(empty, 0, 0)
+                WRMEM_8(empty, 0, 0)
                 ReturnValue(empty)
             }
             start = Add(start, 1)
@@ -279,7 +279,7 @@ Function.StringTrim {
 
         // Input was all whitespace or empty
         empty = Allocate(1)
-        SetByte(empty, 0, 0)
+        WRMEM_8(empty, 0, 0)
         ReturnValue(empty)
     }
 }
@@ -297,7 +297,7 @@ Function.StringRepeat {
     Body: {
         IfCondition LessEqual(count, 0) ThenBlock: {
             empty = Allocate(1)
-            SetByte(empty, 0, 0)
+            WRMEM_8(empty, 0, 0)
             ReturnValue(empty)
         }
 
@@ -309,12 +309,12 @@ Function.StringRepeat {
         WhileLoop LessThan(written, total) {
             i = 0
             WhileLoop LessThan(i, s_len) {
-                SetByte(buf, Add(written, i), GetByte(s, i))
+                WRMEM_8(buf, Add(written, i), RDMEM_8(s, i))
                 i = Add(i, 1)
             }
             written = Add(written, s_len)
         }
-        SetByte(buf, total, 0)
+        WRMEM_8(buf, total, 0)
         ReturnValue(buf)
     }
 }
@@ -347,7 +347,7 @@ Function.StringSplitField {
         WhileLoop LessEqual(i, s_len) {
             ch = 0
             IfCondition LessThan(i, s_len) ThenBlock: {
-                ch = GetByte(s, i)
+                ch = RDMEM_8(s, i)
             } ElseBlock: {
                 ch = delim   // Treat end-of-string as one final delim.
             }
@@ -369,7 +369,7 @@ Function.StringSplitField {
         // n was past the last field — return empty.
         IfCondition EqualTo(found_start, -1) ThenBlock: {
             empty = Allocate(1)
-            SetByte(empty, 0, 0)
+            WRMEM_8(empty, 0, 0)
             ReturnValue(empty)
         }
 
@@ -377,10 +377,10 @@ Function.StringSplitField {
         buf = Allocate(Add(out_len, 1))
         k = 0
         WhileLoop LessThan(k, out_len) {
-            SetByte(buf, k, GetByte(s, Add(found_start, k)))
+            WRMEM_8(buf, k, RDMEM_8(s, Add(found_start, k)))
             k = Add(k, 1)
         }
-        SetByte(buf, out_len, 0)
+        WRMEM_8(buf, out_len, 0)
         ReturnValue(buf)
     }
 }

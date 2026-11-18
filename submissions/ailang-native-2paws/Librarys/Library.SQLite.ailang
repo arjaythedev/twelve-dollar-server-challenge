@@ -243,8 +243,8 @@ Function.SQLite.BE16 {
     Input: off: Integer
     Output: Integer
     Body: {
-        b0 = GetByte(p, off)
-        b1 = GetByte(p, Add(off, 1))
+        b0 = RDMEM_8(p, off)
+        b1 = RDMEM_8(p, Add(off, 1))
         ReturnValue(BitwiseOr(LeftShift(b0, 8), b1))
     }
 }
@@ -254,10 +254,10 @@ Function.SQLite.BE32 {
     Input: off: Integer
     Output: Integer
     Body: {
-        b0 = GetByte(p, off)
-        b1 = GetByte(p, Add(off, 1))
-        b2 = GetByte(p, Add(off, 2))
-        b3 = GetByte(p, Add(off, 3))
+        b0 = RDMEM_8(p, off)
+        b1 = RDMEM_8(p, Add(off, 1))
+        b2 = RDMEM_8(p, Add(off, 2))
+        b3 = RDMEM_8(p, Add(off, 3))
         t = BitwiseOr(LeftShift(b0, 24), LeftShift(b1, 16))
         t2 = BitwiseOr(t, LeftShift(b2, 8))
         ReturnValue(BitwiseOr(t2, b3))
@@ -269,8 +269,8 @@ Function.SQLite.PutBE16 {
     Input: off: Integer
     Input: v: Integer
     Body: {
-        SetByte(p, off, BitwiseAnd(RightShift(v, 8), 255))
-        SetByte(p, Add(off, 1), BitwiseAnd(v, 255))
+        WRMEM_8(p, off, BitwiseAnd(RightShift(v, 8), 255))
+        WRMEM_8(p, Add(off, 1), BitwiseAnd(v, 255))
     }
 }
 
@@ -279,10 +279,10 @@ Function.SQLite.PutBE32 {
     Input: off: Integer
     Input: v: Integer
     Body: {
-        SetByte(p, off, BitwiseAnd(RightShift(v, 24), 255))
-        SetByte(p, Add(off, 1), BitwiseAnd(RightShift(v, 16), 255))
-        SetByte(p, Add(off, 2), BitwiseAnd(RightShift(v, 8), 255))
-        SetByte(p, Add(off, 3), BitwiseAnd(v, 255))
+        WRMEM_8(p, off, BitwiseAnd(RightShift(v, 24), 255))
+        WRMEM_8(p, Add(off, 1), BitwiseAnd(RightShift(v, 16), 255))
+        WRMEM_8(p, Add(off, 2), BitwiseAnd(RightShift(v, 8), 255))
+        WRMEM_8(p, Add(off, 3), BitwiseAnd(v, 255))
     }
 }
 
@@ -291,10 +291,10 @@ Function.SQLite.GetLE32 {
     Input: off: Integer
     Output: Integer
     Body: {
-        b0 = GetByte(p, off)
-        b1 = GetByte(p, Add(off, 1))
-        b2 = GetByte(p, Add(off, 2))
-        b3 = GetByte(p, Add(off, 3))
+        b0 = RDMEM_8(p, off)
+        b1 = RDMEM_8(p, Add(off, 1))
+        b2 = RDMEM_8(p, Add(off, 2))
+        b3 = RDMEM_8(p, Add(off, 3))
         t = BitwiseOr(b0, LeftShift(b1, 8))
         t2 = BitwiseOr(t, LeftShift(b2, 16))
         ReturnValue(BitwiseOr(t2, LeftShift(b3, 24)))
@@ -306,10 +306,10 @@ Function.SQLite.PutLE32 {
     Input: off: Integer
     Input: v: Integer
     Body: {
-        SetByte(p, off, BitwiseAnd(v, 255))
-        SetByte(p, Add(off, 1), BitwiseAnd(RightShift(v, 8), 255))
-        SetByte(p, Add(off, 2), BitwiseAnd(RightShift(v, 16), 255))
-        SetByte(p, Add(off, 3), BitwiseAnd(RightShift(v, 24), 255))
+        WRMEM_8(p, off, BitwiseAnd(v, 255))
+        WRMEM_8(p, Add(off, 1), BitwiseAnd(RightShift(v, 8), 255))
+        WRMEM_8(p, Add(off, 2), BitwiseAnd(RightShift(v, 16), 255))
+        WRMEM_8(p, Add(off, 3), BitwiseAnd(RightShift(v, 24), 255))
     }
 }
 
@@ -320,24 +320,24 @@ Function.SQLite.PutVarint {
     Output: Integer
     Body: {
         IfCondition LessThan(v, 128) ThenBlock: {
-            SetByte(p, off, v)
+            WRMEM_8(p, off, v)
             ReturnValue(1)
         }
         IfCondition LessThan(v, 16384) ThenBlock: {
-            SetByte(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
-            SetByte(p, Add(off, 1), BitwiseAnd(v, 127))
+            WRMEM_8(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
+            WRMEM_8(p, Add(off, 1), BitwiseAnd(v, 127))
             ReturnValue(2)
         }
         IfCondition LessThan(v, 2097152) ThenBlock: {
-            SetByte(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 14), 127), 128))
-            SetByte(p, Add(off, 1), BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
-            SetByte(p, Add(off, 2), BitwiseAnd(v, 127))
+            WRMEM_8(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 14), 127), 128))
+            WRMEM_8(p, Add(off, 1), BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
+            WRMEM_8(p, Add(off, 2), BitwiseAnd(v, 127))
             ReturnValue(3)
         }
-        SetByte(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 21), 127), 128))
-        SetByte(p, Add(off, 1), BitwiseOr(BitwiseAnd(RightShift(v, 14), 127), 128))
-        SetByte(p, Add(off, 2), BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
-        SetByte(p, Add(off, 3), BitwiseAnd(v, 127))
+        WRMEM_8(p, off, BitwiseOr(BitwiseAnd(RightShift(v, 21), 127), 128))
+        WRMEM_8(p, Add(off, 1), BitwiseOr(BitwiseAnd(RightShift(v, 14), 127), 128))
+        WRMEM_8(p, Add(off, 2), BitwiseOr(BitwiseAnd(RightShift(v, 7), 127), 128))
+        WRMEM_8(p, Add(off, 3), BitwiseAnd(v, 127))
         ReturnValue(4)
     }
 }
@@ -350,7 +350,7 @@ Function.SQLite.Varint {
         v = 0
         i = 0
         WhileLoop LessThan(i, 8) {
-            b = GetByte(p, Add(off, i))
+            b = RDMEM_8(p, Add(off, i))
             v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(b, 127))
             IfCondition LessThan(b, 128) ThenBlock: {
                 SQLiteV.next = Add(Add(off, i), 1)
@@ -358,7 +358,7 @@ Function.SQLite.Varint {
             }
             i = Add(i, 1)
         }
-        b = GetByte(p, Add(off, 8))
+        b = RDMEM_8(p, Add(off, 8))
         v = BitwiseOr(LeftShift(v, 8), b)
         SQLiteV.next = Add(off, 9)
         ReturnValue(v)
@@ -375,27 +375,27 @@ Function.SQLite.PageKey {
             SQLiteDB.keybuf = buf
         }
         IfCondition EqualTo(n, 0) ThenBlock: {
-            SetByte(buf, 0, 48)
-            SetByte(buf, 1, 0)
+            WRMEM_8(buf, 0, 48)
+            WRMEM_8(buf, 1, 0)
             ReturnValue(buf)
         }
         v = n
         i = 0
         WhileLoop GreaterThan(v, 0) {
             d = Modulo(v, 10)
-            SetByte(buf, i, Add(48, d))
+            WRMEM_8(buf, i, Add(48, d))
             v = Divide(v, 10)
             i = Add(i, 1)
         }
-        SetByte(buf, i, 0)
+        WRMEM_8(buf, i, 0)
         L = i
         a = 0
         b = Subtract(L, 1)
         WhileLoop LessThan(a, b) {
-            ca = GetByte(buf, a)
-            cb = GetByte(buf, b)
-            SetByte(buf, a, cb)
-            SetByte(buf, b, ca)
+            ca = RDMEM_8(buf, a)
+            cb = RDMEM_8(buf, b)
+            WRMEM_8(buf, a, cb)
+            WRMEM_8(buf, b, ca)
             a = Add(a, 1)
             b = Subtract(b, 1)
         }
@@ -422,7 +422,7 @@ Function.SQLite.OvcDrop {
         IfCondition EqualTo(tab, 0) ThenBlock: { ReturnValue(0) }
         slot = LeftShift(BitwiseAnd(pageno, 4095), 4)
         e = Add(tab, slot)
-        IfCondition EqualTo(Dereference(e), pageno) ThenBlock: { StoreValue(e, 0) }
+        IfCondition EqualTo(RDMEM_64(e), pageno) ThenBlock: { WRMEM_64(e, 0) }
     }
 }
 
@@ -435,9 +435,9 @@ Function.SQLite.Page {
         slot = LeftShift(BitwiseAnd(pageno, 4095), 4)
         e = Add(tab, slot)
         IfCondition NotEqual(tab, 0) ThenBlock: {
-            tag = Dereference(e)
+            tag = RDMEM_64(e)
             IfCondition EqualTo(tag, pageno) ThenBlock: {
-                hit = Dereference(Add(e, 8))
+                hit = RDMEM_64(Add(e, 8))
                 IfCondition NotEqual(hit, 0) ThenBlock: { ReturnValue(hit) }
                 src0 = SQLite.FilePage(pageno)
                 ReturnValue(src0)
@@ -451,8 +451,8 @@ Function.SQLite.Page {
             }
         }
         IfCondition NotEqual(tab, 0) ThenBlock: {
-            StoreValue(e, pageno)
-            StoreValue(Add(e, 8), ov)
+            WRMEM_64(e, pageno)
+            WRMEM_64(Add(e, 8), ov)
         }
         IfCondition NotEqual(ov, 0) ThenBlock: { ReturnValue(ov) }
         src = SQLite.FilePage(pageno)
@@ -502,7 +502,7 @@ Function.SQLite.Open {
         st = Allocate(152)
         MemorySet(st, 0, 152)
         SystemCall(SQLiteSys.FSTAT, fd, st, 0, 0, 0)
-        sz = Dereference(Add(st, 48))
+        sz = RDMEM_64(Add(st, 48))
         Deallocate(st, 152)
         IfCondition LessThan(sz, 100) ThenBlock: {
             SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
@@ -513,13 +513,13 @@ Function.SQLite.Open {
             SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
             ReturnValue(0)
         }
-        mag0 = GetByte(mp, 0)
+        mag0 = RDMEM_8(mp, 0)
         IfCondition NotEqual(mag0, 83) ThenBlock: {
             ReturnValue(0)
         }
         ps = SQLite.BE16(mp, 16)
         IfCondition EqualTo(ps, 1) ThenBlock: { ps = 65536 }
-        reserved = GetByte(mp, 20)
+        reserved = RDMEM_8(mp, 20)
         SQLiteDB.fd = fd
         SQLiteDB.map = mp
         SQLiteDB.size = sz
@@ -567,7 +567,7 @@ Function.SQLite.SliceZ {
         IfCondition GreaterThan(n, 0) ThenBlock: {
             MemoryCopy(out, p, n)
         }
-        SetByte(out, n, 0)
+        WRMEM_8(out, n, 0)
         ReturnValue(out)
     }
 }
@@ -601,7 +601,7 @@ Function.SQLite.ReadIntBE {
         v = 0
         i = 0
         WhileLoop LessThan(i, n) {
-            v = BitwiseOr(LeftShift(v, 8), GetByte(p, i))
+            v = BitwiseOr(LeftShift(v, 8), RDMEM_8(p, i))
             i = Add(i, 1)
         }
         ReturnValue(v)
@@ -701,10 +701,10 @@ Function.SQLite.EqLit {
         IfCondition EqualTo(z, 0) ThenBlock: { ReturnValue(1) }
         i = 0
         WhileLoop LessThan(i, n) {
-            IfCondition NotEqual(GetByte(p, i), GetByte(z, i)) ThenBlock: { ReturnValue(1) }
+            IfCondition NotEqual(RDMEM_8(p, i), RDMEM_8(z, i)) ThenBlock: { ReturnValue(1) }
             i = Add(i, 1)
         }
-        IfCondition NotEqual(GetByte(z, n), 0) ThenBlock: { ReturnValue(1) }
+        IfCondition NotEqual(RDMEM_8(z, n), 0) ThenBlock: { ReturnValue(1) }
         ReturnValue(0)
     }
 }
@@ -719,7 +719,7 @@ Function.SQLite.LeafCell {
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition GreaterEqual(ci, ncells) ThenBlock: { ReturnValue(0) }
         ptrbase = Add(h, 8)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         IfCondition EqualTo(flags, 2) ThenBlock: {
             ptrbase = Add(h, 12)
         }
@@ -758,7 +758,7 @@ Function.SQLite.WalkMaster {
     Body: {
         page = SQLite.Page(1)
         h = 100
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         ci = 0
         WhileLoop LessThan(ci, ncells) {
@@ -809,7 +809,7 @@ Function.SQLite.RightLeaf {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         IfCondition EqualTo(flags, 10) ThenBlock: { ReturnValue(pageno) }
         IfCondition EqualTo(flags, 13) ThenBlock: { ReturnValue(pageno) }
         IfCondition EqualTo(flags, 2) ThenBlock: {
@@ -899,21 +899,21 @@ Function.SQLite.DirAppend {
         off = Multiply(SQLiteUDir.n, stride)
         slot = Add(SQLiteUDir.slots, off)
         pgslot = Add(slot, SQLiteUDirOff.PGNO)
-        StoreValue(pgslot, pageno)
+        WRMEM_64(pgslot, pageno)
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         ncells = SQLite.BE16(page, 3)
         IfCondition LessThan(ncells, 1) ThenBlock: { ReturnValue(0) }
         first = SQLite.RowidAtPtr(page, 8, 0, 0)
-        StoreValue(slot, first)
-        pn = Dereference(pgslot)
+        WRMEM_64(slot, first)
+        pn = RDMEM_64(pgslot)
         page2 = SQLite.Page(pn)
         IfCondition EqualTo(page2, 0) ThenBlock: { ReturnValue(0) }
         n2 = SQLite.BE16(page2, 3)
         lasti = Subtract(n2, 1)
         last = SQLite.RowidAtPtr(page2, 8, lasti, 0)
         lastslot = Add(slot, SQLiteUDirOff.LAST)
-        StoreValue(lastslot, last)
+        WRMEM_64(lastslot, last)
         SQLiteUDir.n = Add(SQLiteUDir.n, 1)
         ReturnValue(1)
     }
@@ -927,7 +927,7 @@ Function.SQLite.DirWalk {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ho = Add(h, 3)
         ncells = SQLite.BE16(page, ho)
         IfCondition EqualTo(flags, 5) ThenBlock: {
@@ -986,7 +986,7 @@ Function.SQLite.DirGet {
             mid = Divide(s, 2)
             off = Add(LeftShift(mid, 4), LeftShift(mid, 3))
             base = Add(slots, off)
-            last = Dereference(Add(base, 8))
+            last = RDMEM_64(Add(base, 8))
             IfCondition LessThan(last, SQLiteRow.key) ThenBlock: {
                 lo = Add(mid, 1)
             }
@@ -998,10 +998,10 @@ Function.SQLite.DirGet {
         IfCondition GreaterEqual(lo, nn) ThenBlock: { ReturnValue(0) }
         eoff = Add(LeftShift(lo, 4), LeftShift(lo, 3))
         ep = Add(SQLiteUDir.slots, eoff)
-        first = Dereference(ep)
+        first = RDMEM_64(ep)
         IfCondition LessThan(SQLiteRow.key, first) ThenBlock: { ReturnValue(0) }
-        last2 = Dereference(Add(ep, SQLiteUDirOff.LAST))
-        pgno = Dereference(Add(ep, SQLiteUDirOff.PGNO))
+        last2 = RDMEM_64(Add(ep, SQLiteUDirOff.LAST))
+        pgno = RDMEM_64(Add(ep, SQLiteUDirOff.PGNO))
         SQLiteURow.first = first
         SQLiteURow.last = last2
         SQLiteURow.leaf = pgno
@@ -1027,32 +1027,32 @@ Function.SQLite.RowidAtPtr {
     Output: Integer
     Body: {
         poff = Add(ptrbase, Multiply(ci, 2))
-        b0 = GetByte(page, poff)
-        b1 = GetByte(page, Add(poff, 1))
+        b0 = RDMEM_8(page, poff)
+        b1 = RDMEM_8(page, Add(poff, 1))
         coff = BitwiseOr(LeftShift(b0, 8), b1)
         cell = Add(page, coff)
         IfCondition EqualTo(kind, 1) ThenBlock: {
-            r0 = GetByte(cell, 4)
+            r0 = RDMEM_8(cell, 4)
             IfCondition LessThan(r0, 128) ThenBlock: { ReturnValue(r0) }
-            r1 = GetByte(cell, 5)
+            r1 = RDMEM_8(cell, 5)
             v = BitwiseOr(LeftShift(BitwiseAnd(r0, 127), 7), BitwiseAnd(r1, 127))
             IfCondition LessThan(r1, 128) ThenBlock: { ReturnValue(v) }
-            r2 = GetByte(cell, 6)
+            r2 = RDMEM_8(cell, 6)
             v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r2, 127))
             IfCondition LessThan(r2, 128) ThenBlock: { ReturnValue(v) }
-            r3 = GetByte(cell, 7)
+            r3 = RDMEM_8(cell, 7)
             v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r3, 127))
             IfCondition LessThan(r3, 128) ThenBlock: { ReturnValue(v) }
             k = SQLite.Varint(cell, 4)
             ReturnValue(k)
         }
-        p0 = GetByte(cell, 0)
+        p0 = RDMEM_8(cell, 0)
         off = 1
         IfCondition GreaterEqual(p0, 128) ThenBlock: {
-            p1 = GetByte(cell, 1)
+            p1 = RDMEM_8(cell, 1)
             off = 2
             IfCondition GreaterEqual(p1, 128) ThenBlock: {
-                p2 = GetByte(cell, 2)
+                p2 = RDMEM_8(cell, 2)
                 off = 3
                 IfCondition GreaterEqual(p2, 128) ThenBlock: {
                     rid = SQLite.TableCellRowid(cell)
@@ -1060,15 +1060,15 @@ Function.SQLite.RowidAtPtr {
                 }
             }
         }
-        r0 = GetByte(cell, off)
+        r0 = RDMEM_8(cell, off)
         IfCondition LessThan(r0, 128) ThenBlock: { ReturnValue(r0) }
-        r1 = GetByte(cell, Add(off, 1))
+        r1 = RDMEM_8(cell, Add(off, 1))
         v = BitwiseOr(LeftShift(BitwiseAnd(r0, 127), 7), BitwiseAnd(r1, 127))
         IfCondition LessThan(r1, 128) ThenBlock: { ReturnValue(v) }
-        r2 = GetByte(cell, Add(off, 2))
+        r2 = RDMEM_8(cell, Add(off, 2))
         v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r2, 127))
         IfCondition LessThan(r2, 128) ThenBlock: { ReturnValue(v) }
-        r3 = GetByte(cell, Add(off, 3))
+        r3 = RDMEM_8(cell, Add(off, 3))
         v = BitwiseOr(LeftShift(v, 7), BitwiseAnd(r3, 127))
         IfCondition LessThan(r3, 128) ThenBlock: { ReturnValue(v) }
         rid2 = SQLite.TableCellRowid(cell)
@@ -1083,17 +1083,17 @@ Function.SQLite.RecAt {
     Output: Address
     Body: {
         poff = Add(ptrbase, Multiply(ci, 2))
-        b0 = GetByte(page, poff)
-        b1 = GetByte(page, Add(poff, 1))
+        b0 = RDMEM_8(page, poff)
+        b1 = RDMEM_8(page, Add(poff, 1))
         coff = BitwiseOr(LeftShift(b0, 8), b1)
         cell = Add(page, coff)
-        p0 = GetByte(cell, 0)
+        p0 = RDMEM_8(cell, 0)
         off = 1
         IfCondition GreaterEqual(p0, 128) ThenBlock: {
-            p1 = GetByte(cell, 1)
+            p1 = RDMEM_8(cell, 1)
             off = 2
             IfCondition GreaterEqual(p1, 128) ThenBlock: {
-                p2 = GetByte(cell, 2)
+                p2 = RDMEM_8(cell, 2)
                 off = 3
                 IfCondition GreaterEqual(p2, 128) ThenBlock: {
                     rec = SQLite.TableCellRec(cell)
@@ -1101,19 +1101,19 @@ Function.SQLite.RecAt {
                 }
             }
         }
-        r0 = GetByte(cell, off)
+        r0 = RDMEM_8(cell, off)
         IfCondition LessThan(r0, 128) ThenBlock: {
             ReturnValue(Add(cell, Add(off, 1)))
         }
-        r1 = GetByte(cell, Add(off, 1))
+        r1 = RDMEM_8(cell, Add(off, 1))
         IfCondition LessThan(r1, 128) ThenBlock: {
             ReturnValue(Add(cell, Add(off, 2)))
         }
-        r2 = GetByte(cell, Add(off, 2))
+        r2 = RDMEM_8(cell, Add(off, 2))
         IfCondition LessThan(r2, 128) ThenBlock: {
             ReturnValue(Add(cell, Add(off, 3)))
         }
-        r3 = GetByte(cell, Add(off, 3))
+        r3 = RDMEM_8(cell, Add(off, 3))
         IfCondition LessThan(r3, 128) ThenBlock: {
             ReturnValue(Add(cell, Add(off, 4)))
         }
@@ -1184,7 +1184,7 @@ Function.SQLite.FindRowid {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition EqualTo(flags, 5) ThenBlock: {
             ptrbase = Add(h, 12)
@@ -1246,7 +1246,7 @@ Function.SQLite.ReadPostCols {
                 acc = 0
                 k = 0
                 WhileLoop LessThan(k, ln1) {
-                    acc = BitwiseOr(LeftShift(acc, 8), GetByte(data, k))
+                    acc = BitwiseOr(LeftShift(acc, 8), RDMEM_8(data, k))
                     k = Add(k, 1)
                 }
                 uid = acc
@@ -1350,38 +1350,38 @@ Function.SQLite.IdxKeyAt {
     Output: Integer
     Body: {
         poff = Add(ptrbase, Multiply(ci, 2))
-        b0 = GetByte(page, poff)
-        b1 = GetByte(page, Add(poff, 1))
+        b0 = RDMEM_8(page, poff)
+        b1 = RDMEM_8(page, Add(poff, 1))
         coff = BitwiseOr(LeftShift(b0, 8), b1)
         cell = Add(page, coff)
-        bpl = GetByte(cell, skip)
+        bpl = RDMEM_8(cell, skip)
         IfCondition LessThan(bpl, 128) ThenBlock: {
             rec = Add(cell, Add(skip, 1))
-            hsz = GetByte(rec, 0)
+            hsz = RDMEM_8(rec, 0)
             IfCondition LessThan(hsz, 128) ThenBlock: {
                 IfCondition GreaterThan(hsz, 1) ThenBlock: {
-                    st = GetByte(rec, 1)
+                    st = RDMEM_8(rec, 1)
                     data = Add(rec, hsz)
                     IfCondition EqualTo(st, 3) ThenBlock: {
-                        x0 = GetByte(data, 0)
-                        x1 = GetByte(data, 1)
-                        x2 = GetByte(data, 2)
+                        x0 = RDMEM_8(data, 0)
+                        x1 = RDMEM_8(data, 1)
+                        x2 = RDMEM_8(data, 2)
                         t = BitwiseOr(LeftShift(x0, 16), LeftShift(x1, 8))
                         ReturnValue(BitwiseOr(t, x2))
                     }
                     IfCondition EqualTo(st, 2) ThenBlock: {
-                        x0 = GetByte(data, 0)
-                        x1 = GetByte(data, 1)
+                        x0 = RDMEM_8(data, 0)
+                        x1 = RDMEM_8(data, 1)
                         ReturnValue(BitwiseOr(LeftShift(x0, 8), x1))
                     }
                     IfCondition EqualTo(st, 1) ThenBlock: {
-                        ReturnValue(GetByte(data, 0))
+                        ReturnValue(RDMEM_8(data, 0))
                     }
                     IfCondition EqualTo(st, 4) ThenBlock: {
-                        x0 = GetByte(data, 0)
-                        x1 = GetByte(data, 1)
-                        x2 = GetByte(data, 2)
-                        x3 = GetByte(data, 3)
+                        x0 = RDMEM_8(data, 0)
+                        x1 = RDMEM_8(data, 1)
+                        x2 = RDMEM_8(data, 2)
+                        x3 = RDMEM_8(data, 3)
                         t = BitwiseOr(LeftShift(x0, 24), LeftShift(x1, 16))
                         t2 = BitwiseOr(t, LeftShift(x2, 8))
                         ReturnValue(BitwiseOr(t2, x3))
@@ -1405,7 +1405,7 @@ Function.SQLite.PageFlags {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        ReturnValue(GetByte(page, h))
+        ReturnValue(RDMEM_8(page, h))
     }
 }
 
@@ -1495,7 +1495,7 @@ Function.SQLite.CountTable {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition EqualTo(flags, 5) ThenBlock: {
             n = 0
@@ -1536,7 +1536,7 @@ Function.SQLite.CountAll {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition NotEqual(flags, 2) ThenBlock: { ReturnValue(ncells) }
         n = ncells
@@ -1565,7 +1565,7 @@ Function.SQLite.CountIdx {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition EqualTo(flags, 2) ThenBlock: {
             lo = SQLite.LowerBound(page, pageno, ncells, 4, want)
@@ -1620,7 +1620,7 @@ Function.SQLite.CountBounds {
             ReturnValue(0)
         }
         h = SQLite.HdrOff(SQLiteCnt.leaf)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition NotEqual(flags, 10) ThenBlock: { SQLiteCnt.leaf = 0 }
         IfCondition LessThan(ncells, 1) ThenBlock: { SQLiteCnt.leaf = 0 }
@@ -1739,11 +1739,11 @@ Function.SQLite.FeedCounts {
     Body: {
         n = SQLiteFeed.n
         IfCondition EqualTo(n, 0) ThenBlock: { ReturnValue(0) }
-        lo = Dereference(SQLiteFeed.slots)
+        lo = RDMEM_64(SQLiteFeed.slots)
         hi = lo
         i = 1
         WhileLoop LessThan(i, n) {
-            id = Dereference(SQLite.FeedAt(i))
+            id = RDMEM_64(SQLite.FeedAt(i))
             IfCondition LessThan(id, lo) ThenBlock: { lo = id }
             IfCondition GreaterThan(id, hi) ThenBlock: { hi = id }
             i = Add(i, 1)
@@ -1761,13 +1761,13 @@ Function.SQLite.FeedCounts {
         i = 0
         WhileLoop LessThan(i, n) {
             slot = SQLite.FeedAt(i)
-            id = Dereference(slot)
+            id = RDMEM_64(slot)
             c = 0
             IfCondition EqualTo(ranged, 1) ThenBlock: {
-                c = Dereference(Add(SQLiteFeed.cnt, LeftShift(Subtract(id, lo), 3)))
+                c = RDMEM_64(Add(SQLiteFeed.cnt, LeftShift(Subtract(id, lo), 3)))
             }
             IfCondition EqualTo(ranged, 0) ThenBlock: { c = SQLite.CountLikes(id) }
-            StoreValue(Add(slot, SQLiteFeedOff.LIKES), c)
+            WRMEM_64(Add(slot, SQLiteFeedOff.LIKES), c)
             i = Add(i, 1)
         }
     }
@@ -1778,7 +1778,7 @@ Function.SQLite.CntAdd {
     Input: v: Integer
     Body: {
         e = Add(SQLiteFeed.cnt, LeftShift(Subtract(key, SQLiteFeed.lo), 3))
-        StoreValue(e, Add(Dereference(e), v))
+        WRMEM_64(e, Add(RDMEM_64(e), v))
     }
 }
 
@@ -1793,7 +1793,7 @@ Function.SQLite.RangeCount {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         b1 = Add(b, 1)
         IfCondition EqualTo(flags, 2) ThenBlock: {
@@ -1864,7 +1864,7 @@ Function.SQLite.FeedId {
     Output: Integer
     Body: {
         p = SQLite.FeedAt(i)
-        ReturnValue(Dereference(p))
+        ReturnValue(RDMEM_64(p))
     }
 }
 
@@ -1873,7 +1873,7 @@ Function.SQLite.FeedBody {
     Output: Address
     Body: {
         p = SQLite.FeedAt(i)
-        ReturnValue(Dereference(Add(p, SQLiteFeedOff.BODY)))
+        ReturnValue(RDMEM_64(Add(p, SQLiteFeedOff.BODY)))
     }
 }
 
@@ -1882,7 +1882,7 @@ Function.SQLite.FeedCreated {
     Output: Address
     Body: {
         p = SQLite.FeedAt(i)
-        ReturnValue(Dereference(Add(p, SQLiteFeedOff.CREATED)))
+        ReturnValue(RDMEM_64(Add(p, SQLiteFeedOff.CREATED)))
     }
 }
 
@@ -1891,7 +1891,7 @@ Function.SQLite.FeedAuthor {
     Output: Address
     Body: {
         p = SQLite.FeedAt(i)
-        ReturnValue(Dereference(Add(p, SQLiteFeedOff.AUTHOR)))
+        ReturnValue(RDMEM_64(Add(p, SQLiteFeedOff.AUTHOR)))
     }
 }
 
@@ -1900,21 +1900,21 @@ Function.SQLite.FeedLikes {
     Output: Integer
     Body: {
         p = SQLite.FeedAt(i)
-        ReturnValue(Dereference(Add(p, SQLiteFeedOff.LIKES)))
+        ReturnValue(RDMEM_64(Add(p, SQLiteFeedOff.LIKES)))
     }
 }
 
 Function.SQLite.FeedStore {
     Body: {
         slot = SQLite.FeedAt(SQLiteFeed.n)
-        StoreValue(slot, SQLitePost.id)
-        StoreValue(Add(slot, SQLiteFeedOff.BODY), SQLitePost.body)
-        StoreValue(Add(slot, SQLiteFeedOff.CREATED), SQLitePost.created)
-        StoreValue(Add(slot, SQLiteFeedOff.AUTHOR), SQLitePost.author)
-        StoreValue(Add(slot, SQLiteFeedOff.LIKES), SQLitePost.likes)
-        StoreValue(Add(slot, SQLiteFeedOff.BODY_N), SQLitePost.body_n)
-        StoreValue(Add(slot, SQLiteFeedOff.CREATED_N), SQLitePost.created_n)
-        StoreValue(Add(slot, SQLiteFeedOff.AUTHOR_N), SQLitePost.author_n)
+        WRMEM_64(slot, SQLitePost.id)
+        WRMEM_64(Add(slot, SQLiteFeedOff.BODY), SQLitePost.body)
+        WRMEM_64(Add(slot, SQLiteFeedOff.CREATED), SQLitePost.created)
+        WRMEM_64(Add(slot, SQLiteFeedOff.AUTHOR), SQLitePost.author)
+        WRMEM_64(Add(slot, SQLiteFeedOff.LIKES), SQLitePost.likes)
+        WRMEM_64(Add(slot, SQLiteFeedOff.BODY_N), SQLitePost.body_n)
+        WRMEM_64(Add(slot, SQLiteFeedOff.CREATED_N), SQLitePost.created_n)
+        WRMEM_64(Add(slot, SQLiteFeedOff.AUTHOR_N), SQLitePost.author_n)
         SQLiteFeed.n = Add(SQLiteFeed.n, 1)
     }
 }
@@ -1923,14 +1923,14 @@ Function.SQLite.FeedLoad {
     Input: i: Integer
     Body: {
         p = SQLite.FeedAt(i)
-        SQLitePost.id = Dereference(p)
-        SQLitePost.body = Dereference(Add(p, SQLiteFeedOff.BODY))
-        SQLitePost.created = Dereference(Add(p, SQLiteFeedOff.CREATED))
-        SQLitePost.author = Dereference(Add(p, SQLiteFeedOff.AUTHOR))
-        SQLitePost.likes = Dereference(Add(p, SQLiteFeedOff.LIKES))
-        SQLitePost.body_n = Dereference(Add(p, SQLiteFeedOff.BODY_N))
-        SQLitePost.created_n = Dereference(Add(p, SQLiteFeedOff.CREATED_N))
-        SQLitePost.author_n = Dereference(Add(p, SQLiteFeedOff.AUTHOR_N))
+        SQLitePost.id = RDMEM_64(p)
+        SQLitePost.body = RDMEM_64(Add(p, SQLiteFeedOff.BODY))
+        SQLitePost.created = RDMEM_64(Add(p, SQLiteFeedOff.CREATED))
+        SQLitePost.author = RDMEM_64(Add(p, SQLiteFeedOff.AUTHOR))
+        SQLitePost.likes = RDMEM_64(Add(p, SQLiteFeedOff.LIKES))
+        SQLitePost.body_n = RDMEM_64(Add(p, SQLiteFeedOff.BODY_N))
+        SQLitePost.created_n = RDMEM_64(Add(p, SQLiteFeedOff.CREATED_N))
+        SQLitePost.author_n = RDMEM_64(Add(p, SQLiteFeedOff.AUTHOR_N))
     }
 }
 
@@ -1945,7 +1945,7 @@ Function.SQLite.FeedWalkTable {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition EqualTo(flags, 5) ThenBlock: {
             right = SQLite.BE32(page, Add(h, 8))
@@ -2010,7 +2010,7 @@ Function.SQLite.FeedWalk {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition EqualTo(flags, 2) ThenBlock: {
             ci = 0
@@ -2074,11 +2074,11 @@ Function.SQLite.WalName {
         IfCondition GreaterThan(n, 0) ThenBlock: {
             MemoryCopy(out, SQLiteDB.path, n)
         }
-        SetByte(out, n, 45)
-        SetByte(out, Add(n, 1), 119)
-        SetByte(out, Add(n, 2), 97)
-        SetByte(out, Add(n, 3), 108)
-        SetByte(out, Add(n, 4), 0)
+        WRMEM_8(out, n, 45)
+        WRMEM_8(out, Add(n, 1), 119)
+        WRMEM_8(out, Add(n, 2), 97)
+        WRMEM_8(out, Add(n, 3), 108)
+        WRMEM_8(out, Add(n, 4), 0)
         ReturnValue(out)
     }
 }
@@ -2094,7 +2094,7 @@ Function.SQLite.WalCkAdd {
         q = Add(p, off)
         WhileLoop LessThan(i, nbyte) {
             // one little-endian 8-byte load is both 32-bit words
-            w = Dereference(Add(q, i))
+            w = RDMEM_64(Add(q, i))
             x1 = BitwiseAnd(w, 4294967295)
             x2 = BitwiseAnd(RightShift(w, 32), 4294967295)
             t1 = Add(Add(s1, x1), s2)
@@ -2119,7 +2119,7 @@ Function.SQLite.LoadWal {
         st = Allocate(152)
         MemorySet(st, 0, 152)
         SystemCall(SQLiteSys.FSTAT, fd, st, 0, 0, 0)
-        wsz = Dereference(Add(st, 48))
+        wsz = RDMEM_64(Add(st, 48))
         Deallocate(st, 152)
         IfCondition LessThan(wsz, 32) ThenBlock: {
             SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
@@ -2222,8 +2222,8 @@ Function.SQLite.WalEnsure {
         ts = Allocate(16)
         MemorySet(ts, 0, 16)
         SystemCall(SQLiteSys.CLOCK, 0, ts)
-        SQLiteDB.salt1 = Dereference(ts)
-        SQLiteDB.salt2 = Dereference(Add(ts, 8))
+        SQLiteDB.salt1 = RDMEM_64(ts)
+        SQLiteDB.salt2 = RDMEM_64(Add(ts, 8))
         Deallocate(ts, 16)
         SQLite.PutBE32(hdr, 16, SQLiteDB.salt1)
         SQLite.PutBE32(hdr, 20, SQLiteDB.salt2)
@@ -2455,7 +2455,7 @@ Function.SQLite.SyncAsk {
     Body: {
         SQLiteDB.inflight = 1
         SQLiteDB.sync_kind = kind
-        StoreValue(SQLiteDB.sync_buf, kind)
+        WRMEM_64(SQLiteDB.sync_buf, kind)
         SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_req, SQLiteDB.sync_buf, 8)
     }
 }
@@ -2533,7 +2533,7 @@ Function.SQLite.IoKick {
 Function.SQLite.IoDone {
     Output: Integer
     Body: {
-        ReturnValue(Dereference(Add(SQLiteIo.blk, 8)))
+        ReturnValue(RDMEM_64(Add(SQLiteIo.blk, 8)))
     }
 }
 
@@ -2543,11 +2543,11 @@ Function.SQLite.IoRoom {
     Input: need: Integer
     Body: {
         WhileLoop 1 {
-            tail = Dereference(SQLiteIo.blk)
+            tail = RDMEM_64(SQLiteIo.blk)
             used = Subtract(Add(SQLiteIo.head, need), tail)
             IfCondition LessEqual(used, SQLiteIo.size) ThenBlock: { ReturnValue(0) }
             SQLite.IoKick()
-            StoreValue(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
+            WRMEM_64(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
             SystemCall(SQLiteSys.POLL, SQLiteIo.pfd, 1, 10)
         }
     }
@@ -2568,18 +2568,18 @@ Function.SQLite.IoPut {
         SQLite.IoRoom(Add(skip, need))
         data = Add(SQLiteIo.blk, 64)
         IfCondition GreaterThan(skip, 0) ThenBlock: {
-            IfCondition GreaterEqual(room, 32) ThenBlock: { StoreValue(Add(data, phys), 0) }
+            IfCondition GreaterEqual(room, 32) ThenBlock: { WRMEM_64(Add(data, phys), 0) }
             SQLiteIo.head = Add(SQLiteIo.head, skip)
             phys = 0
         }
         p = Add(data, phys)
-        StoreValue(p, op)
-        StoreValue(Add(p, 8), arg)
-        StoreValue(Add(p, 16), 0)
-        StoreValue(Add(p, 24), len)
+        WRMEM_64(p, op)
+        WRMEM_64(Add(p, 8), arg)
+        WRMEM_64(Add(p, 16), 0)
+        WRMEM_64(Add(p, 24), len)
         IfCondition GreaterThan(len, 0) ThenBlock: { MemoryCopy(Add(p, 32), src, len) }
         SQLiteIo.head = Add(SQLiteIo.head, need)
-        StoreValue(Add(SQLiteIo.blk, 16), SQLiteIo.head)
+        WRMEM_64(Add(SQLiteIo.blk, 16), SQLiteIo.head)
     }
 }
 
@@ -2589,7 +2589,7 @@ Function.SQLite.IoWait {
     Body: {
         WhileLoop LessThan(SQLite.IoDone(), seq) {
             SQLite.IoKick()
-            StoreValue(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
+            WRMEM_64(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
             SystemCall(SQLiteSys.POLL, SQLiteIo.pfd, 1, 10)
         }
     }
@@ -2622,9 +2622,9 @@ Function.SQLite.IoServe {
         buf = SQLiteDB.sync_buf
         tail = 0
         WhileLoop 1 {
-            head = Dereference(Add(blk, 16))
+            head = RDMEM_64(Add(blk, 16))
             IfCondition EqualTo(tail, head) ThenBlock: {
-                StoreValue(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_req, LeftShift(1, 32)))
+                WRMEM_64(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_req, LeftShift(1, 32)))
                 r = SystemCall(SQLiteSys.POLL, SQLiteIo.pfd, 1, 1000)
                 IfCondition GreaterThan(r, 0) ThenBlock: {
                     SystemCall(SQLiteSys.READ, SQLiteDB.sync_req, buf, 8)
@@ -2639,25 +2639,25 @@ Function.SQLite.IoServe {
                 room = Subtract(sz, phys)
                 p = Add(data, phys)
                 op = 0
-                IfCondition GreaterEqual(room, 32) ThenBlock: { op = Dereference(p) }
+                IfCondition GreaterEqual(room, 32) ThenBlock: { op = RDMEM_64(p) }
                 IfCondition EqualTo(op, 0) ThenBlock: {
                     tail = Add(tail, room)
                 } ElseBlock: {
-                    arg = Dereference(Add(p, 8))
-                    len = Dereference(Add(p, 24))
+                    arg = RDMEM_64(Add(p, 8))
+                    len = RDMEM_64(Add(p, 24))
                     src = Add(p, 32)
                     IfCondition EqualTo(op, SQLiteOp.WAL) ThenBlock: { SystemCall(SQLiteSys.PWRITE, wfd, src, len, arg) }
                     IfCondition EqualTo(op, SQLiteOp.DB) ThenBlock: { SystemCall(SQLiteSys.PWRITE, dfd, src, len, arg) }
                     IfCondition EqualTo(op, SQLiteOp.SYNC_WAL) ThenBlock: { SystemCall(SQLiteSys.FDATASYNC, wfd, 0, 0) }
                     IfCondition EqualTo(op, SQLiteOp.SYNC_DB) ThenBlock: { SystemCall(SQLiteSys.FDATASYNC, dfd, 0, 0) }
                     IfCondition EqualTo(op, SQLiteOp.MARK) ThenBlock: {
-                        StoreValue(Add(blk, 8), arg)
-                        StoreValue(buf, 1)
+                        WRMEM_64(Add(blk, 8), arg)
+                        WRMEM_64(buf, 1)
                         SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_done, buf, 8)
                     }
                     tail = Add(tail, Add(32, BitwiseAnd(Add(len, 7), -8)))
                 }
-                StoreValue(blk, tail)
+                WRMEM_64(blk, tail)
             }
         }
     }
@@ -2774,7 +2774,7 @@ Function.SQLite.StartSyncer {
             SQLiteIo.size = SQLiteOp.RING
             SQLiteIo.pfd = Allocate(8)
             SQLiteIo.one = Allocate(8)
-            StoreValue(SQLiteIo.one, 1)
+            WRMEM_64(SQLiteIo.one, 1)
         }
         pid = SystemCall(SQLiteSys.FORK)
         IfCondition NotEqual(pid, 0) ThenBlock: { ReturnValue(1) }
@@ -2786,13 +2786,13 @@ Function.SQLite.StartSyncer {
             r = SystemCall(SQLiteSys.READ, SQLiteDB.sync_req, SQLiteDB.sync_buf, 8)
             IfCondition EqualTo(r, 8) ThenBlock: {
                 target = wn
-                IfCondition EqualTo(Dereference(SQLiteDB.sync_buf), 2) ThenBlock: { target = path }
+                IfCondition EqualTo(RDMEM_64(SQLiteDB.sync_buf), 2) ThenBlock: { target = path }
                 fd = SystemCall(SQLiteSys.OPEN, target, SQLiteSys.O_RDWR, 0)
                 IfCondition GreaterEqual(fd, 0) ThenBlock: {
                     SystemCall(SQLiteSys.FDATASYNC, fd, 0, 0)
                     SystemCall(SQLiteSys.CLOSE, fd, 0, 0)
                 }
-                StoreValue(SQLiteDB.sync_buf, 1)
+                WRMEM_64(SQLiteDB.sync_buf, 1)
                 SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_done, SQLiteDB.sync_buf, 8)
             }
         }
@@ -2821,11 +2821,11 @@ Function.SQLite.Remap {
             key = Array.Get(keys, i)
             pgno = 0
             j = 0
-            c = GetByte(key, 0)
+            c = RDMEM_8(key, 0)
             WhileLoop NotEqual(c, 0) {
                 pgno = Add(Multiply(pgno, 10), Subtract(c, 48))
                 j = Add(j, 1)
-                c = GetByte(key, j)
+                c = RDMEM_8(key, j)
             }
             pending = 0
             IfCondition NotEqual(Hash.Get(SQLiteDB.ckpt, key), 0) ThenBlock: { pending = 1 }
@@ -2866,13 +2866,13 @@ Function.SQLite.PutIntN {
     Input: v: Integer
     Body: {
         IfCondition EqualTo(n, 1) ThenBlock: {
-            SetByte(p, off, BitwiseAnd(v, 255))
+            WRMEM_8(p, off, BitwiseAnd(v, 255))
         }
         IfCondition EqualTo(n, 2) ThenBlock: {
             SQLite.PutBE16(p, off, v)
         }
         IfCondition EqualTo(n, 3) ThenBlock: {
-            SetByte(p, off, BitwiseAnd(RightShift(v, 16), 255))
+            WRMEM_8(p, off, BitwiseAnd(RightShift(v, 16), 255))
             SQLite.PutBE16(p, Add(off, 1), v)
         }
         IfCondition EqualTo(n, 4) ThenBlock: {
@@ -2920,8 +2920,8 @@ Function.SQLite.MemCmp {
         IfCondition GreaterThan(na, nb) ThenBlock: { n = nb }
         i = 0
         WhileLoop LessThan(i, n) {
-            ba = GetByte(a, i)
-            bb = GetByte(b, i)
+            ba = RDMEM_8(a, i)
+            bb = RDMEM_8(b, i)
             IfCondition LessThan(ba, bb) ThenBlock: { ReturnValue(-1) }
             IfCondition GreaterThan(ba, bb) ThenBlock: { ReturnValue(1) }
             i = Add(i, 1)
@@ -3020,7 +3020,7 @@ Function.SQLite.AllocPage {
         pn = SQLiteDB.npages
         buf = Allocate(SQLiteDB.page)
         MemorySet(buf, 0, SQLiteDB.page)
-        SetByte(buf, 0, flags)
+        WRMEM_8(buf, 0, flags)
         SQLite.PutBE16(buf, 5, SQLiteDB.usable)
         key = SQLite.PageKey(pn)
         Hash.Set(SQLiteDB.overlay, key, buf)
@@ -3049,7 +3049,7 @@ Function.SQLite.Gap {
     Body: {
         page = SQLite.Page(pageno)
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         content = SQLite.BE16(page, Add(h, 5))
         pb = SQLite.PtrBase(h, flags)
@@ -3063,7 +3063,7 @@ Function.SQLite.Compact {
     Body: {
         page = SQLite.Dirty(pageno)
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         pb = SQLite.PtrBase(h, flags)
         ps = SQLiteDB.page
@@ -3081,7 +3081,7 @@ Function.SQLite.Compact {
         }
         SQLite.PutBE16(tmp, Add(h, 5), dst)
         SQLite.PutBE16(tmp, Add(h, 1), 0)
-        SetByte(tmp, Add(h, 7), 0)
+        WRMEM_8(tmp, Add(h, 7), 0)
         MemoryCopy(page, tmp, ps)
         Deallocate(tmp, ps)
     }
@@ -3104,7 +3104,7 @@ Function.SQLite.PutCell {
             page = SQLite.Page(pageno)
         }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         content = SQLite.BE16(page, Add(h, 5))
         pb = SQLite.PtrBase(h, flags)
@@ -3169,7 +3169,7 @@ Function.SQLite.SaveSep {
     Body: {
         page = SQLite.Page(pageno)
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         last = Subtract(ncells, 1)
         cell = SQLite.LeafCell(page, pageno, last)
@@ -3184,7 +3184,7 @@ Function.SQLite.PutNew {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         pos = SQLite.InsPos(page, pageno, ncells, flags)
         ok = SQLite.PutCell(pageno, pos, SQLiteIns.buf, SQLiteIns.len)
@@ -3244,7 +3244,7 @@ Function.SQLite.SplitLeaf {
     Body: {
         page = SQLite.Dirty(pageno)
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         mid = Divide(ncells, 2)
         is_int = 0
@@ -3404,7 +3404,7 @@ Function.SQLite.BtreeInsert {
         page = SQLite.Page(pageno)
         IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
         h = SQLite.HdrOff(pageno)
-        flags = GetByte(page, h)
+        flags = RDMEM_8(page, h)
         ncells = SQLite.BE16(page, Add(h, 3))
         IfCondition EqualTo(flags, 5) ThenBlock: {
             child = SQLite.BE32(page, Add(h, 8))
@@ -3480,7 +3480,7 @@ Function.SQLite.MaxRowid {
             page = SQLite.Page(cur)
             IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
             h = SQLite.HdrOff(cur)
-            flags = GetByte(page, h)
+            flags = RDMEM_8(page, h)
             ncells = SQLite.BE16(page, Add(h, 3))
             IfCondition EqualTo(flags, 5) ThenBlock: {
                 cur = SQLite.BE32(page, Add(h, 8))
@@ -3539,10 +3539,10 @@ Function.SQLite.EncIntsText {
         stb = SQLite.IntSerial(b)
         stt = Add(13, Multiply(ln, 2))
         rec = Allocate(Add(ln, 32))
-        SetByte(rec, 0, 4)
-        SetByte(rec, 1, sta)
-        SetByte(rec, 2, stb)
-        SetByte(rec, 3, stt)
+        WRMEM_8(rec, 0, 4)
+        WRMEM_8(rec, 1, sta)
+        WRMEM_8(rec, 2, stb)
+        WRMEM_8(rec, 3, stt)
         o = 4
         la = SQLite.SerialLen(sta)
         SQLite.PutIntN(rec, o, la, a)
@@ -3570,15 +3570,15 @@ Function.SQLite.EncPostRec {
         stb = Add(13, Multiply(bl, 2))
         stc = Add(13, Multiply(cl, 2))
         rec = Allocate(Add(Add(bl, cl), 32))
-        SetByte(rec, 0, 5)
-        SetByte(rec, 1, 0)
-        SetByte(rec, 2, stu)
+        WRMEM_8(rec, 0, 5)
+        WRMEM_8(rec, 1, 0)
+        WRMEM_8(rec, 2, stu)
         n3 = SQLite.PutVarint(rec, 3, stb)
         off = Add(3, n3)
         n4 = SQLite.PutVarint(rec, off, stc)
         hend = Add(off, n4)
         IfCondition NotEqual(hend, 5) ThenBlock: {
-            SetByte(rec, 0, hend)
+            WRMEM_8(rec, 0, hend)
         }
         o = hend
         lu = SQLite.SerialLen(stu)
@@ -3605,10 +3605,10 @@ Function.SQLite.EncTextTwoInt {
         stb = SQLite.IntSerial(b)
         rec = Allocate(Add(ln, 32))
         n1 = SQLite.PutVarint(rec, 1, stt)
-        SetByte(rec, Add(1, n1), sta)
-        SetByte(rec, Add(Add(1, n1), 1), stb)
+        WRMEM_8(rec, Add(1, n1), sta)
+        WRMEM_8(rec, Add(Add(1, n1), 1), stb)
         hend = Add(Add(1, n1), 2)
-        SetByte(rec, 0, hend)
+        WRMEM_8(rec, 0, hend)
         IfCondition GreaterThan(ln, 0) ThenBlock: {
             MemoryCopy(Add(rec, hend), t, ln)
         }
@@ -3632,9 +3632,9 @@ Function.SQLite.EncTwoInt {
         sta = SQLite.IntSerial(a)
         stb = SQLite.IntSerial(b)
         rec = Allocate(16)
-        SetByte(rec, 0, 3)
-        SetByte(rec, 1, sta)
-        SetByte(rec, 2, stb)
+        WRMEM_8(rec, 0, 3)
+        WRMEM_8(rec, 1, sta)
+        WRMEM_8(rec, 2, stb)
         o = 3
         la = SQLite.SerialLen(sta)
         SQLite.PutIntN(rec, o, la, a)
@@ -3657,10 +3657,10 @@ Function.SQLite.EncThreeInt {
         stb = SQLite.IntSerial(b)
         stc = SQLite.IntSerial(c)
         rec = Allocate(24)
-        SetByte(rec, 0, 4)
-        SetByte(rec, 1, sta)
-        SetByte(rec, 2, stb)
-        SetByte(rec, 3, stc)
+        WRMEM_8(rec, 0, 4)
+        WRMEM_8(rec, 1, sta)
+        WRMEM_8(rec, 2, stb)
+        WRMEM_8(rec, 3, stc)
         o = 4
         la = SQLite.SerialLen(sta)
         SQLite.PutIntN(rec, o, la, a)
@@ -3742,7 +3742,7 @@ Function.SQLite.PkWalk {
             page = SQLite.Page(cur)
             IfCondition EqualTo(page, 0) ThenBlock: { ReturnValue(0) }
             h = SQLite.HdrOff(cur)
-            flags = GetByte(page, h)
+            flags = RDMEM_8(page, h)
             ncells = SQLite.BE16(page, Add(h, 3))
             skip = 0
             IfCondition EqualTo(flags, 2) ThenBlock: { skip = 4 }

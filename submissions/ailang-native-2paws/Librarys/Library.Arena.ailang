@@ -258,7 +258,7 @@ Function.Arena_Init {
 Function.Arena_InitSlab24 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab24.chunk = chunk
         Slab24.next = Add(chunk, 8)
         Slab24.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -272,7 +272,7 @@ Function.Arena_InitSlab24 {
 Function.Arena_InitSlab32 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab32.chunk = chunk
         Slab32.next = Add(chunk, 8)
         Slab32.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -286,7 +286,7 @@ Function.Arena_InitSlab32 {
 Function.Arena_InitSlab64 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab64.chunk = chunk
         Slab64.next = Add(chunk, 8)
         Slab64.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -300,7 +300,7 @@ Function.Arena_InitSlab64 {
 Function.Arena_InitSlab128 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab128.chunk = chunk
         Slab128.next = Add(chunk, 8)
         Slab128.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -314,7 +314,7 @@ Function.Arena_InitSlab128 {
 Function.Arena_InitSlab256 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab256.chunk = chunk
         Slab256.next = Add(chunk, 8)
         Slab256.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -328,7 +328,7 @@ Function.Arena_InitSlab256 {
 Function.Arena_InitSlab512 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab512.chunk = chunk
         Slab512.next = Add(chunk, 8)
         Slab512.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -342,7 +342,7 @@ Function.Arena_InitSlab512 {
 Function.Arena_InitSlab1024 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab1024.chunk = chunk
         Slab1024.next = Add(chunk, 8)
         Slab1024.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -356,7 +356,7 @@ Function.Arena_InitSlab1024 {
 Function.Arena_InitSlab2048 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab2048.chunk = chunk
         Slab2048.next = Add(chunk, 8)
         Slab2048.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -370,7 +370,7 @@ Function.Arena_InitSlab2048 {
 Function.Arena_InitSlab4096 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab4096.chunk = chunk
         Slab4096.next = Add(chunk, 8)
         Slab4096.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -384,7 +384,7 @@ Function.Arena_InitSlab4096 {
 Function.Arena_InitGeneral {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         ArenaGeneral.chunk = chunk
         ArenaGeneral.next = Add(chunk, 8)
         ArenaGeneral.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -428,7 +428,7 @@ Function.Arena_Alloc24 {
         IfCondition NotEqual(Slab24.free_list, 0) ThenBlock: {
             ptr = Slab24.free_list
             // Free list stores next pointer at [ptr]
-            Slab24.free_list = Dereference(ptr)
+            Slab24.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -450,7 +450,7 @@ Function.Arena_Free24 {
         Slab24.free_count = Add(Slab24.free_count, 1)
         
         // Push to free list (store current head at ptr, update head)
-        StoreValue(ptr, Slab24.free_list)
+        WRMEM_64(ptr, Slab24.free_list)
         Slab24.free_list = ptr
     }
 }
@@ -460,7 +460,7 @@ Function.Arena_GrowSlab24 {
         // Allocate new chunk
         old_chunk = Slab24.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab24.chunk = chunk
         Slab24.next = Add(chunk, 8)
         Slab24.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -472,7 +472,7 @@ Function.Arena_FreeSlab24 {
     Body: {
         current = Slab24.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -496,7 +496,7 @@ Function.Arena_Alloc32 {
         
         IfCondition NotEqual(Slab32.free_list, 0) ThenBlock: {
             ptr = Slab32.free_list
-            Slab32.free_list = Dereference(ptr)
+            Slab32.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -514,7 +514,7 @@ Function.Arena_Free32 {
     Input: ptr: Address
     Body: {
         Slab32.free_count = Add(Slab32.free_count, 1)
-        StoreValue(ptr, Slab32.free_list)
+        WRMEM_64(ptr, Slab32.free_list)
         Slab32.free_list = ptr
     }
 }
@@ -523,7 +523,7 @@ Function.Arena_GrowSlab32 {
     Body: {
         old_chunk = Slab32.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab32.chunk = chunk
         Slab32.next = Add(chunk, 8)
         Slab32.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -535,7 +535,7 @@ Function.Arena_FreeSlab32 {
     Body: {
         current = Slab32.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -559,7 +559,7 @@ Function.Arena_Alloc64 {
         
         IfCondition NotEqual(Slab64.free_list, 0) ThenBlock: {
             ptr = Slab64.free_list
-            Slab64.free_list = Dereference(ptr)
+            Slab64.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -577,7 +577,7 @@ Function.Arena_Free64 {
     Input: ptr: Address
     Body: {
         Slab64.free_count = Add(Slab64.free_count, 1)
-        StoreValue(ptr, Slab64.free_list)
+        WRMEM_64(ptr, Slab64.free_list)
         Slab64.free_list = ptr
     }
 }
@@ -586,7 +586,7 @@ Function.Arena_GrowSlab64 {
     Body: {
         old_chunk = Slab64.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab64.chunk = chunk
         Slab64.next = Add(chunk, 8)
         Slab64.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -598,7 +598,7 @@ Function.Arena_FreeSlab64 {
     Body: {
         current = Slab64.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -623,7 +623,7 @@ Function.Arena_Alloc128 {
         
         IfCondition NotEqual(Slab128.free_list, 0) ThenBlock: {
             ptr = Slab128.free_list
-            Slab128.free_list = Dereference(ptr)
+            Slab128.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -641,7 +641,7 @@ Function.Arena_Free128 {
     Input: ptr: Address
     Body: {
         Slab128.free_count = Add(Slab128.free_count, 1)
-        StoreValue(ptr, Slab128.free_list)
+        WRMEM_64(ptr, Slab128.free_list)
         Slab128.free_list = ptr
     }
 }
@@ -650,7 +650,7 @@ Function.Arena_GrowSlab128 {
     Body: {
         old_chunk = Slab128.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab128.chunk = chunk
         Slab128.next = Add(chunk, 8)
         Slab128.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -662,7 +662,7 @@ Function.Arena_FreeSlab128 {
     Body: {
         current = Slab128.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -686,7 +686,7 @@ Function.Arena_Alloc256 {
         
         IfCondition NotEqual(Slab256.free_list, 0) ThenBlock: {
             ptr = Slab256.free_list
-            Slab256.free_list = Dereference(ptr)
+            Slab256.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -704,7 +704,7 @@ Function.Arena_Free256 {
     Input: ptr: Address
     Body: {
         Slab256.free_count = Add(Slab256.free_count, 1)
-        StoreValue(ptr, Slab256.free_list)
+        WRMEM_64(ptr, Slab256.free_list)
         Slab256.free_list = ptr
     }
 }
@@ -713,7 +713,7 @@ Function.Arena_GrowSlab256 {
     Body: {
         old_chunk = Slab256.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab256.chunk = chunk
         Slab256.next = Add(chunk, 8)
         Slab256.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -725,7 +725,7 @@ Function.Arena_FreeSlab256 {
     Body: {
         current = Slab256.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -749,7 +749,7 @@ Function.Arena_Alloc512 {
         
         IfCondition NotEqual(Slab512.free_list, 0) ThenBlock: {
             ptr = Slab512.free_list
-            Slab512.free_list = Dereference(ptr)
+            Slab512.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -767,7 +767,7 @@ Function.Arena_Free512 {
     Input: ptr: Address
     Body: {
         Slab512.free_count = Add(Slab512.free_count, 1)
-        StoreValue(ptr, Slab512.free_list)
+        WRMEM_64(ptr, Slab512.free_list)
         Slab512.free_list = ptr
     }
 }
@@ -776,7 +776,7 @@ Function.Arena_GrowSlab512 {
     Body: {
         old_chunk = Slab512.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab512.chunk = chunk
         Slab512.next = Add(chunk, 8)
         Slab512.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -788,7 +788,7 @@ Function.Arena_FreeSlab512 {
     Body: {
         current = Slab512.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -812,7 +812,7 @@ Function.Arena_Alloc1024 {
         
         IfCondition NotEqual(Slab1024.free_list, 0) ThenBlock: {
             ptr = Slab1024.free_list
-            Slab1024.free_list = Dereference(ptr)
+            Slab1024.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -830,7 +830,7 @@ Function.Arena_Free1024 {
     Input: ptr: Address
     Body: {
         Slab1024.free_count = Add(Slab1024.free_count, 1)
-        StoreValue(ptr, Slab1024.free_list)
+        WRMEM_64(ptr, Slab1024.free_list)
         Slab1024.free_list = ptr
     }
 }
@@ -839,7 +839,7 @@ Function.Arena_GrowSlab1024 {
     Body: {
         old_chunk = Slab1024.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab1024.chunk = chunk
         Slab1024.next = Add(chunk, 8)
         Slab1024.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -851,7 +851,7 @@ Function.Arena_FreeSlab1024 {
     Body: {
         current = Slab1024.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -875,7 +875,7 @@ Function.Arena_Alloc2048 {
         
         IfCondition NotEqual(Slab2048.free_list, 0) ThenBlock: {
             ptr = Slab2048.free_list
-            Slab2048.free_list = Dereference(ptr)
+            Slab2048.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -893,7 +893,7 @@ Function.Arena_Free2048 {
     Input: ptr: Address
     Body: {
         Slab2048.free_count = Add(Slab2048.free_count, 1)
-        StoreValue(ptr, Slab2048.free_list)
+        WRMEM_64(ptr, Slab2048.free_list)
         Slab2048.free_list = ptr
     }
 }
@@ -902,7 +902,7 @@ Function.Arena_GrowSlab2048 {
     Body: {
         old_chunk = Slab2048.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab2048.chunk = chunk
         Slab2048.next = Add(chunk, 8)
         Slab2048.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -914,7 +914,7 @@ Function.Arena_FreeSlab2048 {
     Body: {
         current = Slab2048.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -938,7 +938,7 @@ Function.Arena_Alloc4096 {
         
         IfCondition NotEqual(Slab4096.free_list, 0) ThenBlock: {
             ptr = Slab4096.free_list
-            Slab4096.free_list = Dereference(ptr)
+            Slab4096.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         
@@ -956,7 +956,7 @@ Function.Arena_Free4096 {
     Input: ptr: Address
     Body: {
         Slab4096.free_count = Add(Slab4096.free_count, 1)
-        StoreValue(ptr, Slab4096.free_list)
+        WRMEM_64(ptr, Slab4096.free_list)
         Slab4096.free_list = ptr
     }
 }
@@ -965,7 +965,7 @@ Function.Arena_GrowSlab4096 {
     Body: {
         old_chunk = Slab4096.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab4096.chunk = chunk
         Slab4096.next = Add(chunk, 8)
         Slab4096.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -977,7 +977,7 @@ Function.Arena_FreeSlab4096 {
     Body: {
         current = Slab4096.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -997,7 +997,7 @@ Function.Arena_FreeSlab4096 {
 Function.Arena_InitSlab8192 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab8192.chunk = chunk
         Slab8192.next = Add(chunk, 8)
         Slab8192.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1014,7 +1014,7 @@ Function.Arena_Alloc8192 {
         Slab8192.alloc_count = Add(Slab8192.alloc_count, 1)
         IfCondition NotEqual(Slab8192.free_list, 0) ThenBlock: {
             ptr = Slab8192.free_list
-            Slab8192.free_list = Dereference(ptr)
+            Slab8192.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         IfCondition GreaterEqual(Add(Slab8192.next, 8192), Slab8192.end) ThenBlock: {
@@ -1030,7 +1030,7 @@ Function.Arena_Free8192 {
     Input: ptr: Address
     Body: {
         Slab8192.free_count = Add(Slab8192.free_count, 1)
-        StoreValue(ptr, Slab8192.free_list)
+        WRMEM_64(ptr, Slab8192.free_list)
         Slab8192.free_list = ptr
     }
 }
@@ -1039,7 +1039,7 @@ Function.Arena_GrowSlab8192 {
     Body: {
         old_chunk = Slab8192.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab8192.chunk = chunk
         Slab8192.next = Add(chunk, 8)
         Slab8192.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1051,7 +1051,7 @@ Function.Arena_FreeSlab8192 {
     Body: {
         current = Slab8192.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -1071,7 +1071,7 @@ Function.Arena_FreeSlab8192 {
 Function.Arena_InitSlab16384 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab16384.chunk = chunk
         Slab16384.next = Add(chunk, 8)
         Slab16384.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1088,7 +1088,7 @@ Function.Arena_Alloc16384 {
         Slab16384.alloc_count = Add(Slab16384.alloc_count, 1)
         IfCondition NotEqual(Slab16384.free_list, 0) ThenBlock: {
             ptr = Slab16384.free_list
-            Slab16384.free_list = Dereference(ptr)
+            Slab16384.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         IfCondition GreaterEqual(Add(Slab16384.next, 16384), Slab16384.end) ThenBlock: {
@@ -1104,7 +1104,7 @@ Function.Arena_Free16384 {
     Input: ptr: Address
     Body: {
         Slab16384.free_count = Add(Slab16384.free_count, 1)
-        StoreValue(ptr, Slab16384.free_list)
+        WRMEM_64(ptr, Slab16384.free_list)
         Slab16384.free_list = ptr
     }
 }
@@ -1113,7 +1113,7 @@ Function.Arena_GrowSlab16384 {
     Body: {
         old_chunk = Slab16384.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab16384.chunk = chunk
         Slab16384.next = Add(chunk, 8)
         Slab16384.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1125,7 +1125,7 @@ Function.Arena_FreeSlab16384 {
     Body: {
         current = Slab16384.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -1145,7 +1145,7 @@ Function.Arena_FreeSlab16384 {
 Function.Arena_InitSlab32768 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab32768.chunk = chunk
         Slab32768.next = Add(chunk, 8)
         Slab32768.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1162,7 +1162,7 @@ Function.Arena_Alloc32768 {
         Slab32768.alloc_count = Add(Slab32768.alloc_count, 1)
         IfCondition NotEqual(Slab32768.free_list, 0) ThenBlock: {
             ptr = Slab32768.free_list
-            Slab32768.free_list = Dereference(ptr)
+            Slab32768.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         IfCondition GreaterEqual(Add(Slab32768.next, 32768), Slab32768.end) ThenBlock: {
@@ -1178,7 +1178,7 @@ Function.Arena_Free32768 {
     Input: ptr: Address
     Body: {
         Slab32768.free_count = Add(Slab32768.free_count, 1)
-        StoreValue(ptr, Slab32768.free_list)
+        WRMEM_64(ptr, Slab32768.free_list)
         Slab32768.free_list = ptr
     }
 }
@@ -1187,7 +1187,7 @@ Function.Arena_GrowSlab32768 {
     Body: {
         old_chunk = Slab32768.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab32768.chunk = chunk
         Slab32768.next = Add(chunk, 8)
         Slab32768.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1199,7 +1199,7 @@ Function.Arena_FreeSlab32768 {
     Body: {
         current = Slab32768.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -1219,7 +1219,7 @@ Function.Arena_FreeSlab32768 {
 Function.Arena_InitSlab65536 {
     Body: {
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, 0)
+        WRMEM_64(chunk, 0)
         Slab65536.chunk = chunk
         Slab65536.next = Add(chunk, 8)
         Slab65536.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1236,7 +1236,7 @@ Function.Arena_Alloc65536 {
         Slab65536.alloc_count = Add(Slab65536.alloc_count, 1)
         IfCondition NotEqual(Slab65536.free_list, 0) ThenBlock: {
             ptr = Slab65536.free_list
-            Slab65536.free_list = Dereference(ptr)
+            Slab65536.free_list = RDMEM_64(ptr)
             ReturnValue(ptr)
         }
         IfCondition GreaterEqual(Add(Slab65536.next, 65536), Slab65536.end) ThenBlock: {
@@ -1252,7 +1252,7 @@ Function.Arena_Free65536 {
     Input: ptr: Address
     Body: {
         Slab65536.free_count = Add(Slab65536.free_count, 1)
-        StoreValue(ptr, Slab65536.free_list)
+        WRMEM_64(ptr, Slab65536.free_list)
         Slab65536.free_list = ptr
     }
 }
@@ -1261,7 +1261,7 @@ Function.Arena_GrowSlab65536 {
     Body: {
         old_chunk = Slab65536.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         Slab65536.chunk = chunk
         Slab65536.next = Add(chunk, 8)
         Slab65536.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1273,7 +1273,7 @@ Function.Arena_FreeSlab65536 {
     Body: {
         current = Slab65536.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -1347,7 +1347,7 @@ Function.Arena_LargeCacheAlloc {
         head = Arena_LargeBucketHead(bucket)
         IfCondition NotEqual(head, 0) ThenBlock: {
             // Pop: first 8 bytes of the block hold the next pointer.
-            next = Dereference(head)
+            next = RDMEM_64(head)
             Arena_LargeBucketSetHead(bucket, next)
             LargeMmapCache.hits = Add(LargeMmapCache.hits, 1)
             ReturnValue(head)
@@ -1370,7 +1370,7 @@ Function.Arena_LargeCacheFree {
         }
         // Push onto bucket's freelist: store current head in ptr[0].
         head = Arena_LargeBucketHead(bucket)
-        StoreValue(ptr, head)
+        WRMEM_64(ptr, head)
         Arena_LargeBucketSetHead(bucket, ptr)
         LargeMmapCache.releases = Add(LargeMmapCache.releases, 1)
     }
@@ -1409,7 +1409,7 @@ Function.Arena_GrowGeneral {
     Body: {
         old_chunk = ArenaGeneral.chunk
         chunk = Arena_MmapChunk()
-        StoreValue(chunk, old_chunk)
+        WRMEM_64(chunk, old_chunk)
         ArenaGeneral.chunk = chunk
         ArenaGeneral.next = Add(chunk, 8)
         ArenaGeneral.end = Add(chunk, ArenaConst.CHUNK_SIZE)
@@ -1421,7 +1421,7 @@ Function.Arena_FreeGeneral {
     Body: {
         current = ArenaGeneral.chunk
         WhileLoop NotEqual(current, 0) {
-            prev = Dereference(current)
+            prev = RDMEM_64(current)
             SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
             current = prev
         }
@@ -1472,7 +1472,7 @@ Function.Arena_ScratchGrow {
     Body: {
         linked = 0
         IfCondition NotEqual(ArenaScratch.chunk, 0) ThenBlock: {
-            linked = Dereference(ArenaScratch.chunk)
+            linked = RDMEM_64(ArenaScratch.chunk)
         }
         IfCondition NotEqual(linked, 0) ThenBlock: {
             ArenaScratch.chunk = linked
@@ -1481,12 +1481,12 @@ Function.Arena_ScratchGrow {
             ReturnValue(0)
         }
         c = Arena_MmapChunk()
-        StoreValue(c, 0)
+        WRMEM_64(c, 0)
         IfCondition EqualTo(ArenaScratch.head, 0) ThenBlock: {
             ArenaScratch.head = c
         } ElseBlock: {
             IfCondition NotEqual(ArenaScratch.chunk, 0) ThenBlock: {
-                StoreValue(ArenaScratch.chunk, c)
+                WRMEM_64(ArenaScratch.chunk, c)
             }
         }
         ArenaScratch.chunk = c
@@ -1703,7 +1703,7 @@ Function.Arena_ArrayDestroy {
         
         // alloc_size is stored 8 bytes BEFORE the arr pointer
         block = Subtract(arr, 8)
-        alloc_size = Dereference(block)
+        alloc_size = RDMEM_64(block)
         
         // Sanity check - alloc_size should be reasonable
         IfCondition LessThan(alloc_size, 16) ThenBlock: {
@@ -1762,13 +1762,13 @@ Function.Arena_ArrayCreate {
         }
         
         // Store alloc_size at offset 0 (hidden)
-        StoreValue(block, alloc_size)
+        WRMEM_64(block, alloc_size)
         
         // Return pointer to offset 8 - this is what user sees as "the array"
         arr = Add(block, 8)
         
         // Store capacity at arr[0] (which is block[8])
-        StoreValue(arr, capacity)
+        WRMEM_64(arr, capacity)
         
         ReturnValue(arr)
     }
@@ -1790,7 +1790,7 @@ Function.Arena_ArrayResize {
         }
         
         // Get old capacity
-        old_capacity = Dereference(old_arr)
+        old_capacity = RDMEM_64(old_arr)
         
         // If shrinking or same size, could potentially reuse
         // For now, always create new (simple and safe)
@@ -1830,13 +1830,13 @@ Function.Arena_Reset {
         IfCondition GreaterThan(Slab24.chunk_count, 1) ThenBlock: {
             // Walk from first chunk's link to free extras
             first_chunk = Slab24.chunk
-            current = Dereference(first_chunk)  // second chunk (linked from first)
+            current = RDMEM_64(first_chunk)  // second chunk (linked from first)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)  // clear link in first chunk
+            WRMEM_64(first_chunk, 0)  // clear link in first chunk
             Slab24.chunk_count = 1
         }
         Slab24.next = Slab24.chunk
@@ -1848,13 +1848,13 @@ Function.Arena_Reset {
         // === Slab32: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab32.chunk_count, 1) ThenBlock: {
             first_chunk = Slab32.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab32.chunk_count = 1
         }
         Slab32.next = Slab32.chunk
@@ -1866,13 +1866,13 @@ Function.Arena_Reset {
         // === Slab64: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab64.chunk_count, 1) ThenBlock: {
             first_chunk = Slab64.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab64.chunk_count = 1
         }
         Slab64.next = Slab64.chunk
@@ -1884,13 +1884,13 @@ Function.Arena_Reset {
         // === Slab128: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab128.chunk_count, 1) ThenBlock: {
             first_chunk = Slab128.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab128.chunk_count = 1
         }
         Slab128.next = Slab128.chunk
@@ -1902,13 +1902,13 @@ Function.Arena_Reset {
         // === Slab256: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab256.chunk_count, 1) ThenBlock: {
             first_chunk = Slab256.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab256.chunk_count = 1
         }
         Slab256.next = Slab256.chunk
@@ -1920,13 +1920,13 @@ Function.Arena_Reset {
         // === Slab512: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab512.chunk_count, 1) ThenBlock: {
             first_chunk = Slab512.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab512.chunk_count = 1
         }
         Slab512.next = Slab512.chunk
@@ -1938,13 +1938,13 @@ Function.Arena_Reset {
         // === Slab1024: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab1024.chunk_count, 1) ThenBlock: {
             first_chunk = Slab1024.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab1024.chunk_count = 1
         }
         Slab1024.next = Slab1024.chunk
@@ -1956,13 +1956,13 @@ Function.Arena_Reset {
         // === Slab2048: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab2048.chunk_count, 1) ThenBlock: {
             first_chunk = Slab2048.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab2048.chunk_count = 1
         }
         Slab2048.next = Slab2048.chunk
@@ -1974,13 +1974,13 @@ Function.Arena_Reset {
         // === Slab4096: Free extra chunks, keep first ===
         IfCondition GreaterThan(Slab4096.chunk_count, 1) ThenBlock: {
             first_chunk = Slab4096.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             Slab4096.chunk_count = 1
         }
         Slab4096.next = Slab4096.chunk
@@ -1992,13 +1992,13 @@ Function.Arena_Reset {
         // === ArenaGeneral: Free extra chunks, keep first ===
         IfCondition GreaterThan(ArenaGeneral.chunk_count, 1) ThenBlock: {
             first_chunk = ArenaGeneral.chunk
-            current = Dereference(first_chunk)
+            current = RDMEM_64(first_chunk)
             WhileLoop NotEqual(current, 0) {
-                next_chunk = Dereference(current)
+                next_chunk = RDMEM_64(current)
                 SystemCall(11, current, ArenaConst.CHUNK_SIZE, 0, 0, 0, 0)
                 current = next_chunk
             }
-            StoreValue(first_chunk, 0)
+            WRMEM_64(first_chunk, 0)
             ArenaGeneral.chunk_count = 1
         }
         ArenaGeneral.next = ArenaGeneral.chunk

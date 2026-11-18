@@ -23,36 +23,36 @@ Function.Socket.CreateAddr {
         addr = Allocate(16)
 
         // Family AF_INET = 2, bytes 0-1
-        SetByte(addr, 0, 2)
-        SetByte(addr, 1, 0)
+        WRMEM_8(addr, 0, 2)
+        WRMEM_8(addr, 1, 0)
 
         // Port in network byte order (big-endian), bytes 2-3
         port_high = Divide(port, 256)
         port_low = Subtract(port, Multiply(port_high, 256))
-        SetByte(addr, 2, port_high)
-        SetByte(addr, 3, port_low)
+        WRMEM_8(addr, 2, port_high)
+        WRMEM_8(addr, 3, port_low)
 
         // IP address, bytes 4-7
         is_localhost = StringCompare(host, "localhost")
         is_loopback = StringCompare(host, "127.0.0.1")
         IfCondition Or(EqualTo(is_localhost, 0), EqualTo(is_loopback, 0)) ThenBlock: {
-            SetByte(addr, 4, 127)
-            SetByte(addr, 5, 0)
-            SetByte(addr, 6, 0)
-            SetByte(addr, 7, 1)
+            WRMEM_8(addr, 4, 127)
+            WRMEM_8(addr, 5, 0)
+            WRMEM_8(addr, 6, 0)
+            WRMEM_8(addr, 7, 1)
         } ElseBlock: {
             ip_parts = Socket.ParseIPAddress(host)
-            SetByte(addr, 4, ArrayGet(ip_parts, 0))
-            SetByte(addr, 5, ArrayGet(ip_parts, 1))
-            SetByte(addr, 6, ArrayGet(ip_parts, 2))
-            SetByte(addr, 7, ArrayGet(ip_parts, 3))
+            WRMEM_8(addr, 4, ArrayGet(ip_parts, 0))
+            WRMEM_8(addr, 5, ArrayGet(ip_parts, 1))
+            WRMEM_8(addr, 6, ArrayGet(ip_parts, 2))
+            WRMEM_8(addr, 7, ArrayGet(ip_parts, 3))
             ArrayDestroy(ip_parts)
         }
 
         // Zero padding, bytes 8-15
         zi = 8
         WhileLoop LessThan(zi, 16) {
-            SetByte(addr, zi, 0)
+            WRMEM_8(addr, zi, 0)
             zi = Add(zi, 1)
         }
 
@@ -142,8 +142,8 @@ Function.Socket.SetRecvTimeout {
         tv_sec = Divide(timeout_ms, 1000)
         tv_usec = Multiply(Modulo(timeout_ms, 1000), 1000)
         timeval = Allocate(16)
-        StoreValue(timeval, tv_sec)
-        StoreValue(Add(timeval, 8), tv_usec)
+        WRMEM_64(timeval, tv_sec)
+        WRMEM_64(Add(timeval, 8), tv_usec)
         SystemCall(54, sock, 1, 20, timeval, 16)
         Deallocate(timeval, 16)
         ReturnValue(0)
@@ -170,9 +170,9 @@ Function.Socket.ParseIPAddress {
         ip_len = StringLength(ip_str)
 
         WhileLoop LessThan(pi, ip_len) {
-            ch = GetByte(ip_str, pi)
+            ch = RDMEM_8(ip_str, pi)
             IfCondition EqualTo(ch, 46) ThenBlock: {
-                StoreValue(Add(parts, Multiply(part_idx, 8)), current_num)
+                WRMEM_64(Add(parts, Multiply(part_idx, 8)), current_num)
                 part_idx = Add(part_idx, 1)
                 current_num = 0
             } ElseBlock: {
@@ -181,7 +181,7 @@ Function.Socket.ParseIPAddress {
             }
             pi = Add(pi, 1)
         }
-        StoreValue(Add(parts, Multiply(part_idx, 8)), current_num)
+        WRMEM_64(Add(parts, Multiply(part_idx, 8)), current_num)
         ReturnValue(parts)
     }
 }
@@ -208,13 +208,13 @@ Function.Socket.CreateAddrUnix {
         // Zero the whole struct
         zi = 0
         WhileLoop LessThan(zi, 110) {
-            SetByte(addr, zi, 0)
+            WRMEM_8(addr, zi, 0)
             zi = Add(zi, 1)
         }
 
         // Family AF_UNIX = 1
-        SetByte(addr, 0, 1)
-        SetByte(addr, 1, 0)
+        WRMEM_8(addr, 0, 1)
+        WRMEM_8(addr, 1, 0)
 
         // Copy path starting at offset 2. If first char is '@' (0x40),
         // emit a null byte instead — Linux abstract socket convention.
@@ -224,11 +224,11 @@ Function.Socket.CreateAddrUnix {
         }
         pi = 0
         WhileLoop LessThan(pi, plen) {
-            b = GetByte(path, pi)
+            b = RDMEM_8(path, pi)
             IfCondition EqualTo(pi, 0) ThenBlock: {
                 IfCondition EqualTo(b, 64) ThenBlock: { b = 0 }
             }
-            SetByte(addr, Add(2, pi), b)
+            WRMEM_8(addr, Add(2, pi), b)
             pi = Add(pi, 1)
         }
 
@@ -312,10 +312,10 @@ Function.Socket.SendMsg {
 
         // Send 4-byte big-endian length header
         hdr = Allocate(4)
-        SetByte(hdr, 0, BitwiseAnd(RightShift(len, 24), 255))
-        SetByte(hdr, 1, BitwiseAnd(RightShift(len, 16), 255))
-        SetByte(hdr, 2, BitwiseAnd(RightShift(len, 8), 255))
-        SetByte(hdr, 3, BitwiseAnd(len, 255))
+        WRMEM_8(hdr, 0, BitwiseAnd(RightShift(len, 24), 255))
+        WRMEM_8(hdr, 1, BitwiseAnd(RightShift(len, 16), 255))
+        WRMEM_8(hdr, 2, BitwiseAnd(RightShift(len, 8), 255))
+        WRMEM_8(hdr, 3, BitwiseAnd(len, 255))
         Socket.Send(sock, hdr, 4)
         Deallocate(hdr, 4)
 
@@ -339,10 +339,10 @@ Function.Socket.RecvMsg {
             ReturnValue(0)
         }
 
-        b3 = GetByte(hdr, 0)
-        b2 = GetByte(hdr, 1)
-        b1 = GetByte(hdr, 2)
-        b0 = GetByte(hdr, 3)
+        b3 = RDMEM_8(hdr, 0)
+        b2 = RDMEM_8(hdr, 1)
+        b1 = RDMEM_8(hdr, 2)
+        b0 = RDMEM_8(hdr, 3)
         Deallocate(hdr, 4)
 
         len = BitwiseOr(LeftShift(b3, 24), BitwiseOr(LeftShift(b2, 16), BitwiseOr(LeftShift(b1, 8), b0)))
@@ -377,7 +377,7 @@ Function.Socket.RecvMsg {
             Deallocate(buf, Add(len, 1))
             ReturnValue(0)
         }
-        SetByte(buf, len, 0)
+        WRMEM_8(buf, len, 0)
 
         ReturnValue(buf)
     }
@@ -432,10 +432,10 @@ Function.Socket.SetSockInt {
     Output: Integer
     Body: {
         v = Allocate(4)
-        SetByte(v, 0, 1)
-        SetByte(v, 1, 0)
-        SetByte(v, 2, 0)
-        SetByte(v, 3, 0)
+        WRMEM_8(v, 0, 1)
+        WRMEM_8(v, 1, 0)
+        WRMEM_8(v, 2, 0)
+        WRMEM_8(v, 3, 0)
         r = SystemCall(SockOpt.SYS_SETSOCKOPT, fd, level, opt, v, 4)
         Deallocate(v, 4)
         ReturnValue(r)
@@ -526,18 +526,18 @@ Function.Epoll.Pack {
     Input: events: Integer
     Input: data: Integer
     Body: {
-        SetByte(ev, 0, BitwiseAnd(events, 255))
-        SetByte(ev, 1, BitwiseAnd(RightShift(events, 8), 255))
-        SetByte(ev, 2, BitwiseAnd(RightShift(events, 16), 255))
-        SetByte(ev, 3, BitwiseAnd(RightShift(events, 24), 255))
-        SetByte(ev, 4, BitwiseAnd(data, 255))
-        SetByte(ev, 5, BitwiseAnd(RightShift(data, 8), 255))
-        SetByte(ev, 6, BitwiseAnd(RightShift(data, 16), 255))
-        SetByte(ev, 7, BitwiseAnd(RightShift(data, 24), 255))
-        SetByte(ev, 8, BitwiseAnd(RightShift(data, 32), 255))
-        SetByte(ev, 9, BitwiseAnd(RightShift(data, 40), 255))
-        SetByte(ev, 10, BitwiseAnd(RightShift(data, 48), 255))
-        SetByte(ev, 11, BitwiseAnd(RightShift(data, 56), 255))
+        WRMEM_8(ev, 0, BitwiseAnd(events, 255))
+        WRMEM_8(ev, 1, BitwiseAnd(RightShift(events, 8), 255))
+        WRMEM_8(ev, 2, BitwiseAnd(RightShift(events, 16), 255))
+        WRMEM_8(ev, 3, BitwiseAnd(RightShift(events, 24), 255))
+        WRMEM_8(ev, 4, BitwiseAnd(data, 255))
+        WRMEM_8(ev, 5, BitwiseAnd(RightShift(data, 8), 255))
+        WRMEM_8(ev, 6, BitwiseAnd(RightShift(data, 16), 255))
+        WRMEM_8(ev, 7, BitwiseAnd(RightShift(data, 24), 255))
+        WRMEM_8(ev, 8, BitwiseAnd(RightShift(data, 32), 255))
+        WRMEM_8(ev, 9, BitwiseAnd(RightShift(data, 40), 255))
+        WRMEM_8(ev, 10, BitwiseAnd(RightShift(data, 48), 255))
+        WRMEM_8(ev, 11, BitwiseAnd(RightShift(data, 56), 255))
     }
 }
 
@@ -545,10 +545,10 @@ Function.Epoll.EventsAt {
     Input: ev: Address
     Output: Integer
     Body: {
-        b0 = GetByte(ev, 0)
-        b1 = GetByte(ev, 1)
-        b2 = GetByte(ev, 2)
-        b3 = GetByte(ev, 3)
+        b0 = RDMEM_8(ev, 0)
+        b1 = RDMEM_8(ev, 1)
+        b2 = RDMEM_8(ev, 2)
+        b3 = RDMEM_8(ev, 3)
         t = BitwiseOr(b0, LeftShift(b1, 8))
         t2 = BitwiseOr(t, LeftShift(b2, 16))
         ReturnValue(BitwiseOr(t2, LeftShift(b3, 24)))
@@ -559,14 +559,14 @@ Function.Epoll.DataAt {
     Input: ev: Address
     Output: Integer
     Body: {
-        b0 = GetByte(ev, 4)
-        b1 = GetByte(ev, 5)
-        b2 = GetByte(ev, 6)
-        b3 = GetByte(ev, 7)
-        b4 = GetByte(ev, 8)
-        b5 = GetByte(ev, 9)
-        b6 = GetByte(ev, 10)
-        b7 = GetByte(ev, 11)
+        b0 = RDMEM_8(ev, 4)
+        b1 = RDMEM_8(ev, 5)
+        b2 = RDMEM_8(ev, 6)
+        b3 = RDMEM_8(ev, 7)
+        b4 = RDMEM_8(ev, 8)
+        b5 = RDMEM_8(ev, 9)
+        b6 = RDMEM_8(ev, 10)
+        b7 = RDMEM_8(ev, 11)
         t0 = BitwiseOr(b0, LeftShift(b1, 8))
         t1 = BitwiseOr(t0, LeftShift(b2, 16))
         t2 = BitwiseOr(t1, LeftShift(b3, 24))

@@ -30,7 +30,7 @@ Function.Feed.NowUnix {
     Output: Integer
     Body: {
         SystemCall(228, 0, FeedSt.ts)
-        ReturnValue(Dereference(FeedSt.ts))
+        ReturnValue(RDMEM_64(FeedSt.ts))
     }
 }
 
@@ -44,7 +44,7 @@ Function.Feed.PutDigits {
         i = Subtract(width, 1)
         WhileLoop GreaterEqual(i, 0) {
             d = Modulo(x, 10)
-            SetByte(buf, Add(off, i), Add(48, d))
+            WRMEM_8(buf, Add(off, i), Add(48, d))
             x = Divide(x, 10)
             i = Subtract(i, 1)
         }
@@ -55,7 +55,7 @@ Function.Feed.NowISO {
     Output: Address
     Body: {
         sec = Feed.NowUnix()
-        ns = Dereference(Add(FeedSt.ts, 8))
+        ns = RDMEM_64(Add(FeedSt.ts, 8))
         ms = Divide(ns, 1000000)
         days = Divide(sec, 86400)
         sod = Subtract(sec, Multiply(days, 86400))
@@ -88,20 +88,20 @@ Function.Feed.NowISO {
         }
         buf = FeedSt.iso
         Feed.PutDigits(buf, 0, 4, y)
-        SetByte(buf, 4, 45)
+        WRMEM_8(buf, 4, 45)
         Feed.PutDigits(buf, 5, 2, m)
-        SetByte(buf, 7, 45)
+        WRMEM_8(buf, 7, 45)
         Feed.PutDigits(buf, 8, 2, d)
-        SetByte(buf, 10, 84)
+        WRMEM_8(buf, 10, 84)
         Feed.PutDigits(buf, 11, 2, hh)
-        SetByte(buf, 13, 58)
+        WRMEM_8(buf, 13, 58)
         Feed.PutDigits(buf, 14, 2, mm)
-        SetByte(buf, 16, 58)
+        WRMEM_8(buf, 16, 58)
         Feed.PutDigits(buf, 17, 2, ss)
-        SetByte(buf, 19, 46)
+        WRMEM_8(buf, 19, 46)
         Feed.PutDigits(buf, 20, 3, ms)
-        SetByte(buf, 23, 90)
-        SetByte(buf, 24, 0)
+        WRMEM_8(buf, 23, 90)
+        WRMEM_8(buf, 24, 0)
         ReturnValue(buf)
     }
 }
@@ -144,7 +144,7 @@ Function.Feed.PutInt {
         out = FeedSt.out
         IfCondition EqualTo(v, 0) ThenBlock: {
             IfCondition LessThan(ol, cap) ThenBlock: {
-                SetByte(out, ol, 48)
+                WRMEM_8(out, ol, 48)
                 FeedSt.len = Add(ol, 1)
             }
             ReturnValue(0)
@@ -152,7 +152,7 @@ Function.Feed.PutInt {
         x = v
         IfCondition LessThan(x, 0) ThenBlock: {
             IfCondition LessThan(ol, cap) ThenBlock: {
-                SetByte(out, ol, 45)
+                WRMEM_8(out, ol, 45)
                 ol = Add(ol, 1)
             }
             x = Subtract(0, x)
@@ -191,7 +191,7 @@ Function.Feed.PutInt {
         i = Subtract(n, 1)
         WhileLoop GreaterEqual(i, 0) {
             d = Modulo(x, 10)
-            SetByte(out, Add(ol, i), Add(48, d))
+            WRMEM_8(out, Add(ol, i), Add(48, d))
             x = Divide(x, 10)
             i = Subtract(i, 1)
         }
@@ -204,7 +204,7 @@ Function.Feed.PutByte {
     Body: {
         ol = FeedSt.len
         IfCondition LessThan(ol, FeedSt.cap) ThenBlock: {
-            SetByte(FeedSt.out, ol, ch)
+            WRMEM_8(FeedSt.out, ol, ch)
             FeedSt.len = Add(ol, 1)
         }
     }
@@ -266,7 +266,7 @@ Function.Feed.PutEscN {
         i = 0
         need = 0
         WhileLoop LessThan(i, n) {
-            ch = GetByte(p, i)
+            ch = RDMEM_8(p, i)
             IfCondition EqualTo(ch, 34) ThenBlock: { need = 1 }
             IfCondition EqualTo(ch, 92) ThenBlock: { need = 1 }
             IfCondition LessThan(ch, 32) ThenBlock: { need = 1 }
@@ -278,7 +278,7 @@ Function.Feed.PutEscN {
         }
         i2 = 0
         WhileLoop LessThan(i2, n) {
-            ch2 = GetByte(p, i2)
+            ch2 = RDMEM_8(p, i2)
             Feed.PutEscByte(ch2)
             i2 = Add(i2, 1)
         }
@@ -331,7 +331,7 @@ Function.Feed.PutPost {
         MemoryCopy(dst, "\",\"like_count\":", 15)
         Feed.PutInt(SQLitePost.likes)
         ol = FeedSt.len
-        SetByte(FeedSt.out, ol, 125)
+        WRMEM_8(FeedSt.out, ol, 125)
         FeedSt.len = Add(ol, 1)
     }
 }
@@ -364,9 +364,9 @@ Function.Feed.Starts {
     Body: {
         i = 0
         WhileLoop 1 {
-            pc = GetByte(prefix, i)
+            pc = RDMEM_8(prefix, i)
             IfCondition EqualTo(pc, 0) ThenBlock: { ReturnValue(1) }
-            sc = GetByte(s, i)
+            sc = RDMEM_8(s, i)
             IfCondition NotEqual(sc, pc) ThenBlock: { ReturnValue(0) }
             i = Add(i, 1)
         }
@@ -379,13 +379,13 @@ Function.Feed.ParseId {
     Output: Integer
     Body: {
         FeedSt.rest = p
-        c0 = GetByte(p, 0)
+        c0 = RDMEM_8(p, 0)
         IfCondition LessThan(c0, 48) ThenBlock: { ReturnValue(0) }
         IfCondition GreaterThan(c0, 57) ThenBlock: { ReturnValue(0) }
         v = 0
         i = 0
         WhileLoop 1 {
-            ch = GetByte(p, i)
+            ch = RDMEM_8(p, i)
             IfCondition LessThan(ch, 48) ThenBlock: { BreakLoop }
             IfCondition GreaterThan(ch, 57) ThenBlock: { BreakLoop }
             v = Add(Multiply(v, 10), Subtract(ch, 48))
@@ -403,14 +403,14 @@ Function.Feed.BearerOk {
     Output: Integer
     Body: {
         IfCondition EqualTo(b, 0) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(b, 0), 66) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(b, 1), 101) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(b, 2), 97) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(b, 3), 114) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(b, 4), 101) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(b, 5), 114) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(b, 6), 32) ThenBlock: { ReturnValue(0) }
-        IfCondition EqualTo(GetByte(b, 7), 0) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(b, 0), 66) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(b, 1), 101) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(b, 2), 97) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(b, 3), 114) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(b, 4), 101) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(b, 5), 114) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(b, 6), 32) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(RDMEM_8(b, 7), 0) ThenBlock: { ReturnValue(0) }
         ReturnValue(1)
     }
 }
@@ -434,7 +434,7 @@ Function.Feed.Auth {
             nl = StringLength(nm)
             IfCondition GreaterThan(nl, 255) ThenBlock: { nl = 255 }
             MemoryCopy(FeedSt.uname, nm, nl)
-            SetByte(FeedSt.uname, nl, 0)
+            WRMEM_8(FeedSt.uname, nl, 0)
             JWTOut.name = FeedSt.uname
         }
         Arena_ScratchEnd()
@@ -471,7 +471,7 @@ Function.Feed.TrimCopy {
     Body: {
         i = 0
         WhileLoop 1 {
-            ch = GetByte(s, i)
+            ch = RDMEM_8(s, i)
             sp = 0
             IfCondition EqualTo(ch, 32) ThenBlock: { sp = 1 }
             IfCondition EqualTo(ch, 9) ThenBlock: { sp = 1 }
@@ -483,7 +483,7 @@ Function.Feed.TrimCopy {
         n = StringLength(s)
         e = n
         WhileLoop GreaterThan(e, i) {
-            ch = GetByte(s, Subtract(e, 1))
+            ch = RDMEM_8(s, Subtract(e, 1))
             sp = 0
             IfCondition EqualTo(ch, 32) ThenBlock: { sp = 1 }
             IfCondition EqualTo(ch, 9) ThenBlock: { sp = 1 }
@@ -497,7 +497,7 @@ Function.Feed.TrimCopy {
         IfCondition GreaterThan(ln, 0) ThenBlock: {
             MemoryCopy(out, Add(s, i), ln)
         }
-        SetByte(out, ln, 0)
+        WRMEM_8(out, ln, 0)
         ReturnValue(out)
     }
 }
@@ -534,7 +534,7 @@ Function.Feed.DoFeed {
         WhileLoop LessThan(i, n) {
             IfCondition GreaterThan(i, 0) ThenBlock: {
                 ol = FeedSt.len
-                SetByte(FeedSt.out, ol, 44)
+                WRMEM_8(FeedSt.out, ol, 44)
                 FeedSt.len = Add(ol, 1)
             }
             SQLite.FeedLoad(i)
@@ -555,7 +555,7 @@ Function.Feed.DoGetPost {
     Body: {
         rest = Add(path, 7)
         id = Feed.ParseId(rest)
-        endc = GetByte(FeedSt.rest, 0)
+        endc = RDMEM_8(FeedSt.rest, 0)
         IfCondition EqualTo(id, 0) ThenBlock: {
             Feed.Err(conn, 400, "invalid post id")
             ReturnValue(0)
@@ -574,7 +574,7 @@ Function.Feed.DoGetPost {
         FeedSt.len = 8
         Feed.PutPost()
         ol = FeedSt.len
-        SetByte(FeedSt.out, ol, 125)
+        WRMEM_8(FeedSt.out, ol, 125)
         FeedSt.len = Add(ol, 1)
         Feed.Reply(conn, 200)
     }
@@ -587,7 +587,7 @@ Function.Feed.JsonObjectOk {
     Body: {
         i = 0
         WhileLoop LessThan(i, n) {
-            ch = GetByte(s, i)
+            ch = RDMEM_8(s, i)
             ws = 0
             IfCondition EqualTo(ch, 32) ThenBlock: { ws = 1 }
             IfCondition EqualTo(ch, 9) ThenBlock: { ws = 1 }
@@ -597,13 +597,13 @@ Function.Feed.JsonObjectOk {
             i = Add(i, 1)
         }
         IfCondition GreaterEqual(i, n) ThenBlock: { ReturnValue(0) }
-        IfCondition NotEqual(GetByte(s, i), 123) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(s, i), 123) ThenBlock: { ReturnValue(0) }
         depth = 1
         in_str = 0
         esc = 0
         i = Add(i, 1)
         WhileLoop LessThan(i, n) {
-            ch = GetByte(s, i)
+            ch = RDMEM_8(s, i)
             IfCondition EqualTo(in_str, 1) ThenBlock: {
                 IfCondition EqualTo(esc, 1) ThenBlock: {
                     esc = 0
@@ -623,7 +623,7 @@ Function.Feed.JsonObjectOk {
                     IfCondition EqualTo(depth, 0) ThenBlock: {
                         j = Add(i, 1)
                         WhileLoop LessThan(j, n) {
-                            c2 = GetByte(s, j)
+                            c2 = RDMEM_8(s, j)
                             ws2 = 0
                             IfCondition EqualTo(c2, 32) ThenBlock: { ws2 = 1 }
                             IfCondition EqualTo(c2, 9) ThenBlock: { ws2 = 1 }
@@ -655,7 +655,7 @@ Function.Feed.ParseBody {
         }
         copy = Allocate(Add(n, 1))
         MemoryCopy(copy, raw, n)
-        SetByte(copy, n, 0)
+        WRMEM_8(copy, n, 0)
         jok = Feed.JsonObjectOk(copy, n)
         IfCondition EqualTo(jok, 0) ThenBlock: {
             ReturnValue(1)
@@ -685,7 +685,7 @@ Function.Feed.ParseBody {
             ReturnValue(3)
         }
         MemoryCopy(FeedSt.body, trimmed, tlen)
-        SetByte(FeedSt.body, tlen, 0)
+        WRMEM_8(FeedSt.body, tlen, 0)
         ReturnValue(0)
     }
 }
@@ -753,7 +753,7 @@ Function.Feed.DoLike {
         rest = Add(path, 7)
         id = Feed.ParseId(rest)
         likeok = Feed.Starts(FeedSt.rest, "/like")
-        endc = GetByte(FeedSt.rest, 5)
+        endc = RDMEM_8(FeedSt.rest, 5)
         IfCondition EqualTo(id, 0) ThenBlock: {
             Feed.Err(conn, 400, "invalid post id")
             ReturnValue(0)
@@ -813,29 +813,29 @@ Function.FeedHandler {
     Body: {
         method = HTTP1.Method(conn)
         path = HTTP1.Path(conn)
-        m0 = GetByte(method, 0)
+        m0 = RDMEM_8(method, 0)
         IfCondition EqualTo(m0, 71) ThenBlock: {
-            IfCondition NotEqual(GetByte(method, 1), 69) ThenBlock: {
+            IfCondition NotEqual(RDMEM_8(method, 1), 69) ThenBlock: {
                 Feed.Err(conn, 404, "not found")
                 ReturnValue(0)
             }
-            IfCondition NotEqual(GetByte(method, 2), 84) ThenBlock: {
+            IfCondition NotEqual(RDMEM_8(method, 2), 84) ThenBlock: {
                 Feed.Err(conn, 404, "not found")
                 ReturnValue(0)
             }
-            IfCondition NotEqual(GetByte(method, 3), 0) ThenBlock: {
+            IfCondition NotEqual(RDMEM_8(method, 3), 0) ThenBlock: {
                 Feed.Err(conn, 404, "not found")
                 ReturnValue(0)
             }
             Arena_ScratchBegin()
-            p0 = GetByte(path, 0)
-            p1 = GetByte(path, 1)
+            p0 = RDMEM_8(path, 0)
+            p1 = RDMEM_8(path, 1)
             IfCondition EqualTo(p0, 47) ThenBlock: {
                 IfCondition EqualTo(p1, 102) ThenBlock: {
-                    IfCondition EqualTo(GetByte(path, 2), 101) ThenBlock: {
-                        IfCondition EqualTo(GetByte(path, 3), 101) ThenBlock: {
-                            IfCondition EqualTo(GetByte(path, 4), 100) ThenBlock: {
-                                IfCondition EqualTo(GetByte(path, 5), 0) ThenBlock: {
+                    IfCondition EqualTo(RDMEM_8(path, 2), 101) ThenBlock: {
+                        IfCondition EqualTo(RDMEM_8(path, 3), 101) ThenBlock: {
+                            IfCondition EqualTo(RDMEM_8(path, 4), 100) ThenBlock: {
+                                IfCondition EqualTo(RDMEM_8(path, 5), 0) ThenBlock: {
                                     Feed.DoFeed(conn)
                                     Arena_ScratchEnd()
                                     ReturnValue(0)
@@ -977,7 +977,7 @@ SubRoutine.Main {
     IfCondition GreaterThan(fronts, 0) ThenBlock: { Front.Attach() }
     HTTP1St.ring_fn = AddressOf(Feed.Ring)
     IfCondition GreaterEqual(SQLiteDB.sync_done, 0) ThenBlock: {
-        Epoll.Add(HTTP1St.epfd, SQLiteDB.sync_done, 1, Add(HTTP1Ring.TAG, Feed.SYNC_TAG))
+        HTTP1.WatchFd(SQLiteDB.sync_done, Add(HTTP1Ring.TAG, Feed.SYNC_TAG))
     }
     PrintMessage("listening\n")
     HTTP1.Serve(AddressOf(FeedHandler))

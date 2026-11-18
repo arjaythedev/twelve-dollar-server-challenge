@@ -51,8 +51,8 @@ Function.JSON.Tag {
     Output: Address
     Body: {
         t = Allocate(16)
-        StoreValue(t, vtype)
-        StoreValue(Add(t, 8), value)
+        WRMEM_64(t, vtype)
+        WRMEM_64(Add(t, 8), value)
         ReturnValue(t)
     }
 }
@@ -62,7 +62,7 @@ Function.JSON.TagType {
     Output: Integer
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(JType.NULL) }
-        ReturnValue(Dereference(tagged))
+        ReturnValue(RDMEM_64(tagged))
     }
 }
 
@@ -71,7 +71,7 @@ Function.JSON.TagValue {
     Output: Address
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(tagged, 8)))
+        ReturnValue(RDMEM_64(Add(tagged, 8)))
     }
 }
 
@@ -83,9 +83,9 @@ Function.JSON.AsObject {
     Output: Address
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
-        vtype = Dereference(tagged)
+        vtype = RDMEM_64(tagged)
         IfCondition NotEqual(vtype, JType.OBJECT) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(tagged, 8)))
+        ReturnValue(RDMEM_64(Add(tagged, 8)))
     }
 }
 
@@ -94,9 +94,9 @@ Function.JSON.AsArray {
     Output: Address
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
-        vtype = Dereference(tagged)
+        vtype = RDMEM_64(tagged)
         IfCondition NotEqual(vtype, JType.ARRAY) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(tagged, 8)))
+        ReturnValue(RDMEM_64(Add(tagged, 8)))
     }
 }
 
@@ -105,9 +105,9 @@ Function.JSON.AsString {
     Output: Address
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
-        vtype = Dereference(tagged)
+        vtype = RDMEM_64(tagged)
         IfCondition NotEqual(vtype, JType.STRING) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(tagged, 8)))
+        ReturnValue(RDMEM_64(Add(tagged, 8)))
     }
 }
 
@@ -116,9 +116,9 @@ Function.JSON.AsNumber {
     Output: Integer
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
-        vtype = Dereference(tagged)
+        vtype = RDMEM_64(tagged)
         IfCondition NotEqual(vtype, JType.NUMBER) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(tagged, 8)))
+        ReturnValue(RDMEM_64(Add(tagged, 8)))
     }
 }
 
@@ -127,9 +127,9 @@ Function.JSON.AsBool {
     Output: Integer
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
-        vtype = Dereference(tagged)
+        vtype = RDMEM_64(tagged)
         IfCondition NotEqual(vtype, JType.BOOL) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(tagged, 8)))
+        ReturnValue(RDMEM_64(Add(tagged, 8)))
     }
 }
 
@@ -371,7 +371,7 @@ Function.JSON.EscapeString {
     Body: {
         IfCondition EqualTo(str, 0) ThenBlock: {
             e = Allocate(1)
-            SetByte(e, 0, 0)
+            WRMEM_8(e, 0, 0)
             ReturnValue(e)
         }
 
@@ -379,7 +379,7 @@ Function.JSON.EscapeString {
         src = str
         out_len = 0
         WhileLoop EqualTo(1, 1) {
-            ch = Dereference(src, "byte")
+            ch = RDMEM_64(src, "byte")
             IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
             IfCondition EqualTo(ch, 34) ThenBlock: { out_len = Add(out_len, 2) }
             ElseBlock: {
@@ -408,11 +408,11 @@ Function.JSON.EscapeString {
             copy = Allocate(Add(in_len, 1))
             i = 0
             WhileLoop LessThan(i, in_len) {
-                b = Dereference(Add(str, i), "byte")
-                SetByte(copy, i, b)
+                b = RDMEM_64(Add(str, i), "byte")
+                WRMEM_8(copy, i, b)
                 i = Add(i, 1)
             }
-            SetByte(copy, in_len, 0)
+            WRMEM_8(copy, in_len, 0)
             ReturnValue(copy)
         }
 
@@ -421,65 +421,65 @@ Function.JSON.EscapeString {
         src = str
         dst = 0
         WhileLoop EqualTo(1, 1) {
-            ch = Dereference(src, "byte")
+            ch = RDMEM_64(src, "byte")
             IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
 
             IfCondition EqualTo(ch, 34) ThenBlock: {
-                SetByte(out, dst, 92)
+                WRMEM_8(out, dst, 92)
                 dst = Add(dst, 1)
-                SetByte(out, dst, 34)
+                WRMEM_8(out, dst, 34)
                 dst = Add(dst, 1)
             } ElseBlock: {
                 IfCondition EqualTo(ch, 92) ThenBlock: {
-                    SetByte(out, dst, 92)
+                    WRMEM_8(out, dst, 92)
                     dst = Add(dst, 1)
-                    SetByte(out, dst, 92)
+                    WRMEM_8(out, dst, 92)
                     dst = Add(dst, 1)
                 } ElseBlock: {
                     IfCondition EqualTo(ch, 10) ThenBlock: {
-                        SetByte(out, dst, 92)
+                        WRMEM_8(out, dst, 92)
                         dst = Add(dst, 1)
-                        SetByte(out, dst, 110)
+                        WRMEM_8(out, dst, 110)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                         IfCondition EqualTo(ch, 13) ThenBlock: {
-                            SetByte(out, dst, 92)
+                            WRMEM_8(out, dst, 92)
                             dst = Add(dst, 1)
-                            SetByte(out, dst, 114)
+                            WRMEM_8(out, dst, 114)
                             dst = Add(dst, 1)
                         } ElseBlock: {
                             IfCondition EqualTo(ch, 9) ThenBlock: {
-                                SetByte(out, dst, 92)
+                                WRMEM_8(out, dst, 92)
                                 dst = Add(dst, 1)
-                                SetByte(out, dst, 116)
+                                WRMEM_8(out, dst, 116)
                                 dst = Add(dst, 1)
                             } ElseBlock: {
                                 // All other control chars (0x01–0x1F) → \uXXXX
                                 IfCondition LessThan(ch, 32) ThenBlock: {
-                                    SetByte(out, dst, 92)
+                                    WRMEM_8(out, dst, 92)
                                     dst = Add(dst, 1)
-                                    SetByte(out, dst, 117)
+                                    WRMEM_8(out, dst, 117)
                                     dst = Add(dst, 1)
-                                    SetByte(out, dst, 48)
+                                    WRMEM_8(out, dst, 48)
                                     dst = Add(dst, 1)
-                                    SetByte(out, dst, 48)
+                                    WRMEM_8(out, dst, 48)
                                     dst = Add(dst, 1)
                                     hi = Divide(ch, 16)
                                     IfCondition LessThan(hi, 10) ThenBlock: {
-                                        SetByte(out, dst, Add(48, hi))
+                                        WRMEM_8(out, dst, Add(48, hi))
                                     } ElseBlock: {
-                                        SetByte(out, dst, Add(87, hi))
+                                        WRMEM_8(out, dst, Add(87, hi))
                                     }
                                     dst = Add(dst, 1)
                                     lo = Modulo(ch, 16)
                                     IfCondition LessThan(lo, 10) ThenBlock: {
-                                        SetByte(out, dst, Add(48, lo))
+                                        WRMEM_8(out, dst, Add(48, lo))
                                     } ElseBlock: {
-                                        SetByte(out, dst, Add(87, lo))
+                                        WRMEM_8(out, dst, Add(87, lo))
                                     }
                                     dst = Add(dst, 1)
                                 } ElseBlock: {
-                                    SetByte(out, dst, ch)
+                                    WRMEM_8(out, dst, ch)
                                     dst = Add(dst, 1)
                                 }
                             }
@@ -489,7 +489,7 @@ Function.JSON.EscapeString {
             }
             src = Add(src, 1)
         }
-        SetByte(out, dst, 0)
+        WRMEM_8(out, dst, 0)
         ReturnValue(out)
     }
 }
@@ -512,8 +512,8 @@ Function.JSON.Serialize {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(StringConcat("null", "")) }
         IfCondition EqualTo(tagged, Arrays.NULL) ThenBlock: { ReturnValue(StringConcat("null", "")) }
 
-        vtype = Dereference(tagged)
-        value = Dereference(Add(tagged, 8))
+        vtype = RDMEM_64(tagged)
+        value = RDMEM_64(Add(tagged, 8))
 
         IfCondition EqualTo(vtype, JType.NULL) ThenBlock: {
             ReturnValue(StringConcat("null", ""))
@@ -536,10 +536,10 @@ Function.JSON.Serialize {
             num_copy = Allocate(Add(nlen, 1))
             ni = 0
             WhileLoop LessThan(ni, nlen) {
-                SetByte(num_copy, ni, GetByte(num_str, ni))
+                WRMEM_8(num_copy, ni, RDMEM_8(num_str, ni))
                 ni = Add(ni, 1)
             }
-            SetByte(num_copy, nlen, 0)
+            WRMEM_8(num_copy, nlen, 0)
             ReturnValue(num_copy)
         }
 
@@ -714,7 +714,7 @@ Function.ParseJSON {
 Function.JSON.SkipWhitespace {
     Body: {
         WhileLoop LessThan(JParse.pos, JParse.size) {
-            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
             is_ws = 0
             IfCondition EqualTo(ch, 32) ThenBlock: { is_ws = 1 }
             IfCondition EqualTo(ch, 9) ThenBlock: { is_ws = 1 }
@@ -734,7 +734,7 @@ Function.JSON.ParseValue {
             ReturnValue(JSON.Tag(JType.NULL, 0))
         }
 
-        ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+        ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
 
         IfCondition EqualTo(ch, 123) ThenBlock: {
             ReturnValue(JSON.ParseObject())
@@ -761,7 +761,7 @@ Function.JSON.ParseObject {
         JSON.SkipWhitespace()
 
         IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
             IfCondition EqualTo(ch, 125) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
                 ReturnValue(JSON.Tag(JType.OBJECT, obj))
@@ -779,7 +779,7 @@ Function.JSON.ParseObject {
             JSON.SkipWhitespace()
 
             IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-                ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
                 IfCondition EqualTo(ch, 58) ThenBlock: {
                     JParse.pos = Add(JParse.pos, 1)
                 }
@@ -793,7 +793,7 @@ Function.JSON.ParseObject {
             JSON.SkipWhitespace()
 
             IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-                ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
                 IfCondition EqualTo(ch, 125) ThenBlock: {
                     JParse.pos = Add(JParse.pos, 1)
                     parsing = 0
@@ -822,7 +822,7 @@ Function.JSON.ParseArray {
         JSON.SkipWhitespace()
 
         IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
             IfCondition EqualTo(ch, 93) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
                 ReturnValue(JSON.Tag(JType.ARRAY, arr))
@@ -839,7 +839,7 @@ Function.JSON.ParseArray {
             JSON.SkipWhitespace()
 
             IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-                ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
                 IfCondition EqualTo(ch, 93) ThenBlock: {
                     JParse.pos = Add(JParse.pos, 1)
                     parsing = 0
@@ -868,7 +868,7 @@ Function.JSON.ParseString {
         scan = JParse.pos
         out_len = 0
         WhileLoop LessThan(scan, JParse.size) {
-            ch = Dereference(Add(JParse.buffer, scan), "byte")
+            ch = RDMEM_64(Add(JParse.buffer, scan), "byte")
             IfCondition EqualTo(ch, 92) ThenBlock: {
                 out_len = Add(out_len, 1)
                 scan = Add(scan, 1)
@@ -895,61 +895,61 @@ Function.JSON.ParseString {
 
         WhileLoop And(LessThan(JParse.pos, scan), LessThan(JParse.pos, JParse.size)) {
             IfCondition GreaterEqual(dst, out_len) ThenBlock: { BreakLoop }
-            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
 
             IfCondition EqualTo(ch, 92) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
                 IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
                     IfCondition GreaterEqual(dst, out_len) ThenBlock: { BreakLoop }
-                    esc = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+                    esc = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
                     IfCondition EqualTo(esc, 34) ThenBlock: {
-                        SetByte(str, dst, 34)
+                        WRMEM_8(str, dst, 34)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                     IfCondition EqualTo(esc, 92) ThenBlock: {
-                        SetByte(str, dst, 92)
+                        WRMEM_8(str, dst, 92)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                     IfCondition EqualTo(esc, 110) ThenBlock: {
-                        SetByte(str, dst, 10)
+                        WRMEM_8(str, dst, 10)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                     IfCondition EqualTo(esc, 114) ThenBlock: {
-                        SetByte(str, dst, 13)
+                        WRMEM_8(str, dst, 13)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                     IfCondition EqualTo(esc, 116) ThenBlock: {
-                        SetByte(str, dst, 9)
+                        WRMEM_8(str, dst, 9)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                     IfCondition EqualTo(esc, 47) ThenBlock: {
-                        SetByte(str, dst, 47)
+                        WRMEM_8(str, dst, 47)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                     IfCondition EqualTo(esc, 98) ThenBlock: {
-                        SetByte(str, dst, 8)
+                        WRMEM_8(str, dst, 8)
                         dst = Add(dst, 1)
                     } ElseBlock: {
                     IfCondition EqualTo(esc, 102) ThenBlock: {
-                        SetByte(str, dst, 12)
+                        WRMEM_8(str, dst, 12)
                         dst = Add(dst, 1)
                     } ElseBlock: {
-                        SetByte(str, dst, esc)
+                        WRMEM_8(str, dst, esc)
                         dst = Add(dst, 1)
                     }}}}}}}}
                     JParse.pos = Add(JParse.pos, 1)
                 }
             } ElseBlock: {
-                SetByte(str, dst, ch)
+                WRMEM_8(str, dst, ch)
                 dst = Add(dst, 1)
                 JParse.pos = Add(JParse.pos, 1)
             }
         }
 
-        SetByte(str, dst, 0)
+        WRMEM_8(str, dst, 0)
 
         IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
             IfCondition EqualTo(ch, 34) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
             }
@@ -965,7 +965,7 @@ Function.JSON.ParsePrimitive {
         start = JParse.pos
 
         WhileLoop LessThan(JParse.pos, JParse.size) {
-            ch = Dereference(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
             is_delim = 0
             IfCondition EqualTo(ch, 32) ThenBlock: { is_delim = 1 }
             IfCondition EqualTo(ch, 9) ThenBlock: { is_delim = 1 }
@@ -987,11 +987,11 @@ Function.JSON.ParsePrimitive {
         token = Allocate(Add(length, 1))
         i = 0
         WhileLoop LessThan(i, length) {
-            b = Dereference(Add(JParse.buffer, Add(start, i)), "byte")
-            SetByte(token, i, b)
+            b = RDMEM_64(Add(JParse.buffer, Add(start, i)), "byte")
+            WRMEM_8(token, i, b)
             i = Add(i, 1)
         }
-        SetByte(token, length, 0)
+        WRMEM_8(token, length, 0)
 
         IfCondition EqualTo(StringCompare(token, "true"), 0) ThenBlock: {
             Deallocate(token, Add(length, 1))
@@ -1008,7 +1008,7 @@ Function.JSON.ParsePrimitive {
             ReturnValue(JSON.Tag(JType.NULL, 0))
         }
 
-        first = Dereference(Add(token, 0), "byte")
+        first = RDMEM_64(Add(token, 0), "byte")
         is_num = 0
         IfCondition And(GreaterEqual(first, 48), LessEqual(first, 57)) ThenBlock: { is_num = 1 }
         IfCondition EqualTo(first, 45) ThenBlock: { is_num = 1 }
@@ -1068,8 +1068,8 @@ Function.JSON.Free {
     Body: {
         IfCondition EqualTo(tagged, 0) ThenBlock: { ReturnValue(0) }
 
-        vtype = Dereference(tagged)
-        value = Dereference(Add(tagged, 8))
+        vtype = RDMEM_64(tagged)
+        value = RDMEM_64(Add(tagged, 8))
 
         IfCondition EqualTo(vtype, JType.STRING) ThenBlock: {
             IfCondition NotEqual(value, 0) ThenBlock: {

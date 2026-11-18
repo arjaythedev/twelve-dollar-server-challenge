@@ -1,5 +1,5 @@
 // Library.Array.ailang
-// Performance dynamic array — flat Allocate/Dereference/StoreValue storage.
+// Performance dynamic array — flat Allocate/RDMEM_64/WRMEM_64 storage.
 // Replaces ArrayCreate/ArrayGet/ArraySet/ArrayDestroy with direct pointer math.
 //
 // Header layout (32 bytes):
@@ -36,10 +36,10 @@ Function.Array.Create {
         data     = Allocate(Multiply(initial_capacity, 8))
         MemorySet(data, 0, Multiply(initial_capacity, 8))
 
-        StoreValue(header,              Arrays.MAGIC)
-        StoreValue(Add(header, 8),  initial_capacity)
-        StoreValue(Add(header, 16), 0)
-        StoreValue(Add(header, 24), data)
+        WRMEM_64(header,              Arrays.MAGIC)
+        WRMEM_64(Add(header, 8),  initial_capacity)
+        WRMEM_64(Add(header, 16), 0)
+        WRMEM_64(Add(header, 24), data)
 
         ReturnValue(header)
     }
@@ -53,14 +53,14 @@ Function.Array.Destroy {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        magic = Dereference(arr)
+        magic = RDMEM_64(arr)
         IfCondition NotEqual(magic, Arrays.MAGIC) ThenBlock: {
             PrintMessage("Array.Destroy: bad magic\n")
             ReturnValue(0)
         }
 
-        capacity = Dereference(Add(arr, 8))
-        data     = Dereference(Add(arr, 24))
+        capacity = RDMEM_64(Add(arr, 8))
+        data     = RDMEM_64(Add(arr, 24))
 
         IfCondition NotEqual(data, 0) ThenBlock: {
             Deallocate(data, Multiply(capacity, 8))
@@ -81,7 +81,7 @@ Function.Array.IsArray {
         // Allocate() returns high pointers; unboxed ints in [1e6, 4e6) are not
         // mapped and used to SIGSEGV here (AIMacro NumAdd on large sums).
         IfCondition LessThan(value, 4000000) ThenBlock: { ReturnValue(0) }
-        magic = Dereference(value)
+        magic = RDMEM_64(value)
         IfCondition EqualTo(magic, Arrays.MAGIC) ThenBlock: { ReturnValue(1) }
         ReturnValue(0)
     }
@@ -95,7 +95,7 @@ Function.Array.Size {
     Output: Integer
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(arr, 16)))
+        ReturnValue(RDMEM_64(Add(arr, 16)))
     }
 }
 
@@ -107,7 +107,7 @@ Function.Array.Capacity {
     Output: Integer
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
-        ReturnValue(Dereference(Add(arr, 8)))
+        ReturnValue(RDMEM_64(Add(arr, 8)))
     }
 }
 
@@ -121,12 +121,12 @@ Function.Array.Get {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition LessThan(index, 0)     ThenBlock: { ReturnValue(0) }
         IfCondition GreaterEqual(index, size) ThenBlock: { ReturnValue(0) }
 
-        data = Dereference(Add(arr, 24))
-        ReturnValue(Dereference(Add(data, Multiply(index, 8))))
+        data = RDMEM_64(Add(arr, 24))
+        ReturnValue(RDMEM_64(Add(data, Multiply(index, 8))))
     }
 }
 
@@ -140,12 +140,12 @@ Function.Array.Set {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition LessThan(index, 0)     ThenBlock: { ReturnValue(0) }
         IfCondition GreaterEqual(index, size) ThenBlock: { ReturnValue(0) }
 
-        data = Dereference(Add(arr, 24))
-        StoreValue(Add(data, Multiply(index, 8)), value)
+        data = RDMEM_64(Add(arr, 24))
+        WRMEM_64(Add(data, Multiply(index, 8)), value)
     }
 }
 
@@ -158,9 +158,9 @@ Function.Array.Push {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        capacity = Dereference(Add(arr, 8))
-        size     = Dereference(Add(arr, 16))
-        data     = Dereference(Add(arr, 24))
+        capacity = RDMEM_64(Add(arr, 8))
+        size     = RDMEM_64(Add(arr, 16))
+        data     = RDMEM_64(Add(arr, 24))
 
         IfCondition GreaterEqual(size, capacity) ThenBlock: {
             new_capacity = Multiply(capacity, Arrays.GROWTH_FACTOR)
@@ -168,19 +168,19 @@ Function.Array.Push {
 
             i = 0
             WhileLoop LessThan(i, size) {
-                StoreValue(Add(new_data, Multiply(i, 8)),
-                           Dereference(Add(data, Multiply(i, 8))))
+                WRMEM_64(Add(new_data, Multiply(i, 8)),
+                           RDMEM_64(Add(data, Multiply(i, 8))))
                 i = Add(i, 1)
             }
 
             Deallocate(data, Multiply(capacity, 8))
-            StoreValue(Add(arr, 8),  new_capacity)
-            StoreValue(Add(arr, 24), new_data)
+            WRMEM_64(Add(arr, 8),  new_capacity)
+            WRMEM_64(Add(arr, 24), new_data)
             data = new_data
         }
 
-        StoreValue(Add(data, Multiply(size, 8)), value)
-        StoreValue(Add(arr, 16), Add(size, 1))
+        WRMEM_64(Add(data, Multiply(size, 8)), value)
+        WRMEM_64(Add(arr, 16), Add(size, 1))
     }
 }
 
@@ -193,14 +193,14 @@ Function.Array.Pop {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition LessEqual(size, 0) ThenBlock: { ReturnValue(0) }
 
-        data     = Dereference(Add(arr, 24))
+        data     = RDMEM_64(Add(arr, 24))
         new_size = Subtract(size, 1)
-        value    = Dereference(Add(data, Multiply(new_size, 8)))
+        value    = RDMEM_64(Add(data, Multiply(new_size, 8)))
 
-        StoreValue(Add(arr, 16), new_size)
+        WRMEM_64(Add(arr, 16), new_size)
         ReturnValue(value)
     }
 }
@@ -212,7 +212,7 @@ Function.Array.Clear {
     Input: arr: Address
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
-        StoreValue(Add(arr, 16), 0)
+        WRMEM_64(Add(arr, 16), 0)
     }
 }
 
@@ -227,9 +227,9 @@ Function.Array.Insert {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        capacity = Dereference(Add(arr, 8))
-        size     = Dereference(Add(arr, 16))
-        data     = Dereference(Add(arr, 24))
+        capacity = RDMEM_64(Add(arr, 8))
+        size     = RDMEM_64(Add(arr, 16))
+        data     = RDMEM_64(Add(arr, 24))
 
         IfCondition LessThan(index, 0)    ThenBlock: { index = 0 }
         IfCondition GreaterThan(index, size) ThenBlock: { index = size }
@@ -240,27 +240,27 @@ Function.Array.Insert {
 
             i = 0
             WhileLoop LessThan(i, size) {
-                StoreValue(Add(new_data, Multiply(i, 8)),
-                           Dereference(Add(data, Multiply(i, 8))))
+                WRMEM_64(Add(new_data, Multiply(i, 8)),
+                           RDMEM_64(Add(data, Multiply(i, 8))))
                 i = Add(i, 1)
             }
 
             Deallocate(data, Multiply(capacity, 8))
-            StoreValue(Add(arr, 8),  new_capacity)
-            StoreValue(Add(arr, 24), new_data)
+            WRMEM_64(Add(arr, 8),  new_capacity)
+            WRMEM_64(Add(arr, 24), new_data)
             data = new_data
         }
 
         i = size
         WhileLoop GreaterThan(i, index) {
             prev = Subtract(i, 1)
-            StoreValue(Add(data, Multiply(i, 8)),
-                       Dereference(Add(data, Multiply(prev, 8))))
+            WRMEM_64(Add(data, Multiply(i, 8)),
+                       RDMEM_64(Add(data, Multiply(prev, 8))))
             i = Subtract(i, 1)
         }
 
-        StoreValue(Add(data, Multiply(index, 8)), value)
-        StoreValue(Add(arr, 16), Add(size, 1))
+        WRMEM_64(Add(data, Multiply(index, 8)), value)
+        WRMEM_64(Add(arr, 16), Add(size, 1))
         ReturnValue(1)
     }
 }
@@ -275,23 +275,23 @@ Function.Array.Delete {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition LessThan(index, 0)     ThenBlock: { ReturnValue(0) }
         IfCondition GreaterEqual(index, size) ThenBlock: { ReturnValue(0) }
 
-        data    = Dereference(Add(arr, 24))
-        deleted = Dereference(Add(data, Multiply(index, 8)))
+        data    = RDMEM_64(Add(arr, 24))
+        deleted = RDMEM_64(Add(data, Multiply(index, 8)))
 
         i = index
         last = Subtract(size, 1)
         WhileLoop LessThan(i, last) {
             next = Add(i, 1)
-            StoreValue(Add(data, Multiply(i, 8)),
-                       Dereference(Add(data, Multiply(next, 8))))
+            WRMEM_64(Add(data, Multiply(i, 8)),
+                       RDMEM_64(Add(data, Multiply(next, 8))))
             i = Add(i, 1)
         }
 
-        StoreValue(Add(arr, 16), last)
+        WRMEM_64(Add(arr, 16), last)
         ReturnValue(deleted)
     }
 }
@@ -306,12 +306,12 @@ Function.Array.IndexOf {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(Arrays.NULL) }
 
-        size = Dereference(Add(arr, 16))
-        data = Dereference(Add(arr, 24))
+        size = RDMEM_64(Add(arr, 16))
+        data = RDMEM_64(Add(arr, 24))
 
         i = 0
         WhileLoop LessThan(i, size) {
-            IfCondition EqualTo(Dereference(Add(data, Multiply(i, 8))), value) ThenBlock: {
+            IfCondition EqualTo(RDMEM_64(Add(data, Multiply(i, 8))), value) ThenBlock: {
                 ReturnValue(i)
             }
             i = Add(i, 1)
@@ -347,21 +347,21 @@ Function.Array.Copy {
             ReturnValue(Array.Create(Arrays.DEFAULT_CAPACITY))
         }
 
-        size     = Dereference(Add(arr, 16))
-        capacity = Dereference(Add(arr, 8))
-        data     = Dereference(Add(arr, 24))
+        size     = RDMEM_64(Add(arr, 16))
+        capacity = RDMEM_64(Add(arr, 8))
+        data     = RDMEM_64(Add(arr, 24))
 
         new_arr  = Array.Create(capacity)
-        new_data = Dereference(Add(new_arr, 24))
+        new_data = RDMEM_64(Add(new_arr, 24))
 
         i = 0
         WhileLoop LessThan(i, size) {
-            StoreValue(Add(new_data, Multiply(i, 8)),
-                       Dereference(Add(data, Multiply(i, 8))))
+            WRMEM_64(Add(new_data, Multiply(i, 8)),
+                       RDMEM_64(Add(data, Multiply(i, 8))))
             i = Add(i, 1)
         }
 
-        StoreValue(Add(new_arr, 16), size)
+        WRMEM_64(Add(new_arr, 16), size)
         ReturnValue(new_arr)
     }
 }
@@ -376,12 +376,12 @@ Function.Array.Extend {
         IfCondition EqualTo(arr,   0) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(other, 0) ThenBlock: { ReturnValue(0) }
 
-        other_size = Dereference(Add(other, 16))
-        other_data = Dereference(Add(other, 24))
+        other_size = RDMEM_64(Add(other, 16))
+        other_data = RDMEM_64(Add(other, 24))
 
         i = 0
         WhileLoop LessThan(i, other_size) {
-            val = Dereference(Add(other_data, Multiply(i, 8)))
+            val = RDMEM_64(Add(other_data, Multiply(i, 8)))
             Array.Push(arr, val)
             i = Add(i, 1)
         }
@@ -396,8 +396,8 @@ Function.Array.Reverse {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        size = Dereference(Add(arr, 16))
-        data = Dereference(Add(arr, 24))
+        size = RDMEM_64(Add(arr, 16))
+        data = RDMEM_64(Add(arr, 24))
 
         left  = 0
         right = Subtract(size, 1)
@@ -405,10 +405,10 @@ Function.Array.Reverse {
         WhileLoop LessThan(left, right) {
             loff = Add(data, Multiply(left,  8))
             roff = Add(data, Multiply(right, 8))
-            lv   = Dereference(loff)
-            rv   = Dereference(roff)
-            StoreValue(loff, rv)
-            StoreValue(roff, lv)
+            lv   = RDMEM_64(loff)
+            rv   = RDMEM_64(roff)
+            WRMEM_64(loff, rv)
+            WRMEM_64(roff, lv)
             left  = Add(left,  1)
             right = Subtract(right, 1)
         }
@@ -423,14 +423,14 @@ Function.Array.Sort {
     Body: {
         IfCondition EqualTo(arr, 0) ThenBlock: { ReturnValue(0) }
 
-        size = Dereference(Add(arr, 16))
-        data = Dereference(Add(arr, 24))
+        size = RDMEM_64(Add(arr, 16))
+        data = RDMEM_64(Add(arr, 24))
 
         IfCondition LessEqual(size, 1) ThenBlock: { ReturnValue(0) }
 
         i = 1
         WhileLoop LessThan(i, size) {
-            key = Dereference(Add(data, Multiply(i, 8)))
+            key = RDMEM_64(Add(data, Multiply(i, 8)))
             j   = Subtract(i, 1)
 
             cont = 1
@@ -438,9 +438,9 @@ Function.Array.Sort {
                 IfCondition LessThan(j, 0) ThenBlock: {
                     cont = 0
                 } ElseBlock: {
-                    curr = Dereference(Add(data, Multiply(j, 8)))
+                    curr = RDMEM_64(Add(data, Multiply(j, 8)))
                     IfCondition GreaterThan(curr, key) ThenBlock: {
-                        StoreValue(Add(data, Multiply(Add(j, 1), 8)), curr)
+                        WRMEM_64(Add(data, Multiply(Add(j, 1), 8)), curr)
                         j = Subtract(j, 1)
                     } ElseBlock: {
                         cont = 0
@@ -448,7 +448,7 @@ Function.Array.Sort {
                 }
             }
 
-            StoreValue(Add(data, Multiply(Add(j, 1), 8)), key)
+            WRMEM_64(Add(data, Multiply(Add(j, 1), 8)), key)
             i = Add(i, 1)
         }
     }
@@ -467,8 +467,8 @@ Function.Array.Slice {
             ReturnValue(Array.Create(0))
         }
 
-        size = Dereference(Add(arr, 16))
-        data = Dereference(Add(arr, 24))
+        size = RDMEM_64(Add(arr, 16))
+        data = RDMEM_64(Add(arr, 24))
 
         IfCondition LessThan(start, 0) ThenBlock: {
             start = Add(size, start)
@@ -486,7 +486,7 @@ Function.Array.Slice {
 
         i = start
         WhileLoop LessThan(i, end_idx) {
-            val = Dereference(Add(data, Multiply(i, 8)))
+            val = RDMEM_64(Add(data, Multiply(i, 8)))
             Array.Push(result, val)
             i = Add(i, 1)
         }
@@ -504,14 +504,14 @@ Function.Array.Swap {
     Input: idx2: Integer
     Output: Integer
     Body: {
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition Or(LessThan(idx1, 0), GreaterEqual(idx1, size)) ThenBlock: { ReturnValue(0) }
         IfCondition Or(LessThan(idx2, 0), GreaterEqual(idx2, size)) ThenBlock: { ReturnValue(0) }
-        data = Dereference(Add(arr, 24))
-        v1 = Dereference(Add(data, Multiply(idx1, 8)))
-        v2 = Dereference(Add(data, Multiply(idx2, 8)))
-        StoreValue(Add(data, Multiply(idx1, 8)), v2)
-        StoreValue(Add(data, Multiply(idx2, 8)), v1)
+        data = RDMEM_64(Add(arr, 24))
+        v1 = RDMEM_64(Add(data, Multiply(idx1, 8)))
+        v2 = RDMEM_64(Add(data, Multiply(idx2, 8)))
+        WRMEM_64(Add(data, Multiply(idx1, 8)), v2)
+        WRMEM_64(Add(data, Multiply(idx2, 8)), v1)
         ReturnValue(1)
     }
 }
@@ -523,17 +523,17 @@ Function.Array.Shift {
     Input: arr: Address
     Output: Integer
     Body: {
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition LessEqual(size, 0) ThenBlock: { ReturnValue(0) }
-        data = Dereference(Add(arr, 24))
-        first = Dereference(data)
+        data = RDMEM_64(Add(arr, 24))
+        first = RDMEM_64(data)
         i = 1
         WhileLoop LessThan(i, size) {
-            val = Dereference(Add(data, Multiply(i, 8)))
-            StoreValue(Add(data, Multiply(Subtract(i, 1), 8)), val)
+            val = RDMEM_64(Add(data, Multiply(i, 8)))
+            WRMEM_64(Add(data, Multiply(Subtract(i, 1), 8)), val)
             i = Add(i, 1)
         }
-        StoreValue(Add(arr, 16), Subtract(size, 1))
+        WRMEM_64(Add(arr, 16), Subtract(size, 1))
         ReturnValue(first)
     }
 }
@@ -545,10 +545,10 @@ Function.Array.First {
     Input: arr: Address
     Output: Integer
     Body: {
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition EqualTo(size, 0) ThenBlock: { ReturnValue(Arrays.NULL) }
-        data = Dereference(Add(arr, 24))
-        ReturnValue(Dereference(data))
+        data = RDMEM_64(Add(arr, 24))
+        ReturnValue(RDMEM_64(data))
     }
 }
 
@@ -559,10 +559,10 @@ Function.Array.Last {
     Input: arr: Address
     Output: Integer
     Body: {
-        size = Dereference(Add(arr, 16))
+        size = RDMEM_64(Add(arr, 16))
         IfCondition EqualTo(size, 0) ThenBlock: { ReturnValue(Arrays.NULL) }
-        data = Dereference(Add(arr, 24))
-        ReturnValue(Dereference(Add(data, Multiply(Subtract(size, 1), 8))))
+        data = RDMEM_64(Add(arr, 24))
+        ReturnValue(RDMEM_64(Add(data, Multiply(Subtract(size, 1), 8))))
     }
 }
 
@@ -573,7 +573,7 @@ Function.Array.IsEmpty {
     Input: arr: Address
     Output: Integer
     Body: {
-        ReturnValue(EqualTo(Dereference(Add(arr, 16)), 0))
+        ReturnValue(EqualTo(RDMEM_64(Add(arr, 16)), 0))
     }
 }
 
@@ -585,20 +585,20 @@ Function.Array.Resize {
     Input: new_capacity: Integer
     Output: Integer
     Body: {
-        size     = Dereference(Add(arr, 16))
-        old_cap  = Dereference(Add(arr, 8))
-        old_data = Dereference(Add(arr, 24))
+        size     = RDMEM_64(Add(arr, 16))
+        old_cap  = RDMEM_64(Add(arr, 8))
+        old_data = RDMEM_64(Add(arr, 24))
         IfCondition LessThan(new_capacity, size) ThenBlock: { new_capacity = size }
         new_data = Allocate(Multiply(new_capacity, 8))
         i = 0
         WhileLoop LessThan(i, size) {
-            val = Dereference(Add(old_data, Multiply(i, 8)))
-            StoreValue(Add(new_data, Multiply(i, 8)), val)
+            val = RDMEM_64(Add(old_data, Multiply(i, 8)))
+            WRMEM_64(Add(new_data, Multiply(i, 8)), val)
             i = Add(i, 1)
         }
         Deallocate(old_data, Multiply(old_cap, 8))
-        StoreValue(Add(arr, 8),  new_capacity)
-        StoreValue(Add(arr, 24), new_data)
+        WRMEM_64(Add(arr, 8),  new_capacity)
+        WRMEM_64(Add(arr, 24), new_data)
         ReturnValue(1)
     }
 }
@@ -611,13 +611,13 @@ Function.Array.InsertSorted {
     Input: value: Integer
     Output: Integer
     Body: {
-        size = Dereference(Add(arr, 16))
-        data = Dereference(Add(arr, 24))
+        size = RDMEM_64(Add(arr, 16))
+        data = RDMEM_64(Add(arr, 24))
         insert_idx = size
         i = 0
         found = 0
         WhileLoop And(LessThan(i, size), EqualTo(found, 0)) {
-            cur = Dereference(Add(data, Multiply(i, 8)))
+            cur = RDMEM_64(Add(data, Multiply(i, 8)))
             IfCondition GreaterThan(cur, value) ThenBlock: {
                 insert_idx = i
                 found = 1
@@ -637,13 +637,13 @@ Function.Array.BinarySearch {
     Input: value: Integer
     Output: Integer
     Body: {
-        size  = Dereference(Add(arr, 16))
-        data  = Dereference(Add(arr, 24))
+        size  = RDMEM_64(Add(arr, 16))
+        data  = RDMEM_64(Add(arr, 24))
         left  = 0
         right = Subtract(size, 1)
         WhileLoop LessEqual(left, right) {
             mid     = Divide(Add(left, right), 2)
-            mid_val = Dereference(Add(data, Multiply(mid, 8)))
+            mid_val = RDMEM_64(Add(data, Multiply(mid, 8)))
             IfCondition EqualTo(mid_val, value) ThenBlock: { ReturnValue(mid) }
             IfCondition LessThan(mid_val, value) ThenBlock: {
                 left = Add(mid, 1)

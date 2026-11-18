@@ -63,7 +63,7 @@ Function.Front.Get {
     Input: i: Integer
     Output: Integer
     Body: {
-        ReturnValue(Dereference(Add(arr, Multiply(i, 8))))
+        ReturnValue(RDMEM_64(Add(arr, Multiply(i, 8))))
     }
 }
 
@@ -95,8 +95,8 @@ Function.Front.PushSlot {
     Input: ring: Address
     Output: Address
     Body: {
-        head = Dereference(ring)
-        tail = Dereference(Add(ring, 8))
+        head = RDMEM_64(ring)
+        tail = RDMEM_64(Add(ring, 8))
         IfCondition GreaterEqual(Subtract(tail, head), FrontC.NSLOT) ThenBlock: { ReturnValue(0) }
         i = Modulo(tail, FrontC.NSLOT)
         ReturnValue(Add(Add(ring, FrontC.HDR), Multiply(i, FrontC.SLOT)))
@@ -106,7 +106,7 @@ Function.Front.PushSlot {
 Function.Front.PushDone {
     Input: ring: Address
     Body: {
-        StoreValue(Add(ring, 8), Add(Dereference(Add(ring, 8)), 1))
+        WRMEM_64(Add(ring, 8), Add(RDMEM_64(Add(ring, 8)), 1))
     }
 }
 
@@ -115,8 +115,8 @@ Function.Front.PopSlot {
     Input: ring: Address
     Output: Address
     Body: {
-        head = Dereference(ring)
-        tail = Dereference(Add(ring, 8))
+        head = RDMEM_64(ring)
+        tail = RDMEM_64(Add(ring, 8))
         IfCondition EqualTo(head, tail) ThenBlock: { ReturnValue(0) }
         i = Modulo(head, FrontC.NSLOT)
         ReturnValue(Add(Add(ring, FrontC.HDR), Multiply(i, FrontC.SLOT)))
@@ -126,14 +126,14 @@ Function.Front.PopSlot {
 Function.Front.PopDone {
     Input: ring: Address
     Body: {
-        StoreValue(ring, Add(Dereference(ring), 1))
+        WRMEM_64(ring, Add(RDMEM_64(ring), 1))
     }
 }
 
 Function.Front.Signal {
     Input: efd: Integer
     Body: {
-        StoreValue(FrontSt.efbuf, 1)
+        WRMEM_64(FrontSt.efbuf, 1)
         SystemCall(FrontC.SYS_WRITE, efd, FrontSt.efbuf, 8)
     }
 }
@@ -163,9 +163,9 @@ Function.Front.Setup {
             // MAP_SHARED | MAP_ANONYMOUS: both processes see the same pages
             r = SystemCall(FrontC.SYS_MMAP, 0, bytes, 3, 33, -1, 0)
             IfCondition LessThan(r, 4096) ThenBlock: { ReturnValue(0) }
-            StoreValue(Add(FrontSt.regions, Multiply(f, 8)), r)
-            StoreValue(Add(FrontSt.req_efd, Multiply(f, 8)), SystemCall(FrontC.SYS_EVENTFD2, 0, FrontC.EFD_NONBLOCK))
-            StoreValue(Add(FrontSt.resp_efd, Multiply(f, 8)), SystemCall(FrontC.SYS_EVENTFD2, 0, FrontC.EFD_NONBLOCK))
+            WRMEM_64(Add(FrontSt.regions, Multiply(f, 8)), r)
+            WRMEM_64(Add(FrontSt.req_efd, Multiply(f, 8)), SystemCall(FrontC.SYS_EVENTFD2, 0, FrontC.EFD_NONBLOCK))
+            WRMEM_64(Add(FrontSt.resp_efd, Multiply(f, 8)), SystemCall(FrontC.SYS_EVENTFD2, 0, FrontC.EFD_NONBLOCK))
             f = Add(f, 1)
         }
         ReturnValue(1)
@@ -231,30 +231,30 @@ Function.Front.Handler {
         blk = 0
         IfCondition Or(EqualTo(slot, 0), NotEqual(FrontSt.ov_head, 0)) ThenBlock: {
             blk = Allocate(Add(need, 16))
-            StoreValue(blk, 0)
-            StoreValue(Add(blk, 8), need)
+            WRMEM_64(blk, 0)
+            WRMEM_64(Add(blk, 8), need)
             slot = Add(blk, 16)
         }
         idx = Divide(Subtract(conn, HTTP1St.slots), HTTP1Off.SLOT)
-        StoreValue(slot, HTTP1.CGet(conn, HTTP1Off.GEN))
-        StoreValue(Add(slot, 8), idx)
-        StoreValue(Add(slot, 16), HTTP1.CGet(conn, HTTP1Off.KEEP))
-        StoreValue(Add(slot, 24), mlen)
-        StoreValue(Add(slot, 32), plen)
-        StoreValue(Add(slot, 40), blen)
-        StoreValue(Add(slot, 48), dlen)
+        WRMEM_64(slot, HTTP1.CGet(conn, HTTP1Off.GEN))
+        WRMEM_64(Add(slot, 8), idx)
+        WRMEM_64(Add(slot, 16), HTTP1.CGet(conn, HTTP1Off.KEEP))
+        WRMEM_64(Add(slot, 24), mlen)
+        WRMEM_64(Add(slot, 32), plen)
+        WRMEM_64(Add(slot, 40), blen)
+        WRMEM_64(Add(slot, 48), dlen)
         p = Add(slot, FrontC.HDR)
         MemoryCopy(p, method, mlen)
-        SetByte(p, mlen, 0)
+        WRMEM_8(p, mlen, 0)
         p = Add(p, Add(mlen, 1))
         MemoryCopy(p, path, plen)
-        SetByte(p, plen, 0)
+        WRMEM_8(p, plen, 0)
         p = Add(p, Add(plen, 1))
         IfCondition GreaterThan(blen, 0) ThenBlock: { MemoryCopy(p, bearer, blen) }
-        SetByte(p, blen, 0)
+        WRMEM_8(p, blen, 0)
         p = Add(p, Add(blen, 1))
         IfCondition GreaterThan(dlen, 0) ThenBlock: { MemoryCopy(p, body, dlen) }
-        SetByte(p, dlen, 0)
+        WRMEM_8(p, dlen, 0)
         IfCondition EqualTo(blk, 0) ThenBlock: {
             Front.PushDone(ring)
             FrontSt.req_pend = 1
@@ -262,7 +262,7 @@ Function.Front.Handler {
             IfCondition EqualTo(FrontSt.ov_head, 0) ThenBlock: {
                 FrontSt.ov_head = blk
             } ElseBlock: {
-                StoreValue(FrontSt.ov_tail, blk)
+                WRMEM_64(FrontSt.ov_tail, blk)
             }
             FrontSt.ov_tail = blk
         }
@@ -279,10 +279,10 @@ Function.Front.OnResp {
         ring = Front.RespRing(f)
         slot = Front.PopSlot(ring)
         WhileLoop NotEqual(slot, 0) {
-            gen = Dereference(slot)
-            idx = Dereference(Add(slot, 8))
-            keep = Dereference(Add(slot, 16))
-            len = Dereference(Add(slot, 24))
+            gen = RDMEM_64(slot)
+            idx = RDMEM_64(Add(slot, 8))
+            keep = RDMEM_64(Add(slot, 16))
+            len = RDMEM_64(Add(slot, 24))
             conn = HTTP1.ConnAt(idx)
             ok = 0
             IfCondition GreaterThan(HTTP1.CGet(conn, HTTP1Off.FD), 0) ThenBlock: {
@@ -335,11 +335,11 @@ Function.Front.Tick {
             WhileLoop NotEqual(blk, 0) {
                 slot = Front.PushSlot(ring)
                 IfCondition EqualTo(slot, 0) ThenBlock: { BreakLoop }
-                len = Dereference(Add(blk, 8))
+                len = RDMEM_64(Add(blk, 8))
                 MemoryCopy(slot, Add(blk, 16), len)
                 Front.PushDone(ring)
                 FrontSt.req_pend = 1
-                nxt = Dereference(blk)
+                nxt = RDMEM_64(blk)
                 Deallocate(blk, Add(len, 16))
                 blk = nxt
             }
@@ -354,7 +354,7 @@ Function.Front.Tick {
         f = 0
         WhileLoop LessThan(f, FrontSt.n) {
             IfCondition EqualTo(Front.Get(FrontSt.resp_pend, f), 1) ThenBlock: {
-                StoreValue(Add(FrontSt.resp_pend, Multiply(f, 8)), 0)
+                WRMEM_64(Add(FrontSt.resp_pend, Multiply(f, 8)), 0)
                 Front.Signal(Front.Get(FrontSt.resp_efd, f))
             }
             f = Add(f, 1)
@@ -376,7 +376,7 @@ Function.Front.Serve {
             PrintMessage("FAIL front listen\n")
             Exit(1)
         }
-        Epoll.Add(HTTP1St.epfd, Front.Get(FrontSt.resp_efd, FrontSt.me), 1, HTTP1Ring.TAG)
+        HTTP1.WatchFd(Front.Get(FrontSt.resp_efd, FrontSt.me), HTTP1Ring.TAG)
         PrintMessage("front listening\n")
         HTTP1.Serve(AddressOf(Front.Handler))
         Exit(0)
@@ -395,7 +395,7 @@ Function.Front.Attach {
         HTTP1St.tick_fn = AddressOf(Front.Tick)
         f = 0
         WhileLoop LessThan(f, FrontSt.n) {
-            Epoll.Add(HTTP1St.epfd, Front.Get(FrontSt.req_efd, f), 1, Add(HTTP1Ring.TAG, f))
+            HTTP1.WatchFd(Front.Get(FrontSt.req_efd, f), Add(HTTP1Ring.TAG, f))
             f = Add(f, 1)
         }
     }
@@ -411,7 +411,7 @@ Function.Front.VGet {
             HTTP1.CSet(v, HTTP1Off.CAP, HTTP1St.bufsz)
             ReturnValue(v)
         }
-        FrontSt.vfree = Dereference(Add(v, HTTP1Off.VIDX))
+        FrontSt.vfree = RDMEM_64(Add(v, HTTP1Off.VIDX))
         ReturnValue(v)
     }
 }
@@ -419,7 +419,7 @@ Function.Front.VGet {
 Function.Front.VPut {
     Input: v: Address
     Body: {
-        StoreValue(Add(v, HTTP1Off.VIDX), FrontSt.vfree)
+        WRMEM_64(Add(v, HTTP1Off.VIDX), FrontSt.vfree)
         FrontSt.vfree = v
     }
 }
@@ -439,15 +439,15 @@ Function.Front.VSend {
             slot = Front.PushSlot(ring)
         }
         len = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
-        StoreValue(slot, HTTP1.CGet(conn, HTTP1Off.VGEN))
-        StoreValue(Add(slot, 8), HTTP1.CGet(conn, HTTP1Off.VIDX))
-        StoreValue(Add(slot, 16), HTTP1.CGet(conn, HTTP1Off.KEEP))
-        StoreValue(Add(slot, 24), len)
+        WRMEM_64(slot, HTTP1.CGet(conn, HTTP1Off.VGEN))
+        WRMEM_64(Add(slot, 8), HTTP1.CGet(conn, HTTP1Off.VIDX))
+        WRMEM_64(Add(slot, 16), HTTP1.CGet(conn, HTTP1Off.KEEP))
+        WRMEM_64(Add(slot, 24), len)
         IfCondition GreaterThan(len, 0) ThenBlock: {
             MemoryCopy(Add(slot, FrontC.HDR), HTTP1.CGet(conn, HTTP1Off.OUT), len)
         }
         Front.PushDone(ring)
-        StoreValue(Add(FrontSt.resp_pend, Multiply(f, 8)), 1)
+        WRMEM_64(Add(FrontSt.resp_pend, Multiply(f, 8)), 1)
         HTTP1.CSet(conn, HTTP1Off.OUT_SENT, len)
         // Its fields stay readable until the caller resets it; it is only
         // reused by the next Front.OnReq
@@ -465,10 +465,10 @@ Function.Front.OnReq {
         slot = Front.PopSlot(ring)
         WhileLoop NotEqual(slot, 0) {
             v = Front.VGet()
-            mlen = Dereference(Add(slot, 24))
-            plen = Dereference(Add(slot, 32))
-            blen = Dereference(Add(slot, 40))
-            dlen = Dereference(Add(slot, 48))
+            mlen = RDMEM_64(Add(slot, 24))
+            plen = RDMEM_64(Add(slot, 32))
+            blen = RDMEM_64(Add(slot, 40))
+            dlen = RDMEM_64(Add(slot, 48))
             p = Add(slot, FrontC.HDR)
             HTTP1.CSet(v, HTTP1Off.METHOD, p)
             p = Add(p, Add(mlen, 1))
@@ -484,9 +484,9 @@ Function.Front.OnReq {
             IfCondition GreaterThan(dlen, 0) ThenBlock: { body = p }
             HTTP1.CSet(v, HTTP1Off.BODY, body)
             HTTP1.CSet(v, HTTP1Off.BODY_LEN, dlen)
-            HTTP1.CSet(v, HTTP1Off.KEEP, Dereference(Add(slot, 16)))
-            HTTP1.CSet(v, HTTP1Off.VGEN, Dereference(slot))
-            HTTP1.CSet(v, HTTP1Off.VIDX, Dereference(Add(slot, 8)))
+            HTTP1.CSet(v, HTTP1Off.KEEP, RDMEM_64(Add(slot, 16)))
+            HTTP1.CSet(v, HTTP1Off.VGEN, RDMEM_64(slot))
+            HTTP1.CSet(v, HTTP1Off.VIDX, RDMEM_64(Add(slot, 8)))
             HTTP1.CSet(v, HTTP1Off.VFRONT, f)
             HTTP1.CSet(v, HTTP1Off.FD, -2)
             HTTP1.CSet(v, HTTP1Off.STATE, 1)

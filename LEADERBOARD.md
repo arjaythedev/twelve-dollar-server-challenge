@@ -116,9 +116,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 21 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
 | 21 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
 | 21 | holyphp-io-uring-elifoxcoder | #490 | HolyPHP (io_uring, SQLite B-tree reads) | **270,000** ᵘ | 25,816 | 234.0 | 584.6 | 0.00 | 84 | 29 | 1,325 | 2026-11-17 |
-| 32 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
-| 33 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
-| 33 | cpp-io_uring-0329-at | #492 | C++ (io_uring, SQLite B-tree reads) | **260,000** ᴹ | 25,008 | 49.1 | 182.5 | 0.00 | 75 | 27 | 670 | 2026-11-18 |
+| 21 | cpp-io_uring-0329-at | #514 | C++ (io_uring, SQLite B-tree reads) | **270,000** ᴹ | 25,812 | 103.5 | 567.4 | 0.00 | 79 | 28 | 1,097 | 2026-11-18 |
+| 33 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
+| 34 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 35 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 35 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 35 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
@@ -1153,6 +1153,11 @@ ties the merged 220,000 without beating it, so the row stays at `a77a5bb` and #4
 other slot instead of all at once): it held **260,000** (25,008 req/s, p95 49.1 / p99 182.5 ms, 0 errors, 75 % CPU,
 27 µs/req, 670 MB, 2026-11-18). 270,000 and 280,000 failed the 2-minute probe on p99 (1.53 s, 2.07 s, 0 errors) and
 320,000 on p99 14.8 s with 0.068 % timeouts. It beats the merged 220,000, so #492 is merged and replaces #483's row.
+**The row is now follow-up #514 at `b76816c`** (feed id-span fast path widened from 64 to 512 posts, idea credited to
+#264): it held **270,000** (25,812 req/s, p95 103.5 / p99 567.4 ms, 0 errors, 79 % CPU, 28 µs/req, 1,097 MB,
+2026-11-18). 280,000 failed the 2-minute probe on p99 (2.52 s, 0 errors) and 320,000 on p99 14.5 s with 0.29 %
+timeouts. The head moved to `8015284` during that run, so #514 isn't merged yet: `8015284` is queued for its own run,
+and the merged code is still #492's `e1696c8` (260,000).
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

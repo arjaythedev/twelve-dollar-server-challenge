@@ -111,7 +111,7 @@ static void ob_json_str_slow(struct ob *o, const uint8_t *s, size_t n) {
   o->n = (size_t)(d - o->p);
 }
 
-static inline void ob_json_str(struct ob *o, const uint8_t *s, size_t n) {
+static __attribute__((noinline)) void ob_json_str_avx2(struct ob *o, const uint8_t *s, size_t n) {
   if (!ob_room(o, n + 2 + 32)) return;
   uint8_t *d = o->p + o->n;
   d[0] = '"';
@@ -126,38 +126,48 @@ static inline void ob_json_str(struct ob *o, const uint8_t *s, size_t n) {
     if (_mm256_movemask_epi8(m)) { ob_json_str_slow(o, s, n); return; }
     _mm256_storeu_si256((__m256i *)(d + i), v);
   }
-  if (i < n && n >= 32) {
+  if (i < n) {
     __m256i v = _mm256_loadu_si256((const __m256i *)(s + n - 32));
     __m256i m = _mm256_or_si256(_mm256_cmpeq_epi8(v, q), _mm256_cmpeq_epi8(v, bs));
     m = _mm256_or_si256(m, _mm256_cmpeq_epi8(_mm256_max_epu8(v, lo), lo));
     if (_mm256_movemask_epi8(m)) { ob_json_str_slow(o, s, n); return; }
     _mm256_storeu_si256((__m256i *)(d + n - 32), v);
-    i = n;
-  } else if (n >= 16) {
-    const __m128i lo16 = _mm_set1_epi8(0x1f), q16 = _mm_set1_epi8('"'), bs16 = _mm_set1_epi8('\\');
-    for (size_t k = 0; k < 2; k++) {
-      size_t at = k ? n - 16 : 0;
-      __m128i v = _mm_loadu_si128((const __m128i *)(s + at));
-      __m128i m = _mm_or_si128(_mm_cmpeq_epi8(v, q16), _mm_cmpeq_epi8(v, bs16));
-      m = _mm_or_si128(m, _mm_cmpeq_epi8(_mm_max_epu8(v, lo16), lo16));
-      if (_mm_movemask_epi8(m)) { ob_json_str_slow(o, s, n); return; }
-      _mm_storeu_si128((__m128i *)(d + at), v);
-    }
-    i = n;
-  } else if (n >= 8) {
-    const __m128i lo16 = _mm_set1_epi8(0x1f), q16 = _mm_set1_epi8('"'), bs16 = _mm_set1_epi8('\\');
-    __m128i v0 = _mm_loadu_si64(s);
-    __m128i v1 = _mm_loadu_si64(s + n - 8);
-    __m128i v = _mm_unpacklo_epi64(v0, v1);
-    __m128i m = _mm_or_si128(_mm_cmpeq_epi8(v, q16), _mm_cmpeq_epi8(v, bs16));
-    m = _mm_or_si128(m, _mm_cmpeq_epi8(_mm_max_epu8(v, lo16), lo16));
-    if (_mm_movemask_epi8(m)) { ob_json_str_slow(o, s, n); return; }
-    _mm_storeu_si64(d, v0);
-    _mm_storeu_si64(d + n - 8, v1);
-    i = n;
+  }
+#else
+  for (; i < n; i++) {
+    uint8_t c = s[i];
+    if (c < 0x20 || c == '"' || c == '\\') { ob_json_str_slow(o, s, n); return; }
+    d[i] = c;
   }
 #endif
-  for (; i < n; i++) {
+  d[n] = '"';
+  o->n += n + 2;
+}
+
+static inline void ob_json_str(struct ob *o, const uint8_t *s, size_t n) {
+  if (n >= 32) { ob_json_str_avx2(o, s, n); return; }
+  if (!ob_room(o, n + 2 + 16)) return;
+  uint8_t *d = o->p + o->n;
+  d[0] = '"';
+  d++;
+#ifdef __SSE2__
+  if (n >= 16) {
+    const __m128i lo16 = _mm_set1_epi8(0x1f), q16 = _mm_set1_epi8('"'), bs16 = _mm_set1_epi8('\\');
+    __m128i v0 = _mm_loadu_si128((const __m128i *)s);
+    __m128i v1 = _mm_loadu_si128((const __m128i *)(s + n - 16));
+    __m128i m0 = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v0, q16), _mm_cmpeq_epi8(v0, bs16)),
+                              _mm_cmpeq_epi8(_mm_max_epu8(v0, lo16), lo16));
+    __m128i m1 = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(v1, q16), _mm_cmpeq_epi8(v1, bs16)),
+                              _mm_cmpeq_epi8(_mm_max_epu8(v1, lo16), lo16));
+    if (_mm_movemask_epi8(_mm_or_si128(m0, m1))) { ob_json_str_slow(o, s, n); return; }
+    _mm_storeu_si128((__m128i *)d, v0);
+    _mm_storeu_si128((__m128i *)(d + n - 16), v1);
+    d[n] = '"';
+    o->n += n + 2;
+    return;
+  }
+#endif
+  for (size_t i = 0; i < n; i++) {
     uint8_t c = s[i];
     if (c < 0x20 || c == '"' || c == '\\') { ob_json_str_slow(o, s, n); return; }
     d[i] = c;

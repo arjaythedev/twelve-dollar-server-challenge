@@ -69,6 +69,11 @@
 #ifndef IORING_CQE_BUFFER_SHIFT
 #define IORING_CQE_BUFFER_SHIFT 16
 #endif
+#ifndef TCP_QUICKACK
+#define TCP_QUICKACK 12
+#endif
+
+static const int g_uring_zero_int = 0;
 
 #define LOAD_ACQ(p) atomic_load_explicit((_Atomic typeof(*(p)) *)(p), memory_order_acquire)
 #define LOAD_RLX(p) atomic_load_explicit((_Atomic typeof(*(p)) *)(p), memory_order_relaxed)
@@ -233,18 +238,6 @@ fail:
   return -1;
 }
 
-static inline int ring_register_eventfd(struct ring *r) {
-  int efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
-  if (efd < 0) return -1;
-  if (sys_io_uring_register(r->fd, IORING_REGISTER_EVENTFD, &efd, 1) < 0) {
-    int err = errno;
-    close(efd);
-    errno = err;
-    return -1;
-  }
-  return efd;
-}
-
 static inline unsigned ring_pending_submit(const struct ring *r) { return r->sq_local - r->sq_pushed; }
 
 static inline int ring_needs_enter(const struct ring *r) {
@@ -317,11 +310,23 @@ static inline void sqe_poll_multishot_conn(struct io_uring_sqe *s, unsigned slot
   s->poll32_events = POLLIN | POLLRDHUP;
   s->user_data = ud;
 }
-static inline void sqe_poll_eventfd(struct io_uring_sqe *s, int fd, uint64_t ud) {
-  s->opcode = IORING_OP_POLL_ADD;
+static inline void sqe_read_efd(struct io_uring_sqe *s, int fd, uint64_t *buf, uint64_t ud) {
+  s->opcode = IORING_OP_READ;
   s->fd = fd;
-  s->len = IORING_POLL_ADD_MULTI;
-  s->poll32_events = POLLIN;
+  s->addr = (uint64_t)(uintptr_t)buf;
+  s->len = (uint32_t)sizeof(uint64_t);
+  s->off = 0;
+  s->user_data = ud;
+}
+static inline void sqe_setsockopt_quickack0(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
+  /* IORING_OP_URING_CMD (46) + SOCKET_URING_OP_SETSOCKOPT (3) via stable SQE ABI offsets. */
+  s->opcode = 46;
+  s->flags = IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
+  s->fd = (int)slot;
+  s->off = 3;
+  s->addr = (uint64_t)(uint32_t)IPPROTO_TCP | ((uint64_t)(uint32_t)TCP_QUICKACK << 32);
+  s->file_index = (uint32_t)sizeof(int);
+  s->addr3 = (uint64_t)(uintptr_t)&g_uring_zero_int;
   s->user_data = ud;
 }
 static inline void sqe_recv_once(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
@@ -393,6 +398,11 @@ static int listen_socket(const char *host, int port, int backlog, const char **e
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) { *err = "HOST must be an IPv4 address"; close(fd); return -1; }
   if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0) { *err = "bind"; close(fd); return -1; }
   if (listen(fd, backlog) < 0) { *err = "listen"; close(fd); return -1; }
+  const char *qa = getenv("QUICKACK");
+  if (!qa || strcmp(qa, "1") != 0) {
+    int zero = 0;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &zero, sizeof zero);
+  }
   return fd;
 }
 

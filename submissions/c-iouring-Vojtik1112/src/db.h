@@ -1,5 +1,5 @@
-// SQLite persistence, direct-mapped hugepage PCACHE2, WAL syscall coalescing,
-// carried read transactions, and non-blocking two-phase background checkpointing.
+// SQLite persistence, pure-PCACHE2 direct hugepage cache over unix-excl,
+// commit-frame WAL coalescing VFS, carried read transactions, and non-blocking nice-19 checkpointing.
 #pragma once
 
 #include <errno.h>
@@ -14,6 +14,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -27,6 +28,7 @@
 // FastCache (SQLITE_CONFIG_PCACHE2): O(1) direct pgno->page array backed by
 // MADV_HUGEPAGE slab for the main 4096-byte purgeable cache, delegating all
 // secondary or non-4096 caches cleanly to SQLite's built-in pcache1.
+// Uses pure PCACHE2 contract only (tracks pinned state via xFetch/xUnpin).
 // -----------------------------------------------------------------------------
 enum {
     FC_FREE = 0,
@@ -39,7 +41,8 @@ struct fast_slot {
     int32_t next_free;
     uint8_t state;
     uint8_t ref;
-    uint8_t pad[2];
+    uint8_t pinned;
+    uint8_t pad;
 };
 
 struct fast_cache {
@@ -73,15 +76,15 @@ static int g_fc_extra_stride = 0;
 static int g_fc_prefault = 0;
 
 static void fc_configure(uint32_t cache_pages, int do_prefault) {
-    // Keep +4096 headroom slots above cache_size for concurrent pinned/dirty pages.
-    g_fc_slab_pages = cache_pages + 4096u;
+    // Keep +512 headroom slots above cache_size for concurrent pinned/dirty pages.
+    g_fc_slab_pages = cache_pages + 512u;
     g_fc_prefault = do_prefault;
 }
 
 static void fc_ensure_slab(int sz_extra) {
     int stride = (sz_extra + 63) & ~63;
     if (stride < 320) stride = 320;
-    uint32_t want_n = g_fc_slab_pages ? g_fc_slab_pages : (65536u + 4096u);
+    uint32_t want_n = g_fc_slab_pages ? g_fc_slab_pages : (16384u + 512u);
     if (g_fc_slots && stride <= g_fc_extra_stride && want_n <= g_fc_slab_pages) return;
 
     if (g_fc_slots) {
@@ -91,7 +94,7 @@ static void fc_ensure_slab(int sz_extra) {
         g_fc_slots = NULL;
     }
 
-    uint32_t n = g_fc_slab_pages ? g_fc_slab_pages : (65536u + 4096u);
+    uint32_t n = want_n;
     g_fc_slab_pages = n;
     g_fc_extra_stride = stride;
 
@@ -145,7 +148,7 @@ static sqlite3_pcache *fc_xCreate(int szPage, int szExtra, int bPurgeable) {
         atomic_compare_exchange_strong(&g_fc_taken, &expected, 1)) {
         fc_ensure_slab(szExtra);
         if (g_fc_slots) {
-            uint32_t dcap = 131072u; // Covers up to 512 MB DB in flat array before grow
+            uint32_t dcap = 131072u; // Covers up to 512 MB DB before grow
             if (g_fc_slab_pages + 4096u > dcap) dcap = 262144u;
             struct fast_slot **dir = (struct fast_slot **)mmap(
                 NULL, (size_t)dcap * sizeof(*dir), PROT_READ | PROT_WRITE,
@@ -154,7 +157,7 @@ static sqlite3_pcache *fc_xCreate(int szPage, int szExtra, int bPurgeable) {
                 fc->is_fast = 1;
                 fc->sz_page = szPage;
                 fc->sz_extra = szExtra;
-                fc->n_max = g_fc_slab_pages > 4096u ? g_fc_slab_pages - 4096u : g_fc_slab_pages;
+                fc->n_max = g_fc_slab_pages > 512u ? g_fc_slab_pages - 512u : g_fc_slab_pages;
                 fc->direct_cap = dcap;
                 fc->direct = dir;
                 fc->slots = g_fc_slots;
@@ -166,6 +169,7 @@ static sqlite3_pcache *fc_xCreate(int szPage, int szExtra, int bPurgeable) {
                     s->key = 0;
                     s->state = FC_FREE;
                     s->ref = 0;
+                    s->pinned = 0;
                     s->next_free = (i + 1u < g_fc_slab_pages) ? (int32_t)(i + 1u) : -1;
                 }
                 fc->free_head = 0;
@@ -192,7 +196,7 @@ static void fc_xCachesize(sqlite3_pcache *p, int nCachesize) {
         return;
     }
     uint32_t lim = nCachesize > 16 ? (uint32_t)nCachesize : 16u;
-    if (lim > fc->slab_cap - 1024u) lim = fc->slab_cap - 1024u;
+    if (fc->slab_cap > 256u && lim > fc->slab_cap - 256u) lim = fc->slab_cap - 256u;
     fc->n_max = lim;
 }
 
@@ -223,17 +227,14 @@ static struct fast_slot *fc_clock_evict(struct fast_cache *fc) {
     for (uint32_t tries = 0; tries < 2u * n; tries++) {
         struct fast_slot *s = &fc->slots[h];
         if (++h == n) h = 0;
-        if (s->state == FC_USED) {
-            PgHdr *ph = (PgHdr *)s->pg.pExtra;
-            if (ph->pPage && ph->nRef == 0 && (ph->flags & PGHDR_CLEAN)) {
-                if (s->ref) {
-                    s->ref = 0;
-                } else {
-                    fc->clock_hand = h;
-                    if (likely(s->key < fc->direct_cap && fc->direct[s->key] == s))
-                        fc->direct[s->key] = NULL;
-                    return s;
-                }
+        if (s->state == FC_USED && !s->pinned) {
+            if (s->ref) {
+                s->ref = 0;
+            } else {
+                fc->clock_hand = h;
+                if (likely(s->key < fc->direct_cap && fc->direct[s->key] == s))
+                    fc->direct[s->key] = NULL;
+                return s;
             }
         }
     }
@@ -266,11 +267,12 @@ static __attribute__((noinline)) sqlite3_pcache_page *fc_alloc_page(
             }
         }
     }
-    // SQLite's sqlite3PcacheFetchFinish requires pPgHdr->pPage == 0 on fresh/evicted slots.
+    // Clear pExtra so SQLite sees an uninitialized PgHdr on newly allocated/evicted slots.
     memset(s->pg.pExtra, 0, (size_t)fc->sz_extra);
     s->key = key;
     s->state = FC_USED;
     s->ref = 1;
+    s->pinned = 1;
     fc->direct[key] = s;
     if (key > fc->max_key) fc->max_key = key;
     return &s->pg;
@@ -281,7 +283,11 @@ static sqlite3_pcache_page *fc_xFetch(sqlite3_pcache *p, unsigned key, int creat
     if (unlikely(!fc->is_fast)) return g_orig_pcache.xFetch(fc->orig, key, createFlag);
     if (likely(key < fc->direct_cap)) {
         struct fast_slot *s = fc->direct[key];
-        if (likely(s != NULL)) return &s->pg;
+        if (likely(s != NULL)) {
+            s->pinned = 1;
+            if (unlikely(!s->ref)) s->ref = 1;
+            return &s->pg;
+        }
     }
     if (!createFlag) return NULL;
     return fc_alloc_page(fc, key, createFlag);
@@ -293,6 +299,7 @@ static inline void fc_drop_slot(struct fast_cache *fc, struct fast_slot *s) {
     s->key = 0;
     s->state = FC_FREE;
     s->ref = 0;
+    s->pinned = 0;
     s->next_free = fc->free_head;
     fc->free_head = (int32_t)(s - fc->slots);
     fc->n_alloc--;
@@ -304,8 +311,12 @@ static void fc_xUnpin(sqlite3_pcache *p, sqlite3_pcache_page *pPg, int discard) 
         g_orig_pcache.xUnpin(fc->orig, pPg, discard);
         return;
     }
-    if (likely(!discard)) return;
-    fc_drop_slot(fc, (struct fast_slot *)pPg);
+    struct fast_slot *s = (struct fast_slot *)pPg;
+    if (likely(!discard)) {
+        s->pinned = 0;
+        return;
+    }
+    fc_drop_slot(fc, s);
 }
 
 static void fc_xRekey(sqlite3_pcache *p, sqlite3_pcache_page *pPg,
@@ -321,6 +332,8 @@ static void fc_xRekey(sqlite3_pcache *p, sqlite3_pcache_page *pPg,
     if (unlikely(newKey >= fc->direct_cap)) {
         if (fc_grow_direct(fc, newKey) != 0) abort();
     }
+    struct fast_slot *prev = fc->direct[newKey];
+    if (unlikely(prev && prev != s)) fc_drop_slot(fc, prev);
     s->key = newKey;
     fc->direct[newKey] = s;
     if (newKey > fc->max_key) fc->max_key = newKey;
@@ -384,9 +397,10 @@ static int fc_register(void) {
 }
 
 // -----------------------------------------------------------------------------
-// "feed-wal" VFS: coalesces sequential 24B+4096B WAL frame writes into a
-// 256 KB buffer, flushed automatically on xShmBarrier(pDbFd), xSync, xRead,
-// xTruncate, xFileSize, xUnlock, or xClose. Also tracks g_wal_frames in O(1).
+// "feed-wal" VFS (wrapping "unix-excl"): coalesces 24B+4096B WAL frame writes
+// into a 256 KB buffer, flushed automatically on the commit frame's page
+// (header bytes 4..7 != 0) as well as xSync, xRead, xTruncate, xFileSize,
+// xLock, xUnlock, xFileControl, xFetch, or xClose.
 // -----------------------------------------------------------------------------
 #define FEED_WAL_WBUF_CAP (256u * 1024u)
 
@@ -395,16 +409,15 @@ struct feed_file {
     sqlite3_file *real;
     sqlite3_io_methods *iom;
     int is_wal;
-    int is_db;
+    int commit;
     int werr;
     uint8_t *wbuf;
     sqlite3_int64 woff;
+    sqlite3_int64 last_end;
     size_t wlen;
     size_t wcap;
 };
 
-static struct feed_file *g_wal_file = NULL;
-static atomic_uint g_wal_frames = 0;
 static sqlite3_vfs *g_unix_vfs = NULL;
 static sqlite3_vfs g_feed_vfs;
 static int g_vfs_registered = 0;
@@ -428,22 +441,11 @@ static int ff_flush_wal(struct feed_file *f) {
     return rc;
 }
 
-static inline void ff_track_wal_write(sqlite3_int64 off, int n) {
-    if (off == 0 && n == 32) {
-        atomic_store_explicit(&g_wal_frames, 0, memory_order_release);
-    } else if (off + n >= 32 + 4120) {
-        uint32_t frm = (uint32_t)((off + n - 32) / 4120);
-        uint32_t cur = atomic_load_explicit(&g_wal_frames, memory_order_relaxed);
-        if (frm > cur) atomic_store_explicit(&g_wal_frames, frm, memory_order_release);
-    }
-}
-
 static int ff_close(sqlite3_file *sf) {
     struct feed_file *f = (struct feed_file *)sf;
     int rc = SQLITE_OK;
     if (f->is_wal) {
         rc = ff_flush_wal(f);
-        if (g_wal_file == f) g_wal_file = NULL;
         free(f->wbuf);
         f->wbuf = NULL;
     }
@@ -466,43 +468,54 @@ static int ff_write(sqlite3_file *sf, const void *buf, int n, sqlite3_int64 off)
     struct feed_file *f = (struct feed_file *)sf;
     if (likely(f->is_wal)) {
         if (unlikely(f->werr != SQLITE_OK)) return f->werr;
-        ff_track_wal_write(off, n);
-        if (likely(f->wbuf != NULL)) {
-            if (f->wlen > 0 &&
-                off == f->woff + (sqlite3_int64)f->wlen &&
-                f->wlen + (size_t)n <= f->wcap) {
-                memcpy(f->wbuf + f->wlen, buf, (size_t)n);
-                f->wlen += (size_t)n;
-                return SQLITE_OK;
-            }
+        if (off != f->last_end) {
             if (f->wlen > 0) {
                 int rc = ff_flush_wal(f);
                 if (rc != SQLITE_OK) return rc;
             }
-            if ((size_t)n <= f->wcap) {
-                f->woff = off;
-                memcpy(f->wbuf, buf, (size_t)n);
-                f->wlen = (size_t)n;
+            f->commit = 0;
+        } else if (f->wlen + (size_t)n > f->wcap) {
+            int rc = ff_flush_wal(f);
+            if (rc != SQLITE_OK) return rc;
+        }
+        f->last_end = off + n;
+        if (likely(f->wbuf != NULL && (size_t)n <= f->wcap)) {
+            if (f->wlen == 0) f->woff = off;
+            memcpy(f->wbuf + f->wlen, buf, (size_t)n);
+            f->wlen += (size_t)n;
+            if (n == 24) {
+                const uint8_t *h = (const uint8_t *)buf;
+                f->commit = (h[4] | h[5] | h[6] | h[7]) != 0;
                 return SQLITE_OK;
             }
+            if (f->commit) {
+                f->commit = 0;
+                return ff_flush_wal(f);
+            }
+            return SQLITE_OK;
         }
+        if (f->wlen > 0) {
+            int rc = ff_flush_wal(f);
+            if (rc != SQLITE_OK) return rc;
+        }
+        f->commit = 0;
     }
     return f->real->pMethods->xWrite(f->real, buf, n, off);
 }
 
 static int ff_truncate(sqlite3_file *sf, sqlite3_int64 size) {
     struct feed_file *f = (struct feed_file *)sf;
-    if (f->is_wal) {
+    if (f->is_wal && f->wlen > 0) {
         int rc = ff_flush_wal(f);
         if (rc != SQLITE_OK) return rc;
-        if (size <= 32) atomic_store_explicit(&g_wal_frames, 0, memory_order_release);
     }
+    f->commit = 0;
     return f->real->pMethods->xTruncate(f->real, size);
 }
 
 static int ff_sync(sqlite3_file *sf, int flags) {
     struct feed_file *f = (struct feed_file *)sf;
-    if (f->is_wal) {
+    if (f->is_wal && f->wlen > 0) {
         int rc = ff_flush_wal(f);
         if (rc != SQLITE_OK) return rc;
     }
@@ -520,6 +533,10 @@ static int ff_file_size(sqlite3_file *sf, sqlite3_int64 *pSize) {
 
 static int ff_lock(sqlite3_file *sf, int eLock) {
     struct feed_file *f = (struct feed_file *)sf;
+    if (f->is_wal && f->wlen > 0) {
+        int rc = ff_flush_wal(f);
+        if (rc != SQLITE_OK) return rc;
+    }
     return f->real->pMethods->xLock(f->real, eLock);
 }
 
@@ -539,9 +556,9 @@ static int ff_check_reserved_lock(sqlite3_file *sf, int *pResOut) {
 
 static int ff_file_control(sqlite3_file *sf, int op, void *pArg) {
     struct feed_file *f = (struct feed_file *)sf;
-    if (f->is_db && g_wal_file && g_wal_file->wlen > 0 &&
-        (op == SQLITE_FCNTL_SYNC || op == SQLITE_FCNTL_COMMIT_PHASETWO)) {
-        ff_flush_wal(g_wal_file);
+    if (f->is_wal && f->wlen > 0) {
+        int rc = ff_flush_wal(f);
+        if (rc != SQLITE_OK) return rc;
     }
     return f->real->pMethods->xFileControl(f->real, op, pArg);
 }
@@ -563,13 +580,11 @@ static int ff_shm_map(sqlite3_file *sf, int iPg, int pgsz, int bExtend, void vol
 
 static int ff_shm_lock(sqlite3_file *sf, int offset, int n, int flags) {
     struct feed_file *f = (struct feed_file *)sf;
-    if (f->is_db && g_wal_file && g_wal_file->wlen > 0) ff_flush_wal(g_wal_file);
     return f->real->pMethods->xShmLock(f->real, offset, n, flags);
 }
 
 static void ff_shm_barrier(sqlite3_file *sf) {
     struct feed_file *f = (struct feed_file *)sf;
-    if (f->is_db && g_wal_file && g_wal_file->wlen > 0) ff_flush_wal(g_wal_file);
     f->real->pMethods->xShmBarrier(f->real);
 }
 
@@ -580,6 +595,10 @@ static int ff_shm_unmap(sqlite3_file *sf, int deleteFlag) {
 
 static int ff_fetch(sqlite3_file *sf, sqlite3_int64 iOfst, int iAmt, void **pp) {
     struct feed_file *f = (struct feed_file *)sf;
+    if (f->is_wal && f->wlen > 0) {
+        int rc = ff_flush_wal(f);
+        if (rc != SQLITE_OK) return rc;
+    }
     return f->real->pMethods->xFetch(f->real, iOfst, iAmt, pp);
 }
 
@@ -593,7 +612,8 @@ static int ff_open(sqlite3_vfs *vfs, sqlite3_filename zName, sqlite3_file *sf,
     (void)vfs;
     struct feed_file *f = (struct feed_file *)sf;
     memset(f, 0, sizeof(*f));
-    f->real = (sqlite3_file *)(f + 1);
+    f->last_end = -1;
+    f->real = (sqlite3_file *)(((uintptr_t)(f + 1) + 7u) & ~(uintptr_t)7u);
     int rc = g_unix_vfs->xOpen(g_unix_vfs, zName, f->real, flags, pOutFlags);
     if (rc != SQLITE_OK) return rc;
 
@@ -634,18 +654,11 @@ static int ff_open(sqlite3_vfs *vfs, sqlite3_filename zName, sqlite3_file *sf,
         size_t l = strlen(zName);
         if (l >= 4 && strcmp(zName + l - 4, "-wal") == 0) is_wal = 1;
     }
-    if (is_wal && !g_wal_file) {
+    if (is_wal) {
         if (posix_memalign((void **)&f->wbuf, 4096, FEED_WAL_WBUF_CAP) == 0) {
             f->wcap = FEED_WAL_WBUF_CAP;
         }
         f->is_wal = 1;
-        g_wal_file = f;
-    } else if (is_wal) {
-        f->is_wal = 1;
-    }
-
-    if ((flags & SQLITE_OPEN_MAIN_DB) && !(flags & SQLITE_OPEN_READONLY)) {
-        f->is_db = 1;
     }
 
     f->iom = iom;
@@ -688,11 +701,12 @@ static int ff_current_time_int64(sqlite3_vfs *vfs, sqlite3_int64 *piNow) {
 
 static int ff_vfs_register(void) {
     if (g_vfs_registered) return SQLITE_OK;
-    g_unix_vfs = sqlite3_vfs_find("unix");
+    g_unix_vfs = sqlite3_vfs_find("unix-excl");
+    if (!g_unix_vfs) g_unix_vfs = sqlite3_vfs_find("unix");
     if (!g_unix_vfs) return SQLITE_ERROR;
     memset(&g_feed_vfs, 0, sizeof(g_feed_vfs));
     g_feed_vfs.iVersion = g_unix_vfs->iVersion > 2 ? 2 : g_unix_vfs->iVersion;
-    g_feed_vfs.szOsFile = (int)sizeof(struct feed_file) + g_unix_vfs->szOsFile;
+    g_feed_vfs.szOsFile = ((int)sizeof(struct feed_file) + 7 + g_unix_vfs->szOsFile) & ~7;
     g_feed_vfs.mxPathname = g_unix_vfs->mxPathname;
     g_feed_vfs.zName = "feed-wal";
     g_feed_vfs.xOpen = ff_open;
@@ -710,14 +724,12 @@ static int ff_vfs_register(void) {
 }
 
 // -----------------------------------------------------------------------------
-// Database handle, prepared statements, carried read tx, background checkpointer
+// Database handle, prepared statements, carried read tx, nice-19 checkpointer
 // -----------------------------------------------------------------------------
 enum {
     CK_IDLE = 0,
-    CK_BULK = 1,
-    CK_BULK_DONE = 2,
-    CK_TAIL = 3,
-    CK_TAIL_DONE = 4
+    CK_RUN  = 1,
+    CK_DONE = 2
 };
 
 struct db {
@@ -732,44 +744,45 @@ struct db {
     sqlite3_stmt *st_feed_ref;
     sqlite3_stmt *st_post_ref;
     sqlite3_stmt *st_begin_read;
-    sqlite3_stmt *st_begin_write;
     sqlite3_stmt *st_commit;
     sqlite3_stmt *st_rollback;
 
-    int in_tx;          // 0=none, 1=read, 2=write
+    int in_tx;          // 0=none, 1=active
     int wrote;
     int broken;
     int carry_read_tx;
     int writes_held;
-    int bench_mode;
     int is_large_db;
 
     uint32_t wal_frames;
-    uint32_t ck_min_frames;
-    uint32_t ck_hard_frames;
+    atomic_uint wal_frames_now;
+    uint32_t ck_pass_frames;
+    uint32_t ck_hold_at;
+    uint32_t ck_last_req;
+    uint32_t hold_start_ms;
+    uint32_t hold_max_ms;
 
     char path[4096];
     char wal_path[4104];
     int db_fd;
     int wal_fd;
     int ck_efd;
-    int64_t wb_kicked;
-    uint64_t dropped_at;
 
     // Timestamp cache (YYYY-MM-DDTHH:MM:SS.mmmZ, 24 bytes)
     int64_t iso_sec;
     char iso_prefix[20];
 
-    // Background two-thread checkpointer
+    // Single nice-19 background checkpointer
     pthread_mutex_t ck_mu;
     pthread_cond_t ck_cond;
-    pthread_cond_t ck_urgent_cond;
     pthread_t ck_thr;
-    pthread_t ck_urgent_thr;
-    int ck_threads_up;
+    int ck_thread_up;
     int ck_stop;
+    int ck_sync_req;
     atomic_int ck_state;
-    atomic_uint ck_rem_frames;
+    int ck_rc;
+    int ck_log;
+    int ck_ckpt;
 };
 
 static inline void db_notify_efd(int efd) {
@@ -778,6 +791,17 @@ static inline void db_notify_efd(int efd) {
         ssize_t r = write(efd, &v, sizeof(v));
         (void)r;
     }
+}
+
+static int db_wal_hook(void *arg, sqlite3 *c, const char *name, int frames) {
+    (void)c;
+    (void)name;
+    struct db *d = (struct db *)arg;
+    uint32_t f = frames > 0 ? (uint32_t)frames : 0u;
+    if (f < d->ck_last_req) d->ck_last_req = 0;
+    d->wal_frames = f;
+    atomic_store_explicit(&d->wal_frames_now, f, memory_order_release);
+    return SQLITE_OK;
 }
 
 static inline int db_now_iso(struct db *d, char out[25]) {
@@ -830,116 +854,44 @@ static inline int db_step_stmt(sqlite3_stmt *s) {
 }
 
 static void db_open_wal_fd(struct db *d) {
-    if (d->wal_fd >= 0) return;
-    d->wal_fd = open(d->wal_path, O_RDONLY | O_CLOEXEC);
-}
-
-static inline uint64_t db_mono_ns(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
-static void db_wb_kick(struct db *d) {
-    db_open_wal_fd(d);
-    if (d->wal_fd < 0) return;
-    uint32_t frms = atomic_load_explicit(&g_wal_frames, memory_order_relaxed);
-    int64_t end = 32LL + (int64_t)frms * 4120LL;
-    if (end < d->wb_kicked) d->wb_kicked = 0;
-    if (end - d->wb_kicked < (int64_t)(64LL * 4120LL)) return;
-    if (sync_file_range(d->wal_fd, d->wb_kicked, end - d->wb_kicked, SYNC_FILE_RANGE_WRITE) == 0) {
-        d->wb_kicked = end;
+    if (d->wal_fd < 0) {
+        d->wal_fd = open(d->wal_path, O_RDONLY | O_CLOEXEC);
     }
 }
 
-static void db_drop_os_cache(struct db *d) {
-    if (!d->is_large_db || d->db_fd < 0) return;
-    uint64_t now = db_mono_ns();
-    if (d->dropped_at && now - d->dropped_at < 2000000000ULL) return;
-    d->dropped_at = now;
-    (void)posix_fadvise(d->db_fd, 0, 0, POSIX_FADV_DONTNEED);
-}
-
-static void *ck_bulk_main(void *arg) {
+static void *ck_main(void *arg) {
     struct db *d = (struct db *)arg;
-    // Lower CPU scheduling priority on the single-core box so bulk page copy stays smooth.
-    setpriority(PRIO_PROCESS, 0, 5);
+    setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+    db_exec(d->ck_c, "SELECT 1 FROM sqlite_schema LIMIT 1;");
     for (;;) {
         pthread_mutex_lock(&d->ck_mu);
-        while (!d->ck_stop && atomic_load(&d->ck_state) != CK_BULK) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_nsec += 250000000L;
-            if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
-            if (pthread_cond_timedwait(&d->ck_cond, &d->ck_mu, &ts) == ETIMEDOUT) {
-                pthread_mutex_unlock(&d->ck_mu);
-                db_wb_kick(d);
-                db_drop_os_cache(d);
-                pthread_mutex_lock(&d->ck_mu);
-            }
+        while (!d->ck_stop && atomic_load_explicit(&d->ck_state, memory_order_acquire) != CK_RUN) {
+            pthread_cond_wait(&d->ck_cond, &d->ck_mu);
         }
         int stop = d->ck_stop;
+        int do_sync = d->ck_sync_req;
         pthread_mutex_unlock(&d->ck_mu);
         if (stop) break;
 
-        if (d->is_large_db) {
-            db_open_wal_fd(d);
-            uint32_t frms = atomic_load_explicit(&g_wal_frames, memory_order_relaxed);
-            int64_t end = 32LL + (int64_t)frms * 4120LL;
-            if (d->wal_fd >= 0 && end > 0) {
-                int64_t ra_end = end > (256LL << 20) ? (256LL << 20) : end;
-                (void)readahead(d->wal_fd, 0, (size_t)ra_end);
-            }
-        }
+        int log = -1, ckpt = -1;
+        int rc = sqlite3_wal_checkpoint_v2(d->ck_c, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &ckpt);
 
-        int log = 0, ckpt = 0;
-        sqlite3_wal_checkpoint_v2(d->ck_c, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &ckpt);
-        if (d->db_fd >= 0) fdatasync(d->db_fd);
-
-        // One quick second PASSIVE pass drains frames appended during fdatasync.
-        sqlite3_wal_checkpoint_v2(d->ck_c, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &ckpt);
-        if (d->db_fd >= 0) {
-            fdatasync(d->db_fd);
-            if (d->is_large_db) (void)posix_fadvise(d->db_fd, 0, 0, POSIX_FADV_DONTNEED);
-        }
-
-        if (ckpt > 0) {
-            db_open_wal_fd(d);
-            if (d->wal_fd >= 0) {
-                posix_fadvise(d->wal_fd, 0, (off_t)ckpt * 4120 + 32, POSIX_FADV_DONTNEED);
-            }
-        }
-        atomic_store_explicit(&d->ck_state, CK_BULK_DONE, memory_order_release);
-        db_notify_efd(d->ck_efd);
-    }
-    return NULL;
-}
-
-static void *ck_urgent_main(void *arg) {
-    struct db *d = (struct db *)arg;
-    setpriority(PRIO_PROCESS, 0, 0);
-    for (;;) {
-        pthread_mutex_lock(&d->ck_mu);
-        while (!d->ck_stop && atomic_load(&d->ck_state) != CK_TAIL) {
-            pthread_cond_wait(&d->ck_urgent_cond, &d->ck_mu);
-        }
-        int stop = d->ck_stop;
-        pthread_mutex_unlock(&d->ck_mu);
-        if (stop) break;
-
-        int log = 0, ckpt = 0;
-        int rc = sqlite3_wal_checkpoint_v2(d->ck_c, "main",
-                                           SQLITE_CHECKPOINT_RESTART, &log, &ckpt);
-        if (d->db_fd >= 0) fdatasync(d->db_fd);
         db_open_wal_fd(d);
-        if (d->wal_fd >= 0) {
-            posix_fadvise(d->wal_fd, 0, 0, POSIX_FADV_DONTNEED);
+        if (rc == SQLITE_OK && ckpt > 0 && d->wal_fd >= 0) {
+            (void)posix_fadvise(d->wal_fd, 0, (off_t)ckpt * 4120 + 32, POSIX_FADV_DONTNEED);
         }
-        unsigned rem = 0;
-        if (rc == SQLITE_OK && log > ckpt) rem = (unsigned)(log - ckpt);
-        else if (rc != SQLITE_OK && log > 0) rem = (unsigned)log;
-        atomic_store_explicit(&d->ck_rem_frames, rem, memory_order_release);
-        atomic_store_explicit(&d->ck_state, CK_TAIL_DONE, memory_order_release);
+        if (d->is_large_db && d->db_fd >= 0 && rc == SQLITE_OK && ckpt > 0 && ckpt == log &&
+            (uint32_t)ckpt >= atomic_load_explicit(&d->wal_frames_now, memory_order_acquire)) {
+            (void)posix_fadvise(d->db_fd, 0, 0, POSIX_FADV_DONTNEED);
+        }
+        if (do_sync && d->db_fd >= 0 && rc == SQLITE_OK) {
+            (void)fdatasync(d->db_fd);
+        }
+
+        d->ck_rc = rc;
+        d->ck_log = log;
+        d->ck_ckpt = ckpt;
+        atomic_store_explicit(&d->ck_state, CK_DONE, memory_order_release);
         db_notify_efd(d->ck_efd);
     }
     return NULL;
@@ -949,18 +901,18 @@ static int db_warm(struct db *d) {
     if (d->db_fd >= 0 && d->is_large_db) {
         struct stat st;
         if (fstat(d->db_fd, &st) == 0 && st.st_size > 0) {
-            posix_fadvise(d->db_fd, 0, st.st_size, POSIX_FADV_WILLNEED);
+            (void)posix_fadvise(d->db_fd, 0, st.st_size, POSIX_FADV_WILLNEED);
         }
     }
-    // Warm in ascending priority order so hottest working sets remain resident last in FastCache.
-    if (db_exec(d->c, "SELECT count(*) FROM posts INDEXED BY posts_user_id_idx;") != SQLITE_OK) return -1;
-    if (db_exec(d->c, "SELECT count(*) FROM likes WHERE user_id > 0;") != SQLITE_OK) return -1;
-    if (db_exec(d->c, "SELECT count(*) FROM likes INDEXED BY likes_post_id_idx;") != SQLITE_OK) return -1;
-    if (db_exec(d->c, "SELECT count(*) FROM posts INDEXED BY posts_created_at_id_idx;") != SQLITE_OK) return -1;
-    if (db_exec(d->c, "SELECT count(*) FROM users;") != SQLITE_OK) return -1;
+    // Surgical 38 MB working-set warmup: autoindex_likes (29.5M) + posts_user_id_idx (5.3M)
+    // + users (2.5M) + hottest post/like tails (~1M), leaving ~26M headroom in 64M FastCache.
+    if (db_exec(d->c, "SELECT sum(user_id) FROM likes INDEXED BY sqlite_autoindex_likes_1;") != SQLITE_OK) return -1;
+    if (db_exec(d->c, "SELECT sum(user_id) FROM posts INDEXED BY posts_user_id_idx;") != SQLITE_OK) return -1;
+    if (db_exec(d->c, "SELECT sum(length(username)) FROM users;") != SQLITE_OK) return -1;
     if (db_exec(d->c, "SELECT count(length(body)) FROM (SELECT body FROM posts ORDER BY id DESC LIMIT 2000);") != SQLITE_OK) return -1;
+    if (db_exec(d->c, "SELECT count(*) FROM (SELECT post_id FROM likes ORDER BY post_id DESC LIMIT 8000);") != SQLITE_OK) return -1;
     if (d->db_fd >= 0 && d->is_large_db) {
-        posix_fadvise(d->db_fd, 0, 0, POSIX_FADV_DONTNEED);
+        (void)posix_fadvise(d->db_fd, 0, 0, POSIX_FADV_DONTNEED);
     }
     return 0;
 }
@@ -1003,13 +955,13 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
             cache_kib = atoi(env_c);
         } else {
             uint64_t ram_bytes = db_effective_ram_bytes();
-            cache_kib = (ram_bytes > 0 && ram_bytes <= (2500ULL << 20)) ? 98304 : 262144;
+            cache_kib = (ram_bytes > 0 && ram_bytes <= (2500ULL << 20)) ? 65536 : 131072;
         }
         if (cache_kib < 4096) cache_kib = 4096;
     }
 
     uint32_t cache_pages = (uint32_t)(cache_kib / 4);
-    fc_configure(cache_pages, d->is_large_db);
+    fc_configure(cache_pages, 0);
     if (fc_register() != SQLITE_OK) return -1;
     if (sqlite3_initialize() != SQLITE_OK) return -1;
     if (ff_vfs_register() != SQLITE_OK) return -1;
@@ -1018,12 +970,23 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
     const char *env_carry = getenv("CARRY_READ_TX");
     if (env_carry) d->carry_read_tx = atoi(env_carry) != 0;
 
-    const char *env_ckmin = getenv("CKPT_MIN");
-    d->ck_min_frames = env_ckmin ? (uint32_t)atoi(env_ckmin) : 4096u;
-    if (d->ck_min_frames < 100u) d->ck_min_frames = 100u;
-    const char *env_ckhard = getenv("CKPT_HARD");
-    d->ck_hard_frames = env_ckhard ? (uint32_t)atoi(env_ckhard) : 16384u;
-    if (d->ck_hard_frames < d->ck_min_frames) d->ck_hard_frames = d->ck_min_frames * 4u;
+    const char *env_ckpass = getenv("CKPT_PASS");
+    d->ck_pass_frames = (env_ckpass && *env_ckpass) ? (uint32_t)atoi(env_ckpass) : 16384u;
+    if (d->ck_pass_frames < 100u) d->ck_pass_frames = 100u;
+
+    uint32_t max_hold = 1048576u; // ~4 GB max WAL
+    struct statvfs sv;
+    if (statvfs(path, &sv) == 0 && sv.f_bavail > 0 && sv.f_frsize > 0) {
+        uint64_t free_bytes = (uint64_t)sv.f_bavail * (uint64_t)sv.f_frsize;
+        uint64_t half_frames = (free_bytes / 2ULL) / 4120ULL;
+        if (half_frames < max_hold) max_hold = (uint32_t)half_frames;
+    }
+    const char *env_hold = getenv("CKPT_HOLD");
+    d->ck_hold_at = (env_hold && *env_hold) ? (uint32_t)atoi(env_hold) : max_hold;
+    if (d->ck_hold_at < d->ck_pass_frames * 2u) d->ck_hold_at = d->ck_pass_frames * 2u;
+
+    const char *env_hmax = getenv("HOLD_MAX_MS");
+    d->hold_max_ms = (env_hmax && *env_hmax) ? (uint32_t)atoi(env_hmax) : 1500u;
 
     int flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE;
     if (sqlite3_open_v2(path, &d->c, flags, "feed-wal") != SQLITE_OK) return -1;
@@ -1033,23 +996,24 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
         sqlite3_file_control(d->c, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
     }
 
-    char pragmas[256];
+    char pragmas[280];
     snprintf(pragmas, sizeof(pragmas),
              "PRAGMA journal_mode=WAL;"
              "PRAGMA synchronous=NORMAL;"
              "PRAGMA temp_store=MEMORY;"
              "PRAGMA mmap_size=0;"
+             "PRAGMA journal_size_limit=0;"
              "PRAGMA wal_autocheckpoint=0;"
              "PRAGMA cache_size=-%d;",
              cache_kib);
     if (db_exec(d->c, pragmas) != SQLITE_OK) return -1;
 
-    // Flush any pre-existing WAL before opening FastCache working set or warming.
+    // Empty any leftover WAL before opening FastCache working set or warming.
     sqlite3_wal_checkpoint_v2(d->c, "main", SQLITE_CHECKPOINT_TRUNCATE, NULL, NULL);
-    atomic_store_explicit(&g_wal_frames, 0, memory_order_release);
+    sqlite3_wal_hook(d->c, db_wal_hook, d);
+    atomic_store_explicit(&d->wal_frames_now, 0, memory_order_release);
 
-    d->db_fd = open(path, O_RDWR | O_CLOEXEC);
-    if (d->db_fd < 0) d->db_fd = open(path, O_RDONLY | O_CLOEXEC);
+    d->db_fd = open(path, O_RDONLY | O_CLOEXEC);
 
     if (sqlite3_prepare_v3(d->c, "SELECT 1", -1, SQLITE_PREPARE_PERSISTENT,
                            &d->st_health, NULL) != SQLITE_OK) return -1;
@@ -1074,8 +1038,6 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
                            -1, SQLITE_PREPARE_PERSISTENT, &d->st_post_ref, NULL) != SQLITE_OK) return -1;
     if (sqlite3_prepare_v3(d->c, "BEGIN", -1, SQLITE_PREPARE_PERSISTENT,
                            &d->st_begin_read, NULL) != SQLITE_OK) return -1;
-    if (sqlite3_prepare_v3(d->c, "BEGIN IMMEDIATE", -1, SQLITE_PREPARE_PERSISTENT,
-                           &d->st_begin_write, NULL) != SQLITE_OK) return -1;
     if (sqlite3_prepare_v3(d->c, "COMMIT", -1, SQLITE_PREPARE_PERSISTENT,
                            &d->st_commit, NULL) != SQLITE_OK) return -1;
     if (sqlite3_prepare_v3(d->c, "ROLLBACK", -1, SQLITE_PREPARE_PERSISTENT,
@@ -1083,19 +1045,21 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
 
     bt_init(&d->bt, d->c);
 
-    // Warm main connection first so FastCache claims the hugepage slab cleanly.
     if (d->is_large_db && getenv("NO_WARM") == NULL) {
         if (db_warm(d) != 0) return -1;
     } else {
         db_exec(d->c, "SELECT 1 FROM sqlite_schema LIMIT 1;");
     }
 
-    // Open secondary checkpointer connection with small pcache1 cache.
+    const char *ck_vfs = sqlite3_vfs_find("unix-excl") ? "unix-excl" : "unix";
     if (sqlite3_open_v2(path, &d->ck_c,
-                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_EXRESCODE,
-                        "unix") != SQLITE_OK) return -1;
+                        SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX | SQLITE_OPEN_EXRESCODE,
+                        ck_vfs) != SQLITE_OK) return -1;
+    if (d->is_large_db) {
+        int chunk = 64 << 20;
+        sqlite3_file_control(d->ck_c, "main", SQLITE_FCNTL_CHUNK_SIZE, &chunk);
+    }
     if (db_exec(d->ck_c,
-                "PRAGMA journal_mode=WAL;"
                 "PRAGMA synchronous=NORMAL;"
                 "PRAGMA temp_store=MEMORY;"
                 "PRAGMA mmap_size=0;"
@@ -1106,25 +1070,26 @@ static int db_open(struct db *d, const char *path, int cache_kib) {
     d->ck_efd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     pthread_mutex_init(&d->ck_mu, NULL);
     pthread_cond_init(&d->ck_cond, NULL);
-    pthread_cond_init(&d->ck_urgent_cond, NULL);
     atomic_store(&d->ck_state, CK_IDLE);
-    if (pthread_create(&d->ck_thr, NULL, ck_bulk_main, d) == 0 &&
-        pthread_create(&d->ck_urgent_thr, NULL, ck_urgent_main, d) == 0) {
-        d->ck_threads_up = 1;
+
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, 256u << 10);
+    if (pthread_create(&d->ck_thr, &attr, ck_main, d) == 0) {
+        d->ck_thread_up = 1;
     }
+    pthread_attr_destroy(&attr);
     return 0;
 }
 
 static void db_close(struct db *d) {
-    if (d->ck_threads_up) {
+    if (d->ck_thread_up) {
         pthread_mutex_lock(&d->ck_mu);
         d->ck_stop = 1;
         pthread_cond_signal(&d->ck_cond);
-        pthread_cond_signal(&d->ck_urgent_cond);
         pthread_mutex_unlock(&d->ck_mu);
         pthread_join(d->ck_thr, NULL);
-        pthread_join(d->ck_urgent_thr, NULL);
-        d->ck_threads_up = 0;
+        d->ck_thread_up = 0;
     }
     if (d->in_tx) {
         bt_close(&d->bt);
@@ -1139,7 +1104,6 @@ static void db_close(struct db *d) {
     if (d->st_feed_ref) sqlite3_finalize(d->st_feed_ref);
     if (d->st_post_ref) sqlite3_finalize(d->st_post_ref);
     if (d->st_begin_read) sqlite3_finalize(d->st_begin_read);
-    if (d->st_begin_write) sqlite3_finalize(d->st_begin_write);
     if (d->st_commit) sqlite3_finalize(d->st_commit);
     if (d->st_rollback) sqlite3_finalize(d->st_rollback);
     if (d->ck_c) sqlite3_close(d->ck_c);
@@ -1149,7 +1113,6 @@ static void db_close(struct db *d) {
     if (d->ck_efd >= 0) close(d->ck_efd);
     pthread_mutex_destroy(&d->ck_mu);
     pthread_cond_destroy(&d->ck_cond);
-    pthread_cond_destroy(&d->ck_urgent_cond);
     memset(d, 0, sizeof(*d));
     d->db_fd = d->wal_fd = d->ck_efd = -1;
 }
@@ -1167,19 +1130,6 @@ static inline int db_begin(struct db *d) {
         d->in_tx = 0;
         return -1;
     }
-    return 0;
-}
-
-static inline int db_begin_write(struct db *d) {
-    if (d->in_tx == 2) return 0;
-    if (d->in_tx == 1) {
-        bt_close(&d->bt);
-        db_step_stmt(d->st_commit);
-        d->in_tx = 0;
-    }
-    int rc = db_step_stmt(d->st_begin_write);
-    if (unlikely(rc != SQLITE_DONE)) return -1;
-    d->in_tx = 2;
     return 0;
 }
 
@@ -1203,72 +1153,97 @@ static int db_commit(struct db *d) {
     }
     d->wrote = 0;
     d->in_tx = 0;
-    d->wal_frames = atomic_load_explicit(&g_wal_frames, memory_order_acquire);
     return 0;
 }
 
-static inline void db_drain_efd(struct db *d) {
-    if (d->ck_efd >= 0) {
-        uint64_t v;
-        ssize_t r = read(d->ck_efd, &v, sizeof(v));
-        (void)r;
+static inline void db_ck_start(struct db *d, int do_sync) {
+    pthread_mutex_lock(&d->ck_mu);
+    if (atomic_load_explicit(&d->ck_state, memory_order_relaxed) == CK_IDLE) {
+        d->ck_sync_req = do_sync;
+        atomic_store_explicit(&d->ck_state, CK_RUN, memory_order_release);
+        pthread_cond_signal(&d->ck_cond);
+    }
+    pthread_mutex_unlock(&d->ck_mu);
+}
+
+static inline int db_should_yield_hold(const struct db *d, uint32_t now_ms) {
+    if (likely(!d->writes_held)) return 0;
+    if (atomic_load_explicit(&d->ck_state, memory_order_acquire) != CK_RUN) return 0;
+    return now_ms >= d->hold_start_ms && (now_ms - d->hold_start_ms) >= 20u;
+}
+
+static void db_tick(struct db *d, uint32_t now_ms) {
+    int st = atomic_load_explicit(&d->ck_state, memory_order_acquire);
+    if (unlikely(st == CK_DONE)) {
+        int rc = d->ck_rc;
+        int log = d->ck_log;
+        int ckpt = d->ck_ckpt;
+        atomic_store_explicit(&d->ck_state, CK_IDLE, memory_order_release);
+        d->ck_last_req = d->wal_frames;
+
+        if (rc == SQLITE_OK && ckpt > 0 && ckpt == log) {
+            d->ck_last_req = 0;
+        }
+        if (d->writes_held) {
+            if (rc == SQLITE_OK && log >= 0 && ckpt >= log) {
+                d->writes_held = 0;
+                d->ck_last_req = 0;
+            } else if (now_ms - d->hold_start_ms >= d->hold_max_ms) {
+                d->writes_held = 0;
+            } else {
+                db_ck_start(d, 0);
+                return;
+            }
+        }
+        if (d->wal_frames >= d->ck_hold_at) {
+            int rem = (log > ckpt && rc == SQLITE_OK) ? (log - ckpt) : (int)d->wal_frames;
+            if (rem <= 2000 || d->wal_frames >= d->ck_hold_at + d->ck_pass_frames) {
+                if (!d->writes_held) {
+                    if (d->in_tx && db_commit(d) != 0) d->broken = 0;
+                    d->writes_held = 1;
+                    d->hold_start_ms = now_ms;
+                }
+                db_ck_start(d, 0);
+            } else {
+                db_ck_start(d, 1);
+            }
+        }
+        return;
+    }
+
+    if (unlikely(d->writes_held)) {
+        if (now_ms - d->hold_start_ms >= d->hold_max_ms) {
+            d->writes_held = 0;
+        }
+        return;
+    }
+
+    if (st == CK_IDLE && d->ck_thread_up) {
+        if (d->wal_frames >= d->ck_hold_at) {
+            if (d->in_tx && db_commit(d) != 0) d->broken = 0;
+            d->writes_held = 1;
+            d->hold_start_ms = now_ms;
+            db_ck_start(d, 1);
+        } else if (d->wal_frames >= d->ck_last_req + d->ck_pass_frames) {
+            int near_hold = (d->wal_frames + d->ck_pass_frames * 2u >= d->ck_hold_at);
+            d->ck_last_req = d->wal_frames;
+            db_ck_start(d, near_hold);
+        }
     }
 }
 
-static int db_tick(struct db *d) {
-    int st = atomic_load_explicit(&d->ck_state, memory_order_acquire);
-    if (unlikely(st == CK_TAIL_DONE)) {
-        db_drain_efd(d);
-        d->wal_frames = atomic_load_explicit(&d->ck_rem_frames, memory_order_acquire);
-        if (d->wal_frames == 0) atomic_store_explicit(&g_wal_frames, 0, memory_order_release);
-        d->writes_held = 0;
-        atomic_store_explicit(&d->ck_state, CK_IDLE, memory_order_release);
-        return 0;
-    }
-    if (unlikely(st == CK_BULK_DONE)) {
-        db_drain_efd(d);
-        if (d->in_tx) {
+static inline int db_end_batch(struct db *d, uint32_t now_ms) {
+    if (d->in_tx) {
+        if (d->wrote || d->broken || !d->carry_read_tx || d->writes_held) {
             if (db_commit(d) != 0) return -1;
         }
-        d->writes_held = 1;
-        pthread_mutex_lock(&d->ck_mu);
-        atomic_store_explicit(&d->ck_state, CK_TAIL, memory_order_release);
-        pthread_cond_signal(&d->ck_urgent_cond);
-        pthread_mutex_unlock(&d->ck_mu);
-        return 0;
     }
-    if (st == CK_IDLE && d->wal_frames >= d->ck_min_frames && d->ck_threads_up) {
-        pthread_mutex_lock(&d->ck_mu);
-        if (atomic_load_explicit(&d->ck_state, memory_order_relaxed) == CK_IDLE) {
-            atomic_store_explicit(&d->ck_state, CK_BULK, memory_order_release);
-            pthread_cond_signal(&d->ck_cond);
-        }
-        pthread_mutex_unlock(&d->ck_mu);
-    }
-    return 0;
-}
-
-static inline int db_end_batch(struct db *d) {
-    int st = atomic_load_explicit(&d->ck_state, memory_order_acquire);
-    if (unlikely(st != CK_IDLE)) {
-        if (d->in_tx && db_commit(d) != 0) return -1;
-        return db_tick(d);
-    }
-    d->wal_frames = atomic_load_explicit(&g_wal_frames, memory_order_acquire);
-    if (!d->in_tx) {
-        if (d->wal_frames >= d->ck_min_frames) return db_tick(d);
-        return 0;
-    }
-    if (d->wrote || d->broken || !d->carry_read_tx || d->wal_frames >= d->ck_min_frames) {
-        if (db_commit(d) != 0) return -1;
-        if (d->wal_frames >= d->ck_min_frames) return db_tick(d);
-    }
+    db_tick(d, now_ms);
     return 0;
 }
 
 static int db_health(struct db *d) {
     if (db_begin(d) != 0) return -1;
-    // Also verify btree cursors cleanly opened, then run minimal query only if unverified.
     int rc = sqlite3_step(d->st_health);
     int col = (rc == SQLITE_ROW) ? sqlite3_column_int(d->st_health, 0) : 0;
     sqlite3_reset(d->st_health);
@@ -1350,7 +1325,7 @@ static inline int db_post_exists(struct db *d, int64_t id) {
 static int db_insert_post(struct db *d, int64_t uid, const char *body, int body_len,
                           int64_t *id_out, char created_out[25]) {
     if (db_begin(d) != 0) return -1;
-    bt_close_mask(&d->bt, (1u << CUR_POSTS) | (1u << CUR_FEED_TAIL) | (1u << CUR_FEED_IDX));
+    bt_close_mask(&d->bt, (1ULL << CUR_POSTS) | (1ULL << CUR_FEED_TAIL) | (1ULL << CUR_POST_PREV) | (1ULL << CUR_FEED_IDX));
     int clen = db_now_iso(d, created_out);
     sqlite3_bind_int64(d->st_ins_post, 1, uid);
     sqlite3_bind_text(d->st_ins_post, 2, body, body_len, SQLITE_STATIC);
@@ -1359,7 +1334,6 @@ static int db_insert_post(struct db *d, int64_t uid, const char *body, int body_
     sqlite3_reset(d->st_ins_post);
     if (likely(rc == SQLITE_DONE)) {
         *id_out = sqlite3_last_insert_rowid(d->c);
-        bt_rotate_authors(&d->bt);
         d->wrote = 1;
         return 0;
     }
@@ -1371,7 +1345,7 @@ static int db_insert_post(struct db *d, int64_t uid, const char *body, int body_
 // Returns 0 on new like, 2 on already liked, 1 on constraint failure, -1 on IO/busy error.
 static int db_insert_like(struct db *d, int64_t uid, int64_t pid, char created_out[25]) {
     if (db_begin(d) != 0) return -1;
-    bt_close_mask(&d->bt, (1u << CUR_LIKES_IDX) | (1u << CUR_LIKES_LAST));
+    bt_close_mask(&d->bt, (1ULL << CUR_LIKES_IDX) | (1ULL << CUR_LIKES_LAST));
     char tmp[25];
     char *dst = created_out ? created_out : tmp;
     int clen = db_now_iso(d, dst);

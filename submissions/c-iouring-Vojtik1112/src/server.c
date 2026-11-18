@@ -2,18 +2,15 @@
  *
  * Key optimizations:
  * - Pre-created io_uring instances with IORING_SETUP_SINGLE_ISSUER | DEFER_TASKRUN | TASKRUN_FLAG
- *   and MADV_HUGEPAGE provided buffer rings; Ring 0 polls worker ring eventfds + ckpt eventfd.
- * - Multishot RECV with provided buffers (1 CQE / 0 SQEs per request fast path) and automatic
- *   ENOBUFS/rearm recovery.
- * - Direct O(1) pgno->page PCACHE2 (FastCache) + "feed-wal" write coalescing VFS + carried
- *   read transactions across read-only batches.
- * - Adaptive batching (min_complete=1 when light, 64 under saturation), bounded write coalescing
- *   window (WRITE_WINDOW_US=10000) with exact ring_enter remaining-window wakeup, and age-bounded
- *   LIFO ready queue scheduling with mid-pass CQE reap. */
+ *   and MADV_HUGEPAGE provided buffer rings; Ring 0 polls ck_efd via IORING_OP_READ.
+ * - Single combined submit+collect enter per active ring (zero worker eventfds, zero mid-pass enters).
+ * - TCP_QUICKACK=0 on SO_REUSEPORT listeners + LATEACK IORING_OP_URING_CMD setsockopt refresh.
+ * - Zero-malloc pre-parsed & JWT-verified request queue + bump arena; inline fast path + pipelining.
+ * - Pure PCACHE2 64MB FastCache + "feed-wal" over "unix-excl" + nice-19 non-blocking PASSIVE checkpointer.
+ * - Compact 24B struct conn + 2048-buf rings + mmap arena pool (<80 MB base RSS). */
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <getopt.h>
-#include <malloc.h>
 #include <sys/stat.h>
 
 #include "uring.h"
@@ -29,12 +26,13 @@
 #define MAX_RINGS 12
 #define NLISTEN 8
 #define ACCEPT_DEPTH 512u
-#define ARENA_CAP (1u << 20)
-#define ARENA_POOL 64
+#define ARENA_CAP ((1u << 20) - (uint32_t)sizeof(struct arena))
+#define ARENA_POOL 4
 #define IDLE_SECONDS 300
 #define GOVERNOR_NS 2000000000ULL
 #define IDLE_SWEEP_NS 30000000000ULL
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
+#define PEND_NONE 0xFFFFu
 #define READS_PER_PASS 16384u
 
 enum {
@@ -44,9 +42,9 @@ enum {
     UD_SEND = 4,
     UD_SHUTDOWN = 5,
     UD_CLOSE = 6,
-    UD_EVFD = 7,
-    UD_CKPT_EFD = 8,
-    UD_CANCEL = 9
+    UD_CKPT_EFD = 7,
+    UD_CANCEL = 8,
+    UD_OPT = 9
 };
 
 #define UD(op, ring, slot, gen) \
@@ -78,22 +76,27 @@ struct arena {
     uint8_t data[];
 };
 
+struct pbuf {
+    uint8_t *buf;
+    uint32_t len;
+    uint32_t cap;
+    uint16_t next_free;
+};
+
 struct conn {
     uint32_t gen;
-    uint16_t flags;
-    uint16_t ring;
-    uint32_t slot;
     uint32_t last_active;
-    uint8_t *pend;
-    uint32_t pend_len;
-    uint32_t pend_cap;
+    uint16_t flags;
+    uint8_t ring;
+    uint8_t pad;
+    uint16_t pend_idx;
+    uint16_t pad2;
     struct arena *send_arena;
 };
 
 struct rs {
     struct ring r;
     struct conn *conns;
-    int efd;
     unsigned open;
     unsigned max_slot;
     unsigned recvs_in_flight;
@@ -109,11 +112,19 @@ struct rs {
 struct reply {
     struct conn *c;
     uint32_t gen;
+    uint32_t req_ms;
     struct arena *a;
     uint8_t *p;
     unsigned len;
     uint8_t db;
     uint8_t close;
+};
+
+struct qitem {
+    struct conn *c;
+    uint32_t gen;
+    uint32_t ms;
+    struct parsed_req pr;
 };
 
 struct cref {
@@ -126,49 +137,62 @@ static unsigned NR = 6;
 static unsigned NR_MAX = MAX_RINGS;
 static unsigned active_rings = 1;
 static unsigned ring_slots = 65471;
-static unsigned ring_bufs = 8192;
+static unsigned ring_bufs = 2048;
 static unsigned ring_buf_size = 1024;
 static int lfd[NLISTEN] = {-1, -1, -1, -1, -1, -1, -1, -1};
 static unsigned accept_ring = 0;
 static unsigned accept_margin = 4096;
 static int defer_taskrun = 1;
-static int accept_paused = 0;
 static int ring_grow_failed = 0;
 
 static struct app A;
 static uint32_t now_s = 0;
 static uint32_t now_ms = 0;
 static volatile sig_atomic_t g_stop = 0;
+static uint64_t g_ck_efd_buf = 0;
 
 static struct arena *arena_pool = NULL;
 static unsigned arena_pool_n = 0;
 static struct arena *cur_arena = NULL;
 
+static struct qarena g_qa = {NULL, 0, 0};
+static struct qarena g_qa_swap = {NULL, 0, 0};
+
+static struct pbuf *pend_pool = NULL;
+static unsigned pend_cap_n = 0;
+static uint16_t pend_free_head = PEND_NONE;
+static unsigned pend_free_n = 0;
+
 static struct reply *replies = NULL;
 static unsigned nreplies = 0, replies_cap = 0;
 
-static struct cref *ready = NULL;
-static uint32_t *ready_ms = NULL;
+static struct qitem *ready = NULL;
 static unsigned nready = 0, ready_cap = 0;
 
-static struct cref *held = NULL;
+static struct qitem *held = NULL;
 static unsigned nheld = 0, held_cap = 0;
 
 static struct cref *rq = NULL;
 static unsigned rq_head = 0, nrq = 0, rq_cap = 0;
 static uint64_t reads_done = 0;
-static int trim_due = 0;
 
-static unsigned answers_per_pass = 1024;
-static unsigned answers_left = 1024;
+static unsigned answers_per_pass = 256;
+static unsigned answers_left = 256;
 static unsigned wait_min = 64;
-static uint64_t wait_ns_cfg = 2000000ULL;       /* 2 ms */
-static uint64_t write_win_ns = 2000000ULL;      /* 2 ms */
+static uint64_t wait_ns_cfg = 1000000ULL;       /* 1 ms */
+static uint64_t write_win_ns = 15000000ULL;     /* 15 ms */
+static uint32_t late_ack_ms = 30;
+static int late_ack_enabled = 1;
+static uint32_t lifo_age_ms = 8000;
 static uint64_t last_write_commit_ns = 0;
 static uint64_t last_batch_cqes = 0;
 static int in_run_ready = 0;
 
-/* ---------------- arena management ---------------- */
+static inline unsigned conn_slot(const struct conn *c) {
+    return (unsigned)(c - R[c->ring].conns);
+}
+
+/* ---------------- mmap arena management ---------------- */
 
 static struct arena *arena_get(void) {
     if (arena_pool) {
@@ -180,8 +204,10 @@ static struct arena *arena_get(void) {
         a->used = 0;
         return a;
     }
-    struct arena *a = (struct arena *)malloc(sizeof(*a) + ARENA_CAP);
-    if (!a) { perror("malloc arena"); exit(1); }
+    size_t map_sz = sizeof(struct arena) + ARENA_CAP;
+    void *m = mmap(NULL, map_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) { perror("mmap arena"); exit(1); }
+    struct arena *a = (struct arena *)m;
     a->next = NULL;
     a->refs = 1;
     a->used = 0;
@@ -202,7 +228,7 @@ static inline void arena_unref(struct arena *a) {
             arena_pool = a;
             arena_pool_n++;
         } else {
-            free(a);
+            munmap(a, sizeof(*a) + a->cap);
         }
     }
 }
@@ -216,34 +242,125 @@ static uint8_t *arena_space(struct arena **ap) {
     return cur_arena->data + cur_arena->used;
 }
 
-/* ---------------- list helpers ---------------- */
+/* ---------------- side pending-buffer pool (split/pipelined packets only) ---------------- */
 
-static inline void ready_push(struct conn *c, uint32_t ms) {
+static struct pbuf *pend_ensure(struct conn *c) {
+    if (c->pend_idx != PEND_NONE) return &pend_pool[c->pend_idx];
+    uint16_t idx;
+    if (pend_free_head != PEND_NONE) {
+        idx = pend_free_head;
+        pend_free_head = pend_pool[idx].next_free;
+        pend_free_n--;
+    } else {
+        if (pend_cap_n >= 65534u) return NULL;
+        idx = (uint16_t)pend_cap_n++;
+        pend_pool = (struct pbuf *)realloc(pend_pool, (size_t)pend_cap_n * sizeof(*pend_pool));
+        if (!pend_pool) { perror("realloc pend_pool"); exit(1); }
+        memset(&pend_pool[idx], 0, sizeof(pend_pool[idx]));
+    }
+    pend_pool[idx].len = 0;
+    pend_pool[idx].next_free = PEND_NONE;
+    c->pend_idx = idx;
+    return &pend_pool[idx];
+}
+
+static void pend_release(struct conn *c) {
+    if (c->pend_idx == PEND_NONE) return;
+    uint16_t idx = c->pend_idx;
+    struct pbuf *pb = &pend_pool[idx];
+    pb->len = 0;
+    if (pb->buf && (pb->cap > 4096u || pend_free_n >= 64u)) {
+        free(pb->buf);
+        pb->buf = NULL;
+        pb->cap = 0;
+    }
+    pb->next_free = pend_free_head;
+    pend_free_head = idx;
+    pend_free_n++;
+    c->pend_idx = PEND_NONE;
+}
+
+static void pend_append(struct conn *c, const uint8_t *buf, unsigned len) {
+    if (len == 0) return;
+    struct pbuf *pb = pend_ensure(c);
+    if (!pb) return;
+    if ((uint64_t)pb->len + len > PEND_MAX + HTTP_MAX_HEAD) {
+        pend_release(c);
+        return;
+    }
+    if (pb->len + len > pb->cap) {
+        uint32_t ncap = pb->cap ? pb->cap * 2u : 2048u;
+        while (ncap < pb->len + len) ncap *= 2u;
+        uint8_t *np = (uint8_t *)realloc(pb->buf, ncap);
+        if (!np) { perror("realloc pb"); exit(1); }
+        pb->buf = np;
+        pb->cap = ncap;
+    }
+    memcpy(pb->buf + pb->len, buf, len);
+    pb->len += len;
+}
+
+static void pend_set(struct conn *c, const uint8_t *buf, unsigned len) {
+    if (len == 0) {
+        pend_release(c);
+        return;
+    }
+    if (c->pend_idx != PEND_NONE) pend_pool[c->pend_idx].len = 0;
+    pend_append(c, buf, len);
+}
+
+/* ---------------- queue & arena helpers ---------------- */
+
+static inline void ready_push_item(const struct qitem *qi) {
+    struct conn *c = qi->c;
     if (c->flags & (CF_READY | CF_HELD | CF_CLOSING)) return;
     if (nready == ready_cap) {
         ready_cap = ready_cap ? ready_cap * 2u : 1024u;
-        ready = (struct cref *)realloc(ready, ready_cap * sizeof(*ready));
-        ready_ms = (uint32_t *)realloc(ready_ms, ready_cap * sizeof(*ready_ms));
-        if (!ready || !ready_ms) { perror("realloc ready"); exit(1); }
+        ready = (struct qitem *)realloc(ready, ready_cap * sizeof(*ready));
+        if (!ready) { perror("realloc ready"); exit(1); }
     }
     c->flags |= CF_READY;
-    ready[nready].c = c;
-    ready[nready].gen = c->gen;
-    ready_ms[nready] = ms;
-    nready++;
+    ready[nready++] = *qi;
 }
 
-static inline void held_push(struct conn *c) {
+static inline void held_push_item(const struct qitem *qi) {
+    struct conn *c = qi->c;
     if (c->flags & (CF_HELD | CF_CLOSING)) return;
     if (nheld == held_cap) {
         held_cap = held_cap ? held_cap * 2u : 512u;
-        held = (struct cref *)realloc(held, held_cap * sizeof(*held));
+        held = (struct qitem *)realloc(held, held_cap * sizeof(*held));
         if (!held) { perror("realloc held"); exit(1); }
     }
     c->flags |= CF_HELD;
-    held[nheld].c = c;
-    held[nheld].gen = c->gen;
-    nheld++;
+    held[nheld++] = *qi;
+}
+
+static void qarena_compact(void) {
+    g_qa_swap.used = 0;
+    for (unsigned i = 0; i < nready; i++) {
+        struct qitem *q = &ready[i];
+        if (q->pr.route == RT_CREATE && q->c->gen == q->gen) {
+            uint32_t off;
+            qarena_append(&g_qa_swap, g_qa.buf + q->pr.name_off, q->pr.name_len, &off);
+            q->pr.name_off = off;
+            qarena_append(&g_qa_swap, g_qa.buf + q->pr.body_off, q->pr.body_len, &off);
+            q->pr.body_off = off;
+        }
+    }
+    for (unsigned i = 0; i < nheld; i++) {
+        struct qitem *q = &held[i];
+        if (q->pr.route == RT_CREATE && q->c->gen == q->gen) {
+            uint32_t off;
+            qarena_append(&g_qa_swap, g_qa.buf + q->pr.name_off, q->pr.name_len, &off);
+            q->pr.name_off = off;
+            qarena_append(&g_qa_swap, g_qa.buf + q->pr.body_off, q->pr.body_len, &off);
+            q->pr.body_off = off;
+        }
+    }
+    struct qarena tmp = g_qa;
+    g_qa = g_qa_swap;
+    g_qa_swap = tmp;
+    g_qa_swap.used = 0;
 }
 
 static inline void rearm_push(struct rs *rs, struct conn *c) {
@@ -282,49 +399,25 @@ static inline void rq_push(struct conn *c) {
     rq_push_raw(c, c->gen);
 }
 
-static void pend_append(struct conn *c, const uint8_t *buf, unsigned len) {
-    if (len == 0) return;
-    if ((uint64_t)c->pend_len + len > PEND_MAX + HTTP_MAX_HEAD) {
-        c->pend_len = 0;
-        return;
-    }
-    if (c->pend_len + len > c->pend_cap) {
-        uint32_t ncap = c->pend_cap ? c->pend_cap * 2u : 2048u;
-        while (ncap < c->pend_len + len) ncap *= 2u;
-        uint8_t *np = (uint8_t *)realloc(c->pend, ncap);
-        if (!np) { perror("realloc pend"); exit(1); }
-        c->pend = np;
-        c->pend_cap = ncap;
-    }
-    memcpy(c->pend + c->pend_len, buf, len);
-    c->pend_len += len;
-}
-
 /* ---------------- connection close & multi-listener accept ---------------- */
 
 static void conn_close(struct conn *c) {
     if (!(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) return;
     c->flags |= CF_CLOSING;
-    c->pend_len = 0;
-    if (c->pend) {
-        free(c->pend);
-        c->pend = NULL;
-        c->pend_cap = 0;
-        trim_due = 1;
-    }
+    pend_release(c);
     struct ring *r = &R[c->ring].r;
+    unsigned slot = conn_slot(c);
     if (c->flags & CF_SENDING) {
-        // Shutdown unblocks active SEND immediately; on_send will emit CLOSE after freeing arena.
         struct io_uring_sqe *s = ring_sqe(r);
         s->opcode = IORING_OP_SHUTDOWN;
         s->flags = IOSQE_FIXED_FILE;
-        s->fd = (int)c->slot;
+        s->fd = (int)slot;
         s->len = SHUT_RDWR;
-        s->user_data = UD(UD_SHUTDOWN, c->ring, c->slot, c->gen);
+        s->user_data = UD(UD_SHUTDOWN, c->ring, slot, c->gen);
     } else {
-        sqe_shutdown_close(r, c->slot,
-                           UD(UD_SHUTDOWN, c->ring, c->slot, c->gen),
-                           UD(UD_CLOSE, c->ring, c->slot, c->gen));
+        sqe_shutdown_close(r, slot,
+                           UD(UD_SHUTDOWN, c->ring, slot, c->gen),
+                           UD(UD_CLOSE, c->ring, slot, c->gen));
     }
 }
 
@@ -353,16 +446,10 @@ static int ring_create_at(unsigned i) {
     }
     R[i].conns = (struct conn *)calloc(ring_slots, sizeof(struct conn));
     if (!R[i].conns) { perror("calloc conns"); return -1; }
+    for (unsigned s = 0; s < ring_slots; s++) R[i].conns[s].pend_idx = PEND_NONE;
     if (i == 0) {
         prefault(R[i].conns, (size_t)ring_slots * sizeof(struct conn));
         prefault(R[i].r.bufs, (size_t)ring_bufs * ring_buf_size);
-    }
-    R[i].efd = -1;
-    if (i > 0) {
-        R[i].efd = ring_register_eventfd(&R[i].r);
-        if (R[i].efd < 0) { perror("ring_register_eventfd"); return -1; }
-        struct io_uring_sqe *s = ring_sqe(&R[0].r);
-        sqe_poll_eventfd(s, R[i].efd, UD(UD_EVFD, i, 0, 0));
     }
     R[i].created = 1;
     return 0;
@@ -370,7 +457,7 @@ static int ring_create_at(unsigned i) {
 
 static void fill_accepts_on(unsigned ri) {
     struct rs *rs = &R[ri];
-    if (accept_paused || !rs->created || rs->accept_full) return;
+    if (!rs->created || rs->accept_full) return;
     unsigned lim = rs->r.nslots > accept_margin ? rs->r.nslots - accept_margin : rs->r.nslots;
     if (rs->open + rs->accept_total >= lim) return;
     unsigned room = lim - (rs->open + rs->accept_total);
@@ -392,7 +479,6 @@ static void fill_accepts_on(unsigned ri) {
 }
 
 static void maybe_rotate_accept(void) {
-    if (accept_paused) return;
     struct rs *cur = &R[accept_ring];
     unsigned lim = cur->r.nslots > accept_margin ? cur->r.nslots - accept_margin : cur->r.nslots;
     if (!cur->accept_full && cur->open < lim) {
@@ -423,15 +509,15 @@ static void maybe_rotate_accept(void) {
     }
 }
 
-/* ---------------- write gating & request handling ---------------- */
+/* ---------------- write gating & request execution ---------------- */
 
 static inline int current_writes_ok(uint64_t now) {
-    if (A.db.writes_held) return 0;
+    if (unlikely(A.db.writes_held)) return 0;
     if (write_win_ns == 0 || last_write_commit_ns == 0 || A.db.wrote) return 1;
     return (now - last_write_commit_ns) >= write_win_ns;
 }
 
-static void queue_reply(struct conn *c, struct arena *a, const struct resp *rp) {
+static void queue_reply(struct conn *c, struct arena *a, const struct resp *rp, uint32_t req_ms) {
     if (nreplies == replies_cap) {
         replies_cap = replies_cap ? replies_cap * 2u : 1024u;
         replies = (struct reply *)realloc(replies, replies_cap * sizeof(*replies));
@@ -442,6 +528,7 @@ static void queue_reply(struct conn *c, struct arena *a, const struct resp *rp) 
     replies[nreplies++] = (struct reply){
         .c = c,
         .gen = c->gen,
+        .req_ms = req_ms,
         .a = a,
         .p = rp->p,
         .len = rp->n,
@@ -450,96 +537,184 @@ static void queue_reply(struct conn *c, struct arena *a, const struct resp *rp) 
     };
 }
 
-static int try_handle_conn(struct conn *c, const uint8_t *in_buf, unsigned in_len, int writes_ok) {
-    if (!(c->flags & CF_OPEN) || (c->flags & (CF_CLOSING | CF_SENDING | CF_REPLIED))) return 0;
+static int coalesce_tail_bytes(struct conn *c, const uint8_t *buf, unsigned len,
+                               struct arena *a, struct resp *rp, int writes_ok, unsigned *pos_out) {
+    int handled = 1;
+    if (rp->is_static || rp->close || len == 0) {
+        *pos_out = 0;
+        return handled;
+    }
+    uint8_t *first_p = rp->p;
+    unsigned first_n = rp->n;
+    uint8_t any_db = rp->db;
+    unsigned pos = 0;
+    while (handled < 16 && pos < len && !rp->close) {
+        if (a != cur_arena || a->cap - a->used < RESP_MAX) break;
+        struct req r2;
+        int pr2 = http_parse(buf + pos, len - pos, &r2);
+        if (pr2 <= 0) break;
+        struct parsed_req sub_pr;
+        uint32_t qa_mark = g_qa.used;
+        struct resp rp2;
+        if (app_parse_and_auth(&A, &r2, &sub_pr, &g_qa, &rp2)) {
+            if (sub_pr.is_write && !writes_ok) {
+                g_qa.used = qa_mark;
+                break;
+            }
+            uint8_t *next_free = a->data + a->used;
+            app_exec_parsed(&A, &sub_pr, &g_qa, next_free, &rp2);
+            g_qa.used = qa_mark;
+        }
+        if (rp2.is_static) memcpy(first_p + first_n, rp2.p, rp2.n);
+        else memmove(first_p + first_n, rp2.p, rp2.n);
+        first_n += rp2.n;
+        a->used = (uint32_t)((first_p - a->data) + first_n);
+        pos += r2.total_len;
+        handled++;
+        any_db |= rp2.db;
+        if (rp2.close) rp->close = 1;
+    }
+    rp->n = first_n;
+    rp->db = any_db;
+    *pos_out = pos;
+    return handled;
+}
+
+static void execute_queued_item(struct conn *c, const struct parsed_req *pr, uint32_t req_ms,
+                                int writes_ok, unsigned *handled_out) {
+    if (unlikely(pr->route == RT_STATIC_ERR)) {
+        struct resp rp = {0};
+        rp.close = pr->close;
+        resp_static(&rp, (int)pr->id);
+        A.n_req++;
+        queue_reply(c, NULL, &rp, req_ms);
+        *handled_out = 1;
+        return;
+    }
+    struct arena *a = NULL;
+    uint8_t *free_buf = arena_space(&a);
+    struct resp rp;
+    app_exec_parsed(&A, pr, &g_qa, free_buf, &rp);
+    if (rp.advance > 0) a->used += rp.advance;
+
+    int handled = 1;
+    if (!rp.is_static && !rp.close && c->pend_idx != PEND_NONE) {
+        struct pbuf *pb = &pend_pool[c->pend_idx];
+        unsigned extra = 0;
+        handled = coalesce_tail_bytes(c, pb->buf, pb->len, a, &rp, writes_ok, &extra);
+        if (extra == pb->len) {
+            pend_release(c);
+        } else if (extra > 0) {
+            memmove(pb->buf, pb->buf + extra, pb->len - extra);
+            pb->len -= extra;
+        }
+    }
+    queue_reply(c, rp.is_static ? NULL : a, &rp, req_ms);
+    *handled_out = (unsigned)handled;
+}
+
+/* Parses first complete HTTP request on an idle connection and either executes inline
+ * or enqueues a pre-parsed qitem into ready[] or held[]. Returns number of requests answered inline. */
+static int dispatch_conn_buf(struct conn *c, const uint8_t *in_buf, unsigned in_len,
+                             int can_inline, int writes_ok) {
+    if (!(c->flags & CF_OPEN) ||
+        (c->flags & (CF_CLOSING | CF_SENDING | CF_REPLIED | CF_READY | CF_HELD))) {
+        if (in_len > 0) pend_append(c, in_buf, in_len);
+        return 0;
+    }
 
     const uint8_t *src = in_buf;
     unsigned len = in_len;
-    if (c->pend_len > 0) {
+    int src_is_pend = 0;
+    if (c->pend_idx != PEND_NONE) {
         if (in_len > 0) pend_append(c, in_buf, in_len);
-        src = c->pend;
-        len = c->pend_len;
+        struct pbuf *pb = &pend_pool[c->pend_idx];
+        src = pb->buf;
+        len = pb->len;
+        src_is_pend = 1;
     }
     if (len == 0) return 0;
 
     struct req r;
-    int pr = http_parse(src, len, &r);
-    if (pr == 0) {
-        if (src != c->pend && in_len > 0) pend_append(c, in_buf, in_len);
+    int pr_rc = http_parse(src, len, &r);
+    if (pr_rc == 0) {
+        if (!src_is_pend && in_len > 0) pend_append(c, in_buf, in_len);
         return 0;
     }
-    if (pr < 0) {
-        struct resp rp;
-        memset(&rp, 0, sizeof rp);
+    if (pr_rc < 0) {
+        struct resp rp = {0};
         rp.close = 1;
         resp_static(&rp, SR_400_BAD);
-        c->pend_len = 0;
-        queue_reply(c, NULL, &rp);
+        pend_release(c);
+        queue_reply(c, NULL, &rp, now_ms);
         return 1;
     }
 
-    struct arena *a = NULL;
-    uint8_t *free_buf = arena_space(&a);
-    struct resp rp;
-    app_handle(&A, &r, free_buf, writes_ok, &rp);
-    if (rp.held) {
-        if (src != c->pend && in_len > 0) pend_append(c, in_buf, in_len);
-        held_push(c);
-        return 0;
-    }
-
-    if (rp.advance > 0) a->used += rp.advance;
+    struct parsed_req pr;
+    struct resp err_rp;
+    uint32_t qa_mark = g_qa.used;
+    int ok = app_parse_and_auth(&A, &r, &pr, &g_qa, &err_rp);
     unsigned consumed = r.total_len;
-    int handled = 1;
 
-    if (!rp.is_static && !rp.close && len > consumed) {
-        uint8_t *first_p = rp.p;
-        unsigned first_n = rp.n;
-        uint8_t any_db = rp.db;
-        while (handled < 16 && len > consumed && !rp.close) {
-            if (a != cur_arena || a->cap - a->used < RESP_MAX) break;
-            struct req r2;
-            int pr2 = http_parse(src + consumed, len - consumed, &r2);
-            if (pr2 <= 0) break;
-            uint8_t *next_free = a->data + a->used;
-            struct resp rp2;
-            app_handle(&A, &r2, next_free, writes_ok, &rp2);
-            if (rp2.held) break;
-            if (rp2.is_static) memcpy(first_p + first_n, rp2.p, rp2.n);
-            else memmove(first_p + first_n, rp2.p, rp2.n);
-            first_n += rp2.n;
-            a->used = (uint32_t)((first_p - a->data) + first_n);
-            consumed += r2.total_len;
-            handled++;
-            any_db |= rp2.db;
-            if (rp2.close) rp.close = 1;
+    int inline_now = can_inline && (!ok || !pr.is_write || writes_ok);
+    if (inline_now) {
+        if (!ok) {
+            A.n_req++;
+            unsigned rem = len - consumed;
+            if (rem == 0) pend_release(c);
+            else if (src_is_pend) {
+                struct pbuf *pb = &pend_pool[c->pend_idx];
+                memmove(pb->buf, pb->buf + consumed, rem);
+                pb->len = rem;
+            } else {
+                pend_set(c, src + consumed, rem);
+            }
+            queue_reply(c, NULL, &err_rp, now_ms);
+            return 1;
         }
-        rp.n = first_n;
-        rp.db = any_db;
+        struct arena *a = NULL;
+        uint8_t *free_buf = arena_space(&a);
+        struct resp rp;
+        app_exec_parsed(&A, &pr, &g_qa, free_buf, &rp);
+        g_qa.used = qa_mark;
+        if (rp.advance > 0) a->used += rp.advance;
+
+        unsigned extra = 0;
+        int handled = coalesce_tail_bytes(c, src + consumed, len - consumed, a, &rp, writes_ok, &extra);
+        consumed += extra;
+
+        unsigned rem = len - consumed;
+        if (rem == 0) {
+            pend_release(c);
+        } else if (src_is_pend) {
+            struct pbuf *pb = &pend_pool[c->pend_idx];
+            memmove(pb->buf, pb->buf + consumed, rem);
+            pb->len = rem;
+        } else {
+            pend_set(c, src + consumed, rem);
+        }
+        queue_reply(c, rp.is_static ? NULL : a, &rp, now_ms);
+        return handled;
     }
 
-    // Preserve any unconsumed tail bytes if present after consumed.
+    /* Enqueue already-parsed & JWT-verified qitem without touching malloc on normal pipe=1. */
     unsigned rem = len - consumed;
     if (rem == 0) {
-        c->pend_len = 0;
-        if (c->pend) {
-            free(c->pend);
-            c->pend = NULL;
-            c->pend_cap = 0;
-            trim_due = 1;
-        }
-    } else if (src == c->pend) {
-        if (consumed > 0) memmove(c->pend, c->pend + consumed, rem);
-        c->pend_len = rem;
+        pend_release(c);
+    } else if (src_is_pend) {
+        struct pbuf *pb = &pend_pool[c->pend_idx];
+        memmove(pb->buf, pb->buf + consumed, rem);
+        pb->len = rem;
     } else {
-        pend_append(c, src + consumed, rem);
+        pend_set(c, src + consumed, rem);
     }
-
-    queue_reply(c, rp.is_static ? NULL : a, &rp);
-    return handled;
+    struct qitem qi = {.c = c, .gen = c->gen, .ms = now_ms, .pr = pr};
+    if (ok && pr.is_write && !writes_ok) held_push_item(&qi);
+    else ready_push_item(&qi);
+    return 0;
 }
 
-/* ---------------- CQE handlers & multi-ring reap ---------------- */
+/* ---------------- CQE handlers & pure userspace multi-ring reap ---------------- */
 
 static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
     struct rs *rs = &R[ri];
@@ -554,16 +729,15 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
     if (slot >= rs->r.nslots) return;
     struct conn *c = &rs->conns[slot];
     if (c->flags & CF_OPEN) {
-        // Stale state shouldn't happen on newly allocated fixed slot; sanitize safely.
+        pend_release(c);
         c->flags = 0;
         if (rs->open > 0) rs->open--;
     }
     c->gen++;
     c->flags = CF_OPEN | CF_MULTI;
-    c->ring = (uint16_t)ri;
-    c->slot = slot;
+    c->ring = (uint8_t)ri;
     c->last_active = now_s;
-    c->pend_len = 0;
+    c->pend_idx = PEND_NONE;
     c->send_arena = NULL;
     rs->open++;
     if (slot + 1u > rs->max_slot) rs->max_slot = slot + 1u;
@@ -595,17 +769,10 @@ static void on_recv(unsigned ri, struct io_uring_cqe *cqe, int multishot, int wr
         c->last_active = now_s;
         const uint8_t *buf = ring_buf_ptr(&rs->r, bid);
         unsigned blen = (unsigned)cqe->res;
-        if (!in_run_ready && nready == 0 && answers_left > 0 &&
-            !(c->flags & (CF_SENDING | CF_REPLIED | CF_HELD))) {
-            int h = try_handle_conn(c, buf, blen, writes_ok);
-            if (h > 0) {
-                answers_left = (unsigned)h >= answers_left ? 0 : answers_left - (unsigned)h;
-            }
-        } else {
-            pend_append(c, buf, blen);
-            if (!(c->flags & (CF_SENDING | CF_REPLIED))) {
-                ready_push(c, now_ms);
-            }
+        int can_inline = (!in_run_ready && nready == 0 && answers_left > 0);
+        int h = dispatch_conn_buf(c, buf, blen, can_inline, writes_ok);
+        if (h > 0) {
+            answers_left = (unsigned)h >= answers_left ? 0 : answers_left - (unsigned)h;
         }
     }
 
@@ -641,7 +808,7 @@ static void on_recv(unsigned ri, struct io_uring_cqe *cqe, int multishot, int wr
     finish_conn(c);
 }
 
-static void on_send(unsigned ri, struct io_uring_cqe *cqe) {
+static void on_send(unsigned ri, struct io_uring_cqe *cqe, int writes_ok) {
     struct rs *rs = &R[ri];
     struct conn *c = &rs->conns[UD_SLOT(cqe->user_data)];
     if (c->gen != UD_GEN(cqe->user_data)) return;
@@ -652,18 +819,19 @@ static void on_send(unsigned ri, struct io_uring_cqe *cqe) {
     }
     if (c->flags & CF_CLOSING) {
         struct io_uring_sqe *s = ring_sqe(&rs->r);
+        unsigned slot = conn_slot(c);
         s->opcode = IORING_OP_CLOSE;
         s->fd = 0;
-        s->file_index = c->slot + 1u;
-        s->user_data = UD(UD_CLOSE, c->ring, c->slot, c->gen);
+        s->file_index = slot + 1u;
+        s->user_data = UD(UD_CLOSE, c->ring, slot, c->gen);
         return;
     }
     if (cqe->res < 0 || (c->flags & CF_CLOSE_AFTER)) {
         conn_close(c);
         return;
     }
-    if (c->pend_len > 0 && !(c->flags & (CF_READY | CF_HELD))) {
-        ready_push(c, now_ms);
+    if (c->pend_idx != PEND_NONE && !(c->flags & (CF_READY | CF_HELD | CF_REPLIED))) {
+        (void)dispatch_conn_buf(c, NULL, 0, 0, writes_ok);
     }
 }
 
@@ -671,14 +839,8 @@ static void on_close(unsigned ri, struct io_uring_cqe *cqe) {
     struct rs *rs = &R[ri];
     struct conn *c = &rs->conns[UD_SLOT(cqe->user_data)];
     if (c->gen != UD_GEN(cqe->user_data)) return;
+    pend_release(c);
     c->flags = 0;
-    c->pend_len = 0;
-    if (c->pend) {
-        free(c->pend);
-        c->pend = NULL;
-        c->pend_cap = 0;
-        trim_due = 1;
-    }
     if (rs->open > 0) rs->open--;
     if (rs->accept_full && rs->open + 2u * accept_margin < rs->r.nslots) {
         rs->accept_full = 0;
@@ -688,9 +850,6 @@ static void on_close(unsigned ri, struct io_uring_cqe *cqe) {
 static uint64_t reap_ring(unsigned ri, int writes_ok) {
     struct ring *r = &R[ri].r;
     uint64_t count = 0;
-    if (LOAD_ACQ(r->sq_flags) & (IORING_SQ_TASKRUN | IORING_SQ_CQ_OVERFLOW)) {
-        ring_enter(r, 0, 0);
-    }
     unsigned head = *r->cq_head;
     unsigned tail = LOAD_ACQ(r->cq_tail);
     while (head != tail) {
@@ -704,7 +863,7 @@ static uint64_t reap_ring(unsigned ri, int writes_ok) {
             on_recv(ri, cqe, 0, writes_ok);
             break;
         case UD_SEND:
-            on_send(ri, cqe);
+            on_send(ri, cqe, writes_ok);
             break;
         case UD_ACCEPT:
             on_accept(ri, cqe);
@@ -712,27 +871,15 @@ static uint64_t reap_ring(unsigned ri, int writes_ok) {
         case UD_CLOSE:
             on_close(ri, cqe);
             break;
-        case UD_EVFD: {
-            unsigned child = UD_RING(cqe->user_data);
-            uint64_t tmp;
-            ssize_t rr = read(R[child].efd, &tmp, sizeof(tmp));
-            (void)rr;
-            if (!(cqe->flags & IORING_CQE_F_MORE)) {
+        case UD_OPT:
+            if (cqe->res == -EINVAL || cqe->res == -EOPNOTSUPP) late_ack_enabled = 0;
+            break;
+        case UD_CKPT_EFD:
+            if (A.db.ck_efd >= 0 && !g_stop) {
                 struct io_uring_sqe *s = ring_sqe(&R[0].r);
-                sqe_poll_eventfd(s, R[child].efd, UD(UD_EVFD, child, 0, 0));
+                sqe_read_efd(s, A.db.ck_efd, &g_ck_efd_buf, UD(UD_CKPT_EFD, 0, 0, 0));
             }
             break;
-        }
-        case UD_CKPT_EFD: {
-            uint64_t tmp;
-            ssize_t rr = read(A.db.ck_efd, &tmp, sizeof(tmp));
-            (void)rr;
-            if (!(cqe->flags & IORING_CQE_F_MORE)) {
-                struct io_uring_sqe *s = ring_sqe(&R[0].r);
-                sqe_poll_eventfd(s, A.db.ck_efd, UD(UD_CKPT_EFD, 0, 0, 0));
-            }
-            break;
-        }
         case UD_SHUTDOWN:
         case UD_CANCEL:
         default:
@@ -752,7 +899,6 @@ static uint64_t reap_ring(unsigned ri, int writes_ok) {
 
 static uint64_t reap_all(int writes_ok) {
     uint64_t total = 0;
-    // Drain Ring 0 first to acknowledge worker eventfds cleanly, then active worker rings.
     for (unsigned i = 0; i < active_rings; i++) {
         total += reap_ring(i, writes_ok);
     }
@@ -777,7 +923,8 @@ static unsigned issue_reads(unsigned budget) {
         }
         c->flags = (uint16_t)((c->flags & ~CF_RQ) | CF_RECVING);
         rs->recvs_in_flight++;
-        sqe_recv_once(ring_sqe(&rs->r), c->slot, UD(UD_READ, c->ring, c->slot, c->gen));
+        unsigned slot = conn_slot(c);
+        sqe_recv_once(ring_sqe(&rs->r), slot, UD(UD_READ, c->ring, slot, c->gen));
         issued++;
     }
     if (rq_head == nrq) {
@@ -800,7 +947,7 @@ static uint64_t read_rounds(int writes_ok) {
         budget -= k;
         uint64_t before = reads_done;
         for (unsigned i = 0; i < active_rings; i++) {
-            if (ring_pending_submit(&R[i].r) > 0) ring_enter(&R[i].r, 0, 0);
+            if (ring_needs_enter(&R[i].r)) ring_enter(&R[i].r, 0, 0);
         }
         n += reap_all(writes_ok);
         if (reads_done == before) break;
@@ -818,7 +965,7 @@ static void rearm_all(void) {
             if ((c->flags & (CF_OPEN | CF_CLOSING | CF_MULTI | CF_RECVING | CF_RQ)) == CF_OPEN) {
                 c->flags |= CF_MULTI;
                 struct io_uring_sqe *s = ring_sqe(&rs->r);
-                sqe_recv_multishot(s, c->slot, UD(UD_RECV, c->ring, c->slot, c->gen));
+                sqe_recv_multishot(s, conn_slot(c), UD(UD_RECV, c->ring, conn_slot(c), c->gen));
             }
         }
         rs->nrearm = 0;
@@ -832,26 +979,25 @@ static void drain_held(int writes_ok) {
     unsigned out = 0;
     unsigned done = 0;
     for (unsigned i = 0; i < nheld; i++) {
-        struct conn *c = held[i].c;
-        if (c->gen != held[i].gen || !(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) continue;
+        struct qitem *q = &held[i];
+        struct conn *c = q->c;
+        if (c->gen != q->gen || !(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) continue;
         if (done >= 256u) {
-            held[out++] = held[i];
+            held[out++] = *q;
             continue;
         }
         c->flags &= (uint16_t)~CF_HELD;
         if (!(c->flags & (CF_SENDING | CF_REPLIED))) {
-            int h = try_handle_conn(c, NULL, 0, 1);
-            if (h > 0) {
-                done += (unsigned)h;
-                answers_left = (unsigned)h >= answers_left ? 0 : answers_left - (unsigned)h;
-            }
-            if (c->flags & CF_HELD) {
-                held[out++] = held[i];
-            } else if (c->pend_len > 0 && !(c->flags & (CF_READY | CF_SENDING | CF_REPLIED))) {
-                ready_push(c, now_ms);
+            unsigned h = 0;
+            execute_queued_item(c, &q->pr, q->ms, 1, &h);
+            done += h;
+            answers_left = h >= answers_left ? 0 : answers_left - h;
+            if ((c->flags & CF_CLOSE_AFTER) && !(c->flags & (CF_REPLIED | CF_SENDING | CF_HELD))) {
+                conn_close(c);
             }
         } else {
-            ready_push(c, now_ms);
+            held[out++] = *q;
+            c->flags |= CF_HELD;
         }
     }
     nheld = out;
@@ -863,28 +1009,28 @@ static void run_ready(int writes_ok) {
     unsigned orig_n = nready;
     unsigned old_quota = 0;
     if (orig_n > answers_left) {
-        uint32_t oldest_age = now_ms >= ready_ms[0] ? (now_ms - ready_ms[0]) : 0;
-        if (oldest_age >= 500u) old_quota = answers_left;
-        else if (oldest_age >= 250u) old_quota = (answers_left + 1u) / 2u;
+        uint32_t oldest_age = now_ms >= ready[0].ms ? (now_ms - ready[0].ms) : 0;
+        if (oldest_age >= lifo_age_ms * 2u) old_quota = answers_left;
+        else if (oldest_age >= lifo_age_ms) old_quota = (answers_left + 1u) / 2u;
         else old_quota = (answers_left + 7u) / 8u;
     }
 
     unsigned i = 0;
     unsigned k = orig_n;
-    unsigned served = 0;
 
     while (i < k && answers_left > 0 && i < old_quota) {
-        struct conn *c = ready[i].c;
-        uint32_t gen = ready[i].gen;
-        i++;
-        if (c->gen != gen || !(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) continue;
+        struct qitem q = ready[i++];
+        struct conn *c = q.c;
+        if (c->gen != q.gen || !(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) continue;
         c->flags &= (uint16_t)~CF_READY;
         if (c->flags & (CF_SENDING | CF_REPLIED | CF_HELD)) continue;
-        int h = try_handle_conn(c, NULL, 0, writes_ok);
-        if (h > 0) {
-            answers_left = (unsigned)h >= answers_left ? 0 : answers_left - (unsigned)h;
-            if ((++served & 127u) == 0) reap_all(writes_ok);
+        if (q.pr.is_write && !writes_ok) {
+            held_push_item(&q);
+            continue;
         }
+        unsigned h = 0;
+        execute_queued_item(c, &q.pr, q.ms, writes_ok, &h);
+        answers_left = h >= answers_left ? 0 : answers_left - h;
         if ((c->flags & CF_CLOSE_AFTER) && !(c->flags & (CF_REPLIED | CF_SENDING | CF_HELD))) {
             conn_close(c);
         }
@@ -892,31 +1038,30 @@ static void run_ready(int writes_ok) {
 
     while (i < k && answers_left > 0) {
         k--;
-        struct conn *c = ready[k].c;
-        uint32_t gen = ready[k].gen;
-        if (c->gen != gen || !(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) continue;
+        struct qitem q = ready[k];
+        struct conn *c = q.c;
+        if (c->gen != q.gen || !(c->flags & CF_OPEN) || (c->flags & CF_CLOSING)) continue;
         c->flags &= (uint16_t)~CF_READY;
         if (c->flags & (CF_SENDING | CF_REPLIED | CF_HELD)) continue;
-        int h = try_handle_conn(c, NULL, 0, writes_ok);
-        if (h > 0) {
-            answers_left = (unsigned)h >= answers_left ? 0 : answers_left - (unsigned)h;
-            if ((++served & 127u) == 0) reap_all(writes_ok);
+        if (q.pr.is_write && !writes_ok) {
+            held_push_item(&q);
+            continue;
         }
+        unsigned h = 0;
+        execute_queued_item(c, &q.pr, q.ms, writes_ok, &h);
+        answers_left = h >= answers_left ? 0 : answers_left - h;
         if ((c->flags & CF_CLOSE_AFTER) && !(c->flags & (CF_REPLIED | CF_SENDING | CF_HELD))) {
             conn_close(c);
         }
     }
 
-    // Compact remaining middle [i..k) together with mid-pass appends [orig_n..nready).
     unsigned rem_mid = k - i;
     if (rem_mid > 0 && i > 0) {
         memmove(ready, ready + i, rem_mid * sizeof(ready[0]));
-        memmove(ready_ms, ready_ms + i, rem_mid * sizeof(ready_ms[0]));
     }
     unsigned new_n = nready - orig_n;
     if (new_n > 0 && rem_mid != orig_n) {
         memmove(ready + rem_mid, ready + orig_n, new_n * sizeof(ready[0]));
-        memmove(ready_ms + rem_mid, ready_ms + orig_n, new_n * sizeof(ready_ms[0]));
     }
     nready = rem_mid + new_n;
     in_run_ready = 0;
@@ -950,28 +1095,21 @@ static void flush_replies(int had_writes, int db_err, uint64_t now) {
         if (rp->close) c->flags |= CF_CLOSE_AFTER;
         c->send_arena = keep_arena;
 
-        struct io_uring_sqe *s = ring_sqe(&R[c->ring].r);
-        sqe_send(s, c->slot, ptr, len, UD(UD_SEND, c->ring, c->slot, c->gen));
+        unsigned slot = conn_slot(c);
+        struct ring *r = &R[c->ring].r;
+        struct io_uring_sqe *s = ring_sqe(r);
+        sqe_send(s, slot, ptr, len, UD(UD_SEND, c->ring, slot, c->gen));
+
+        if (late_ack_enabled && late_ack_ms > 0 && !rp->close &&
+            now_ms >= rp->req_ms && (now_ms - rp->req_ms) >= late_ack_ms) {
+            struct io_uring_sqe *sopt = ring_sqe(r);
+            sqe_setsockopt_quickack0(sopt, slot, UD(UD_OPT, c->ring, slot, c->gen));
+        }
     }
     nreplies = 0;
 }
 
-/* ---------------- periodic sweeps, memory governor, mlock ---------------- */
-
-static long read_mem_avail_kb(void) {
-    FILE *f = fopen("/proc/meminfo", "r");
-    if (!f) return -1;
-    char line[256];
-    long kb = -1;
-    while (fgets(line, sizeof line, f)) {
-        if (strncmp(line, "MemAvailable:", 13) == 0) {
-            kb = atol(line + 13);
-            break;
-        }
-    }
-    fclose(f);
-    return kb;
-}
+/* ---------------- cgroup SO_RCVBUF governor, 300s idle sweep, mlock ---------------- */
 
 static int small_file_read(const char *path, char *buf, size_t cap) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -1004,11 +1142,6 @@ static void sweep_idle_and_govern(uint64_t now) {
     if (now - last_gov < GOVERNOR_NS) return;
     last_gov = now;
 
-    if (trim_due && nready == 0 && nheld == 0) {
-        malloc_trim(0);
-        trim_due = 0;
-    }
-
     uint64_t cg_cur = cg_read_u64("/sys/fs/cgroup/memory.current");
     uint64_t cg_lim = cg_read_u64("/sys/fs/cgroup/memory.max");
     double psi_some = 0.0, psi_full = 0.0;
@@ -1034,20 +1167,7 @@ static void sweep_idle_and_govern(uint64_t now) {
         cur_rcvbuf = 16384;
     }
 
-    long avail_kb = read_mem_avail_kb();
-    unsigned timeout_s = IDLE_SECONDS;
-    int low_mem = (avail_kb >= 0 && avail_kb < 96 * 1024L);
-    if (avail_kb >= 0) {
-        if (low_mem) {
-            timeout_s = 10;
-            accept_paused = 1;
-        } else if (avail_kb > 160 * 1024L && accept_paused) {
-            accept_paused = 0;
-            fill_accepts_on(accept_ring);
-        }
-    }
-
-    if (!low_mem && now - last_idle_sweep < IDLE_SWEEP_NS) return;
+    if (now - last_idle_sweep < IDLE_SWEEP_NS) return;
     last_idle_sweep = now;
 
     for (unsigned ri = 0; ri < active_rings; ri++) {
@@ -1056,8 +1176,8 @@ static void sweep_idle_and_govern(uint64_t now) {
         unsigned lim = rs->max_slot;
         for (unsigned slot = 0; slot < lim; slot++) {
             struct conn *c = &rs->conns[slot];
-            if ((c->flags & (CF_OPEN | CF_CLOSING | CF_SENDING | CF_REPLIED)) == CF_OPEN) {
-                if (now_s - c->last_active >= timeout_s) {
+            if ((c->flags & (CF_OPEN | CF_CLOSING | CF_SENDING | CF_REPLIED | CF_READY | CF_HELD)) == CF_OPEN) {
+                if (now_s - c->last_active >= IDLE_SECONDS) {
                     conn_close(c);
                 }
             }
@@ -1066,18 +1186,35 @@ static void sweep_idle_and_govern(uint64_t now) {
 }
 
 static void lock_code(void) {
+    char exe[512] = "";
+    ssize_t en = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    if (en <= 0) return;
+    exe[en] = '\0';
+
     FILE *f = fopen("/proc/self/maps", "r");
     if (!f) return;
-    char line[512];
+    int mem_fd = -1;
+    char line[768];
     while (fgets(line, sizeof line, f)) {
         unsigned long lo = 0, hi = 0;
-        char perms[8] = "";
-        if (sscanf(line, "%lx-%lx %4s", &lo, &hi, perms) == 3) {
-            if (perms[2] == 'x' && hi > lo) {
-                mlock((const void *)lo, (size_t)(hi - lo));
+        char perms[8] = "", path[512] = "";
+        if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %511[^\n]", &lo, &hi, perms, path) < 4) continue;
+        if (strcmp(path, exe) != 0) continue;
+        if (perms[3] != 'p' || perms[1] == 'w' || hi <= lo) continue;
+        size_t sz = (size_t)(hi - lo);
+        if (mlock((const void *)lo, sz) == 0) continue;
+        /* Fallback: convert own binary file-backed pages into non-reclaimable anonymous COW pages. */
+        if (mem_fd < 0) mem_fd = open("/proc/self/mem", O_RDWR | O_CLOEXEC);
+        if (mem_fd >= 0) {
+            uint8_t page[4096];
+            for (size_t off = 0; off < sz; off += 4096u) {
+                size_t chunk = (sz - off < 4096u) ? (sz - off) : 4096u;
+                memcpy(page, (const void *)(lo + off), chunk);
+                (void)pwrite(mem_fd, page, chunk, (off_t)(lo + off));
             }
         }
     }
+    if (mem_fd >= 0) close(mem_fd);
     fclose(f);
 }
 
@@ -1214,10 +1351,8 @@ static int run_bench(int argc, char **argv) {
     if (max_pid < 1) max_pid = 1;
     if (max_uid < 1) max_uid = 1;
 
-    // Pre-build 256 signed JWT Bearer headers so benchmark includes real HMAC-SHA256 verification.
     enum { NTOK = 256 };
     char auth_hdrs[NTOK][512];
-    unsigned auth_lens[NTOK];
     const char hdr_b64[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
     for (int i = 0; i < NTOK; i++) {
         int64_t uid = 1 + (i % max_uid);
@@ -1229,7 +1364,7 @@ static int run_bench(int argc, char **argv) {
         uint8_t sig[32];
         hmac_sha256(&A.key, (const uint8_t *)msg, (size_t)mn, sig);
         b64url_encode(sig, 32, sig_b64);
-        auth_lens[i] = (unsigned)snprintf(auth_hdrs[i], sizeof auth_hdrs[i], "Bearer %s.%s", msg, sig_b64);
+        snprintf(auth_hdrs[i], sizeof auth_hdrs[i], "Bearer %s.%s", msg, sig_b64);
     }
 
     uint8_t *buf = (uint8_t *)malloc(RESP_MAX);
@@ -1237,7 +1372,7 @@ static int run_bench(int argc, char **argv) {
     char req_buf[1024];
 
     int do_writes = (strcmp(mode, "read") != 0);
-    // Warm up 5,000 requests before timing.
+    int hot_tail = (strcmp(mode, "rand") != 0);
     uint64_t rng = 0x9e3779b97f4a7c15ULL;
     for (long w = 0; w < 5000; w++) {
         rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
@@ -1246,15 +1381,17 @@ static int run_bench(int argc, char **argv) {
         if (pct < 50) {
             n = snprintf(req_buf, sizeof req_buf, "GET /feed HTTP/1.1\r\nHost: localhost\r\n\r\n");
         } else {
-            int64_t pid = 1 + (int64_t)((rng >> 8) % (uint64_t)max_pid);
+            int64_t pid = hot_tail
+                          ? (max_pid >= 20 ? max_pid - (int64_t)((rng >> 8) % 20ULL) : max_pid)
+                          : (1 + (int64_t)((rng >> 8) % (uint64_t)max_pid));
             n = snprintf(req_buf, sizeof req_buf, "GET /posts/%lld HTTP/1.1\r\nHost: localhost\r\n\r\n", (long long)pid);
         }
         struct req r;
         if (http_parse((const uint8_t *)req_buf, (uint32_t)n, &r) == 1) {
             struct resp rp;
-            app_handle(&A, &r, buf, 1, &rp);
+            app_handle(&A, &r, buf, &rp);
         }
-        if ((w & 63) == 63) db_end_batch(&A.db);
+        if ((w & 63) == 63) db_end_batch(&A.db, 0);
     }
     db_commit(&A.db);
 
@@ -1264,26 +1401,25 @@ static int run_bench(int argc, char **argv) {
         rng = rng * 6364136223846793005ULL + 1442695040888963407ULL;
         uint32_t x = (uint32_t)(rng >> 32) % 1000u;
         int n = 0;
+        int64_t pid = hot_tail
+                      ? (max_pid >= 20 ? max_pid - (int64_t)((rng >> 8) % 20ULL) : max_pid)
+                      : (1 + (int64_t)((rng >> 8) % (uint64_t)max_pid));
         if (!do_writes) {
             if (x < 500u) {
                 n = snprintf(req_buf, sizeof req_buf, "GET /feed HTTP/1.1\r\nHost: localhost\r\n\r\n");
                 c_feed++;
             } else {
-                int64_t pid = 1 + (int64_t)((rng >> 8) % (uint64_t)max_pid);
                 n = snprintf(req_buf, sizeof req_buf, "GET /posts/%lld HTTP/1.1\r\nHost: localhost\r\n\r\n", (long long)pid);
                 c_post++;
             }
         } else {
-            /* Match bench/load.js: ~46% /feed, ~46% /posts/:id, ~7% /like, ~1% POST /posts */
             if (x < 460u) {
                 n = snprintf(req_buf, sizeof req_buf, "GET /feed HTTP/1.1\r\nHost: localhost\r\n\r\n");
                 c_feed++;
             } else if (x < 920u) {
-                int64_t pid = 1 + (int64_t)((rng >> 8) % (uint64_t)max_pid);
                 n = snprintf(req_buf, sizeof req_buf, "GET /posts/%lld HTTP/1.1\r\nHost: localhost\r\n\r\n", (long long)pid);
                 c_post++;
             } else if (x < 990u) {
-                int64_t pid = 1 + (int64_t)((rng >> 8) % (uint64_t)max_pid);
                 int ti = (int)((rng >> 20) & (NTOK - 1));
                 n = snprintf(req_buf, sizeof req_buf,
                              "POST /posts/%lld/like HTTP/1.1\r\nHost: localhost\r\nAuthorization: %s\r\nContent-Length: 0\r\n\r\n",
@@ -1301,16 +1437,10 @@ static int run_bench(int argc, char **argv) {
         struct req r;
         struct resp rp;
         if (http_parse((const uint8_t *)req_buf, (uint32_t)n, &r) == 1) {
-            app_handle(&A, &r, buf, 1, &rp);
+            app_handle(&A, &r, buf, &rp);
         }
-        if ((i & 63) == 63) {
-            db_end_batch(&A.db);
-            // Wait if CK_TAIL kicked in synchronously during bench
-            while (atomic_load_explicit(&A.db.ck_state, memory_order_acquire) == CK_TAIL) {
-                struct timespec slp = {0, 50000};
-                nanosleep(&slp, NULL);
-            }
-            if (atomic_load_explicit(&A.db.ck_state, memory_order_acquire) != CK_IDLE) db_tick(&A.db);
+        if ((i & 255) == 255) {
+            db_end_batch(&A.db, (uint32_t)(now_ns() / 1000000ULL));
         }
     }
     db_commit(&A.db);
@@ -1352,7 +1482,6 @@ int main(int argc, char **argv) {
     const char *port_s = getenv("PORT");
     int port = (port_s && *port_s) ? atoi(port_s) : 8080;
 
-    // Raise RLIMIT_NOFILE gracefully if allowed before sizing io_uring fixed-file tables.
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
         rl.rlim_cur = rl.rlim_max;
@@ -1371,14 +1500,16 @@ int main(int argc, char **argv) {
     if (ring_slots < 64u) ring_slots = 64u;
     accept_margin = ring_slots / 8u < 4096u ? ring_slots / 8u : 4096u;
     if (accept_margin < 16u) accept_margin = 16u;
-    ring_bufs = (unsigned)env_long("RECV_BUFS", 8192);
+    ring_bufs = (unsigned)env_long("RECV_BUFS", 2048);
     ring_buf_size = (unsigned)env_long("BUF_SIZE", 1024);
-    answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 1024);
+    answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 256);
     if (answers_per_pass < 16) answers_per_pass = 16;
     wait_min = (unsigned)env_long("WAIT_MIN", 64);
     if (wait_min < 1) wait_min = 1;
-    wait_ns_cfg = (uint64_t)env_long("WAIT_US", 2000) * 1000ULL;
-    write_win_ns = (uint64_t)env_long("WRITE_WINDOW_US", 2000) * 1000ULL;
+    wait_ns_cfg = (uint64_t)env_long("WAIT_US", 1000) * 1000ULL;
+    write_win_ns = (uint64_t)env_long("WRITE_WINDOW_US", 15000) * 1000ULL;
+    late_ack_ms = (uint32_t)env_long("LATE_ACK_MS", 30);
+    lifo_age_ms = (uint32_t)env_long("LIFO_AGE_MS", 8000);
     int cache_kib = (int)env_long("CACHE_KIB", 0);
 
     signal(SIGPIPE, SIG_IGN);
@@ -1414,101 +1545,110 @@ int main(int argc, char **argv) {
     }
     apply_listener_rcvbuf(16384);
 
-    // Pre-create NR io_uring rings cleanly at startup (additional rings up to MAX_RINGS on demand).
     for (unsigned i = 0; i < NR; i++) {
         if (ring_create_at(i) != 0) return 1;
     }
 
     if (A.db.ck_efd >= 0) {
         struct io_uring_sqe *s = ring_sqe(&R[0].r);
-        sqe_poll_eventfd(s, A.db.ck_efd, UD(UD_CKPT_EFD, 0, 0, 0));
+        sqe_read_efd(s, A.db.ck_efd, &g_ck_efd_buf, UD(UD_CKPT_EFD, 0, 0, 0));
     }
 
     accept_ring = 0;
     fill_accepts_on(0);
-    // Push initial SQEs on Ring 0 so bounded accepts + poll eventfds are armed right away.
-    ring_enter(&R[0].r, 0, 0);
 
-    fprintf(stderr, "c-iouring-vojtik listening on %s:%d (listeners=%u, rings=%u..%u, slots=%u, carry=%d, wwin=%lluus)\n",
-            host, bind_port, NLISTEN, NR, NR_MAX, ring_slots, A.db.carry_read_tx, (unsigned long long)(write_win_ns / 1000ULL));
+    fprintf(stderr, "c-iouring-Vojtik1112 listening on %s:%d (listeners=%u, rings=%u..%u, slots=%u, carry=%d, wwin=%lluus, ans=%u)\n",
+            host, bind_port, NLISTEN, NR, NR_MAX, ring_slots, A.db.carry_read_tx,
+            (unsigned long long)(write_win_ns / 1000ULL), answers_per_pass);
+
+    unsigned idle_passes = 0;
 
     while (!g_stop) {
+        /* Top-of-loop combined submit+collect: active worker rings flush SENDs/rearms before Ring 0 waits. */
+        int worker_ready = 0;
+        for (unsigned i = 1; i < active_rings; i++) {
+            struct ring *wr = &R[i].r;
+            if (ring_needs_enter(wr)) {
+                long erc = ring_enter(wr, 0, 0);
+                if (erc < 0 && erc != -EINTR && erc != -ETIME && erc != -EBUSY && erc != -EAGAIN) {
+                    if (erc == -EBADR) usleep(1000);
+                }
+            }
+            if (*wr->cq_head != LOAD_ACQ(wr->cq_tail)) worker_ready = 1;
+        }
+
         uint64_t t_now = now_ns();
+        int due_writes = (nheld > 0) && current_writes_ok(t_now);
+        int has_work = worker_ready || nready > 0 || due_writes ||
+                       (*R[0].r.cq_head != LOAD_ACQ(R[0].r.cq_tail));
+
+        if (has_work) {
+            if (ring_needs_enter(&R[0].r)) ring_enter(&R[0].r, 0, 0);
+        } else {
+            uint64_t wait_t = wait_ns_cfg;
+            unsigned min_c = (last_batch_cqes >= 16) ? wait_min : 1u;
+            if (last_batch_cqes < 16) {
+                if (active_rings > 1) {
+                    wait_t = (idle_passes > 64) ? 5000000ULL : (wait_t && wait_t < 2000000ULL ? wait_t : 1000000ULL);
+                } else {
+                    wait_t = 0;
+                }
+            }
+            if (nheld > 0 && !A.db.writes_held && write_win_ns > 0 && last_write_commit_ns != 0) {
+                uint64_t elapsed = t_now - last_write_commit_ns;
+                if (elapsed >= write_win_ns) {
+                    min_c = 0;
+                    wait_t = 0;
+                } else {
+                    uint64_t rem = write_win_ns - elapsed;
+                    if (wait_t == 0 || rem < wait_t) wait_t = rem;
+                }
+            }
+            long erc = ring_enter(&R[0].r, min_c, wait_t);
+            if (erc < 0 && erc != -EINTR && erc != -ETIME && erc != -EAGAIN && erc != -EBUSY) {
+                if (erc == -EBADR) usleep(1000);
+                else break;
+            }
+        }
+
+        t_now = now_ns();
         A.now = (int64_t)time(NULL);
         now_s = (uint32_t)A.now;
         now_ms = (uint32_t)(t_now / 1000000ULL);
 
-        db_tick(&A.db);
-        int ckpt_paused = (atomic_load_explicit(&A.db.ck_state, memory_order_acquire) == CK_TAIL);
-        int writes_ok = ckpt_paused ? 0 : current_writes_ok(t_now);
-        answers_left = ckpt_paused ? 0 : answers_per_pass;
+        if (db_should_yield_hold(&A.db, now_ms) && nready > 0) {
+            usleep(200);
+            t_now = now_ns();
+            now_ms = (uint32_t)(t_now / 1000000ULL);
+        }
 
-        if (!ckpt_paused && writes_ok && nheld > 0) drain_held(1);
+        db_tick(&A.db, now_ms);
+        int writes_ok = current_writes_ok(t_now);
+        answers_left = answers_per_pass;
+
+        if (writes_ok && nheld > 0) drain_held(1);
         uint64_t cqe_n = reap_all(writes_ok);
+        cqe_n += read_rounds(writes_ok);
+        if (nready > 0 && answers_left > 0) run_ready(writes_ok);
+        if (writes_ok && nheld > 0) drain_held(1);
 
-        if (!ckpt_paused) {
-            cqe_n += read_rounds(writes_ok);
-            if (nready > 0 && answers_left > 0) run_ready(writes_ok);
-            if (writes_ok && nheld > 0) drain_held(1);
+        int had_writes = A.db.wrote;
+        int db_err = (db_end_batch(&A.db, now_ms) != 0);
+        flush_replies(had_writes, db_err, t_now);
 
-            int had_writes = A.db.wrote;
-            int db_err = (db_end_batch(&A.db) != 0);
-            flush_replies(had_writes, db_err, t_now);
-        } else {
-            cqe_n += read_rounds(0);
+        if (nready == 0 && nheld == 0) {
+            g_qa.used = 0;
+        } else if (g_qa.used > (16u << 20)) {
+            qarena_compact();
         }
 
         rearm_all();
         maybe_rotate_accept();
         sweep_idle_and_govern(t_now);
 
-        // Flush any newly queued SQEs on active worker rings (e.g. SEND, SHUTDOWN, RECV rearm).
-        for (unsigned i = 1; i < active_rings; i++) {
-            if (ring_needs_enter(&R[i].r)) {
-                ring_enter(&R[i].r, 0, 0);
-            }
-        }
-
         last_batch_cqes = cqe_n;
-
-        // If pending work remains (backlog, held writes just unblocked, or unread worker CQEs), don't sleep.
-        int more_work = (!ckpt_paused) &&
-                        ((nready > 0) || (current_writes_ok(now_ns()) && nheld > 0));
-        if (!more_work) {
-            for (unsigned i = 1; i < active_rings; i++) {
-                if (*R[i].r.cq_head != LOAD_ACQ(R[i].r.cq_tail) ||
-                    (LOAD_ACQ(R[i].r.sq_flags) & IORING_SQ_TASKRUN)) {
-                    more_work = 1;
-                    break;
-                }
-            }
-        }
-        if (more_work) {
-            if (ring_needs_enter(&R[0].r)) ring_enter(&R[0].r, 0, 0);
-            continue;
-        }
-
-        uint64_t wait_t = wait_ns_cfg;
-        unsigned min_c = (cqe_n >= 16) ? wait_min : 1u;
-        if (ckpt_paused) {
-            min_c = 1u;
-            wait_t = 5000000ULL;
-        } else if (nheld > 0 && !A.db.writes_held && write_win_ns > 0 && last_write_commit_ns != 0) {
-            uint64_t elapsed = now_ns() - last_write_commit_ns;
-            if (elapsed >= write_win_ns) {
-                min_c = 0;
-                wait_t = 0;
-            } else {
-                uint64_t rem = write_win_ns - elapsed;
-                if (rem < wait_t) wait_t = rem;
-                min_c = wait_min;
-            }
-        }
-
-        long erc = ring_enter(&R[0].r, min_c, wait_t);
-        if (erc < 0 && erc != -EINTR && erc != -ETIME) {
-            if (erc != -EAGAIN && erc != -EBUSY) break;
-        }
+        if (cqe_n > 0) idle_passes = 0;
+        else idle_passes++;
     }
 
     for (unsigned l = 0; l < NLISTEN; l++) {

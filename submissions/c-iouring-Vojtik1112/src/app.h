@@ -1,4 +1,5 @@
-/* app.h: HTTP route dispatch, JWT authentication, JSON validation, and zero-copy framing. */
+/* app.h: HTTP route dispatch, JWT authentication, zero-malloc parsed request representation,
+ * and zero-copy arena response framing. */
 #ifndef APP_H
 #define APP_H
 
@@ -9,6 +10,34 @@
 #define HDR_ROOM 128
 #define RESP_MAX (128u * 1024u)
 
+enum {
+    RT_STATIC_ERR = 0,
+    RT_FEED = 1,
+    RT_POST,
+    RT_HEALTH,
+    RT_LIKE,
+    RT_CREATE
+};
+
+struct qarena {
+    uint8_t *buf;
+    uint32_t used;
+    uint32_t cap;
+};
+
+struct parsed_req {
+    uint8_t route;
+    uint8_t close;
+    uint8_t is_write;
+    uint8_t pad;
+    uint32_t name_off;
+    uint32_t name_len;
+    uint32_t body_off;
+    uint32_t body_len;
+    int64_t id;
+    int64_t user_id;
+};
+
 struct app {
     struct db db;
     struct hmac_key key;
@@ -17,14 +46,11 @@ struct app {
     uint64_t n_req, n_feed, n_post, n_create, n_like, n_err;
 };
 
-struct arena;
-
 struct resp {
     uint8_t *p;
     unsigned n;
     uint8_t close;
     uint8_t db;
-    uint8_t held;
     uint8_t is_static;
     uint32_t advance; /* bytes consumed from caller scratch free buffer */
 };
@@ -89,10 +115,27 @@ static int app_init(struct app *a, const char *db_path, const char *secret, int 
     return db_open(&a->db, db_path, cache_kib);
 }
 
+static inline void qarena_append(struct qarena *qa, const uint8_t *p, uint32_t n, uint32_t *off_out) {
+    if (unlikely(qa->used + n > qa->cap)) {
+        uint32_t ncap = qa->cap ? qa->cap * 2u : (64u * 1024u);
+        while (ncap < qa->used + n) ncap *= 2u;
+        uint8_t *nb = (uint8_t *)realloc(qa->buf, ncap);
+        if (!nb) { perror("realloc qarena"); exit(1); }
+        qa->buf = nb;
+        qa->cap = ncap;
+    }
+    *off_out = qa->used;
+    if (n > 0) {
+        memcpy(qa->buf + qa->used, p, n);
+        qa->used += n;
+    }
+}
+
 static inline void resp_static(struct resp *out, int id) {
     int cl = out->close ? 1 : 0;
     out->p = S_RESP[id][cl];
     out->n = S_LEN[id][cl];
+    out->db = 0;
     out->is_static = 1;
     out->advance = 0;
 }
@@ -123,14 +166,13 @@ static inline int path_is(const struct req *r, const char *lit, unsigned n) {
     return r->path_len == n && memcmp(r->path, lit, n) == 0;
 }
 
-static int app_auth(struct app *a, const struct req *r, struct resp *out,
-                    struct claims *c, uint8_t *namebuf, uint32_t namecap) {
+static int app_auth_err(const struct app *a, const struct req *r, struct claims *c,
+                        uint8_t *namebuf, uint32_t namecap) {
     int rc = jwt_verify(&a->key, r->auth, r->auth_len, a->now, c, namebuf, namecap);
-    if (likely(rc == JWT_OK)) return 1;
-    if (rc == JWT_MISSING) resp_static(out, SR_401_MISSING);
-    else if (rc == JWT_INVALID) resp_static(out, SR_401_INVALID);
-    else resp_static(out, SR_401_PAYLOAD);
-    return 0;
+    if (likely(rc == JWT_OK)) return -1;
+    if (rc == JWT_MISSING) return SR_401_MISSING;
+    if (rc == JWT_INVALID) return SR_401_INVALID;
+    return SR_401_PAYLOAD;
 }
 
 struct post_body_scan {
@@ -143,57 +185,37 @@ static int on_post_member(void *ud, const uint8_t *k, uint32_t kn, int kesc, str
     return 0;
 }
 
-static void app_handle(struct app *a, const struct req *r, uint8_t *free_buf,
-                       int writes_ok, struct resp *out) {
-    out->close = r->close;
-    out->db = 0;
-    out->held = 0;
-    out->is_static = 0;
-    out->advance = 0;
-    a->n_req++;
-
-    uint8_t *body_dst = free_buf + HDR_ROOM;
-    struct ob o;
-    ob_init(&o, body_dst, RESP_MAX - HDR_ROOM);
+/* Parses route, validates auth and JSON/params completely without touching SQLite.
+ * Returns 1 if ready for app_exec_parsed(), 0 if immediate static error was placed in err_out
+ * (with pr->route = RT_STATIC_ERR and pr->id = error_id so caller can queue it if needed). */
+static int app_parse_and_auth(struct app *a, const struct req *r, struct parsed_req *pr,
+                              struct qarena *qa, struct resp *err_out) {
+    pr->close = r->close;
+    pr->is_write = 0;
 
     if (likely(r->method == M_GET)) {
         if (likely(path_is(r, "/feed", 5))) {
-            a->n_feed++;
-            out->db = 1;
-            if (unlikely(db_feed(&a->db, &o) < 0 || o.err)) goto err500;
-            resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
-            return;
+            pr->route = RT_FEED;
+            return 1;
         }
         if (likely(r->path_len > 7 && memcmp(r->path, "/posts/", 7) == 0)) {
-            a->n_post++;
             int64_t id = 0;
             if (unlikely(!parse_positive(r->path + 7, r->path_len - 7, &id))) {
-                resp_static(out, SR_400_ID);
-                return;
+                pr->route = RT_STATIC_ERR;
+                pr->id = SR_400_ID;
+                goto ret_err;
             }
-            out->db = 1;
-            int rc = db_post(&a->db, &o, id);
-            if (unlikely(rc < 0 || o.err)) goto err500;
-            if (rc == 0) {
-                resp_static(out, SR_404_POST);
-                return;
-            }
-            resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
-            return;
+            pr->route = RT_POST;
+            pr->id = id;
+            return 1;
         }
         if (path_is(r, "/health", 7)) {
-            if (db_health(&a->db) < 0) {
-                resp_static(out, SR_503);
-                return;
-            }
-            ob_lit(&o, "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
-            ob_u64(&o, (uint64_t)(a->now >= a->start ? a->now - a->start : 0));
-            ob_char(&o, '}');
-            resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
-            return;
+            pr->route = RT_HEALTH;
+            return 1;
         }
-        resp_static(out, SR_404);
-        return;
+        pr->route = RT_STATIC_ERR;
+        pr->id = SR_404;
+        goto ret_err;
     }
 
     if (r->method == M_POST) {
@@ -202,73 +224,58 @@ static void app_handle(struct app *a, const struct req *r, uint8_t *free_buf,
                       memcmp(r->path, "/posts/", 7) == 0 &&
                       memcmp(r->path + r->path_len - 5, "/like", 5) == 0;
         if (!is_create && !is_like) {
-            resp_static(out, SR_404);
-            return;
-        }
-        if (!writes_ok) {
-            out->held = 1;
-            a->n_req--;
-            return;
+            pr->route = RT_STATIC_ERR;
+            pr->id = SR_404;
+            goto ret_err;
         }
         struct claims c;
         uint8_t namebuf[1024];
-        if (!app_auth(a, r, out, &c, namebuf, sizeof(namebuf))) return;
+        int aerr = app_auth_err(a, r, &c, namebuf, sizeof(namebuf));
+        if (unlikely(aerr >= 0)) {
+            pr->route = RT_STATIC_ERR;
+            pr->id = aerr;
+            goto ret_err;
+        }
 
         if (is_like) {
-            a->n_like++;
             int64_t id = 0;
             if (!parse_positive(r->path + 7, r->path_len - 12, &id)) {
-                resp_static(out, SR_400_ID);
-                return;
+                pr->route = RT_STATIC_ERR;
+                pr->id = SR_400_ID;
+                goto ret_err;
             }
-            out->db = 1;
-            int ex = db_post_exists(&a->db, id);
-            if (unlikely(ex < 0)) goto err500;
-            if (ex == 0) {
-                resp_static(out, SR_404_POST);
-                return;
-            }
-            int rc = db_insert_like(&a->db, c.user_id, id, NULL);
-            if (unlikely(rc < 0)) goto err500;
-            if (rc == 1) {
-                resp_static(out, SR_404_POST);
-                return;
-            }
-            ob_lit(&o, "{\"liked\":true,\"already_liked\":");
-            if (rc == 2) ob_lit(&o, "true,\"post_id\":");
-            else ob_lit(&o, "false,\"post_id\":");
-            ob_u64(&o, (uint64_t)id);
-            ob_char(&o, '}');
-            if (rc == 0) resp_frame(out, free_buf, "201 Created", 11, (unsigned)o.n);
-            else resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
-            return;
+            pr->route = RT_LIKE;
+            pr->is_write = 1;
+            pr->user_id = c.user_id;
+            pr->id = id;
+            return 1;
         }
 
         /* POST /posts */
-        a->n_create++;
         struct jp jcheck = {r->body, r->body + r->body_len, 0};
         jp_ws(&jcheck);
         if (jcheck.p >= jcheck.end) {
-            resp_static(out, SR_400_JSON);
-            return;
+            pr->route = RT_STATIC_ERR;
+            pr->id = SR_400_JSON;
+            goto ret_err;
         }
         struct post_body_scan ps;
         memset(&ps, 0, sizeof ps);
         if (*jcheck.p != '{') {
-            if (jp_value(&jcheck, NULL) != 0 || (jp_ws(&jcheck), jcheck.p != jcheck.end)) {
-                resp_static(out, SR_400_JSON);
-            } else {
-                resp_static(out, SR_400_BODY);
-            }
-            return;
+            pr->route = RT_STATIC_ERR;
+            pr->id = (jp_value(&jcheck, NULL) != 0 || (jp_ws(&jcheck), jcheck.p != jcheck.end))
+                     ? SR_400_JSON : SR_400_BODY;
+            goto ret_err;
         }
         if (json_parse_object(r->body, r->body_len, on_post_member, &ps) != 0) {
-            resp_static(out, SR_400_JSON);
-            return;
+            pr->route = RT_STATIC_ERR;
+            pr->id = SR_400_JSON;
+            goto ret_err;
         }
         if (ps.body.type != JV_STRING) {
-            resp_static(out, SR_400_BODY);
-            return;
+            pr->route = RT_STATIC_ERR;
+            pr->id = SR_400_BODY;
+            goto ret_err;
         }
 
         const uint8_t *trimmed = ps.body.p;
@@ -279,7 +286,12 @@ static void app_handle(struct app *a, const struct req *r, uint8_t *free_buf,
             uint8_t *dst = sbuf;
             if (ps.body.n > sizeof(sbuf)) {
                 heap_u = (uint8_t *)malloc(ps.body.n);
-                if (!heap_u) goto err500;
+                if (!heap_u) {
+                    a->n_err++;
+                    pr->route = RT_STATIC_ERR;
+                    pr->id = SR_500;
+                    goto ret_err;
+                }
                 dst = heap_u;
             }
             trimmed_n = json_unescape(ps.body.p, ps.body.n, dst);
@@ -288,42 +300,152 @@ static void app_handle(struct app *a, const struct req *r, uint8_t *free_buf,
         js_trim(&trimmed, &trimmed_n);
         if (trimmed_n == 0) {
             free(heap_u);
-            resp_static(out, SR_400_BODY);
-            return;
+            pr->route = RT_STATIC_ERR;
+            pr->id = SR_400_BODY;
+            goto ret_err;
         }
         if (utf8_count(trimmed, trimmed_n) > 500u) {
             free(heap_u);
-            resp_static(out, SR_400_LONG);
-            return;
+            pr->route = RT_STATIC_ERR;
+            pr->id = SR_400_LONG;
+            goto ret_err;
         }
 
+        pr->route = RT_CREATE;
+        pr->is_write = 1;
+        pr->user_id = c.user_id;
+        pr->name_len = c.username_len;
+        qarena_append(qa, c.username, c.username_len, &pr->name_off);
+        pr->body_len = trimmed_n;
+        qarena_append(qa, trimmed, trimmed_n, &pr->body_off);
+        free(heap_u);
+        return 1;
+    }
+
+    pr->route = RT_STATIC_ERR;
+    pr->id = SR_404;
+ret_err:
+    if (err_out) {
+        err_out->close = pr->close;
+        resp_static(err_out, (int)pr->id);
+    }
+    return 0;
+}
+
+static void app_exec_parsed(struct app *a, const struct parsed_req *pr, const struct qarena *qa,
+                            uint8_t *free_buf, struct resp *out) {
+    out->close = pr->close;
+    out->db = 0;
+    out->is_static = 0;
+    out->advance = 0;
+    a->n_req++;
+
+    if (unlikely(pr->route == RT_STATIC_ERR)) {
+        resp_static(out, (int)pr->id);
+        return;
+    }
+
+    uint8_t *body_dst = free_buf + HDR_ROOM;
+    struct ob o;
+    ob_init(&o, body_dst, RESP_MAX - HDR_ROOM);
+
+    switch (pr->route) {
+    case RT_FEED:
+        a->n_feed++;
         out->db = 1;
+        if (unlikely(db_feed(&a->db, &o) < 0 || o.err)) goto err500;
+        resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
+        return;
+    case RT_POST: {
+        a->n_post++;
+        out->db = 1;
+        int rc = db_post(&a->db, &o, pr->id);
+        if (unlikely(rc < 0 || o.err)) goto err500;
+        if (rc == 0) {
+            resp_static(out, SR_404_POST);
+            return;
+        }
+        resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
+        return;
+    }
+    case RT_HEALTH:
+        if (db_health(&a->db) < 0) {
+            resp_static(out, SR_503);
+            return;
+        }
+        ob_lit(&o, "{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
+        ob_u64(&o, (uint64_t)(a->now >= a->start ? a->now - a->start : 0));
+        ob_char(&o, '}');
+        resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
+        return;
+    case RT_LIKE: {
+        a->n_like++;
+        out->db = 1;
+        int ex = db_post_exists(&a->db, pr->id);
+        if (unlikely(ex < 0)) goto err500;
+        if (ex == 0) {
+            resp_static(out, SR_404_POST);
+            return;
+        }
+        int rc = db_insert_like(&a->db, pr->user_id, pr->id, NULL);
+        if (unlikely(rc < 0)) goto err500;
+        if (rc == 1) {
+            resp_static(out, SR_404_POST);
+            return;
+        }
+        ob_lit(&o, "{\"liked\":true,\"already_liked\":");
+        if (rc == 2) ob_lit(&o, "true,\"post_id\":");
+        else ob_lit(&o, "false,\"post_id\":");
+        ob_u64(&o, (uint64_t)pr->id);
+        ob_char(&o, '}');
+        if (rc == 0) resp_frame(out, free_buf, "201 Created", 11, (unsigned)o.n);
+        else resp_frame(out, free_buf, "200 OK", 6, (unsigned)o.n);
+        return;
+    }
+    case RT_CREATE: {
+        a->n_create++;
+        out->db = 1;
+        const uint8_t *uname = qa->buf + pr->name_off;
+        const uint8_t *body = qa->buf + pr->body_off;
         int64_t new_id = 0;
         char created[25];
-        int rc = db_insert_post(&a->db, c.user_id, (const char *)trimmed, (int)trimmed_n,
+        int rc = db_insert_post(&a->db, pr->user_id, (const char *)body, (int)pr->body_len,
                                 &new_id, created);
         if (rc != 0) {
-            free(heap_u);
             if (rc == 1) resp_static(out, SR_400_LONG);
             else goto err500;
             return;
         }
         ob_lit(&o, "{\"post\":");
-        ob_post_obj(&o, new_id, trimmed, trimmed_n, (const uint8_t *)created, 24,
-                    c.username, c.username_len, 0);
+        ob_post_obj(&o, new_id, body, pr->body_len, (const uint8_t *)created, 24,
+                    uname, pr->name_len, 0);
         ob_char(&o, '}');
-        free(heap_u);
         if (unlikely(o.err)) goto err500;
         resp_frame(out, free_buf, "201 Created", 11, (unsigned)o.n);
         return;
     }
-
-    resp_static(out, SR_404);
-    return;
+    default:
+        resp_static(out, SR_404);
+        return;
+    }
 
 err500:
     a->n_err++;
     resp_static(out, SR_500);
+}
+
+static struct qarena g_bench_qa = {NULL, 0, 0};
+
+static inline void app_handle(struct app *a, const struct req *r, uint8_t *free_buf,
+                              struct resp *out) {
+    struct parsed_req pr;
+    g_bench_qa.used = 0;
+    if (!app_parse_and_auth(a, r, &pr, &g_bench_qa, out)) {
+        a->n_req++;
+        return;
+    }
+    app_exec_parsed(a, &pr, &g_bench_qa, free_buf, out);
+    g_bench_qa.used = 0;
 }
 
 #endif

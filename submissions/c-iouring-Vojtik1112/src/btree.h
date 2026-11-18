@@ -2,12 +2,11 @@
  *
  * Combines:
  * - Speculative reverse-rowid posts tail walk + O(1) cell-19 rank_twenty certificate
- *   (c-uring-willwang #403) with 2-leaf page pinning (c-iouring-jowinjestine #486)
+ *   with 2-leaf page pinning + dedicated CUR_POST_PREV 2nd-leaf cursor
  * - Dedicated CUR_FEED_TAIL and CUR_LIKES_LAST cursors parked at AtLast (no-op rechecks)
- * - Per-slot CUR_AUTHOR + 0..19 cursors for O(1) repeated author lookups
- *   (objc-uring-delneg #326 / fsharp-uring-delneg #398) + batched level-by-level fallback
- * - Page-at-a-time likes_post_id_idx scan with +8 cell lookahead & binary run-length
- *   subtraction (c-iouring-jowinjestine #486 + c-uring-willwang #403)
+ * - O(1) CUR_LIKES_LAST in-leaf binary search for GET /posts/:id on recent posts
+ * - 32-slot hash-indexed CUR_USER_BASE[uid & 31] cursor bank shared by /feed and /posts/:id
+ * - Page-at-a-time likes_post_id_idx scan with +8 lookahead & binary run-length subtraction
  *
  * Unmodified SQLite 3.54.1 amalgamation. Any unexpected layout, missing author, or
  * overflow record falls back to the reference SQL statement. */
@@ -17,18 +16,19 @@
 #define FEED_N 20
 #define LIKES_SPAN 512
 #define TAIL_GAP 64
+#define USER_SLOTS 32
 
 static inline int cell_pid_rowid(MemPage *pg, int i, i64 *pid, i64 *rowid);
 
 enum {
   CUR_POSTS = 0,
-  CUR_USERS,
   CUR_FEED_IDX,
   CUR_LIKES_IDX,
   CUR_FEED_TAIL,
+  CUR_POST_PREV,
   CUR_LIKES_LAST,
-  CUR_AUTHOR, /* 20 per-slot author cursors: CUR_AUTHOR + 0..19 */
-  NCUR = CUR_AUTHOR + FEED_N
+  CUR_USER_BASE, /* 32 hash-indexed user cursors: CUR_USER_BASE + (uid & 31) */
+  NCUR = CUR_USER_BASE + USER_SLOTS
 };
 
 struct bt {
@@ -36,8 +36,8 @@ struct bt {
   Pgno root[4]; /* 0: posts, 1: users, 2: feed_idx, 3: likes_idx */
   KeyInfo *ki_feed, *ki_likes;
   BtCursor *cur[NCUR];
-  uint32_t open_mask; /* bit i = cur[i] is open in the current transaction */
-  int open;           /* transaction + core cursors open */
+  uint64_t open_mask; /* bit i = cur[i] is open in the current transaction */
+  int open;           /* transaction open */
   int ok;             /* schema validated */
   uint8_t *spill;
   uint32_t spill_cap;
@@ -103,8 +103,8 @@ static int bt_init(struct bt *b, sqlite3 *c) {
 }
 
 static inline Pgno cur_root(const struct bt *b, int idx) {
-  if (idx == CUR_POSTS || idx == CUR_FEED_TAIL) return b->root[0];
-  if (idx == CUR_USERS || idx >= CUR_AUTHOR) return b->root[1];
+  if (idx == CUR_POSTS || idx == CUR_FEED_TAIL || idx == CUR_POST_PREV) return b->root[0];
+  if (idx >= CUR_USER_BASE) return b->root[1];
   if (idx == CUR_FEED_IDX) return b->root[2];
   return b->root[3];
 }
@@ -115,10 +115,10 @@ static inline KeyInfo *cur_ki(const struct bt *b, int idx) {
 }
 
 static inline BtCursor *bt_cur(struct bt *b, int idx) {
-  uint32_t bit = 1u << idx;
-  if (b->open_mask & bit) return b->cur[idx];
+  uint64_t bit = 1ULL << idx;
+  if (likely(b->open_mask & bit)) return b->cur[idx];
   sqlite3BtreeCursorZero(b->cur[idx]);
-  if (sqlite3BtreeCursor(b->bt, cur_root(b, idx), 0, cur_ki(b, idx), b->cur[idx]) != SQLITE_OK) return NULL;
+  if (unlikely(sqlite3BtreeCursor(b->bt, cur_root(b, idx), 0, cur_ki(b, idx), b->cur[idx]) != SQLITE_OK)) return NULL;
   b->open_mask |= bit;
   return b->cur[idx];
 }
@@ -130,10 +130,10 @@ static int bt_open(struct bt *b) {
   return 0;
 }
 
-static inline void bt_close_mask(struct bt *b, uint32_t mask) {
-  uint32_t m = b->open_mask & mask;
+static inline void bt_close_mask(struct bt *b, uint64_t mask) {
+  uint64_t m = b->open_mask & mask;
   while (m) {
-    int i = __builtin_ctz(m);
+    int i = __builtin_ctzll(m);
     sqlite3BtreeCloseCursor(b->cur[i]);
     m &= m - 1;
   }
@@ -142,23 +142,14 @@ static inline void bt_close_mask(struct bt *b, uint32_t mask) {
 
 static void bt_close(struct bt *b) {
   if (!b->open) return;
-  uint32_t m = b->open_mask;
+  uint64_t m = b->open_mask;
   while (m) {
-    int i = __builtin_ctz(m);
+    int i = __builtin_ctzll(m);
     sqlite3BtreeCloseCursor(b->cur[i]);
     m &= m - 1;
   }
   b->open_mask = 0;
   b->open = 0;
-}
-
-static inline void bt_rotate_authors(struct bt *b) {
-  BtCursor *last = b->cur[CUR_AUTHOR + FEED_N - 1];
-  memmove(&b->cur[CUR_AUTHOR + 1], &b->cur[CUR_AUTHOR], (FEED_N - 1) * sizeof(BtCursor *));
-  b->cur[CUR_AUTHOR] = last;
-  uint32_t m = (b->open_mask >> CUR_AUTHOR) & ((1u << FEED_N) - 1u);
-  uint32_t rot = ((m << 1) & ((1u << FEED_N) - 1u)) | (m >> (FEED_N - 1));
-  b->open_mask = (b->open_mask & ~(((1u << FEED_N) - 1u) << CUR_AUTHOR)) | (rot << CUR_AUTHOR);
 }
 
 /* ---- records ---- */
@@ -285,7 +276,7 @@ static inline int cell_pid_rowid(MemPage *pg, int i, i64 *pid, i64 *rowid) {
   return 1;
 }
 
-static int bt_count_likes_fast(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
+static __attribute__((noinline)) int bt_count_likes_fast(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
   BtCursor *c = bt_cur(b, CUR_LIKES_IDX);
   if (!c) return -1;
   int r = idx_seek(c, b->ki_likes, &lo, 1, 0);
@@ -330,7 +321,7 @@ static int bt_count_likes_fast(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
   }
 }
 
-static int bt_count_likes_slow(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
+static __attribute__((noinline)) int bt_count_likes_slow(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
   BtCursor *c = bt_cur(b, CUR_LIKES_IDX);
   if (!c) return -1;
   int r = idx_seek(c, b->ki_likes, &lo, 1, 0);
@@ -347,7 +338,7 @@ static int bt_count_likes_slow(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
   return r < 0 ? -1 : 0;
 }
 
-static int bt_count_likes_tail(struct bt *b, i64 lo, i64 hi, i64 last_pid, uint32_t *n) {
+static __attribute__((noinline)) int bt_count_likes_tail(struct bt *b, i64 lo, i64 hi, i64 last_pid, uint32_t *n) {
   if (last_pid - hi > TAIL_GAP) return 1;
   BtCursor *c = bt_cur(b, CUR_LIKES_IDX);
   if (!c) return -1;
@@ -399,17 +390,71 @@ static int bt_count_likes_tail(struct bt *b, i64 lo, i64 hi, i64 last_pid, uint3
   }
 }
 
+static inline BtCursor *bt_ensure_likes_last(struct bt *b, int *empty_out) {
+  uint64_t bit = 1ULL << CUR_LIKES_LAST;
+  if (likely(b->open_mask & bit)) {
+    BtCursor *cl = b->cur[CUR_LIKES_LAST];
+    if (likely(cl->eState == CURSOR_VALID && (cl->curFlags & BTCF_AtLast))) {
+      *empty_out = 0;
+      return cl;
+    }
+  }
+  BtCursor *cl = bt_cur(b, CUR_LIKES_LAST);
+  if (unlikely(!cl)) return NULL;
+  int empty = 1;
+  if (unlikely(sqlite3BtreeLast(cl, &empty) != SQLITE_OK)) return NULL;
+  *empty_out = empty;
+  return cl;
+}
+
 static int bt_count_likes(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
   memset(n, 0, sizeof(uint32_t) * (size_t)(hi - lo + 1));
-  if (hi - lo >= 4) {
-    /* Range query (GET /feed): check rightmost post_id in O(1) via dedicated CUR_LIKES_LAST cursor. */
-    BtCursor *cl = bt_cur(b, CUR_LIKES_LAST);
-    if (!cl) return -1;
-    int empty = 1;
-    if (sqlite3BtreeLast(cl, &empty) != SQLITE_OK) return -1;
-    if (empty) return 0;
+  int empty = 1;
+  BtCursor *cl = bt_ensure_likes_last(b, &empty);
+  if (unlikely(!cl)) return -1;
+  if (unlikely(empty)) return 0;
+
+  if (lo == hi) {
+    /* Point lookup (GET /posts/:id): O(1) max-pid bound check and in-leaf binary search. */
+    if (likely(cl->eState == CURSOR_VALID && cl->pPage->leaf && cl->ix >= 0 && cl->ix + 1 == cl->pPage->nCell)) {
+      MemPage *lpg = cl->pPage;
+      i64 last_pid = 0, first_pid = 0;
+      if (likely(cell_pid_rowid(lpg, cl->ix, &last_pid, NULL))) {
+        if (lo > last_pid) return 0;
+        if (likely(cell_pid_rowid(lpg, 0, &first_pid, NULL)) &&
+            (lo > first_pid || (cl->iPage == 0 && lo >= first_pid))) {
+          int end = cl->ix + 1;
+          int a = (lo == first_pid) ? 0 : 1, bhi = end;
+          while (a < bhi) {
+            int mid = a + ((bhi - a) >> 1);
+            i64 mpid;
+            if (unlikely(!cell_pid_rowid(lpg, mid, &mpid, NULL))) goto slow_scan;
+            if (mpid < lo) a = mid + 1;
+            else bhi = mid;
+          }
+          int lb = a;
+          if (lb == end) return 0;
+          i64 lpid;
+          if (unlikely(!cell_pid_rowid(lpg, lb, &lpid, NULL))) goto slow_scan;
+          if (lpid != lo) return 0;
+          int u_lo = lb + 1, u_hi = end;
+          while (u_lo < u_hi) {
+            int mid = u_lo + ((u_hi - u_lo) >> 1);
+            i64 mpid;
+            if (unlikely(!cell_pid_rowid(lpg, mid, &mpid, NULL))) goto slow_scan;
+            if (mpid <= lo) u_lo = mid + 1;
+            else u_hi = mid;
+          }
+          n[0] = (uint32_t)(u_lo - lb);
+          return 0;
+        }
+      }
+    }
+  } else if (hi - lo >= 4) {
+    /* Range query (GET /feed): rightmost leaf scan or bounded tail reverse scan. */
     i64 last_pid = 0;
-    int have_last = cl->eState == CURSOR_VALID && cl->pPage->leaf && cell_pid_rowid(cl->pPage, cl->ix, &last_pid, NULL);
+    int have_last = cl->eState == CURSOR_VALID && cl->pPage->leaf && cl->ix >= 0 &&
+                    cell_pid_rowid(cl->pPage, cl->ix, &last_pid, NULL);
     if (have_last) {
       if (lo > last_pid) return 0;
       if (hi > last_pid) hi = last_pid;
@@ -449,26 +494,15 @@ static int bt_count_likes(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
         memset(n, 0, sizeof(uint32_t) * (size_t)(hi - lo + 1));
       }
     }
-  } else if (b->open_mask & (1u << CUR_LIKES_LAST)) {
-    /* Single-post fast zero check if tail cursor already sits AtLast. */
-    BtCursor *cl = b->cur[CUR_LIKES_LAST];
-    if (cl->eState == CURSOR_VALID && (cl->curFlags & BTCF_AtLast) && cl->pPage->leaf) {
-      i64 last_pid = 0;
-      if (cell_pid_rowid(cl->pPage, cl->ix, &last_pid, NULL) && lo > last_pid) return 0;
-    }
   }
+
+slow_scan:;
   int r = bt_count_likes_fast(b, lo, hi, n);
   if (r <= 0) return r;
   memset(n, 0, sizeof(uint32_t) * (size_t)(hi - lo + 1));
   return bt_count_likes_slow(b, lo, hi, n);
 }
 
-/* ---- batched users descent fallback ---- */
-
-struct bt_hit {
-  MemPage *pg;
-  int ix;
-};
 static inline i64 bt_cell_key(MemPage *pg, int i) {
   const u8 *c = findCellPastPtr(pg, i);
   if (pg->intKeyLeaf) {
@@ -480,85 +514,6 @@ static inline i64 bt_cell_key(MemPage *pg, int i) {
   u64 v;
   sqlite3GetVarint(c, &v);
   return (i64)v;
-}
-struct bt_pageinfo {
-  MemPage *pg;
-  i64 k0, kn;
-};
-static int bt_lower_bound(const struct bt_pageinfo *pi, i64 k) {
-  MemPage *pg = pi->pg;
-  int n = pg->nCell;
-  if (k <= pi->k0) return 0;
-  if (k > pi->kn) return n;
-  int lo = 1, hi = n - 1;
-  int g = lo + (int)((k - pi->k0) * (i64)(n - 1) / (pi->kn - pi->k0));
-  if (g < lo) g = lo;
-  if (g > hi) g = hi;
-  for (int probe = 0; lo < hi; probe++) {
-    if (bt_cell_key(pg, g) >= k) hi = g;
-    else lo = g + 1;
-    if (probe < 2 && lo < hi) g = hi == g ? g - 1 : g + 1;
-    else g = lo + ((hi - lo) >> 1);
-    if (g < lo) g = lo;
-    if (g > hi) g = hi;
-  }
-  return lo;
-}
-static void bt_release_hits(struct bt_hit *h, int n) {
-  for (int i = 0; i < n; i++)
-    if (h[i].pg) releasePageNotNull(h[i].pg);
-}
-static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct bt_hit *hit) {
-  BtShared *bs = b->bt->pBt;
-  struct bt_pageinfo pages[FEED_N];
-  int page_of[FEED_N];
-  Pgno next[FEED_N];
-  if (n < 1 || n > FEED_N) return -1;
-  for (int i = 0; i < n; i++) next[i] = root;
-  for (int depth = 0;; depth++) {
-    int np = 0, leaf = -1;
-    for (int i = 0; i < n; i++) {
-      int p = 0;
-      while (p < np && pages[p].pg->pgno != next[i]) p++;
-      if (p == np) {
-        MemPage *pg;
-        if (getAndInitPage(bs, next[i], &pg, PAGER_GET_READONLY) != SQLITE_OK) pg = NULL;
-        if (!pg || !pg->intKey || pg->nCell == 0 || pg->nOverflow || depth >= BTCURSOR_MAX_DEPTH || (leaf >= 0 && pg->leaf != leaf)) {
-          if (pg) releasePageNotNull(pg);
-          for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
-          return -1;
-        }
-        __builtin_prefetch(pg->aCellIdx);
-        leaf = pg->leaf;
-        pages[np].pg = pg;
-        pages[np].k0 = bt_cell_key(pg, 0);
-        pages[np].kn = bt_cell_key(pg, pg->nCell - 1);
-        np++;
-      }
-      page_of[i] = p;
-    }
-    if (leaf) {
-      for (int i = 0; i < n; i++) {
-        struct bt_pageinfo *pi = &pages[page_of[i]];
-        int ix = bt_lower_bound(pi, key[i]);
-        if (ix < pi->pg->nCell && bt_cell_key(pi->pg, ix) == key[i]) {
-          hit[i].pg = pi->pg;
-          hit[i].ix = ix;
-          sqlite3PagerRef(pi->pg->pDbPage);
-        } else {
-          hit[i].pg = NULL;
-        }
-      }
-      for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
-      return 0;
-    }
-    for (int i = 0; i < n; i++) {
-      struct bt_pageinfo *pi = &pages[page_of[i]];
-      int lw = bt_lower_bound(pi, key[i]);
-      next[i] = lw >= pi->pg->nCell ? get4byte(&pi->pg->aData[pi->pg->hdrOffset + 8]) : get4byte(findCell(pi->pg, lw));
-    }
-    for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
-  }
 }
 
 static inline int cur_at_rowid(BtCursor *c, i64 rowid) {
@@ -605,8 +560,9 @@ slow_user:;
 /* ---- JSON object writer ---- */
 
 #define OB_PUT(o, lit) (memcpy((o)->p + (o)->n, lit, sizeof(lit) - 1), (o)->n += sizeof(lit) - 1)
-static inline void ob_post_obj(struct ob *o, i64 id, const u8 *body, u32 body_n, const u8 *created, u32 created_n,
-                               const u8 *author, u32 author_n, i64 likes) {
+static __attribute__((noinline)) void ob_post_obj(struct ob *o, i64 id, const u8 *body, u32 body_n,
+                                                  const u8 *created, u32 created_n,
+                                                  const u8 *author, u32 author_n, i64 likes) {
   if (!ob_room(o, 64)) return;
   OB_PUT(o, "{\"id\":");
   o->n += u64_to_dec((uint64_t)id, (char *)o->p + o->n);
@@ -622,6 +578,40 @@ static inline void ob_post_obj(struct ob *o, i64 id, const u8 *body, u32 body_n,
   OB_PUT(o, ",\"like_count\":");
   o->n += u64_to_dec((uint64_t)likes, (char *)o->p + o->n);
   o->p[o->n++] = '}';
+}
+
+static inline int parse_post_leaf_cell(MemPage *pg, int idx, i64 *id_out, struct col pc[4]) {
+  const u8 *cell = findCell(pg, idx);
+  const u8 *p = cell;
+  const u8 *end = pg->aDataEnd;
+  if (likely(p + 2 < end)) {
+    u32 plen = p[0];
+    if (plen < 0x80) {
+      p += 1;
+    } else if (p[1] < 0x80) {
+      plen = ((plen & 0x7fu) << 7) | p[1];
+      p += 2;
+    } else {
+      goto fallback;
+    }
+    u64 key = 0;
+    p = rd_varint(p, end, &key);
+    if (likely(p != NULL && plen <= (u32)pg->maxLocal && p + plen <= end)) {
+      if (likely(rec_cols(p, plen, 4, pc) == 0 && col_is_int(&pc[1]) && col_is_text(&pc[2]) && col_is_text(&pc[3]))) {
+        *id_out = (i64)key;
+        return 1;
+      }
+      return 0;
+    }
+  }
+fallback:;
+  CellInfo info;
+  pg->xParseCell(pg, (u8 *)cell, &info);
+  if (info.nLocal != info.nPayload || rec_cols(info.pPayload, info.nLocal, 4, pc) != 0 ||
+      !col_is_int(&pc[1]) || !col_is_text(&pc[2]) || !col_is_text(&pc[3]))
+    return 0;
+  *id_out = info.nKey;
+  return 1;
 }
 
 /* ---- feed & point reads ---- */
@@ -662,8 +652,8 @@ static void bt_unpin(MemPage **pinned, int n) {
   for (int i = 0; i < n; i++) releasePageNotNull(pinned[i]);
 }
 
-/* Resolves the 20 authors using per-slot CUR_AUTHOR + 0..19 cursors (O(1) when unchanged)
- * plus intra-feed uid deduplication. */
+/* Resolves the 20 authors using hash-indexed CUR_USER_BASE[uid & 31] cursors
+ * shared across /feed and /posts/:id, with intra-feed uid deduplication. */
 static int bt_resolve_and_emit(struct bt *b, struct ob *o, const struct feed_item *items, int n,
                                MemPage **pinned, int npinned) {
   const u8 *name[FEED_N];
@@ -678,7 +668,7 @@ static int bt_resolve_and_emit(struct bt *b, struct ob *o, const struct feed_ite
       name_n[i] = name_n[dup];
       continue;
     }
-    BtCursor *uc = bt_cur(b, CUR_AUTHOR + i);
+    BtCursor *uc = bt_cur(b, CUR_USER_BASE + (int)((uint64_t)items[i].uid & (USER_SLOTS - 1u)));
     if (!uc || bt_user_name(b, uc, items[i].uid, &name[i], &name_n[i])) {
       bt_unpin(pinned, npinned);
       return -1;
@@ -725,15 +715,13 @@ static int bt_feed_tail(struct bt *b, struct ob *o) {
   pinned[npinned++] = pg;
 
   for (int i = ct->ix; i >= 0 && n < FEED_N; i--) {
-    CellInfo cell;
-    pg->xParseCell(pg, findCell(pg, i), &cell);
     struct col pc[4];
-    if (cell.nLocal != cell.nPayload || rec_cols(cell.pPayload, cell.nLocal, 4, pc) ||
-        !col_is_int(&pc[1]) || !col_is_text(&pc[2]) || !col_is_text(&pc[3])) {
+    i64 pid = 0;
+    if (!parse_post_leaf_cell(pg, i, &pid, pc)) {
       bt_unpin(pinned, npinned);
       return 1;
     }
-    items[n].id = cell.nKey;
+    items[n].id = pid;
     items[n].uid = col_int(&pc[1]);
     items[n].body = pc[2].p;
     items[n].body_n = col_len(&pc[2]);
@@ -746,30 +734,28 @@ static int bt_feed_tail(struct bt *b, struct ob *o) {
     n++;
   }
 
-  /* If the rightmost leaf had < 20 cells, seek CUR_POSTS to items[n-1].id and step left once
-   * so CUR_FEED_TAIL stays parked at AtLast! */
+  /* If rightmost leaf had < 20 cells, use CUR_POST_PREV to seek items[n-1].id and step left once
+   * so CUR_FEED_TAIL stays AtLast and CUR_POST_PREV remains parked on the 2nd-to-last leaf! */
   if (n < FEED_N) {
-    BtCursor *cp = bt_cur(b, CUR_POSTS);
-    if (!cp || cur_seek(cp, items[n - 1].id) != 0) { bt_unpin(pinned, npinned); return 1; }
-    int pr = sqlite3BtreePrevious(cp, 0);
+    BtCursor *cp2 = bt_cur(b, CUR_POST_PREV);
+    if (!cp2 || cur_seek(cp2, items[n - 1].id) != 0) { bt_unpin(pinned, npinned); return 1; }
+    int pr = sqlite3BtreePrevious(cp2, 0);
     if (pr == SQLITE_DONE) { bt_unpin(pinned, npinned); return 1; }
-    if (pr != SQLITE_OK || cp->eState != CURSOR_VALID || !cp->pPage->intKeyLeaf) {
+    if (pr != SQLITE_OK || cp2->eState != CURSOR_VALID || !cp2->pPage->intKeyLeaf) {
       bt_unpin(pinned, npinned);
       return 1;
     }
-    MemPage *pg2 = cp->pPage;
+    MemPage *pg2 = cp2->pPage;
     sqlite3PagerRef(pg2->pDbPage);
     pinned[npinned++] = pg2;
-    for (int i = cp->ix; i >= 0 && n < FEED_N; i--) {
-      CellInfo cell;
-      pg2->xParseCell(pg2, findCell(pg2, i), &cell);
+    for (int i = cp2->ix; i >= 0 && n < FEED_N; i--) {
       struct col pc[4];
-      if (cell.nLocal != cell.nPayload || rec_cols(cell.pPayload, cell.nLocal, 4, pc) ||
-          !col_is_int(&pc[1]) || !col_is_text(&pc[2]) || !col_is_text(&pc[3])) {
+      i64 pid = 0;
+      if (!parse_post_leaf_cell(pg2, i, &pid, pc)) {
         bt_unpin(pinned, npinned);
         return 1;
       }
-      items[n].id = cell.nKey;
+      items[n].id = pid;
       items[n].uid = col_int(&pc[1]);
       items[n].body = pc[2].p;
       items[n].body_n = col_len(&pc[2]);
@@ -827,7 +813,7 @@ static int bt_feed_tail(struct bt *b, struct ob *o) {
   return bt_resolve_and_emit(b, o, items, FEED_N, pinned, npinned);
 }
 
-static int bt_feed_index(struct bt *b, struct ob *o) {
+static __attribute__((noinline)) int bt_feed_index(struct bt *b, struct ob *o) {
   BtCursor *ci = bt_cur(b, CUR_FEED_IDX);
   BtCursor *cp = bt_cur(b, CUR_POSTS);
   if (!ci || !cp) return -1;
@@ -883,35 +869,41 @@ static int bt_feed(struct bt *b, struct ob *o) {
   return bt_feed_index(b, o);
 }
 
+static inline int bt_tail_leaf_hit(BtCursor *c, i64 id, struct feed_item *row, MemPage **pinned, int *npinned) {
+  if (c->eState != CURSOR_VALID || !c->pPage->intKeyLeaf || c->ix < 0) return 0;
+  i64 last_id = bt_cell_key(c->pPage, c->ix);
+  if (id > last_id) return (c->curFlags & BTCF_AtLast) ? -1 : 0;
+  if (last_id - id <= c->ix) {
+    int idx = c->ix - (int)(last_id - id);
+    struct col pc[4];
+    i64 got_id = 0;
+    if (parse_post_leaf_cell(c->pPage, idx, &got_id, pc) && got_id == id) {
+      sqlite3PagerRef(c->pPage->pDbPage);
+      pinned[0] = c->pPage;
+      *npinned = 1;
+      row->body = pc[2].p;
+      row->body_n = col_len(&pc[2]);
+      row->created = pc[3].p;
+      row->created_n = col_len(&pc[3]);
+      row->uid = col_int(&pc[1]);
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static int bt_post(struct bt *b, struct ob *o, i64 id) {
   struct feed_item row;
   MemPage *pinned[1];
   int npinned = 0;
-  if (b->open_mask & (1u << CUR_FEED_TAIL)) {
-    BtCursor *ct = b->cur[CUR_FEED_TAIL];
-    if (ct->eState == CURSOR_VALID && ct->pPage->intKeyLeaf && ct->ix >= 0) {
-      i64 last_id = bt_cell_key(ct->pPage, ct->ix);
-      if (id > last_id && (ct->curFlags & BTCF_AtLast)) return 0;
-      if (id <= last_id && last_id - id <= ct->ix) {
-        int idx = ct->ix - (int)(last_id - id);
-        CellInfo cell;
-        ct->pPage->xParseCell(ct->pPage, findCell(ct->pPage, idx), &cell);
-        struct col pc[4];
-        if (cell.nKey == id && cell.nLocal == cell.nPayload &&
-            rec_cols(cell.pPayload, cell.nLocal, 4, pc) == 0 &&
-            col_is_int(&pc[1]) && col_is_text(&pc[2]) && col_is_text(&pc[3])) {
-          sqlite3PagerRef(ct->pPage->pDbPage);
-          pinned[0] = ct->pPage;
-          npinned = 1;
-          row.body = pc[2].p;
-          row.body_n = col_len(&pc[2]);
-          row.created = pc[3].p;
-          row.created_n = col_len(&pc[3]);
-          row.uid = col_int(&pc[1]);
-          goto got_post_row;
-        }
-      }
-    }
+  if (b->open_mask & (1ULL << CUR_FEED_TAIL)) {
+    int r = bt_tail_leaf_hit(b->cur[CUR_FEED_TAIL], id, &row, pinned, &npinned);
+    if (r < 0) return 0;
+    if (r > 0) goto got_post_row;
+  }
+  if (b->open_mask & (1ULL << CUR_POST_PREV)) {
+    int r = bt_tail_leaf_hit(b->cur[CUR_POST_PREV], id, &row, pinned, &npinned);
+    if (r > 0) goto got_post_row;
   }
   BtCursor *cp = bt_cur(b, CUR_POSTS);
   if (!cp) return -1;
@@ -923,7 +915,7 @@ got_post_row:;
   if (bt_count_likes(b, id, id, &likes)) { bt_unpin(pinned, npinned); return -1; }
   const u8 *name;
   u32 name_n;
-  BtCursor *cu = bt_cur(b, CUR_USERS);
+  BtCursor *cu = bt_cur(b, CUR_USER_BASE + (int)((uint64_t)row.uid & (USER_SLOTS - 1u)));
   if (!cu || bt_user_name(b, cu, row.uid, &name, &name_n)) { bt_unpin(pinned, npinned); return -1; }
   ob_lit(o, "{\"post\":");
   ob_post_obj(o, id, row.body, row.body_n, row.created, row.created_n, name, name_n, likes);
@@ -933,7 +925,7 @@ got_post_row:;
 }
 
 static int bt_post_exists(struct bt *b, i64 id) {
-  if (b->open_mask & (1u << CUR_FEED_TAIL)) {
+  if (b->open_mask & (1ULL << CUR_FEED_TAIL)) {
     BtCursor *ct = b->cur[CUR_FEED_TAIL];
     if (ct->eState == CURSOR_VALID && ct->pPage->intKeyLeaf && ct->ix >= 0) {
       i64 last_id = bt_cell_key(ct->pPage, ct->ix);
@@ -941,6 +933,16 @@ static int bt_post_exists(struct bt *b, i64 id) {
       if (id <= last_id && last_id - id <= ct->ix) {
         int idx = ct->ix - (int)(last_id - id);
         if (bt_cell_key(ct->pPage, idx) == id) return 1;
+      }
+    }
+  }
+  if (b->open_mask & (1ULL << CUR_POST_PREV)) {
+    BtCursor *cp2 = b->cur[CUR_POST_PREV];
+    if (cp2->eState == CURSOR_VALID && cp2->pPage->intKeyLeaf && cp2->ix >= 0) {
+      i64 last_id = bt_cell_key(cp2->pPage, cp2->ix);
+      if (id <= last_id && last_id - id <= cp2->ix) {
+        int idx = cp2->ix - (int)(last_id - id);
+        if (bt_cell_key(cp2->pPage, idx) == id) return 1;
       }
     }
   }

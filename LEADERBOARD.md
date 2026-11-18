@@ -86,11 +86,11 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | # | Submission | PR | Language | Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | µs/req | RAM MB | Scored |
 |---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | 1 | rust-iouring-kensac | #264 | Rust (io_uring, SQLite B-tree reads) | **310,000** | 29,284 | 62 | 190 | 0.00 | 82 | 25 | 1,114 | 2026-11-02 |
-| 2 | mojo-iouring-oh-meh | #257 | Mojo (io_uring, SQLite B-tree reads) | **304,000** | 28,705 | 159 | 545 | 0.00 | 82 | 26 | 726 | 2026-11-01 |
-| 3 | rust-iouring-rkkautsar | #355 | Rust (io_uring, SQLite B-tree reads) | **300,000** ᴿ | 28,417 | 107.7 | 345.0 | 0.00 | 96 | 30 | 1,159 | 2026-11-09 |
-| 3 | swift-iouring-akbashev | #376 | Swift (io_uring, SQLite B-tree reads) | **300,000** ᴬ | 28,183 | 112.1 | 942.5 | 0.00 | 92 | 29 | 1,240 | 2026-11-09 |
-| 3 | fsharp-uring-delneg | #398 | F# (.NET 11, io_uring, SQLite B-tree reads) | **300,000** ᴱ | 28,419 | 56.4 | 404.6 | 0.00 | 82 | 26 | 1,347 | 2026-11-13 |
-| 3 | c-iouring-jowinjestine | #486 | C (io_uring, SQLite B-tree reads) | **300,000** ᴸ | 28,394 | 199.6 | 425.2 | 0.00 | 83 | 26 | 1,503 | 2026-11-17 |
+| 1 | fsharp-uring-delneg | #437 | F# (.NET 11, io_uring, SQLite B-tree reads) | **310,000** ᴱ | 29,243 | 35.7 | 483.9 | 0.00 | 83 | 25 | 823 | 2026-11-18 |
+| 3 | mojo-iouring-oh-meh | #257 | Mojo (io_uring, SQLite B-tree reads) | **304,000** | 28,705 | 159 | 545 | 0.00 | 82 | 26 | 726 | 2026-11-01 |
+| 4 | rust-iouring-rkkautsar | #355 | Rust (io_uring, SQLite B-tree reads) | **300,000** ᴿ | 28,417 | 107.7 | 345.0 | 0.00 | 96 | 30 | 1,159 | 2026-11-09 |
+| 4 | swift-iouring-akbashev | #376 | Swift (io_uring, SQLite B-tree reads) | **300,000** ᴬ | 28,183 | 112.1 | 942.5 | 0.00 | 92 | 29 | 1,240 | 2026-11-09 |
+| 4 | c-iouring-jowinjestine | #486 | C (io_uring, SQLite B-tree reads) | **300,000** ᴸ | 28,394 | 199.6 | 425.2 | 0.00 | 83 | 26 | 1,503 | 2026-11-17 |
 | 7 | c-iouring-pavlyhalim | #245 | C (io_uring, SQLite B-tree reads) | **295,000** | 28,013 | 28 | 117 | 0.00 | 81 | 26 | 1,536 | 2026-11-01 |
 | 8 | rust-native-scooter1337 | #267 | Rust (io_uring, SQLite B-tree reads) | **290,000** | 27,580 | 26.5 | 514 | 0.00 | 80 | 26 | 1,035 | 2026-11-02 |
 | 8 | objc-uring-delneg | #326 | Objective-C (GNUstep, io_uring, SQLite B-tree reads) | **290,000** ᵋ | 27,547 | 43 | 614 | 0.00 | 81 | 26 | 658 | 2026-11-06 |
@@ -1203,7 +1203,10 @@ row stays at #388. PR **#400** (`2451eae`, 2026-11-13, by Pranjay-kumar: loop wa
 **244,000** at 78 % CPU (23,626 req/s, p95 16.1 / p99 117.8 ms, 0 errors, 631 MB; 270k and 257k failed the 5-minute
 hold on p99 2.11 s / 1.87 s), also below 280,000, so #400 is not merged either.
 
-ᴱ **fsharp-uring-delneg** is scored at its follow-up PR **#398** (`8921ed9`, merged 2026-11-13: the write window
+ᴱ **fsharp-uring-delneg** is scored at its follow-up PR **#437** (`da7cf01`, merged 2026-11-18: #427's `a46ab62`
+plus `TCP_QUICKACK` off on its own listeners and the checkpoint thread at nice 19, `CKNICE`): 310,000 held at 83 % CPU,
+0 errors, 823 MB; 320,000 failed the 2-minute probe on p99 (2.03 s). Before that it was scored at its follow-up PR
+**#398** (`8921ed9`, merged 2026-11-13: the write window
 `WWIN` raised from 10 to 20 ms on top of the shim VFS, `SQLITE_CONFIG_PCACHE2` wrapper and read-transaction carry-over
 of its earlier heads): 300,000 held at 82 % CPU, 0 errors, 1,347 MB; 310,000 failed the 2-minute probe on p99 (4.36 s),
 320,000 on p99 (3.72 s). Its previous merged follow-up **#394** (`bbc1c39`, 2026-11-11: held writes in their
@@ -1297,6 +1300,8 @@ the suite hung until its timeout), so it wasn't load tested and #437 is still no
 #437's newest head (`8f726e4`, 2026-11-18: #427's `a46ab62` plus `TCP_QUICKACK` off on its own listeners) held
 **300,000** at 81 % CPU (28,410 req/s, p95 30.4 / p99 381.1 ms, 0 errors, 1,429 MB; 310k failed the 2-minute probe on
 p99 8.01 s, 320k on p99 2.31 s), a tie with #398's 300,000 and not above it, so #437 is still not merged.
+#437's next head (`da7cf01`, 2026-11-18: `8f726e4` with the checkpoint thread at nice 19 instead of 10) held
+**310,000** (29,243 req/s, p95 35.7 / p99 483.9 ms), above #398's 300,000, so #437 was merged there.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

@@ -26,6 +26,11 @@
   completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives). The
   listeners have `TCP_QUICKACK` off, and accepted sockets inherit it, so a connection's first request is acknowledged
   by its response instead of by a bare ACK of its own (`QUICKACK=1` restores the kernel default).
+  An answer that leaves more than 40 ms after its request was acknowledged by the kernel's delayed-ACK timer, which
+  also takes the connection out of that mode: its next request would get a bare ACK at once. So an answer that is
+  `LATEACK` ms late (30; 0: off) sets `TCP_QUICKACK` off on its connection again, with a socket command in the ring
+  (kernel 6.7; on an older kernel the first failure turns it off). Test box, 2,000 connections, one late answer each,
+  then one request each: 1,935 bare ACKs for those requests without it, 320 with it.
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -54,11 +59,11 @@
   then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
-  first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
-  waits without bound. In that newest-first walk the cheaper requests go before feeds (a feed reads 20 posts, their
-  authors and like counts and answers 5 KB): feeds wait, up to 16 passes' worth, and get, newest first, what the
-  others leave of each pass. With a fixed shortfall of CPU, fewer requests then wait past their deadline
-  (`CHEAPFIRST=0` turns it off).
+  first, keeping each connection's order, and the oldest get a share of each pass only from 20 s on (half, and all of
+  it from 40 s; `LIFOAGE`, ms), so no request waits without bound. The load is closed-loop: a request that waits holds
+  its client, so under a short overload of x % newest-first leaves about x % of the clients waiting, the same ones
+  until it ends. With the share starting at 8 s, as before, a ramp-top overload longer than that sent half of every
+  pass to requests that were already late, at the peak, and made many more late.
 - **Checkpoints, and writes that don't wait for them.** SQLite's automatic checkpoints are off (a WAL hook counts
   frames). Every 16,000 new frames the loop asks the checkpoint thread for a PASSIVE checkpoint and learns it
   finished from an eventfd its ring reads. Under steady writes a pass never ends with the WAL fully copied, so the WAL

@@ -225,7 +225,7 @@ function ring_setup(p::Vector{UInt8}, pp::Ptr{UInt8}, idx::Int, nslots::Int, fla
         pu64!(bp, 16, 1)
         r = GC.@preserve breg sys(SYS_IO_URING_REGISTER, fd, REGISTER_PBUF_RING, Clong(UInt(bp)), 1)
         r < 0 && error("io_uring register buffer ring: $(Libc.strerror(Libc.errno()))")
-        idx == 0 && println("io_uring: buffer ring registered with resv[0]=1 (kernel with the inverted check)")
+        idx == 0 && logln("io_uring: buffer ring registered with resv[0]=1 (kernel with the inverted check)")
     end
     bufs = Vector{UInt8}(undef, NBUF * BUFSZ)
 
@@ -497,7 +497,7 @@ function on_accept!(U::Uring, r::Ring, res::Int)
             r.accepting = false                              # table full: this ring stops accepting
         elseif res != -EAGAIN && res != -EINTR && res != -103 && !ACCEPT_ERR_SHOWN[]   # 103: ECONNABORTED
             ACCEPT_ERR_SHOWN[] = true
-            println("io_uring: accept failed: $(Libc.strerror(-res))"); flush(stdout)
+            logln("io_uring: accept failed: $(Libc.strerror(-res))")
         end
         return nothing
     end
@@ -652,8 +652,7 @@ function top_up_accepts!(U::Uring)
             q, _ = Ring(length(U.rings), U.nslots, U.flags)
             push!(U.rings, q)
             next = length(U.rings)
-            println("io_uring: ring $(next - 1) opened ($(sum(x -> x.open, U.rings)) connections)")
-            flush(stdout)
+            logln("io_uring: ring $(next - 1) opened ($(sum(x -> x.open, U.rings)) connections)")
         end
         next == 0 && return nothing
         U.acc = next
@@ -674,7 +673,7 @@ function uring_init(lfd::Cint)
         Vector{UInt8}[], Dict{UInt64,Vector{UInt8}}(), Tuple{Int,Int,UInt32}[], 1, 0, Tuple{Int,Int,UInt32}[], Tuple{Int,Int,UInt32}[],
         Int64[0, 1_000_000], zeros(UInt64, 3), nslots, 0, 0, 0, 0, UInt64(0), zeros(Int, MAX_RINGS), 0, 0, UInt64(0), zeros(UInt64, 1))
     U.evarg[3] = UInt(pointer(U.timeout))                    # getevents_arg.ts
-    println("io_uring: flags=0x$(string(flags, base = 16)) slots/ring=$nslots buffers=$NBUF x $BUFSZ B")
+    logln("io_uring: flags=0x$(string(flags, base = 16)) slots/ring=$nslots buffers=$NBUF x $BUFSZ B")
     U
 end
 

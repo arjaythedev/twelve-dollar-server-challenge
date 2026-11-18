@@ -1,6 +1,6 @@
 # julia-iouring-amanica
 
-Julia 1.13.3 · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) ·
+Julia 1.13.3, compiled ahead of time (`juliac --trim`) · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) ·
 JWT HMAC from Ubuntu's OpenSSL 3 (`libssl3t64`) · **direct** (no Nginx: serves `0.0.0.0:80`)
 
 One Julia thread runs an io_uring event loop through raw syscalls; SQLite is the pinned amalgamation,
@@ -22,6 +22,15 @@ roughly 250–290k on the benchmark box. See "Running locally" for how that was 
   a shared output buffer (no intermediate objects, no JSON library). An idle connection holds no buffers;
   0 bytes allocated per request, so the GC does not run under load.
 - No Julia packages: the server uses only Base and `ccall`.
+- **Compiled ahead of time** with `--trim` (`build.sh`): Julia's own juliac build script, which ships in the
+  pinned Julia tarball (`share/julia/test/trimming/juliac-buildscript.jl`; JuliaC.jl is the packaged front
+  end to it), compiles `src/app.jl` and everything reachable from it into a 2.5 MB executable, linked
+  against libjulia. Built for the CPU it is built on (`--cpu-target=native`, as the JIT would; generic
+  x86-64 was ~6% slower). Boot to a healthy `/health` 3.6–4.3 s → 72–91 ms; server RSS at 250k users
+  480 → 234 MB, GC time per minute 66 → 5 ms; req/s the same (blast medians 50.6k JIT, 51.4k AOT).
+  To be trimmable, logging writes straight to fd 1 instead of `println(stdout, …)` (`stdout` is an
+  abstract `IO`). The dev-only `JR_*` switches are constants, so they are fixed when it's built. If the
+  build fails, `start.sh` runs `src/main.jl` on the JIT instead (`JR_AOT=0` forces that).
 - JWT HS256 verified on every request with libcrypto's HMAC: one `HMAC_CTX` keyed once at startup and
   re-initialised per token (the key pads are hashed once), so each token still gets its full HMAC but
   skips OpenSSL 3's per-call setup in one-shot `HMAC()`: 2.0 → 0.66 µs per token (`dev/ct.sh jwtbench`).
@@ -63,8 +72,8 @@ The code is our own, in Julia, but most of the design follows what other entries
 |---|---|
 | `config.sh` | pinned versions (Julia, SQLite) and build switches |
 | `install.sh` | root: build-essential, curl, unzip, openssl; the official Julia tarball (sha256 checked) |
-| `build.sh` | user: downloads the SQLite amalgamation (SHA3-256 checked), compiles `build/libjr.so` |
-| `start.sh` | runs `src/main.jl` |
+| `build.sh` | user: downloads the SQLite amalgamation (SHA3-256 checked), compiles `build/libjr.so`, then the server ahead of time into `build/server` |
+| `start.sh` | runs `build/server` (or `src/main.jl` on the JIT if there is none) |
 | `src/` | the server |
 | `csrc/shim.c` | WAL checkpoints on a background thread (public SQLite API), compiled into `build/libjr.so` |
 | `dev/` | **development only**: local test and benchmark tooling (podman, k6/wrk, `tools.jl`), see below |
@@ -241,4 +250,7 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | calib: ours smooth | – | 275,000 (498 MB) | – |
 | P7.1: hmac ctx | – | 300,000 (506 MB) | 54,773 (+13%), n=3 |
 | P7.1: hmac oneshot | – | 300,000 (497 MB) | 52,991 (-3%), n=3 |
+| P2: aot generic cpu | – | – | 48,639 (-8%), n=3 |
+| P2: jit | – | 250,000 (480 MB) | 51,076 (+5%), n=6 |
+| P2: aot native | – | 250,000 (234 MB) | 51,396 (+1%), n=3 |
 <!-- results:end -->

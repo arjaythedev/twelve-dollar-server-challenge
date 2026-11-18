@@ -283,10 +283,9 @@ function log_stats!(st::Stats, conns::Int, spill::Int, now::Float64, extra::Stri
     g = Base.gc_num()
     dreq = NREQ[] - st.reqs
     per = dreq > 0 ? (b - st.bytes) ÷ dreq : 0
-    println("stats conns=", conns, " reqs=", dreq, " alloc_per_req=", per,
-        " gc_ms=", (g.total_time - st.gc_ns) ÷ 1_000_000, " gc_pauses=", g.pause - st.pauses,
-        " max_pause_ms=", g.max_pause ÷ 1_000_000, " spill_pool=", spill, extra)
-    flush(stdout)
+    logln("stats conns=$conns reqs=$dreq alloc_per_req=$per" *
+        " gc_ms=$((g.total_time - st.gc_ns) ÷ 1_000_000) gc_pauses=$(g.pause - st.pauses)" *
+        " max_pause_ms=$(g.max_pause ÷ 1_000_000) spill_pool=$spill" * extra)
     st.at = now; st.reqs = NREQ[]; st.bytes = Base.gc_bytes(); st.gc_ns = g.total_time; st.pauses = g.pause
     nothing
 end

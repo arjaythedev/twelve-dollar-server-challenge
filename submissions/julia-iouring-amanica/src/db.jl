@@ -314,6 +314,7 @@ struct WJob                         # jr_job in csrc/shim.c
     ts::NTuple{32,UInt8}
 end
 const WJOB_TS = 56                  # byte offset of ts
+const WJOB_TS0 = ntuple(_ -> 0x00, 32)
 
 mutable struct WBatch
     n::Int
@@ -362,7 +363,7 @@ function w_add!(kind::Int, uid::Int, pid::Int, p::Ptr{UInt8}, n::Int, author::Bu
     @inbounds B.aoff[k] = B.bytes.len
     @inbounds B.alen[k] = author.len
     putbuf!(B.bytes, author)
-    @inbounds B.jobs[k] = WJob(kind, uid, pid, off, n, 0, Int32(0), Int32(0), ntuple(_ -> 0x00, 32))
+    @inbounds B.jobs[k] = WJob(kind, uid, pid, off, n, 0, Int32(0), Int32(0), WJOB_TS0)
     DEFER
 end
 w_add_post!(uid::Int, p::Ptr{UInt8}, n::Int, author::Buf) = w_add!(1, uid, 0, p, n, author)

@@ -82,6 +82,24 @@ FixedPool.HTTP1St {
     "pbuf_n": Initialize=1024, CanChange=True
     "starve": Initialize=0, CanChange=True
     "starve_n": Initialize=0, CanChange=True
+    "direct": Initialize=0, CanChange=True
+    "rings": Initialize=0, CanChange=True
+    "nring": Initialize=0, CanChange=True
+    "maxring": Initialize=8, CanChange=True
+    "ring_cur": Initialize=-1, CanChange=True
+    "acc_ring": Initialize=0, CanChange=True
+    "margin": Initialize=1024, CanChange=True
+    "waitarg": Initialize=0, CanChange=True
+    "sflags": Initialize=0, CanChange=True
+}
+
+// One record per io_uring instance: the IoUring state block, then its own
+// provided-buffer ring and live connection count
+FixedPool.HTTP1Rg {
+    "PBUF_RING": Initialize=128
+    "PBUF_BASE": Initialize=136
+    "LIVE": Initialize=144
+    "SIZE": Initialize=256
 }
 
 FixedPool.HTTP1C {
@@ -218,7 +236,15 @@ Function.HTTP1.ClearConn {
         HTTP1.CSet(conn, HTTP1Off.WSEQ, 0)
         fd = HTTP1.CGet(conn, HTTP1Off.FD)
         IfCondition GreaterThan(fd, 0) ThenBlock: {
-            Socket.Close(fd)
+            IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: {
+                r = HTTP1.RingOf(HTTP1.ConnIdx(conn))
+                HTTP1.UseRing(r)
+                IoUring.PrepShutdownClose(Subtract(fd, 1), HTTP1.EncodeUD(HTTP1Op.CLOSE, 0, 0))
+                rec = HTTP1.RingRec(r)
+                WRMEM_64(Add(rec, HTTP1Rg.LIVE), Subtract(RDMEM_64(Add(rec, HTTP1Rg.LIVE)), 1))
+            } ElseBlock: {
+                Socket.Close(fd)
+            }
         }
         HTTP1.CSet(conn, HTTP1Off.FD, -1)
         HTTP1.ReleaseIn(conn)
@@ -241,6 +267,133 @@ Function.HTTP1.ResetParse {
 }
 
 
+// ---- Rings ----
+Function.HTTP1.RingRec {
+    Input: r: Integer
+    Output: Address
+    Body: { ReturnValue(Add(HTTP1St.rings, Multiply(r, HTTP1Rg.SIZE))) }
+}
+
+Function.HTTP1.UseRing {
+    Input: r: Integer
+    Body: {
+        IfCondition EqualTo(r, HTTP1St.ring_cur) ThenBlock: { ReturnValue(0) }
+        rec = HTTP1.RingRec(r)
+        IoUring.Load(rec)
+        HTTP1St.pbuf_ring = RDMEM_64(Add(rec, HTTP1Rg.PBUF_RING))
+        HTTP1St.pbuf_base = RDMEM_64(Add(rec, HTTP1Rg.PBUF_BASE))
+        HTTP1St.ring_cur = r
+    }
+}
+
+Function.HTTP1.RingOf {
+    Input: idx: Integer
+    Output: Integer
+    Body: { ReturnValue(Divide(idx, HTTP1St.nslot)) }
+}
+
+// The descriptor to put in an SQE: a direct descriptor's slot, or the fd
+Function.HTTP1.IoFd {
+    Input: conn: Address
+    Output: Integer
+    Body: {
+        fd = HTTP1.CGet(conn, HTTP1Off.FD)
+        IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: { ReturnValue(Subtract(fd, 1)) }
+        ReturnValue(fd)
+    }
+}
+
+// New ring with its buffer ring, a file table in direct mode, and its slots
+// initialised. Returns its index, or -1. Leaves it current.
+Function.HTTP1.AddRing {
+    Output: Integer
+    Body: {
+        r = HTTP1St.nring
+        IfCondition GreaterEqual(r, HTTP1St.maxring) ThenBlock: { ReturnValue(-1) }
+        IfCondition LessThan(IoUring.Setup(4096), 0) ThenBlock: { ReturnValue(-1) }
+        rec = HTTP1.RingRec(r)
+        IoUring.Save(rec)
+        HTTP1St.ring_cur = r
+        np = HTTP1St.pbuf_n
+        pr = SystemCall(9, 0, Multiply(np, PBufOff.SIZE), 3, 34, -1, 0)
+        pb = SystemCall(9, 0, Multiply(np, HTTP1St.bufsz), 3, 34, -1, 0)
+        IfCondition Or(LessThan(pr, 4096), LessThan(pb, 4096)) ThenBlock: { ReturnValue(-1) }
+        WRMEM_64(Add(rec, HTTP1Rg.PBUF_RING), pr)
+        WRMEM_64(Add(rec, HTTP1Rg.PBUF_BASE), pb)
+        WRMEM_64(Add(rec, HTTP1Rg.LIVE), 0)
+        HTTP1St.pbuf_ring = pr
+        HTTP1St.pbuf_base = pb
+        IfCondition LessThan(IoUring.RegisterPbufRing(pr, np, HTTP1C.BGID), 0) ThenBlock: {
+            PrintMessage("io_uring provided buffer ring needs Linux 5.19+\n")
+            ReturnValue(-1)
+        }
+        b = 0
+        WhileLoop LessThan(b, np) {
+            HTTP1.PbufPut(b)
+            b = Add(b, 1)
+        }
+        IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: {
+            IfCondition LessThan(IoUring.RegisterFilesSparse(HTTP1St.nslot), 0) ThenBlock: {
+                PrintMessage("io_uring file table failed (needs Linux 5.19+ and RLIMIT_NOFILE >= HTTP_NSLOT)\n")
+                ReturnValue(-1)
+            }
+        }
+        i = Multiply(r, HTTP1St.nslot)
+        end = Add(i, HTTP1St.nslot)
+        WhileLoop LessThan(i, end) {
+            conn = HTTP1.ConnAt(i)
+            HTTP1.CSet(conn, HTTP1Off.FD, -1)
+            HTTP1.CSet(conn, HTTP1Off.STATE, 0)
+            HTTP1.CSet(conn, HTTP1Off.BUF, HTTP1St.scratch_in)
+            HTTP1.CSet(conn, HTTP1Off.CAP, HTTP1St.bufsz)
+            HTTP1.CSet(conn, HTTP1Off.OUT, HTTP1St.scratch_out)
+            i = Add(i, 1)
+        }
+        HTTP1St.nring = Add(r, 1)
+        ReturnValue(r)
+    }
+}
+
+Function.HTTP1.ArmAccept {
+    Input: r: Integer
+    Body: {
+        HTTP1.UseRing(r)
+        ud = HTTP1.EncodeUD(HTTP1Op.ACCEPT, r, 0)
+        IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: {
+            IoUring.PrepAcceptDirect(HTTP1St.listen, ud, 1)
+        } ElseBlock: {
+            IoUring.PrepAcceptMulti(HTTP1St.listen, ud)
+        }
+    }
+}
+
+// The accepting ring is close to a full file table: an accept that finds no free
+// slot has already dequeued the connection, so move before that can happen
+Function.HTTP1.MoveAccept {
+    Body: {
+        from = HTTP1St.acc_ring
+        lim = Subtract(HTTP1St.nslot, Multiply(HTTP1St.margin, 2))
+        to = -1
+        r = 0
+        WhileLoop LessThan(r, HTTP1St.nring) {
+            IfCondition NotEqual(r, from) ThenBlock: {
+                IfCondition LessThan(RDMEM_64(Add(HTTP1.RingRec(r), HTTP1Rg.LIVE)), lim) ThenBlock: {
+                    IfCondition EqualTo(to, -1) ThenBlock: { to = r }
+                }
+            }
+            r = Add(r, 1)
+        }
+        IfCondition EqualTo(to, -1) ThenBlock: { to = HTTP1.AddRing() }
+        IfCondition EqualTo(to, -1) ThenBlock: { ReturnValue(0) }
+        HTTP1.UseRing(from)
+        IoUring.PrepCancel(HTTP1.EncodeUD(HTTP1Op.ACCEPT, from, 0), HTTP1.EncodeUD(HTTP1Op.CLOSE, 0, 0))
+        HTTP1St.acc_ring = to
+        HTTP1.ArmAccept(to)
+        HTTP1.UseRing(from)
+    }
+}
+
+
 // ---- Setup: socket + io_uring + multishot accept ----
 Function.HTTP1.Listen {
     Input: host: Address
@@ -253,74 +406,42 @@ Function.HTTP1.Listen {
         IfCondition EqualTo(HTTP1St.reuseport, 1) ThenBlock: {
             Socket.SetSockInt(fd, SockOpt.SOL_SOCKET, 15)
         }
+        // Accepted sockets inherit these; direct descriptors have no fd to set them on
+        Socket.SetTcpNoDelay(fd)
+        Socket.SetKeepAlive(fd)
         bn = Socket.BindInet(fd, host, port)
         IfCondition LessThan(bn, 0) ThenBlock: { Socket.Close(fd) ReturnValue(-1) }
         ln = Socket.Listen(fd, 16384)
         IfCondition LessThan(ln, 0) ThenBlock: { Socket.Close(fd) ReturnValue(-1) }
         HTTP1St.listen = fd
 
-        // io_uring setup
-        ring = IoUring.Setup(4096)
-        IfCondition LessThan(ring, 0) ThenBlock: {
-            PrintMessage("io_uring setup failed\n")
-            Socket.Close(fd)
-            ReturnValue(-1)
-        }
-        HTTP1St.epfd = ring
-
-        // Provided buffer ring: an idle connection's recv holds no memory; the kernel
-        // picks a buffer only when data arrives, and OnRecv returns it at once
-        np = HTTP1St.pbuf_n
-        HTTP1St.pbuf_ring = SystemCall(9, 0, Multiply(np, PBufOff.SIZE), 3, 34, -1, 0)
-        HTTP1St.pbuf_base = SystemCall(9, 0, Multiply(np, HTTP1St.bufsz), 3, 34, -1, 0)
-        IfCondition Or(LessThan(HTTP1St.pbuf_ring, 4096), LessThan(HTTP1St.pbuf_base, 4096)) ThenBlock: {
-            PrintMessage("pbuf mmap failed\n")
-            ReturnValue(-1)
-        }
-        IfCondition LessThan(IoUring.RegisterPbufRing(HTTP1St.pbuf_ring, np, HTTP1C.BGID), 0) ThenBlock: {
-            PrintMessage("io_uring provided buffer ring needs Linux 5.19+\n")
-            ReturnValue(-1)
-        }
-        b = 0
-        WhileLoop LessThan(b, np) {
-            HTTP1.PbufPut(b)
-            b = Add(b, 1)
-        }
-
-        // Allocate slot table
+        IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: { HTTP1St.sflags = IoUringSqe.FIXED_FILE }
+        IfCondition EqualTo(HTTP1St.direct, 0) ThenBlock: { HTTP1St.maxring = 1 }
         nslot = HTTP1St.nslot
         HTTP1St.scratch_in = Allocate(HTTP1St.bufsz)
         HTTP1St.scratch_out = Allocate(HTTP1St.bufsz)
-        HTTP1St.slots = Allocate(Multiply(nslot, HTTP1Off.SLOT))
-        i = 0
-        WhileLoop LessThan(i, nslot) {
-            conn = HTTP1.ConnAt(i)
-            HTTP1.CSet(conn, HTTP1Off.FD, -1)
-            HTTP1.CSet(conn, HTTP1Off.STATE, 0)
-            HTTP1.CSet(conn, HTTP1Off.BUF, HTTP1St.scratch_in)
-            HTTP1.CSet(conn, HTTP1Off.CAP, HTTP1St.bufsz)
-            HTTP1.CSet(conn, HTTP1Off.OUT, HTTP1St.scratch_out)
-            HTTP1.CSet(conn, HTTP1Off.PRIV_IN, 0)
-            HTTP1.CSet(conn, HTTP1Off.PRIV_OUT, 0)
-            HTTP1.CSet(conn, HTTP1Off.FILL, 0)
-            i = Add(i, 1)
-        }
-        HTTP1St.starve = Allocate(Multiply(nslot, 16))
+        HTTP1St.rings = Allocate(Multiply(HTTP1St.maxring, HTTP1Rg.SIZE))
+        total = Multiply(nslot, HTTP1St.maxring)
+        HTTP1St.slots = SystemCall(9, 0, Multiply(total, HTTP1Off.SLOT), 3, 34, -1, 0)
+        HTTP1St.starve = SystemCall(9, 0, Multiply(total, 16), 3, 34, -1, 0)
         HTTP1St.starve_n = 0
+        HTTP1St.waitarg = Allocate(48)
         HTTP1St.defer_list = Allocate(4096)
         HTTP1St.defer_n = 0
         HTTP1St.defer_cap = 512
-
-        // Watch fd table for eventfds (up to 64 entries, 16 bytes each: fd + tag)
         HTTP1St.watch_fds = Allocate(1024)
         HTTP1St.watch_n = 0
         HTTP1St.efd_buf = Allocate(8)
 
-        // Queue multishot accept
-        ud = HTTP1.EncodeUD(HTTP1Op.ACCEPT, 0, 0)
-        IoUring.PrepAcceptMulti(fd, ud)
-        HTTP1St.pending = 1
-
+        r = HTTP1.AddRing()
+        IfCondition LessThan(r, 0) ThenBlock: {
+            PrintMessage("io_uring setup failed\n")
+            Socket.Close(fd)
+            ReturnValue(-1)
+        }
+        HTTP1St.epfd = IoUring.ring_fd
+        HTTP1St.acc_ring = 0
+        HTTP1.ArmAccept(0)
         ReturnValue(fd)
     }
 }
@@ -330,19 +451,17 @@ Function.HTTP1.WatchFd {
     Input: fd: Integer
     Input: tag: Integer
     Body: {
+        HTTP1.UseRing(0)
         i = HTTP1St.watch_n
         WRMEM_64(Add(HTTP1St.watch_fds, Multiply(i, 16)), fd)
         WRMEM_64(Add(HTTP1St.watch_fds, Add(Multiply(i, 16), 8)), tag)
         HTTP1St.watch_n = Add(i, 1)
-
         sqe = IoUring.GetSqe()
         IoUring.SqeSetOp(sqe, IoUringOp.POLL_ADD, fd)
         IoUring.SqeSetLen(sqe, 1)
         IoUring.SqeSetRwFlags(sqe, 1)
-        ud = HTTP1.EncodeUD(HTTP1Op.POLL, i, 0)
-        IoUring.SqeSetUserData(sqe, ud)
+        IoUring.SqeSetUserData(sqe, HTTP1.EncodeUD(HTTP1Op.POLL, i, 0))
         IoUring.SubmitAdvance()
-        HTTP1St.pending = Add(HTTP1St.pending, 1)
     }
 }
 
@@ -384,14 +503,15 @@ Function.HTTP1.PbufPut {
 Function.HTTP1.QueueRecv {
     Input: idx: Integer
     Body: {
+        HTTP1.UseRing(HTTP1.RingOf(idx))
         conn = HTTP1.ConnAt(idx)
-        fd = HTTP1.CGet(conn, HTTP1Off.FD)
+        fd = HTTP1.IoFd(conn)
         fill = HTTP1.CGet(conn, HTTP1Off.FILL)
         gen = BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255)
         ud = HTTP1.EncodeUD(HTTP1Op.RECV, Add(idx, 1), gen)
         IfCondition EqualTo(fill, 0) ThenBlock: {
             HTTP1.ReleaseIn(conn)
-            IoUring.PrepRecvBuf(fd, HTTP1St.bufsz, HTTP1C.BGID, ud)
+            IoUring.PrepRecvBuf(fd, HTTP1St.bufsz, HTTP1C.BGID, ud, HTTP1St.sflags)
         } ElseBlock: {
             buf = HTTP1.CGet(conn, HTTP1Off.BUF)
             IfCondition EqualTo(buf, HTTP1St.scratch_in) ThenBlock: {
@@ -401,25 +521,22 @@ Function.HTTP1.QueueRecv {
                 HTTP1.CSet(conn, HTTP1Off.PRIV_IN, buf)
             }
             cap = HTTP1.CGet(conn, HTTP1Off.CAP)
-            IoUring.PrepRecv(fd, Add(buf, fill), Subtract(cap, fill), ud)
+            IoUring.PrepRecv(fd, Add(buf, fill), Subtract(cap, fill), ud, HTTP1St.sflags)
         }
-        HTTP1St.pending = Add(HTTP1St.pending, 1)
     }
 }
 
 Function.HTTP1.QueueSend {
     Input: idx: Integer
     Body: {
+        HTTP1.UseRing(HTTP1.RingOf(idx))
         conn = HTTP1.ConnAt(idx)
-        fd = HTTP1.CGet(conn, HTTP1Off.FD)
         out = HTTP1.CGet(conn, HTTP1Off.OUT)
         sent = HTTP1.CGet(conn, HTTP1Off.OUT_SENT)
-        ol = HTTP1.CGet(conn, HTTP1Off.OUT_LEN)
-        left = Subtract(ol, sent)
+        left = Subtract(HTTP1.CGet(conn, HTTP1Off.OUT_LEN), sent)
         gen = BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255)
         ud = HTTP1.EncodeUD(HTTP1Op.SEND, Add(idx, 1), gen)
-        IoUring.PrepSend(fd, Add(out, sent), left, ud)
-        HTTP1St.pending = Add(HTTP1St.pending, 1)
+        IoUring.PrepSend(HTTP1.IoFd(conn), Add(out, sent), left, ud, HTTP1St.sflags)
     }
 }
 
@@ -768,6 +885,7 @@ Function.HTTP1.Flush {
         sent = HTTP1.CGet(conn, HTTP1Off.OUT_SENT)
         left = Subtract(ol, sent)
         IfCondition LessEqual(left, 0) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: { ReturnValue(0) }
         n = Socket.SendNB(fd, Add(out, sent), left)
         IfCondition EqualTo(n, Subtract(0, 11)) ThenBlock: { ReturnValue(0) }
         IfCondition LessEqual(n, 0) ThenBlock: { ReturnValue(-1) }
@@ -975,39 +1093,48 @@ Function.HTTP1.Unshare {
 // ============================================================
 
 Function.HTTP1.OnAccept {
+    Input: r: Integer
     Input: res: Integer
     Input: flags: Integer
     Body: {
+        more = BitwiseAnd(flags, IoUringCqe.F_MORE)
         IfCondition LessThan(res, 0) ThenBlock: {
-            // If multishot cancelled, re-arm
-            IfCondition EqualTo(BitwiseAnd(flags, IoUringCqe.F_MORE), 0) ThenBlock: {
-                ud = HTTP1.EncodeUD(HTTP1Op.ACCEPT, 0, 0)
-                IoUring.PrepAcceptMulti(HTTP1St.listen, ud)
-                HTTP1St.pending = Add(HTTP1St.pending, 1)
+            IfCondition EqualTo(more, 0) ThenBlock: {
+                IfCondition EqualTo(r, HTTP1St.acc_ring) ThenBlock: { HTTP1.ArmAccept(r) }
             }
             ReturnValue(0)
         }
-        cli = res
-        Socket.SetTcpNoDelay(cli)
-        Socket.SetKeepAlive(cli)
-        idx = HTTP1.FindFree()
-        IfCondition LessThan(idx, 0) ThenBlock: {
-            Socket.Close(cli)
-            ReturnValue(0)
+        idx = 0
+        fdv = 0
+        IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: {
+            idx = Add(Multiply(r, HTTP1St.nslot), res)
+            fdv = Add(res, 1)
+            rec = HTTP1.RingRec(r)
+            WRMEM_64(Add(rec, HTTP1Rg.LIVE), Add(RDMEM_64(Add(rec, HTTP1Rg.LIVE)), 1))
+        } ElseBlock: {
+            idx = HTTP1.FindFree()
+            IfCondition LessThan(idx, 0) ThenBlock: {
+                Socket.Close(res)
+                ReturnValue(0)
+            }
+            fdv = res
         }
         conn = HTTP1.ConnAt(idx)
-        HTTP1.CSet(conn, HTTP1Off.FD, cli)
+        HTTP1.CSet(conn, HTTP1Off.FD, fdv)
         HTTP1.CSet(conn, HTTP1Off.GEN, Add(HTTP1.CGet(conn, HTTP1Off.GEN), 1))
         HTTP1.ResetParse(conn)
         HTTP1.CSet(conn, HTTP1Off.FILL, 0)
         HTTP1.CSet(conn, HTTP1Off.CAP, HTTP1St.bufsz)
         HTTP1.QueueRecv(idx)
-
-        // If multishot cancelled, re-arm
-        IfCondition EqualTo(BitwiseAnd(flags, IoUringCqe.F_MORE), 0) ThenBlock: {
-            ud = HTTP1.EncodeUD(HTTP1Op.ACCEPT, 0, 0)
-            IoUring.PrepAcceptMulti(HTTP1St.listen, ud)
-            HTTP1St.pending = Add(HTTP1St.pending, 1)
+        IfCondition EqualTo(r, HTTP1St.acc_ring) ThenBlock: {
+            IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: {
+                live = RDMEM_64(Add(HTTP1.RingRec(r), HTTP1Rg.LIVE))
+                IfCondition GreaterEqual(live, Subtract(HTTP1St.nslot, HTTP1St.margin)) ThenBlock: {
+                    HTTP1.MoveAccept()
+                    ReturnValue(0)
+                }
+            }
+            IfCondition EqualTo(more, 0) ThenBlock: { HTTP1.ArmAccept(r) }
         }
     }
 }
@@ -1191,7 +1318,6 @@ Function.HTTP1.OnPoll {
             ud = HTTP1.EncodeUD(HTTP1Op.POLL, i, 0)
             IoUring.SqeSetUserData(sqe, ud)
             IoUring.SubmitAdvance()
-            HTTP1St.pending = Add(HTTP1St.pending, 1)
         }
     }
 }
@@ -1201,41 +1327,56 @@ Function.HTTP1.OnPoll {
 // Event loop
 // ============================================================
 
+Function.HTTP1.Drain {
+    Input: r: Integer
+    Body: {
+        // Handlers may switch rings (a commit flushes sends on any ring), so select r each time
+        WhileLoop 1 {
+            HTTP1.UseRing(r)
+            cqe = IoUring.PeekCqe()
+            IfCondition EqualTo(cqe, 0) ThenBlock: { BreakLoop }
+            cqe_res = IoUring.CqeRes(cqe)
+            cqe_ud = IoUring.CqeUserData(cqe)
+            cqe_flags = IoUring.CqeFlags(cqe)
+            IoUring.CqAdvance()
+            op = HTTP1.DecodeOp(cqe_ud)
+            data = HTTP1.DecodeData(cqe_ud)
+            gen = HTTP1.DecodeGen(cqe_ud)
+            IfCondition EqualTo(op, HTTP1Op.RECV) ThenBlock: { HTTP1.OnRecv(data, gen, cqe_res, cqe_flags) }
+            IfCondition EqualTo(op, HTTP1Op.SEND) ThenBlock: { HTTP1.OnSend(data, gen, cqe_res) }
+            IfCondition EqualTo(op, HTTP1Op.ACCEPT) ThenBlock: { HTTP1.OnAccept(data, cqe_res, cqe_flags) }
+            IfCondition EqualTo(op, HTTP1Op.POLL) ThenBlock: { HTTP1.OnPoll(data, cqe_flags) }
+        }
+    }
+}
+
+// One pass: every other ring submits and reaps without waiting, then ring 0
+// submits and waits (with a 1 ms cap when other rings exist, as nothing wakes it for them)
 Function.HTTP1.Serve {
     Input: handler: Address
     Body: {
         HTTP1St.handler = handler
-        running = 1
-        WhileLoop EqualTo(running, 1) {
-            r = IoUring.Enter(HTTP1St.pending, 1, IoUringEnter.GETEVENTS)
-            HTTP1St.pending = 0
-            IfCondition LessThan(r, 0) ThenBlock: { running = 0 }
-
-            // Process all ready CQEs
-            WhileLoop GreaterThan(IoUring.CqReady(), 0) {
-                cqe = IoUring.PeekCqe()
-                cqe_res = IoUring.CqeRes(cqe)
-                cqe_ud = IoUring.CqeUserData(cqe)
-                cqe_flags = IoUring.CqeFlags(cqe)
-                IoUring.CqAdvance()
-
-                op = HTTP1.DecodeOp(cqe_ud)
-                data = HTTP1.DecodeData(cqe_ud)
-                gen = HTTP1.DecodeGen(cqe_ud)
-
-                IfCondition EqualTo(op, HTTP1Op.ACCEPT) ThenBlock: {
-                    HTTP1.OnAccept(cqe_res, cqe_flags)
-                }
-                IfCondition EqualTo(op, HTTP1Op.RECV) ThenBlock: {
-                    HTTP1.OnRecv(data, gen, cqe_res, cqe_flags)
-                }
-                IfCondition EqualTo(op, HTTP1Op.SEND) ThenBlock: {
-                    HTTP1.OnSend(data, gen, cqe_res)
-                }
-                IfCondition EqualTo(op, HTTP1Op.POLL) ThenBlock: {
-                    HTTP1.OnPoll(data, cqe_flags)
+        WhileLoop 1 {
+            r = 1
+            WhileLoop LessThan(r, HTTP1St.nring) {
+                HTTP1.UseRing(r)
+                IoUring.Enter(IoUring.SqPending(), 0, IoUringEnter.GETEVENTS)
+                HTTP1.Drain(r)
+                r = Add(r, 1)
+            }
+            HTTP1.UseRing(0)
+            busy = 0
+            IfCondition GreaterThan(HTTP1St.starve_n, 0) ThenBlock: { busy = 1 }
+            IfCondition EqualTo(busy, 1) ThenBlock: {
+                IoUring.Enter(IoUring.SqPending(), 0, IoUringEnter.GETEVENTS)
+            } ElseBlock: {
+                IfCondition GreaterThan(HTTP1St.nring, 1) ThenBlock: {
+                    IoUring.EnterWait(IoUring.SqPending(), 1, 1000, HTTP1St.waitarg)
+                } ElseBlock: {
+                    IoUring.Enter(IoUring.SqPending(), 1, IoUringEnter.GETEVENTS)
                 }
             }
+            HTTP1.Drain(0)
 
             // Recvs that found the buffer ring empty; every buffer is back by now
             sn = HTTP1St.starve_n
@@ -1251,7 +1392,6 @@ Function.HTTP1.Serve {
                 s = Add(s, 1)
             }
 
-            // Post-event processing: batch commit + deferred flush
             IfCondition GreaterThan(HTTP1St.defer_n, 0) ThenBlock: {
                 fn = HTTP1St.commit_fn
                 IfCondition NotEqual(fn, 0) ThenBlock: { CallIndirect(fn, HTTP1St.slots) }

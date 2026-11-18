@@ -80,6 +80,9 @@ FixedPool.IoUringCqe {
 // ---- IOSQE_* for accept multishot ----
 FixedPool.IoUringAccept {
     "MULTISHOT": Initialize=1
+    "FILE_INDEX_ALLOC": Initialize=4294967295
+    "RSRC_SPARSE": Initialize=1
+    "STATE_SIZE": Initialize=128
 }
 
 // ---- Register opcodes ----
@@ -89,6 +92,7 @@ FixedPool.IoUringReg {
     "REGISTER_FILES": Initialize=2
     "UNREGISTER_FILES": Initialize=3
     "REGISTER_FILES_UPDATE": Initialize=6
+    "REGISTER_FILES2": Initialize=13
     "REGISTER_PBUF_RING": Initialize=22
     "UNREGISTER_PBUF_RING": Initialize=23
 }
@@ -221,16 +225,7 @@ Function.IoUring.Rd32 {
     Input: base: Address
     Input: off: Integer
     Output: Integer
-    Body: {
-        p = Add(base, off)
-        b0 = RDMEM_IO_8(p, 0)
-        b1 = RDMEM_IO_8(p, 1)
-        b2 = RDMEM_IO_8(p, 2)
-        b3 = RDMEM_IO_8(p, 3)
-        t = BitwiseOr(b0, LeftShift(b1, 8))
-        t2 = BitwiseOr(t, LeftShift(b2, 16))
-        ReturnValue(BitwiseOr(t2, LeftShift(b3, 24)))
-    }
+    Body: { ReturnValue(RDMEM_IO_32(base, off)) }
 }
 
 // ---- Helper: write u32 to io_uring shared memory ----
@@ -238,13 +233,7 @@ Function.IoUring.Wr32 {
     Input: base: Address
     Input: off: Integer
     Input: val: Integer
-    Body: {
-        p = Add(base, off)
-        WRMEM_IO_8(p, 0, BitwiseAnd(val, 255))
-        WRMEM_IO_8(p, 1, BitwiseAnd(RightShift(val, 8), 255))
-        WRMEM_IO_8(p, 2, BitwiseAnd(RightShift(val, 16), 255))
-        WRMEM_IO_8(p, 3, BitwiseAnd(RightShift(val, 24), 255))
-    }
+    Body: { WRMEM_IO_32(base, off, val) }
 }
 
 // ---- Helper: read u32 from normal (params) memory ----
@@ -252,16 +241,7 @@ Function.IoUring.RdParam32 {
     Input: base: Address
     Input: off: Integer
     Output: Integer
-    Body: {
-        p = Add(base, off)
-        b0 = RDMEM_8(p, 0)
-        b1 = RDMEM_8(p, 1)
-        b2 = RDMEM_8(p, 2)
-        b3 = RDMEM_8(p, 3)
-        t = BitwiseOr(b0, LeftShift(b1, 8))
-        t2 = BitwiseOr(t, LeftShift(b2, 16))
-        ReturnValue(BitwiseOr(t2, LeftShift(b3, 24)))
-    }
+    Body: { ReturnValue(RDMEM_32(Add(base, off))) }
 }
 
 // ---- Helper: write u32 to normal memory ----
@@ -269,13 +249,7 @@ Function.IoUring.WrParam32 {
     Input: base: Address
     Input: off: Integer
     Input: val: Integer
-    Body: {
-        p = Add(base, off)
-        WRMEM_8(p, 0, BitwiseAnd(val, 255))
-        WRMEM_8(p, 1, BitwiseAnd(RightShift(val, 8), 255))
-        WRMEM_8(p, 2, BitwiseAnd(RightShift(val, 16), 255))
-        WRMEM_8(p, 3, BitwiseAnd(RightShift(val, 24), 255))
-    }
+    Body: { WRMEM_32(Add(base, off), val) }
 }
 
 
@@ -368,28 +342,29 @@ Function.IoUring.Setup {
 // ============================================================
 
 // Get the next available SQE slot. Returns SQE address or 0 if full.
+// Get the next SQE slot, zeroed. A full SQ is submitted first, so this never fails
+// while the kernel accepts submissions.
 Function.IoUring.GetSqe {
     Output: Address
     Body: {
         tail = IoUring.Rd32(IoUring.sq_ring, IoUring.sq_tail_off)
         head = IoUring.Rd32(IoUring.sq_ring, IoUring.sq_head_off)
         IfCondition GreaterEqual(Subtract(tail, head), IoUring.sq_entries) ThenBlock: {
-            ReturnValue(0)
+            IoUring.Enter(Subtract(tail, head), 0, 0)
+            head = IoUring.Rd32(IoUring.sq_ring, IoUring.sq_head_off)
+            IfCondition GreaterEqual(Subtract(tail, head), IoUring.sq_entries) ThenBlock: { ReturnValue(0) }
         }
         idx = BitwiseAnd(tail, IoUring.sq_mask)
         sqe = Add(IoUring.sqes, Multiply(idx, SqeOff.SIZE))
-
-        // Zero the SQE
-        j = 0
-        WhileLoop LessThan(j, SqeOff.SIZE) {
-            WRMEM_8(sqe, j, 0)
-            j = Add(j, 1)
-        }
-
-        // Write index into the SQ array
-        arr_off = Add(IoUring.sq_array_off, Multiply(idx, 4))
-        IoUring.Wr32(IoUring.sq_ring, arr_off, idx)
-
+        WRMEM_IO_64(sqe, 0, 0)
+        WRMEM_IO_64(sqe, 8, 0)
+        WRMEM_IO_64(sqe, 16, 0)
+        WRMEM_IO_64(sqe, 24, 0)
+        WRMEM_IO_64(sqe, 32, 0)
+        WRMEM_IO_64(sqe, 40, 0)
+        WRMEM_IO_64(sqe, 48, 0)
+        WRMEM_IO_64(sqe, 56, 0)
+        WRMEM_IO_32(IoUring.sq_ring, Add(IoUring.sq_array_off, Multiply(idx, 4)), idx)
         ReturnValue(sqe)
     }
 }
@@ -408,77 +383,52 @@ Function.IoUring.SqeSetOp {
     Input: opcode: Integer
     Input: fd: Integer
     Body: {
-        WRMEM_8(sqe, SqeOff.OPCODE, opcode)
-        // fd is a signed 32-bit at offset 4
-        IoUring.WrParam32(sqe, SqeOff.FD, fd)
+        WRMEM_IO_8(sqe, SqeOff.OPCODE, opcode)
+        WRMEM_IO_32(sqe, SqeOff.FD, BitwiseAnd(fd, 4294967295))
     }
 }
 
 Function.IoUring.SqeSetFlags {
     Input: sqe: Address
     Input: flags: Integer
-    Body: {
-        WRMEM_8(sqe, SqeOff.FLAGS, flags)
-    }
+    Body: { WRMEM_IO_8(sqe, SqeOff.FLAGS, flags) }
 }
 
 Function.IoUring.SqeSetAddr {
     Input: sqe: Address
     Input: addr: Integer
-    Body: {
-        // addr is u64 at offset 16
-        p = Add(sqe, SqeOff.ADDR)
-        WRMEM_8(p, 0, BitwiseAnd(addr, 255))
-        WRMEM_8(p, 1, BitwiseAnd(RightShift(addr, 8), 255))
-        WRMEM_8(p, 2, BitwiseAnd(RightShift(addr, 16), 255))
-        WRMEM_8(p, 3, BitwiseAnd(RightShift(addr, 24), 255))
-        WRMEM_8(p, 4, BitwiseAnd(RightShift(addr, 32), 255))
-        WRMEM_8(p, 5, BitwiseAnd(RightShift(addr, 40), 255))
-        WRMEM_8(p, 6, BitwiseAnd(RightShift(addr, 48), 255))
-        WRMEM_8(p, 7, BitwiseAnd(RightShift(addr, 56), 255))
-    }
+    Body: { WRMEM_IO_64(sqe, SqeOff.ADDR, addr) }
 }
 
 Function.IoUring.SqeSetLen {
     Input: sqe: Address
     Input: len: Integer
-    Body: {
-        IoUring.WrParam32(sqe, SqeOff.LEN, len)
-    }
+    Body: { WRMEM_IO_32(sqe, SqeOff.LEN, len) }
 }
 
 Function.IoUring.SqeSetUserData {
     Input: sqe: Address
     Input: data: Integer
-    Body: {
-        p = Add(sqe, SqeOff.USER_DATA)
-        WRMEM_8(p, 0, BitwiseAnd(data, 255))
-        WRMEM_8(p, 1, BitwiseAnd(RightShift(data, 8), 255))
-        WRMEM_8(p, 2, BitwiseAnd(RightShift(data, 16), 255))
-        WRMEM_8(p, 3, BitwiseAnd(RightShift(data, 24), 255))
-        WRMEM_8(p, 4, BitwiseAnd(RightShift(data, 32), 255))
-        WRMEM_8(p, 5, BitwiseAnd(RightShift(data, 40), 255))
-        WRMEM_8(p, 6, BitwiseAnd(RightShift(data, 48), 255))
-        WRMEM_8(p, 7, BitwiseAnd(RightShift(data, 56), 255))
-    }
+    Body: { WRMEM_IO_64(sqe, SqeOff.USER_DATA, data) }
 }
 
 Function.IoUring.SqeSetRwFlags {
     Input: sqe: Address
     Input: flags: Integer
-    Body: {
-        IoUring.WrParam32(sqe, SqeOff.RW_FLAGS, flags)
-    }
+    Body: { WRMEM_IO_32(sqe, SqeOff.RW_FLAGS, flags) }
 }
 
 Function.IoUring.SqeSetBufGroup {
     Input: sqe: Address
     Input: group: Integer
-    Body: {
-        p = Add(sqe, SqeOff.BUF_INDEX)
-        WRMEM_8(p, 0, BitwiseAnd(group, 255))
-        WRMEM_8(p, 1, BitwiseAnd(RightShift(group, 8), 255))
-    }
+    Body: { WRMEM_IO_16(sqe, SqeOff.BUF_INDEX, group) }
+}
+
+// file_index (u32 at 44): accept/socket target slot, or close's slot + 1
+Function.IoUring.SqeSetFileIndex {
+    Input: sqe: Address
+    Input: v: Integer
+    Body: { WRMEM_IO_32(sqe, SqeOff.SPLICE_FD_IN, v) }
 }
 
 
@@ -521,6 +471,77 @@ Function.IoUring.Submit {
     }
 }
 
+// SQEs queued since the kernel last consumed the SQ
+Function.IoUring.SqPending {
+    Output: Integer
+    Body: {
+        ReturnValue(Subtract(IoUring.Rd32(IoUring.sq_ring, IoUring.sq_tail_off), IoUring.Rd32(IoUring.sq_ring, IoUring.sq_head_off)))
+    }
+}
+
+// Submit and wait for min_complete CQEs or usec microseconds (IORING_ENTER_EXT_ARG).
+// arg is 48 scratch bytes owned by the caller.
+Function.IoUring.EnterWait {
+    Input: to_submit: Integer
+    Input: min_complete: Integer
+    Input: usec: Integer
+    Input: arg: Address
+    Output: Integer
+    Body: {
+        ts = Add(arg, 24)
+        WRMEM_64(ts, Divide(usec, 1000000))
+        WRMEM_64(Add(ts, 8), Multiply(Modulo(usec, 1000000), 1000))
+        WRMEM_64(arg, 0)
+        WRMEM_64(Add(arg, 8), 0)
+        WRMEM_64(Add(arg, 16), ts)
+        flags = BitwiseOr(IoUringEnter.GETEVENTS, IoUringEnter.EXT_ARG)
+        ReturnValue(SystemCall(IoUringSys.ENTER, IoUring.ring_fd, to_submit, min_complete, flags, arg, 24))
+    }
+}
+
+// Copy the current ring's state out to, or in from, a STATE_SIZE block, so one
+// thread can drive several rings through the same helpers
+Function.IoUring.Save {
+    Input: blk: Address
+    Body: {
+        WRMEM_64(blk, IoUring.ring_fd)
+        WRMEM_64(Add(blk, 8), IoUring.sq_ring)
+        WRMEM_64(Add(blk, 16), IoUring.cq_ring)
+        WRMEM_64(Add(blk, 24), IoUring.sqes)
+        WRMEM_64(Add(blk, 32), IoUring.sq_mask)
+        WRMEM_64(Add(blk, 40), IoUring.cq_mask)
+        WRMEM_64(Add(blk, 48), IoUring.sq_head_off)
+        WRMEM_64(Add(blk, 56), IoUring.sq_tail_off)
+        WRMEM_64(Add(blk, 64), IoUring.sq_array_off)
+        WRMEM_64(Add(blk, 72), IoUring.cq_head_off)
+        WRMEM_64(Add(blk, 80), IoUring.cq_tail_off)
+        WRMEM_64(Add(blk, 88), IoUring.cq_cqes_off)
+        WRMEM_64(Add(blk, 96), IoUring.sq_entries)
+        WRMEM_64(Add(blk, 104), IoUring.cq_entries)
+        WRMEM_64(Add(blk, 112), IoUring.params)
+    }
+}
+Function.IoUring.Load {
+    Input: blk: Address
+    Body: {
+        IoUring.ring_fd = RDMEM_64(blk)
+        IoUring.sq_ring = RDMEM_64(Add(blk, 8))
+        IoUring.cq_ring = RDMEM_64(Add(blk, 16))
+        IoUring.sqes = RDMEM_64(Add(blk, 24))
+        IoUring.sq_mask = RDMEM_64(Add(blk, 32))
+        IoUring.cq_mask = RDMEM_64(Add(blk, 40))
+        IoUring.sq_head_off = RDMEM_64(Add(blk, 48))
+        IoUring.sq_tail_off = RDMEM_64(Add(blk, 56))
+        IoUring.sq_array_off = RDMEM_64(Add(blk, 64))
+        IoUring.cq_head_off = RDMEM_64(Add(blk, 72))
+        IoUring.cq_tail_off = RDMEM_64(Add(blk, 80))
+        IoUring.cq_cqes_off = RDMEM_64(Add(blk, 88))
+        IoUring.sq_entries = RDMEM_64(Add(blk, 96))
+        IoUring.cq_entries = RDMEM_64(Add(blk, 104))
+        IoUring.params = RDMEM_64(Add(blk, 112))
+    }
+}
+
 
 // ============================================================
 // CQE helpers: peek, read fields, advance head
@@ -553,44 +574,22 @@ Function.IoUring.PeekCqe {
 Function.IoUring.CqeUserData {
     Input: cqe: Address
     Output: Integer
-    Body: {
-        p = Add(cqe, CqeOff.USER_DATA)
-        b0 = RDMEM_IO_8(p, 0)
-        b1 = RDMEM_IO_8(p, 1)
-        b2 = RDMEM_IO_8(p, 2)
-        b3 = RDMEM_IO_8(p, 3)
-        b4 = RDMEM_IO_8(p, 4)
-        b5 = RDMEM_IO_8(p, 5)
-        b6 = RDMEM_IO_8(p, 6)
-        b7 = RDMEM_IO_8(p, 7)
-        t0 = BitwiseOr(b0, LeftShift(b1, 8))
-        t1 = BitwiseOr(t0, LeftShift(b2, 16))
-        t2 = BitwiseOr(t1, LeftShift(b3, 24))
-        t3 = BitwiseOr(t2, LeftShift(b4, 32))
-        t4 = BitwiseOr(t3, LeftShift(b5, 40))
-        t5 = BitwiseOr(t4, LeftShift(b6, 48))
-        ReturnValue(BitwiseOr(t5, LeftShift(b7, 56)))
-    }
+    Body: { ReturnValue(RDMEM_IO_64(cqe, CqeOff.USER_DATA)) }
 }
 
 // Read res from a CQE (s32 — the syscall return value)
+// res is a signed s32: a negative errno on failure
 Function.IoUring.CqeRes {
     Input: cqe: Address
     Output: Integer
-    Body: {
-        r = IoUring.Rd32(cqe, CqeOff.RES)
-        ReturnValue(r)
-    }
+    Body: { ReturnValue(RDMEM_IO_S32(cqe, CqeOff.RES)) }
 }
 
 // Read flags from a CQE (u32)
 Function.IoUring.CqeFlags {
     Input: cqe: Address
     Output: Integer
-    Body: {
-        f = IoUring.Rd32(cqe, CqeOff.FLAGS)
-        ReturnValue(f)
-    }
+    Body: { ReturnValue(RDMEM_IO_32(cqe, CqeOff.FLAGS)) }
 }
 
 // Advance the CQ head by 1 (call after processing a CQE)
@@ -622,6 +621,24 @@ Function.IoUring.RegisterFiles {
     Output: Integer
     Body: {
         r = SystemCall(IoUringSys.REGISTER, IoUring.ring_fd, IoUringReg.REGISTER_FILES, fds, nr)
+        ReturnValue(r)
+    }
+}
+
+// An empty (sparse) file table of nr slots for direct descriptors; nr may not
+// exceed RLIMIT_NOFILE
+Function.IoUring.RegisterFilesSparse {
+    Input: nr: Integer
+    Output: Integer
+    Body: {
+        reg = Allocate(32)
+        WRMEM_32(reg, nr)
+        WRMEM_32(Add(reg, 4), IoUringAccept.RSRC_SPARSE)
+        WRMEM_64(Add(reg, 8), 0)
+        WRMEM_64(Add(reg, 16), 0)
+        WRMEM_64(Add(reg, 24), 0)
+        r = SystemCall(IoUringSys.REGISTER, IoUring.ring_fd, IoUringReg.REGISTER_FILES2, reg, 32)
+        Deallocate(reg, 32)
         ReturnValue(r)
     }
 }
@@ -699,9 +716,7 @@ Function.IoUring.PrepAcceptMulti {
         IoUring.SqeSetAddr(sqe, 0)
         IoUring.SqeSetLen(sqe, 0)
         // ioprio = IORING_ACCEPT_MULTISHOT
-        p = Add(sqe, SqeOff.IOPRIO)
-        WRMEM_8(p, 0, BitwiseAnd(IoUringAccept.MULTISHOT, 255))
-        WRMEM_8(p, 1, 0)
+        WRMEM_IO_16(sqe, SqeOff.IOPRIO, IoUringAccept.MULTISHOT)
         IoUring.SqeSetUserData(sqe, user_data)
         IoUring.SubmitAdvance()
         ReturnValue(0)
@@ -714,11 +729,13 @@ Function.IoUring.PrepRecv {
     Input: buf: Address
     Input: len: Integer
     Input: user_data: Integer
+    Input: sflags: Integer
     Output: Integer
     Body: {
         sqe = IoUring.GetSqe()
         IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
         IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
+        IoUring.SqeSetFlags(sqe, sflags)
         IoUring.SqeSetAddr(sqe, buf)
         IoUring.SqeSetLen(sqe, len)
         IoUring.SqeSetUserData(sqe, user_data)
@@ -733,14 +750,14 @@ Function.IoUring.PrepRecvBuf {
     Input: len: Integer
     Input: bgid: Integer
     Input: user_data: Integer
+    Input: sflags: Integer
     Output: Integer
     Body: {
         sqe = IoUring.GetSqe()
         IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
         IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
-        IoUring.SqeSetAddr(sqe, 0)
         IoUring.SqeSetLen(sqe, len)
-        IoUring.SqeSetFlags(sqe, IoUringSqe.BUFFER_SELECT)
+        IoUring.SqeSetFlags(sqe, BitwiseOr(IoUringSqe.BUFFER_SELECT, sflags))
         IoUring.SqeSetBufGroup(sqe, bgid)
         IoUring.SqeSetUserData(sqe, user_data)
         IoUring.SubmitAdvance()
@@ -754,14 +771,60 @@ Function.IoUring.PrepSend {
     Input: buf: Address
     Input: len: Integer
     Input: user_data: Integer
+    Input: sflags: Integer
     Output: Integer
     Body: {
         sqe = IoUring.GetSqe()
         IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
         IoUring.SqeSetOp(sqe, IoUringOp.SEND, fd)
+        IoUring.SqeSetFlags(sqe, sflags)
         IoUring.SqeSetAddr(sqe, buf)
         IoUring.SqeSetLen(sqe, len)
         IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Accept into a kernel-chosen slot of the ring's file table (a direct descriptor);
+// the CQE's res is the slot. A multishot accept keeps going while CQE_F_MORE is set.
+Function.IoUring.PrepAcceptDirect {
+    Input: listen_fd: Integer
+    Input: user_data: Integer
+    Input: multishot: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.ACCEPT, listen_fd)
+        IoUring.SqeSetFileIndex(sqe, IoUringAccept.FILE_INDEX_ALLOC)
+        IfCondition EqualTo(multishot, 1) ThenBlock: { WRMEM_IO_16(sqe, SqeOff.IOPRIO, IoUringAccept.MULTISHOT) }
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Shut a direct descriptor down, which ends any receive on it, then free its slot.
+// Both are hard-linked and post a CQE only on failure.
+Function.IoUring.PrepShutdownClose {
+    Input: slot: Integer
+    Input: user_data: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.SHUTDOWN, slot)
+        IoUring.SqeSetFlags(sqe, BitwiseOr(BitwiseOr(IoUringSqe.FIXED_FILE, IoUringSqe.IO_HARDLINK), IoUringSqe.CQE_SKIP_SUCCESS))
+        IoUring.SqeSetLen(sqe, 2)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        sqe2 = IoUring.GetSqe()
+        IfCondition EqualTo(sqe2, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe2, IoUringOp.CLOSE, 0)
+        IoUring.SqeSetFlags(sqe2, IoUringSqe.CQE_SKIP_SUCCESS)
+        IoUring.SqeSetFileIndex(sqe2, Add(slot, 1))
+        IoUring.SqeSetUserData(sqe2, user_data)
         IoUring.SubmitAdvance()
         ReturnValue(0)
     }

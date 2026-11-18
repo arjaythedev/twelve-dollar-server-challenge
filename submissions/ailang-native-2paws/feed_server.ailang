@@ -943,6 +943,10 @@ SubRoutine.Main {
     // Front processes each hold up to HTTP_NSLOT more connections on their
     // own descriptor limit. Forked before the database opens.
     fronts = Env.GetInt("HTTP_FRONTS")
+    // Direct descriptors live in io_uring file tables, not the fd table, so one
+    // process holds connections past the descriptor limit without fronts
+    HTTP1St.direct = Env.GetInt("HTTP_DIRECT")
+    IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: { fronts = 0 }
     IfCondition GreaterThan(fronts, 0) ThenBlock: {
         IfCondition EqualTo(Front.Setup(fronts), 0) ThenBlock: {
             PrintMessage("FAIL front setup\n")

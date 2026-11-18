@@ -11,9 +11,11 @@
 ## Design
 
 - **One thread drives everything** (the box has one CPU): an io_uring loop over several rings, the HTTP parser, the
-  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, at nice 10 (`CKNICE`).
-  At nice 19 it got ~1 % of the CPU whenever the loop had requests queued: at the end of a ramp a pass that needs
-  15-30 ms of CPU took seconds, holds timed out and the WAL grew past the hold mark. At nice 10 it gets up to ~10 %.
+  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, at nice 19 (`CKNICE`):
+  it gets ~1 % of the CPU while the loop has requests queued. At the end of a ramp a pass then takes seconds instead
+  of 15-30 ms, which used to make write holds time out; writes no longer wait for checkpoints (see below), so a slow
+  pass now delays nothing, and the CPU that nice 10 gave the thread at the busiest moment (up to ~10 %) stays with
+  the loop.
 - **io_uring in F#.** `Ring.fs` maps the rings and writes submission entries in place; the rings are
   `SINGLE_ISSUER | DEFER_TASKRUN | COOP_TASKRUN`, so completions are posted in batches when the loop enters a ring.
   Accepted sockets are fixed (direct) descriptors from multishot accepts. A table may hold up to `RLIMIT_NOFILE`

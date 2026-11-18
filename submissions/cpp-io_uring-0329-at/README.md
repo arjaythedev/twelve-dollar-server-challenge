@@ -35,7 +35,7 @@
 
 **listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时只停止投递 accept，不关闭共享 listener。
 
-**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
+**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找（20 个 id 跨度 < 512 时用一次 seek 加顺序扫描，否则退回逐个 seek；阈值与 rust-iouring-kensac #264 的 512 对齐）；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
 
 **C++23 编译期计算。** 响应头由 `consteval` 在编译期拼成 `std::array`（状态行 + Content-Type + Content-Length 占位），运行时一次拷贝；JSON 转义表、base64url 表、两位数字表和 serial-type 长度表都是 `constexpr`；record 里的整数用 `std::byteswap` + 位运算解码，输入用 `std::string_view`/`std::span` 表达。
 

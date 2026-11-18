@@ -264,4 +264,5 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P8.5: batch 128 | – | 200,000 (211 MB) | – |
 | P8.6: journal_size_limit=0 | – | 225,000 (204 MB) | – |
 | P8.6: journal_size_limit default | – | 225,000 (199 MB) | – |
+| HEAD aot+8.2 | – | 240,000 (209 MB) | – |
 <!-- results:end -->

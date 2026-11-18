@@ -816,11 +816,10 @@ FixedPool.PBufOff {
     "SIZE": Initialize=16
 }
 
-// The ring tail is at the very start of the mapped region (u16, atomic)
+// struct io_uring_buf_ring: the u16 tail overlays bufs[0].resv, so entries start at 0
 FixedPool.PBufRingOff {
-    "RESV": Initialize=0
-    "TAIL": Initialize=6
-    "BUFS": Initialize=8
+    "TAIL": Initialize=14
+    "BUFS": Initialize=0
 }
 
 // Add a buffer to a provided buffer ring
@@ -836,35 +835,13 @@ Function.IoUring.PBufRingAdd {
     Input: bid: Integer
     Input: mask: Integer
     Body: {
-        // Read current tail
-        tp = Add(ring, PBufRingOff.TAIL)
-        tail = BitwiseOr(RDMEM_IO_8(tp, 0), LeftShift(RDMEM_IO_8(tp, 1), 8))
-        idx = BitwiseAnd(tail, mask)
-        entry = Add(Add(ring, PBufRingOff.BUFS), Multiply(idx, PBufOff.SIZE))
-
-        // Write addr (u64)
-        p = Add(entry, PBufOff.ADDR)
-        WRMEM_8(p, 0, BitwiseAnd(buf_addr, 255))
-        WRMEM_8(p, 1, BitwiseAnd(RightShift(buf_addr, 8), 255))
-        WRMEM_8(p, 2, BitwiseAnd(RightShift(buf_addr, 16), 255))
-        WRMEM_8(p, 3, BitwiseAnd(RightShift(buf_addr, 24), 255))
-        WRMEM_8(p, 4, BitwiseAnd(RightShift(buf_addr, 32), 255))
-        WRMEM_8(p, 5, BitwiseAnd(RightShift(buf_addr, 40), 255))
-        WRMEM_8(p, 6, BitwiseAnd(RightShift(buf_addr, 48), 255))
-        WRMEM_8(p, 7, BitwiseAnd(RightShift(buf_addr, 56), 255))
-
-        // Write len (u32)
-        IoUring.WrParam32(entry, PBufOff.LEN, buf_len)
-
-        // Write bid (u16)
-        bp = Add(entry, PBufOff.BID)
-        WRMEM_8(bp, 0, BitwiseAnd(bid, 255))
-        WRMEM_8(bp, 1, BitwiseAnd(RightShift(bid, 8), 255))
-
-        // Advance tail
-        new_tail = Add(tail, 1)
-        WRMEM_IO_8(tp, 0, BitwiseAnd(new_tail, 255))
-        WRMEM_IO_8(tp, 1, BitwiseAnd(RightShift(new_tail, 8), 255))
+        tail = RDMEM_IO_16(ring, PBufRingOff.TAIL)
+        entry = Add(Add(ring, PBufRingOff.BUFS), Multiply(BitwiseAnd(tail, mask), PBufOff.SIZE))
+        // IO stores keep the entry ahead of the tail; the tail is one 16-bit store so it never tears
+        WRMEM_IO_64(entry, PBufOff.ADDR, buf_addr)
+        WRMEM_IO_32(entry, PBufOff.LEN, buf_len)
+        WRMEM_IO_16(entry, PBufOff.BID, bid)
+        WRMEM_IO_16(ring, PBufRingOff.TAIL, BitwiseAnd(Add(tail, 1), 65535))
     }
 }
 

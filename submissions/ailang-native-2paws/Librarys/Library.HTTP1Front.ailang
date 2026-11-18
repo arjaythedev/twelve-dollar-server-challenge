@@ -317,7 +317,7 @@ Function.Front.OnResp {
                         HTTP1.ReleaseOut(conn)
                         fill = HTTP1.CGet(conn, HTTP1Off.FILL)
                         IfCondition GreaterThan(fill, 0) ThenBlock: {
-                            HTTP1.OnRecv(Add(idx, 1), BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255), 0)
+                            HTTP1.Pump(idx)
                         } ElseBlock: {
                             HTTP1.QueueRecv(idx)
                         }

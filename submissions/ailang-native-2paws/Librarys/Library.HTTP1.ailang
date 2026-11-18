@@ -77,6 +77,16 @@ FixedPool.HTTP1St {
     "watch_fds": Initialize=0, CanChange=True
     "watch_n": Initialize=0, CanChange=True
     "efd_buf": Initialize=0, CanChange=True
+    "pbuf_ring": Initialize=0, CanChange=True
+    "pbuf_base": Initialize=0, CanChange=True
+    "pbuf_n": Initialize=1024, CanChange=True
+    "starve": Initialize=0, CanChange=True
+    "starve_n": Initialize=0, CanChange=True
+}
+
+FixedPool.HTTP1C {
+    "ENOBUFS": Initialize=-105
+    "BGID": Initialize=0
 }
 
 FixedPool.HTTP1Ring {
@@ -258,6 +268,25 @@ Function.HTTP1.Listen {
         }
         HTTP1St.epfd = ring
 
+        // Provided buffer ring: an idle connection's recv holds no memory; the kernel
+        // picks a buffer only when data arrives, and OnRecv returns it at once
+        np = HTTP1St.pbuf_n
+        HTTP1St.pbuf_ring = SystemCall(9, 0, Multiply(np, PBufOff.SIZE), 3, 34, -1, 0)
+        HTTP1St.pbuf_base = SystemCall(9, 0, Multiply(np, HTTP1St.bufsz), 3, 34, -1, 0)
+        IfCondition Or(LessThan(HTTP1St.pbuf_ring, 4096), LessThan(HTTP1St.pbuf_base, 4096)) ThenBlock: {
+            PrintMessage("pbuf mmap failed\n")
+            ReturnValue(-1)
+        }
+        IfCondition LessThan(IoUring.RegisterPbufRing(HTTP1St.pbuf_ring, np, HTTP1C.BGID), 0) ThenBlock: {
+            PrintMessage("io_uring provided buffer ring needs Linux 5.19+\n")
+            ReturnValue(-1)
+        }
+        b = 0
+        WhileLoop LessThan(b, np) {
+            HTTP1.PbufPut(b)
+            b = Add(b, 1)
+        }
+
         // Allocate slot table
         nslot = HTTP1St.nslot
         HTTP1St.scratch_in = Allocate(HTTP1St.bufsz)
@@ -276,6 +305,8 @@ Function.HTTP1.Listen {
             HTTP1.CSet(conn, HTTP1Off.FILL, 0)
             i = Add(i, 1)
         }
+        HTTP1St.starve = Allocate(Multiply(nslot, 16))
+        HTTP1St.starve_n = 0
         HTTP1St.defer_list = Allocate(4096)
         HTTP1St.defer_n = 0
         HTTP1St.defer_cap = 512
@@ -340,17 +371,38 @@ Function.HTTP1.FindFree {
 
 // ---- Queue helpers ----
 
+Function.HTTP1.PbufPut {
+    Input: bid: Integer
+    Body: {
+        addr = Add(HTTP1St.pbuf_base, Multiply(bid, HTTP1St.bufsz))
+        IoUring.PBufRingAdd(HTTP1St.pbuf_ring, addr, HTTP1St.bufsz, bid, Subtract(HTTP1St.pbuf_n, 1))
+    }
+}
+
+// With no partial request the recv takes a pooled buffer; a partial request
+// already owns a private buffer, so the rest is read straight into it
 Function.HTTP1.QueueRecv {
     Input: idx: Integer
     Body: {
         conn = HTTP1.ConnAt(idx)
         fd = HTTP1.CGet(conn, HTTP1Off.FD)
-        buf = HTTP1.CGet(conn, HTTP1Off.BUF)
         fill = HTTP1.CGet(conn, HTTP1Off.FILL)
-        cap = HTTP1.CGet(conn, HTTP1Off.CAP)
         gen = BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255)
         ud = HTTP1.EncodeUD(HTTP1Op.RECV, Add(idx, 1), gen)
-        IoUring.PrepRecv(fd, Add(buf, fill), Subtract(cap, fill), ud)
+        IfCondition EqualTo(fill, 0) ThenBlock: {
+            HTTP1.ReleaseIn(conn)
+            IoUring.PrepRecvBuf(fd, HTTP1St.bufsz, HTTP1C.BGID, ud)
+        } ElseBlock: {
+            buf = HTTP1.CGet(conn, HTTP1Off.BUF)
+            IfCondition EqualTo(buf, HTTP1St.scratch_in) ThenBlock: {
+                buf = HTTP1.PoolGet()
+                MemoryCopy(buf, HTTP1St.scratch_in, fill)
+                HTTP1.CSet(conn, HTTP1Off.BUF, buf)
+                HTTP1.CSet(conn, HTTP1Off.PRIV_IN, buf)
+            }
+            cap = HTTP1.CGet(conn, HTTP1Off.CAP)
+            IoUring.PrepRecv(fd, Add(buf, fill), Subtract(cap, fill), ud)
+        }
         HTTP1St.pending = Add(HTTP1St.pending, 1)
     }
 }
@@ -894,6 +946,8 @@ Function.HTTP1.Unshare {
                 HTTP1.CSet(conn, HTTP1Off.BUF, b)
                 HTTP1.CSet(conn, HTTP1Off.PRIV_IN, b)
             }
+        } ElseBlock: {
+            IfCondition EqualTo(fill, 0) ThenBlock: { HTTP1.ReleaseIn(conn) }
         }
         pending = 0
         IfCondition EqualTo(HTTP1.CGet(conn, HTTP1Off.DEFER), 1) ThenBlock: { pending = 1 }
@@ -946,13 +1000,7 @@ Function.HTTP1.OnAccept {
         HTTP1.CSet(conn, HTTP1Off.GEN, Add(HTTP1.CGet(conn, HTTP1Off.GEN), 1))
         HTTP1.ResetParse(conn)
         HTTP1.CSet(conn, HTTP1Off.FILL, 0)
-
-        // Give the connection a private input buffer (io_uring recv is async)
-        buf = HTTP1.PoolGet()
-        HTTP1.CSet(conn, HTTP1Off.BUF, buf)
-        HTTP1.CSet(conn, HTTP1Off.PRIV_IN, buf)
         HTTP1.CSet(conn, HTTP1Off.CAP, HTTP1St.bufsz)
-
         HTTP1.QueueRecv(idx)
 
         // If multishot cancelled, re-arm
@@ -968,30 +1016,60 @@ Function.HTTP1.OnRecv {
     Input: data: Integer
     Input: gen: Integer
     Input: res: Integer
+    Input: flags: Integer
     Body: {
         idx = Subtract(data, 1)
         conn = HTTP1.ConnAt(idx)
-        // Stale CQE check
-        cur_gen = BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255)
-        IfCondition NotEqual(cur_gen, gen) ThenBlock: { ReturnValue(0) }
-        fd = HTTP1.CGet(conn, HTTP1Off.FD)
-        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
-
+        // A pooled buffer goes back to the ring on every path, stale CQEs included
+        bid = -1
+        IfCondition NotEqual(BitwiseAnd(flags, IoUringCqe.F_BUFFER), 0) ThenBlock: {
+            bid = RightShift(flags, 16)
+        }
+        live = 1
+        IfCondition NotEqual(BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255), gen) ThenBlock: { live = 0 }
+        IfCondition LessThan(HTTP1.CGet(conn, HTTP1Off.FD), 0) ThenBlock: { live = 0 }
+        IfCondition EqualTo(live, 0) ThenBlock: {
+            IfCondition GreaterEqual(bid, 0) ThenBlock: { HTTP1.PbufPut(bid) }
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(res, HTTP1C.ENOBUFS) ThenBlock: {
+            e = Add(HTTP1St.starve, Multiply(HTTP1St.starve_n, 16))
+            WRMEM_64(e, idx)
+            WRMEM_64(Add(e, 8), gen)
+            HTTP1St.starve_n = Add(HTTP1St.starve_n, 1)
+            ReturnValue(0)
+        }
         IfCondition LessEqual(res, 0) ThenBlock: {
+            IfCondition GreaterEqual(bid, 0) ThenBlock: { HTTP1.PbufPut(bid) }
             HTTP1.ClearConn(conn)
             ReturnValue(0)
         }
-
         fill = HTTP1.CGet(conn, HTTP1Off.FILL)
-        fill = Add(fill, res)
-        HTTP1.CSet(conn, HTTP1Off.FILL, fill)
+        IfCondition GreaterEqual(bid, 0) ThenBlock: {
+            IfCondition GreaterThan(res, Subtract(HTTP1.CGet(conn, HTTP1Off.CAP), fill)) ThenBlock: {
+                HTTP1.PbufPut(bid)
+                HTTP1.ClearConn(conn)
+                ReturnValue(0)
+            }
+            MemoryCopy(Add(HTTP1.CGet(conn, HTTP1Off.BUF), fill), Add(HTTP1St.pbuf_base, Multiply(bid, HTTP1St.bufsz)), res)
+            HTTP1.PbufPut(bid)
+        }
+        HTTP1.CSet(conn, HTTP1Off.FILL, Add(fill, res))
+        HTTP1.Pump(idx)
+    }
+}
 
-        // Parse and handle requests (pipelining loop)
+// Parse and handle buffered requests (pipelining loop)
+Function.HTTP1.Pump {
+    Input: idx: Integer
+    Body: {
+        conn = HTTP1.ConnAt(idx)
         looping = 1
         WhileLoop EqualTo(looping, 1) {
             pr = HTTP1.Parse(conn)
             IfCondition EqualTo(pr, 0) ThenBlock: {
-                // Need more data
+                // Need more data; a partial request must leave the shared buffer first
+                HTTP1.Unshare(conn)
                 HTTP1.QueueRecv(idx)
                 looping = 0
             } ElseBlock: {
@@ -1084,8 +1162,7 @@ Function.HTTP1.OnSend {
         // Check for pipelined data
         fill = HTTP1.CGet(conn, HTTP1Off.FILL)
         IfCondition GreaterThan(fill, 0) ThenBlock: {
-            // Process pipelined request inline
-            HTTP1.OnRecv(data, gen, 0)
+            HTTP1.Pump(idx)
             ReturnValue(0)
         }
 
@@ -1150,7 +1227,7 @@ Function.HTTP1.Serve {
                     HTTP1.OnAccept(cqe_res, cqe_flags)
                 }
                 IfCondition EqualTo(op, HTTP1Op.RECV) ThenBlock: {
-                    HTTP1.OnRecv(data, gen, cqe_res)
+                    HTTP1.OnRecv(data, gen, cqe_res, cqe_flags)
                 }
                 IfCondition EqualTo(op, HTTP1Op.SEND) ThenBlock: {
                     HTTP1.OnSend(data, gen, cqe_res)
@@ -1158,6 +1235,20 @@ Function.HTTP1.Serve {
                 IfCondition EqualTo(op, HTTP1Op.POLL) ThenBlock: {
                     HTTP1.OnPoll(data, cqe_flags)
                 }
+            }
+
+            // Recvs that found the buffer ring empty; every buffer is back by now
+            sn = HTTP1St.starve_n
+            HTTP1St.starve_n = 0
+            s = 0
+            WhileLoop LessThan(s, sn) {
+                e = Add(HTTP1St.starve, Multiply(s, 16))
+                sidx = RDMEM_64(e)
+                sconn = HTTP1.ConnAt(sidx)
+                IfCondition EqualTo(BitwiseAnd(HTTP1.CGet(sconn, HTTP1Off.GEN), 255), RDMEM_64(Add(e, 8))) ThenBlock: {
+                    IfCondition GreaterThan(HTTP1.CGet(sconn, HTTP1Off.FD), 0) ThenBlock: { HTTP1.QueueRecv(sidx) }
+                }
+                s = Add(s, 1)
             }
 
             // Post-event processing: batch commit + deferred flush

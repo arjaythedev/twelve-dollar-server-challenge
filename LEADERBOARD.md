@@ -1285,6 +1285,9 @@ still not merged.
 #437's newest head (`1c982c3`, 2026-11-17: admission at the door also closes while the loop's CPU is under 5 % idle)
 failed conformance (17 checks passed, then `POST /posts` with `alg=none` and with an expired token got no response and
 the suite hung until its timeout), so it wasn't load tested and #437 is still not merged.
+#437's newest head (`8f726e4`, 2026-11-18: #427's `a46ab62` plus `TCP_QUICKACK` off on its own listeners) held
+**300,000** at 81 % CPU (28,410 req/s, p95 30.4 / p99 381.1 ms, 0 errors, 1,429 MB; 310k failed the 2-minute probe on
+p99 8.01 s, 320k on p99 2.31 s), a tie with #398's 300,000 and not above it, so #437 is still not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

@@ -61,6 +61,17 @@ FixedPool.SQLiteIo {
     "ck_seq": Initialize=0, CanChange=True
     "pfd": Initialize=0, CanChange=True
     "one": Initialize=0, CanChange=True
+    // Checkpoint worker: its own ring (same layout) for the WAL fdatasync, the
+    // write-back and the database fdatasync, so WAL appends and commit marks never
+    // queue behind the disk. cq_vals/cq_i: write-back pages still to queue.
+    "cblk": Initialize=0, CanChange=True
+    "csize": Initialize=0, CanChange=True
+    "chead": Initialize=0, CanChange=True
+    "cseq": Initialize=0, CanChange=True
+    "creq": Initialize=-1, CanChange=True
+    "cq_vals": Initialize=0, CanChange=True
+    "cq_i": Initialize=0, CanChange=True
+    "want_ck": Initialize=1, CanChange=True
 }
 
 FixedPool.SQLiteOp {
@@ -71,6 +82,7 @@ FixedPool.SQLiteOp {
     "SYNC_DB": Initialize=4
     "MARK": Initialize=6
     "RING": Initialize=67108864
+    "CRING": Initialize=33554432
 }
 
 FixedPool.SQLiteDB {
@@ -2427,8 +2439,9 @@ Function.SQLite.CkptMaybe {
             SQLiteDB.frz = SQLiteDB.ckpt
             SQLiteDB.ckpt = t
             SQLiteDB.frz_at = SQLiteDB.wal_size
-            SQLite.IoPut(SQLiteOp.SYNC_WAL, 0, 0, 0)
-            SQLiteIo.ck_seq = SQLite.IoMark()
+            // The worker syncs the WAL once the WAL writer has passed this mark
+            SQLite.CkPut(SQLiteOp.SYNC_WAL, SQLite.IoMark(), 0, 0)
+            SQLiteIo.ck_seq = SQLite.CkMark()
             SQLiteIo.ck = 1
             ReturnValue(0)
         }
@@ -2670,11 +2683,15 @@ Function.SQLite.IoCheckpoint {
     Body: {
         ck = SQLiteIo.ck
         IfCondition EqualTo(ck, 0) ThenBlock: { ReturnValue(0) }
-        done = SQLite.IoDone()
+        done = SQLite.CkDone()
         IfCondition LessThan(done, SQLiteIo.ck_seq) ThenBlock: { ReturnValue(0) }
         IfCondition EqualTo(ck, 1) ThenBlock: {
-            SQLite.IoBackfill(SQLiteDB.frz, SQLiteDB.ckpt)
-            SQLiteIo.ck_seq = SQLite.IoMark()
+            IfCondition EqualTo(SQLite.IoBackfill(SQLiteDB.frz, SQLiteDB.ckpt), 0) ThenBlock: {
+                // Worker ring full: the rest goes in at a later commit
+                SQLite.CkKick()
+                ReturnValue(0)
+            }
+            SQLiteIo.ck_seq = SQLite.CkMark()
             SQLiteIo.ck = 2
             ReturnValue(0)
         }
@@ -2684,8 +2701,8 @@ Function.SQLite.IoCheckpoint {
             SQLite.AfterBackfill()
             SQLiteIo.ck = 0
             IfCondition GreaterEqual(SQLiteDB.wal_size, SQLiteDB.reset_at) ThenBlock: {
-                SQLite.IoPut(SQLiteOp.SYNC_DB, 0, 0, 0)
-                SQLiteIo.ck_seq = SQLite.IoMark()
+                SQLite.CkPut(SQLiteOp.SYNC_DB, 0, 0, 0)
+                SQLiteIo.ck_seq = SQLite.CkMark()
                 SQLiteIo.ck = 3
             }
             ReturnValue(0)
@@ -2696,27 +2713,196 @@ Function.SQLite.IoCheckpoint {
 }
 
 // Queue the write-back of the pages in `set` that were not committed again since (skip).
+// Returns 1 when every page is queued, 0 when the worker ring filled first; the next
+// call resumes where this one stopped. The transaction is empty at every call, so a
+// page queued late holds the same committed bytes, or is in skip.
 Function.SQLite.IoBackfill {
     Input: set: Address
     Input: skip: Address
+    Output: Integer
     Body: {
-        vals = Hash.Values(set)
+        IfCondition EqualTo(SQLiteIo.cq_vals, 0) ThenBlock: {
+            SQLiteIo.cq_vals = Hash.Values(set)
+            SQLiteIo.cq_i = 0
+        }
+        vals = SQLiteIo.cq_vals
         n = Array.Size(vals)
         ps = SQLiteDB.page
-        i = 0
+        i = SQLiteIo.cq_i
         WhileLoop LessThan(i, n) {
             pgno = Array.Get(vals, i)
             key = SQLite.PageKey(pgno)
             IfCondition EqualTo(Hash.Get(skip, key), 0) ThenBlock: {
                 page = SQLite.Page(pgno)
                 IfCondition NotEqual(page, 0) ThenBlock: {
+                    IfCondition EqualTo(SQLite.CkFits(ps), 0) ThenBlock: {
+                        SQLiteIo.cq_i = i
+                        ReturnValue(0)
+                    }
                     off = Multiply(Subtract(pgno, 1), ps)
-                    SQLite.IoPut(SQLiteOp.DB, off, page, ps)
+                    SQLite.CkPut(SQLiteOp.DB, off, page, ps)
                 }
             }
             i = Add(i, 1)
         }
         Array.Destroy(vals)
+        SQLiteIo.cq_vals = 0
+        SQLiteIo.cq_i = 0
+        ReturnValue(1)
+    }
+}
+
+// ---- Checkpoint worker ring. Without it (map failed) everything goes to the I/O ring.
+
+// 1 when a record of len bytes fits in the worker ring with room left for the
+// control records (sync, mark) that follow the write-back.
+Function.SQLite.CkFits {
+    Input: len: Integer
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIo.cblk, 0) ThenBlock: { ReturnValue(1) }
+        need = Add(Add(32, BitwiseAnd(Add(len, 7), -8)), 4096)
+        // worst case a lap end is skipped too
+        need = Add(need, Add(32, BitwiseAnd(Add(len, 7), -8)))
+        used = Subtract(Add(SQLiteIo.chead, need), RDMEM_64(SQLiteIo.cblk))
+        IfCondition LessEqual(used, SQLiteIo.csize) ThenBlock: { ReturnValue(1) }
+        ReturnValue(0)
+    }
+}
+
+Function.SQLite.CkKick {
+    Body: {
+        IfCondition EqualTo(SQLiteIo.cblk, 0) ThenBlock: {
+            SQLite.IoKick()
+            ReturnValue(0)
+        }
+        SystemCall(SQLiteSys.WRITE, SQLiteIo.creq, SQLiteIo.one, 8)
+    }
+}
+
+Function.SQLite.CkDone {
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIo.cblk, 0) ThenBlock: { ReturnValue(SQLite.IoDone()) }
+        ReturnValue(RDMEM_64(Add(SQLiteIo.cblk, 8)))
+    }
+}
+
+Function.SQLite.CkMark {
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIo.cblk, 0) ThenBlock: { ReturnValue(SQLite.IoMark()) }
+        SQLiteIo.cseq = Add(SQLiteIo.cseq, 1)
+        SQLite.CkPut(SQLiteOp.MARK, SQLiteIo.cseq, 0, 0)
+        SQLite.CkKick()
+        ReturnValue(SQLiteIo.cseq)
+    }
+}
+
+// Append a record to the worker ring. Write-back pages are only put after CkFits, so
+// the wait below is reached only for a control record behind a stalled disk.
+Function.SQLite.CkPut {
+    Input: op: Integer
+    Input: arg: Integer
+    Input: src: Address
+    Input: len: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIo.cblk, 0) ThenBlock: {
+            SQLite.IoPut(op, arg, src, len)
+            ReturnValue(0)
+        }
+        need = Add(32, BitwiseAnd(Add(len, 7), -8))
+        sz = SQLiteIo.csize
+        phys = BitwiseAnd(SQLiteIo.chead, Subtract(sz, 1))
+        room = Subtract(sz, phys)
+        skip = 0
+        IfCondition LessThan(room, need) ThenBlock: { skip = room }
+        WhileLoop GreaterThan(Subtract(Add(Add(SQLiteIo.chead, skip), need), RDMEM_64(SQLiteIo.cblk)), sz) {
+            SQLite.CkKick()
+            WRMEM_64(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
+            SystemCall(SQLiteSys.POLL, SQLiteIo.pfd, 1, 10)
+        }
+        data = Add(SQLiteIo.cblk, 64)
+        IfCondition GreaterThan(skip, 0) ThenBlock: {
+            IfCondition GreaterEqual(room, 32) ThenBlock: { WRMEM_64(Add(data, phys), 0) }
+            SQLiteIo.chead = Add(SQLiteIo.chead, skip)
+            phys = 0
+        }
+        p = Add(data, phys)
+        WRMEM_64(p, op)
+        WRMEM_64(Add(p, 8), arg)
+        WRMEM_64(Add(p, 16), 0)
+        WRMEM_64(Add(p, 24), len)
+        IfCondition GreaterThan(len, 0) ThenBlock: { MemoryCopy(Add(p, 32), src, len) }
+        SQLiteIo.chead = Add(SQLiteIo.chead, need)
+        WRMEM_64(Add(SQLiteIo.cblk, 16), SQLiteIo.chead)
+    }
+}
+
+// The checkpoint worker process: database write-back and both fdatasyncs, in ring
+// order. SYNC_WAL waits until the I/O process has published WAL mark `arg`, so the
+// sync covers every frame of the checkpoint. Exits like IoServe once the database
+// process is gone and its ring is empty.
+Function.SQLite.CkServe {
+    Input: path: Address
+    Body: {
+        wn = SQLite.WalName()
+        flags = Add(SQLiteSys.O_RDWR, SQLiteSys.O_CREAT)
+        wfd = SystemCall(SQLiteSys.OPEN, wn, flags, SQLiteSys.MODE)
+        dfd = SystemCall(SQLiteSys.OPEN, path, SQLiteSys.O_RDWR, 0)
+        ppid = SystemCall(SQLiteSys.GETPPID)
+        blk = SQLiteIo.cblk
+        wdone = Add(SQLiteIo.blk, 8)
+        data = Add(blk, 64)
+        sz = SQLiteIo.csize
+        mask = Subtract(sz, 1)
+        buf = SQLiteDB.sync_buf
+        pfd = SQLiteIo.pfd
+        req = SQLiteIo.creq
+        tail = 0
+        WhileLoop 1 {
+            head = RDMEM_64(Add(blk, 16))
+            IfCondition EqualTo(tail, head) ThenBlock: {
+                WRMEM_64(pfd, BitwiseOr(req, LeftShift(1, 32)))
+                r = SystemCall(SQLiteSys.POLL, pfd, 1, 1000)
+                IfCondition GreaterThan(r, 0) ThenBlock: {
+                    SystemCall(SQLiteSys.READ, req, buf, 8)
+                }
+                IfCondition EqualTo(r, 0) ThenBlock: {
+                    IfCondition NotEqual(SystemCall(SQLiteSys.GETPPID), ppid) ThenBlock: {
+                        SystemCall(SQLiteSys.EXIT, 0)
+                    }
+                }
+            } ElseBlock: {
+                phys = BitwiseAnd(tail, mask)
+                room = Subtract(sz, phys)
+                p = Add(data, phys)
+                op = 0
+                IfCondition GreaterEqual(room, 32) ThenBlock: { op = RDMEM_64(p) }
+                IfCondition EqualTo(op, 0) ThenBlock: {
+                    tail = Add(tail, room)
+                } ElseBlock: {
+                    arg = RDMEM_64(Add(p, 8))
+                    len = RDMEM_64(Add(p, 24))
+                    src = Add(p, 32)
+                    IfCondition EqualTo(op, SQLiteOp.DB) ThenBlock: { SystemCall(SQLiteSys.PWRITE, dfd, src, len, arg) }
+                    IfCondition EqualTo(op, SQLiteOp.SYNC_WAL) ThenBlock: {
+                        WhileLoop LessThan(RDMEM_64(wdone), arg) {
+                            SystemCall(SQLiteSys.POLL, pfd, 0, 1)
+                        }
+                        SystemCall(SQLiteSys.FDATASYNC, wfd, 0, 0)
+                    }
+                    IfCondition EqualTo(op, SQLiteOp.SYNC_DB) ThenBlock: { SystemCall(SQLiteSys.FDATASYNC, dfd, 0, 0) }
+                    IfCondition EqualTo(op, SQLiteOp.MARK) ThenBlock: {
+                        WRMEM_64(Add(blk, 8), arg)
+                        WRMEM_64(buf, 1)
+                        SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_done, buf, 8)
+                    }
+                    tail = Add(tail, Add(32, BitwiseAnd(Add(len, 7), -8)))
+                }
+                WRMEM_64(blk, tail)
+            }
+        }
     }
 }
 
@@ -2777,7 +2963,12 @@ Function.SQLite.StartSyncer {
             WRMEM_64(SQLiteIo.one, 1)
         }
         pid = SystemCall(SQLiteSys.FORK)
-        IfCondition NotEqual(pid, 0) ThenBlock: { ReturnValue(1) }
+        IfCondition NotEqual(pid, 0) ThenBlock: {
+            IfCondition And(NotEqual(SQLiteIo.blk, 0), NotEqual(SQLiteIo.want_ck, 0)) ThenBlock: {
+                SQLite.StartCkWorker(path)
+            }
+            ReturnValue(1)
+        }
         SQLiteDB.path = path
         IfCondition NotEqual(SQLiteIo.blk, 0) ThenBlock: { SQLite.IoServe(path) }
         SystemCall(SQLiteSys.PRCTL, 1, 9, 0, 0, 0)
@@ -2796,6 +2987,35 @@ Function.SQLite.StartSyncer {
                 SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_done, SQLiteDB.sync_buf, 8)
             }
         }
+    }
+}
+
+// Fork the checkpoint worker on its own ring; on any failure the checkpoint steps
+// stay on the I/O ring.
+Function.SQLite.StartCkWorker {
+    Input: path: Address
+    Body: {
+        req = SystemCall(SQLiteSys.EVENTFD2, 0, 0)
+        IfCondition LessThan(req, 0) ThenBlock: { ReturnValue(0) }
+        rb = SystemCall(SQLiteSys.MMAP, 0, Add(SQLiteOp.CRING, 64), 3, 33, -1, 0)
+        IfCondition LessEqual(rb, 4096) ThenBlock: {
+            SystemCall(SQLiteSys.CLOSE, req, 0, 0)
+            ReturnValue(0)
+        }
+        SQLiteIo.creq = req
+        SQLiteIo.cblk = rb
+        SQLiteIo.csize = SQLiteOp.CRING
+        pid = SystemCall(SQLiteSys.FORK)
+        IfCondition LessThan(pid, 0) ThenBlock: {
+            SystemCall(SQLiteSys.MUNMAP, rb, Add(SQLiteOp.CRING, 64), 0)
+            SystemCall(SQLiteSys.CLOSE, req, 0, 0)
+            SQLiteIo.cblk = 0
+            SQLiteIo.creq = -1
+            ReturnValue(0)
+        }
+        IfCondition NotEqual(pid, 0) ThenBlock: { ReturnValue(1) }
+        SQLiteDB.path = path
+        SQLite.CkServe(path)
     }
 }
 

@@ -992,6 +992,8 @@ SubRoutine.Main {
         HTTP1St.reuseport = 1
     }
     // Every file write (WAL frames, checkpoints, fdatasync) runs in the I/O process
+    // SQLITE_CKWORKER_OFF=1 keeps checkpoint syncs and write-back on the I/O ring
+    IfCondition EqualTo(Env.GetInt("SQLITE_CKWORKER_OFF"), 1) ThenBlock: { SQLiteIo.want_ck = 0 }
     SQLite.StartSyncer(path)
     dbok = SQLite.Open(path)
     FeedSt.ok = dbok

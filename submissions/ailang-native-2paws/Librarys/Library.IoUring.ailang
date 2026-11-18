@@ -296,8 +296,8 @@ Function.IoUring.Setup {
         }
         IoUring.params = params
 
-        // Set flags: SINGLE_ISSUER | DEFER_TASKRUN
-        flags = BitwiseOr(IoUringSetup.SINGLE_ISSUER, IoUringSetup.DEFER_TASKRUN)
+        // SINGLE_ISSUER only — DEFER_TASKRUN starves WiFi/other softirqs on shared machines
+        flags = IoUringSetup.SINGLE_ISSUER
         IoUring.WrParam32(params, IoUringParamsOff.FLAGS, flags)
 
         // syscall: io_uring_setup(entries, params)

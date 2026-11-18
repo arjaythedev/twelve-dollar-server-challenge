@@ -774,9 +774,10 @@ Function.HTTP1.FlushOne {
                 } ElseBlock: {
                     HTTP1.ResetParse(conn)
                     HTTP1.ReleaseOut(conn)
-                    // Queue recv for the next request
-                    idx = HTTP1.ConnIdx(conn)
-                    HTTP1.QueueRecv(idx)
+                    // A virtual connection (fd -2) lives outside the slot table and has no socket
+                    IfCondition GreaterThan(fd, 0) ThenBlock: {
+                        HTTP1.QueueRecv(HTTP1.ConnIdx(conn))
+                    }
                 }
             }
             IfCondition EqualTo(fr, 0) ThenBlock: {

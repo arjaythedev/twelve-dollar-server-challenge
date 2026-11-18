@@ -1324,6 +1324,10 @@ on p99 1.20 s, 300k on p99 6.96 s, 320k on p99 3.65 s), below #437's 310,000, so
 set off again after a late answer) held **295,000** at 78 % CPU (28,009 req/s, p95 22.6 / p99 148.1 ms, 0 errors, 802 MB;
 the 310k 5-minute hold failed on p99 2.15 s, 320k failed the 2-minute probe on p99 3.72 s), below #437's 310,000, so
 #516 is not merged.
+#427's newest head (`1101bd0`, 2026-11-18: `da7cf01` with `GET /posts/:id` through 32 cursor pairs, the once-per-read-
+transaction check, the old end's share from 20 s and `TCP_QUICKACK` off again after a late answer) held **300,000** at
+76 % CPU (28,469 req/s, p95 20.2 / p99 69.5 ms, 0 errors, 1,224 MB; 310k failed the 2-minute probe on p99 16.7 s, 320k on
+p99 2.65 s), below #437's 310,000, so #427 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

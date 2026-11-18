@@ -842,6 +842,10 @@ req/s, p95 35.0 / p99 199.6 ms, 0 err, 74 % CPU, 26 µs/req, 971 MB, 2026-11-17)
 lowered from 85 % to 70 %) held **300,000** (28,338 req/s, p95 288.4 / p99 980.8 ms, 0 err, 84 % CPU, 27 µs/req,
 1,284 MB, 2026-11-18), level with #486's 300,000, so not merged: 310,000 failed the 2-minute probe on p95/p99 (1.68 /
 2.40 s at 85 % CPU) and 320,000 on p95/p99 (1.35 / 1.66 s at 92 % CPU), all with 0 errors. #500 stays open.
+**#501** (`d5774f0`: #486 with the memory governor's cgroup threshold raised from 85 % to 95 %) held **280,000**
+(26,721 req/s, p95 67.5 / p99 253.4 ms, 0 err, 76 % CPU, 26 µs/req, 1,509 MB, 2026-11-18), below #486's 300,000, so
+not merged: 290,000 failed the 2-minute probe on p95/p99 (0.52 / 0.85 s at 79 % CPU), 300,000 on p95/p99 (0.60 /
+2.26 s at 84 % CPU) and 320,000 on p95/p99 (1.31 / 2.05 s at 93 % CPU), all with 0 errors. #501 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

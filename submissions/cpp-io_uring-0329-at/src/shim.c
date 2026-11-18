@@ -41,7 +41,9 @@ static int wal_cb(void *p, sqlite3 *db, const char *name, int frames) {
   (void)name;
   struct dbx *h = (struct dbx *)p;
   atomic_store_explicit(&h->wal_frames, frames, memory_order_relaxed);
-  if (frames >= 8192 && !atomic_load_explicit(&h->gate_held, memory_order_relaxed)) {
+  /* 闸门 4,096 帧（16 MiB）：日志小一半，一次 hold 内拷完的概率大得多。基准机 3000 写/秒、
+   * 每 pass 组提交后约 7,000 帧/秒，8,192 帧的闸门 1.2 秒就满一次，检查点来不及就被迫再关。 */
+  if (frames >= 4096 && !atomic_load_explicit(&h->gate_held, memory_order_relaxed)) {
     atomic_store_explicit(&h->gate_since, mono_ns(), memory_order_relaxed);
     atomic_store_explicit(&h->gate_held, 1, memory_order_relaxed);
   }
@@ -147,6 +149,27 @@ static sqlite3_stmt *prep(sqlite3 *db, const char *sql) {
   sqlite3_stmt *s = 0;
   if (sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &s, 0)) return 0;
   return s;
+}
+
+/* 诊断输出的统一出口。C 里没有 std::format，所以格式串仍是 printf 风格（由 -Wformat 检查）；
+ * 但输出本身可以交给 C++ 侧，让所有日志走同一个目的地。 */
+static void (*g_log)(const char *, size_t);
+void dbx_set_logger(void (*cb)(const char *, size_t)) { g_log = cb; }
+
+static void shim_log(const char *fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(buf, sizeof buf, fmt, ap);
+  va_end(ap);
+  if (n < 0) return;
+  if (n > (int)sizeof buf - 1) n = (int)sizeof buf - 1;
+  if (g_log) {
+    g_log(buf, (size_t)n);
+  } else {
+    fwrite(buf, 1, (size_t)n, stderr);
+    fputc(10, stderr);
+  }
 }
 
 static void close_cursors(struct dbx *h) {
@@ -602,11 +625,11 @@ int dbx_begin(dbx *h) {
   }
   int rc = step_reset(h->st_begin);
   if (rc != SQLITE_DONE) {
-    fprintf(stderr, "db begin failed: %s (%d)\n", sqlite3_errmsg(h->db), rc);
+    shim_log("db begin failed: %s (%d)", sqlite3_errmsg(h->db), rc);
     return -1;
   }
   if (sqlite3BtreeBeginTrans(h->bt, 0, 0) != SQLITE_OK) {
-    fprintf(stderr, "btree begin failed: %s\n", sqlite3_errmsg(h->db));
+    shim_log("btree begin failed: %s", sqlite3_errmsg(h->db));
     step_reset(h->st_rollback);
     return -1;
   }
@@ -646,7 +669,7 @@ int dbx_commit(dbx *h) {
       }
     }
     if (rc != SQLITE_DONE) {
-      fprintf(stderr, "db commit failed: rc=%d err=%s (%d)\n", rc, sqlite3_errmsg(h->db), ec);
+      shim_log("db commit failed: rc=%d err=%s (%d)", rc, sqlite3_errmsg(h->db), ec);
       step_reset(h->st_rollback);
       return -1;
     }
@@ -664,7 +687,7 @@ int dbx_checkpoint(dbx *h, int *copied) {
   int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
   if (copied) *copied = ndone;
   if (rc != SQLITE_OK) {
-    fprintf(stderr, "checkpoint failed: %s (%d)\n", sqlite3_errmsg(h->ckdb), rc);
+    shim_log("checkpoint failed: %s (%d)", sqlite3_errmsg(h->ckdb), rc);
     return -1;
   }
   int done = (nlog == 0 || ndone >= nlog);
@@ -673,13 +696,13 @@ int dbx_checkpoint(dbx *h, int *copied) {
   return done ? 0 : 1;
 }
 
-/* Non-blocking: true while the WAL is over the gate and the checkpoint thread has not caught up.
- * Writes are held, reads keep going; the hold expires after 400 ms so a checkpoint that cannot
- * finish (a long-lived reader) never stalls writes indefinitely. */
+/* 非阻塞：WAL 超过闸门且检查点线程还没追平时返回真。写被挂起、读照常；hold 最多 250 ms，
+ * 与 rust-iouring-kensac #264 一致——太短会让同一次积压被反复 hold（一次拷不完就重来），
+ * 太短也正是 220k 那次 p99 4.28 s 的形状：写请求等了几轮 hold。 */
 int dbx_writes_held(dbx *h) {
   if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
   long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);
-  if (mono_ns() - since > 120000000LL) {
+  if (mono_ns() - since > 250000000LL) {
     atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
     return 0;
   }

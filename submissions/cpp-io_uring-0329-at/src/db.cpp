@@ -9,7 +9,9 @@
 #include <cstring>
 #include <mutex>
 #include <sys/resource.h>
+#include <ctime>
 #include <thread>
+#include <unistd.h>
 
 #include "json.hpp"
 #include "shim.h"
@@ -18,9 +20,16 @@ namespace app {
 
 namespace {
 
-/* The checkpoint thread runs at nice 19: on one vCPU a pass at the loop's priority takes the
- * CPU for its whole length, and that steal is visible as p95 (c-iouring-public #158 measured
- * 2 of 3 holds dying at nice 0 against 3 of 3 at 19). */
+// 检查点线程跑在 nice 19：单 vCPU 上，与主循环同优先级的 pass 会占满整个时间片，
+// 这种抢占直接体现在 p95 上（c-iouring-public #158 实测：nice 0 时 3 次 hold 有 2 次
+// 失败，nice 19 时 3 次全过）。
+/* 单调时钟，纳秒。用于给 hold 期间的检查点循环设时间上限。 */
+static long long mono_ns() {
+  struct timespec ts {};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+}
+
 void checkpoint_loop(dbx* h, CkState* st) {
   setpriority(PRIO_PROCESS, 0, 19);
   std::unique_lock<std::mutex> lk(st->mu);
@@ -28,18 +37,24 @@ void checkpoint_loop(dbx* h, CkState* st) {
     st->cv.wait_for(lk, std::chrono::milliseconds(50), [st] { return st->stop.load(); });
     if (st->stop.load()) break;
     lk.unlock();
-    /* PASSIVE, so it never waits for the loop's readers: copy what it can, and once every frame
-     * is copied the gate opens and the next write restarts the log at frame 1 (no truncate).
-     * While the gate is held, keep passing only as long as each pass actually copies something:
-     * a pass that copies nothing (the loop's reader is still in the way) must not be retried in a
-     * loop, or the thread burns the single core for no progress. */
+    // PASSIVE 检查点从不等主循环的读者：能拷多少拷多少，全部帧拷完后闸门打开，
+    // 下一次写让日志从第 1 帧重新开始（不需要 truncate）。闸门挂起期间，只在每次 pass
+    // 确实拷到东西时继续：一个什么都没拷到的 pass（主循环的读者还挡着）不能循环重试，
+    // 否则线程会白白烧掉这颗唯一的核。
     if (dbx_wal_frames(h) >= 1024) {
       int copied = 0;
       int r = dbx_checkpoint(h, &copied);
       int last = copied;
-      for (int k = 0; r == 1 && k < 64 && dbx_writes_held(h); k++) {
+      /* 闸门挂起期间一直拷，直到拷完或者 hold 快到期。没拷动时让出 50 µs 再试，而不是立刻
+       * 放弃：PASSIVE 遇到主循环的写锁会返回 BUSY，让出一下就能在下一次 COMMIT 之间拿到。
+       * 原来的写法是「没进展就 break」，于是同一次积压要等 50 ms 后的下一轮，写请求便一次次
+       * 被 hold。 */
+      const long long t0 = mono_ns();
+      while (r == 1 && dbx_writes_held(h) && mono_ns() - t0 < 200000000LL) {
         r = dbx_checkpoint(h, &copied);
-        if (copied == last) break;
+        if (copied == last) {
+          usleep(50);
+        }
         last = copied;
       }
     }
@@ -375,7 +390,7 @@ bool Db::feed_rows() {
     int lr = dbx_likes_many(h_, ids.data(), static_cast<int>(n), counts.data());
     if (lr < 0) throw DbError{};
     if (lr > 0) {
-      /* A cell the page-level walk does not decode (large or odd record): one seek per post. */
+      // 页级扫描解不了的 cell（记录过大或格式特殊）：退回逐个 post 一次 seek。
       for (size_t k = 0; k < n; k++) {
         int c = count_likes_one(ids[k]);
         if (c < 0) throw DbError{};

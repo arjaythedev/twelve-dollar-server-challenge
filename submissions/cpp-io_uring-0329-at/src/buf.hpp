@@ -57,7 +57,6 @@ inline void buf_put(ByteBuf& b, uint8_t c) {
   b.p[b.len++] = c;
 }
 
-inline void buf_clear(ByteBuf& b) { b.len = 0; }
 
 inline void buf_release(ByteBuf& b) {
   std::free(b.p);
@@ -68,22 +67,20 @@ inline void buf_release(ByteBuf& b) {
 
 using Pool = std::vector<ByteBuf*>;
 
-/* Response buffers are per-connection and only live until the response's send completes, so the
- * pool is what bounds in-flight memory: 4,096 recycled buffers of <= 2 x kOutCap bytes.  When the
- * pool runs dry (in-flight above the cap, e.g. during a checkpoint stall) a fresh buffer is
- * allocated and counted, so the miss rate is visible in the STATS line instead of silently
- * turning into a 32 KB malloc per response. */
+// 响应缓冲按连接持有，只活到该响应的 send 完成，所以池决定了在途内存的上限：
+// 4,096 个可复用缓冲，每个不超过 8 x kOutCap 字节。池被抽干时（在途数超过上限，
+// 例如检查点停顿期间）会新分配一个并计数，于是 miss 率会出现在 STATS 行里，
+// 而不是悄悄变成每个响应一次分配。
 inline unsigned long& pool_misses() {
   static unsigned long misses = 0;
   return misses;
 }
 
 constexpr size_t kPoolCap = 4096;
-/* Pre-filled at startup: a response buffer is taken while completions are reaped and given back
- * when the response's send completes, so on a busy pass every take happens before the matching
- * give.  A pool that starts empty therefore misses on every request of every pass (measured: one
- * 8 KB malloc per response, 37,738 brk calls in 10 s).  Sizing the pool up front turns that into
- * pure stack-like reuse. */
+// 启动时预填：响应缓冲在收割完成时取走、在 send 完成时归还，所以繁忙的 pass 里
+// 每次 take 都发生在对应的 give 之前。因此一个空池会在每个 pass 的每个请求上 miss
+// （实测：每个响应一次分配，10 秒内 37,738 次 brk）。事先把池填满，就变成纯粹的
+// 栈式复用。
 constexpr size_t kPoolPreload = 256;
 
 inline void preload_pool(Pool& pool) {

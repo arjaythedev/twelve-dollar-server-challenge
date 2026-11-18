@@ -996,7 +996,7 @@ mod linux_uring {
         while off < buf.len() {
             match parse_http_request(&buf[off..]) {
                 ParseState::Complete(req) => {
-                    if writes_held && App::is_write_request(&req) {
+                    if (writes_held || app.db.writes_held()) && App::is_write_request(&req) {
                         if !c.held {
                             c.held = true;
                             held.push((ri as u8, slot, c.generation));
@@ -1919,6 +1919,35 @@ mod tests {
         let (st, body) = run_raw_req(&mut app, b"GET /feed HTTP/1.1\r\n\r\n");
         assert_eq!(st, 200);
         assert!(body.starts_with("{\"posts\":[{\"id\":500001,"), "new post at top of feed: {body}");
+
+        // Verify that an 8192-byte pooled buffer does not reallocate on GET /feed
+        let ParseState::Complete(feed_req) =
+            parse_http_request(b"GET /feed HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        else {
+            panic!("parse feed req");
+        };
+        let mut pooled = Vec::with_capacity(8192);
+        app.handle_request(&feed_req, &mut pooled);
+        assert_eq!(
+            pooled.capacity(),
+            8192,
+            "/feed response must fit inside 8 KB pooled buffer without reallocating"
+        );
+
+        // Verify grow_cold on heavy control-character escaping (>64 bytes of escape expansion)
+        let heavy_raw = "\x01".repeat(120);
+        let mut esc_out = Vec::new();
+        crate::json::write_single_post_json(
+            &mut esc_out,
+            999,
+            heavy_raw.as_bytes(),
+            b"2026-03-23T00:00:00.000Z",
+            b"user\"\\\x02",
+            7,
+        );
+        let esc_str = String::from_utf8(esc_out).expect("utf8 escaped response");
+        assert!(esc_str.contains(&"\\u0001".repeat(120)));
+        assert!(esc_str.contains("\"author\":\"user\\\"\\\\\\u0002\""));
 
         app.db.end_read_batch();
         drop(app);

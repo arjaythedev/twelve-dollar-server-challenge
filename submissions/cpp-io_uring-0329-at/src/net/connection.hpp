@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <sys/mman.h>
+#include <memory>
 #include <vector>
 
 #include "buf.hpp"
@@ -35,7 +36,7 @@ struct Connection {
   uint32_t last_active = 0;
   app::ByteBuf* out = nullptr;
   app::ByteBuf* wire = nullptr;
-  std::vector<uint8_t>* part = nullptr;
+  std::unique_ptr<std::vector<uint8_t>> part; /* 不完整请求的暂存；唯一所有者 */
 
   bool live() const { return open && !closing; }
 };

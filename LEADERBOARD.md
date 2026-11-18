@@ -869,7 +869,11 @@ req/s, p95 236.4 / p99 645.8 ms, 0 err, 82 % CPU, 27 µs/req, 805 MB, 2026-11-18
 95 % CPU), all with 0 errors. #506 stays open. **#507** (`f7378cf`: #486 with completions reaped every 256 ready
 answers instead of 512) held **290,000** (27,474 req/s, p95 442.5 / p99 652.2 ms, 0 err, 86 % CPU, 28 µs/req,
 1,042 MB, 2026-11-18), below #486's 300,000, so not merged: 300,000 failed the 2-minute probe on p95/p99 (1.20 /
-2.79 s at 91 % CPU) and 320,000 on p95/p99 (2.84 / 3.34 s at 90 % CPU), all with 0 errors. #507 stays open.
+2.79 s at 91 % CPU) and 320,000 on p95/p99 (2.84 / 3.34 s at 90 % CPU), all with 0 errors. #507 stays open. **#508** (`9444fad`: #486 answering up to 4,096
+ready requests per pass instead of 2,048) held **280,000** (26,706 req/s, p95 76.0 / p99 545.3 ms, 0 err, 77 % CPU,
+26 µs/req, 806 MB, 2026-11-18), below #486's 300,000, so not merged: 290,000 failed the 2-minute probe on p99 (1.14 s
+at 79 % CPU), 300,000 on p95/p99 (0.74 / 1.45 s at 84 % CPU) and 320,000 on p95/p99 (1.93 / 3.14 s at 93 % CPU), all
+with 0 errors. #508 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

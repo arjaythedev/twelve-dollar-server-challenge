@@ -380,6 +380,13 @@ class Server {
     pub bool $feedRawUserDecode = false;
     pub bool $sparseBufs = false;
     pub bool $retryingWrites = false;
+    /* Group commit: queued writes wait up to this many ms (or until 256 are
+     * queued) so several poll cycles share one transaction. Every commit
+     * rewrites the hot pages (page 1, the posts/likes tails and their index
+     * leaves) into the WAL, so fewer commits mean fewer page writes, checksums
+     * and checkpoint copies. Replies still go out only after their commit. */
+    pub int $writeGroupMs = 0;
+    pub int $writeGroupStart = 0;
     pub int $persistedPending = 0;
     pub int $writeWaitMs = 1;
     pub int $reqs = 0;
@@ -414,6 +421,11 @@ class Server {
         if ($batchWaitEnv != "") {
             $batchWait = intval($batchWaitEnv);
             if ($batchWait >= 0 && $batchWait <= 10) { $this->writeWaitMs = $batchWait; }
+        }
+        $groupEnv = getenv("HPHP_WRITE_GROUP_MS");
+        if ($groupEnv != "") {
+            $g = intval($groupEnv);
+            if ($g >= 0 && $g <= 20) { $this->writeGroupMs = $g; }
         }
         $this->postSendBuilder = (getenv("HPHP_POST_SB") == "1");
         if (getenv("HPHP_STATS") == "1") { $this->statsmode = true; }
@@ -1101,11 +1113,12 @@ class Server {
                 } else {
                     $this->send_json($fd, 404, '{"error":"not found"}');
                 }
-                if (!(iarr_get($this->socks, $fd) != 0)) { return; }
                 $np = $he + 4;                          /* EXPERIMENT R */
                 if ($np == $bufLen) { return; }          /* no substr for the
                                                            last request in
                                                            the packet */
+                /* more bytes follow: stop if the handler closed the socket */
+                if (!(iarr_get($this->socks, $fd) != 0)) { return; }
                 $buf = substr($buf, $np);
                 if ($buf == "") { return; }
                 continue;
@@ -2292,6 +2305,17 @@ class Server {
     public function execute_writes(): void {
         $n = count($this->pending);
         if ($n == 0) { return; }
+        if ($this->writeGroupMs > 0 && $n < 256) {
+            $now = hrtime(true);
+            if ($this->writeGroupStart == 0) { $this->writeGroupStart = $now; }
+            if ($now - $this->writeGroupStart < $this->writeGroupMs * 1000000) {
+                /* keep collecting: the queued strings must outlive this scope */
+                $this->persist_pending_posts();
+                $this->retryingWrites = true;
+                return;
+            }
+        }
+        $this->writeGroupStart = 0;
         if ($this->bgCheckpoint && sqlite_bg_checkpoint_hold($this->db)) {
             /* A checkpoint can defer this batch across poll cycles. Strings
              * copied from the current request live only until scope_end(),

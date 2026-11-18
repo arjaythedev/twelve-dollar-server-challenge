@@ -26,7 +26,11 @@ let private wwin = uint32 (env "WWIN" 20) // ms: writes commit at most once per 
 let private lifoOn = env "LIFO" 1 = 1
 let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
-let private lifoAge = uint32 (env "LIFOAGE" 8000)
+// The old end's share starts late. The load is closed-loop: a waiting request holds its client, so under an overload
+// of x % newest-first leaves about x % of the clients waiting, the same ones until it ends. A share for the old end
+// while the overload lasts takes capacity from fresh requests to answer ones that are already late, and makes more
+// requests late. 20 s is longer than a ramp's peak and, doubled, inside a client timeout of 60 s.
+let private lifoAge = uint32 (env "LIFOAGE" 20000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048

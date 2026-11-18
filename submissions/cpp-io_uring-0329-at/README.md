@@ -75,6 +75,7 @@
 - **大响应用零拷贝发送**（IORING_OP_SEND_ZC）：feed 的 JSON 约 5.5 KB，send_zc 让内核直接读用户缓冲，省掉一次 5.5 KB 的拷贝；完成时会多一个 IORING_CQE_F_NOTIF，缓冲必须等它到达才能还回池（连接状态多了 Flushed）。post/like 的响应只有几百字节，多一个 NOTIF 不划算，仍走普通 send；关闭中的响应也不用。内核不支持时（-EINVAL/-ENOSYS）自动回退并永久关闭，ZC=0 可手动关掉做 A/B。还有一条边界照 c-iouring-public 的 loop.c 处理：第一个完成若没有 IORING_CQE_F_MORE，说明不会再有 NOTIF，必须立刻视作已通知，否则连接会停在 Flushed 等一个永远不来的完成。
 - 每个连接同一时间最多一个发送在途；流水线响应排在它后面。输出缓冲来自池（8 KB，启动预填 256 个），发送完成后归还；一次 feed 响应的 JSON 上界约 24 KB，所以回收阈值放到 `8 × 8 KB`，否则每个 feed 缓冲都会被丢掉重分配（实测：每请求一次 24 KB `malloc`，`brk` 37,738 次/10 s）。
 - 关闭是 `SHUTDOWN` 硬链接到 fixed-file `CLOSE`；每个 `user_data` 里的 generation 号会丢弃复用槽位的完成。
+- **`part` 缓冲走 `std::pmr` 的池资源**：backlog 时每个被延后的连接都要留一份未处理字节，270k 连接时这一项约 400–500 MB；`std::vector` 每份都带 24 B 对象头、malloc 元数据和 1.5 倍扩容的容量浪费。改成 `std::pmr::vector` + `unsynchronized_pool_resource`（单线程用，无锁），固定块复用、按需增长，池在 backlog 清空时随 `malloc_trim` 一起 `release()`。
 - **backlog 清空后把空闲堆还给内核**：每 10 秒检查一次，只有在就绪队列和读队列都空时才调用 `malloc_trim(0)`。glibc 释放的内存默认留在进程 arena 里，RSS 只增不减——backlog 期间为 `part`/响应缓冲分配的块，在 backlog 清空后仍算在 RSS 上（c-iouring-jowinjestine #404 把这一条记成「backlog 碰过的每个连接都永久留着一块」，他们观测到 200k 个 deferred 请求约 100 MB）。本地 20k 连接、标准负载：p99 196 → 2.78 ms，max 655 → 39 ms。
 
 ## 请求路径

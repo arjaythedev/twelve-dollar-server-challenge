@@ -61,10 +61,15 @@ export HPHP_ACCEPT_HANDOVER="${HPHP_ACCEPT_HANDOVER:-1}"
 # Optional same-binary experiment: rotate which ring's CQ is drained first.
 # Mixed-load A/Bs were not consistent enough to enable this by default.
 # Set HPHP_DRAIN_RR=1 to test it without changing the server source.
-# Cap accepted TCP receive/send buffers through the listener; on Linux these
-# options are inherited by accepted sockets, including direct fds. A same-binary
-# A/B/B/A at 120k connections showed no CPU difference; set 0 for the kernel defaults.
+# Set accepted TCP receive buffers through the listener; on Linux these options
+# are inherited by accepted sockets, including direct fds. 16 KiB receive
+# (HPHP_SOCKET_RCVBUF) keeps idle keep-alives cheap without the receive-queue
+# pruning/collapsing a 4 KiB cap caused; the send buffer stays at the kernel
+# default (HPHP_SOCKET_SNDBUF=0). Set HPHP_SOCKET_BUFFERS=0 for kernel defaults,
+# or HPHP_SOCKET_RCVBUF=4096 HPHP_SOCKET_SNDBUF=8192 for the previous caps.
 export HPHP_SOCKET_BUFFERS="${HPHP_SOCKET_BUFFERS:-1}"
+export HPHP_SOCKET_RCVBUF="${HPHP_SOCKET_RCVBUF:-16384}"
+export HPHP_SOCKET_SNDBUF="${HPHP_SOCKET_SNDBUF:-0}"
 # Decode the fixed posts record inline in HolyPHP instead of making five
 # per-column B-tree builtin calls. Set 0 to retain bt_cols/column accessors.
 export HPHP_FEED_RAW="${HPHP_FEED_RAW:-1}"

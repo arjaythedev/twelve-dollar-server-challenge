@@ -636,7 +636,7 @@ static unsigned read_rounds(void) {
  * before they run out. Without it the buffers ran dry mid-pass, requests sat in their sockets, and
  * each socket holding one counted a page against tcp_mem: past ~30k of them TCP went into memory
  * pressure and pruned queues (CPU, drops, retransmits) until the OOM killer ended it at 285k. */
-static unsigned reap_every = 512;
+static unsigned reap_every = 256;
 static void run_ready(void) {
   unsigned n = nready, i = 0, since = 0;
   /* Only time-slice an established backlog. Normal batches follow the original fast path. */
@@ -1073,7 +1073,7 @@ int main(int argc, char **argv) {
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
-  reap_every = (unsigned)env_long("REAP_EVERY", 512);
+  reap_every = (unsigned)env_long("REAP_EVERY", 256);
   poll_idle = env_long("IDLE_POLL", 0) != 0;
   eventfd_wake = env_long("EVENTFD_WAKE", 0) != 0;
   recv_buf_size = (unsigned)env_long("RECV_SIZE", RECV_BUF_SIZE_DEFAULT);

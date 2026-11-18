@@ -13,7 +13,7 @@
 #include "db.h"
 #include "net.h"
 
-#define MAX_BATCH 2048              /* requests answered per pass */
+#define MAX_BATCH 512               /* requests answered per pass */
 #define ARENA_CAP (2u << 20)        /* response memory comes in 2 MiB arenas */
 #define MAX_ARENAS 256
 #define RESP_MAX (128u << 10)       /* upper bound of one response */
@@ -25,6 +25,9 @@
 #define IDLE_NS 1000000000L
 #define READS_PER_PASS 16384        /* single reads issued per pass */
 #define CQES_PER_REAP 32768
+#define HELD_PER_PASS 256           /* parked POSTs released per pass after a hold */
+#define BACKLOG_NEWEST MAX_BATCH    /* more than a pass waiting: new requests go first */
+#define BACKLOG_AGE_MS 8000         /* from this age on the oldest get a growing share */
 
 enum { ST_DONE = 0, ST_READ, ST_WRITE };
 
@@ -76,6 +79,8 @@ static int g_narena, g_cur_arena = -1;
 static char *g_scratch;
 static uint32_t g_scratch_off;
 static struct idlist g_ready, g_held, g_rq;
+static struct idlist g_ready_at; /* when each entry of g_ready was queued, ms */
+static uint32_t g_held_off; /* parked POSTs before this index are released */
 static uint32_t g_reads;
 static struct bt_feed g_feed;
 
@@ -290,6 +295,7 @@ static inline void conn_ready(struct ring_ctx *r, uint32_t slot) {
   if (c->flags & CF_READY) return;
   c->flags |= CF_READY;
   list_push(&g_ready, ((uint32_t)r->idx << 16) | slot);
+  list_push(&g_ready_at, (uint32_t)g_now_ms);
 }
 
 static inline int is_write_route(const struct http_req *q) {
@@ -360,57 +366,64 @@ static void on_data(struct ring_ctx *r, uint32_t slot, const char *p, uint32_t n
   if ((uint32_t)k < n) conn_stash(r, slot, p + k, n - (uint32_t)k); /* pipelined: after this response */
 }
 
-static void process_ready(void) {
-  uint32_t n = g_ready.n;
-  if (!n) return;
-  uint32_t *v = g_ready.v;
-  struct idlist keep = {0, 0, 0};
-  g_ready.v = NULL;
-  g_ready.n = g_ready.cap = 0;
-  for (uint32_t i = 0; i < n; i++) {
-    struct ring_ctx *r = cid_ring(v[i]);
-    uint32_t slot = v[i] & 0xffff;
-    struct conn *c = &r->conns[slot];
-    if (c->state != C_OPEN || !(c->flags & CF_READY)) continue;
-    if (g_nbatch == MAX_BATCH) { /* the rest keeps its place in the queue */
-      for (; i < n; i++) list_push(&keep, v[i]);
-      break;
-    }
-    c->flags &= (uint8_t)~CF_READY;
-    if (!c->in_len || (c->flags & (CF_BUSY | CF_HELD))) continue;
-    struct http_req q;
-    int k = http_parse(c->in, c->in_len, &q);
-    if (k < 0) {
-      conn_close(r, slot);
-      continue;
-    }
-    if (k == 0) continue;
-    if (is_write_route(&q) && g_db.writes_held) {
-      c->flags |= CF_HELD;
-      list_push(&g_held, v[i]);
-      continue;
-    }
-    if (!task_add(r, slot, &q)) {
-      c->flags |= CF_READY;
-      list_push(&keep, v[i]);
-      continue;
-    }
-    c->in_len -= (uint32_t)k;
-    if (c->in_len) {
-      memmove(c->in, c->in + k, c->in_len);
-    } else {
-      free(c->in);
-      c->in = NULL;
-      c->in_cap = 0;
-    }
+/* 1 = off the queue, 0 = no room for it in this pass */
+static int ready_one(uint32_t id) {
+  struct ring_ctx *r = cid_ring(id);
+  uint32_t slot = id & 0xffff;
+  struct conn *c = &r->conns[slot];
+  if (c->state != C_OPEN || !(c->flags & CF_READY)) return 1;
+  c->flags &= (uint8_t)~CF_READY;
+  if (!c->in_len || (c->flags & (CF_BUSY | CF_HELD))) return 1;
+  struct http_req q;
+  int k = http_parse(c->in, c->in_len, &q);
+  if (k < 0) {
+    conn_close(r, slot);
+    return 1;
   }
-  free(v);
-  for (uint32_t i = 0; i < keep.n; i++) list_push(&g_ready, keep.v[i]);
-  free(keep.v);
+  if (k == 0) return 1;
+  if (is_write_route(&q) && g_db.writes_held) {
+    c->flags |= CF_HELD;
+    list_push(&g_held, id);
+    return 1;
+  }
+  if (!task_add(r, slot, &q)) {
+    c->flags |= CF_READY;
+    return 0;
+  }
+  c->in_len -= (uint32_t)k;
+  if (c->in_len) {
+    memmove(c->in, c->in + k, c->in_len);
+  } else {
+    free(c->in);
+    c->in = NULL;
+    c->in_cap = 0;
+  }
+  return 1;
 }
 
+/* fills the batch up to `room`, oldest or newest first */
+static void process_ready(int newest, int room) {
+  uint32_t n = g_ready.n;
+  if (!n) return;
+  if (newest) {
+    while (g_ready.n && g_nbatch < room && ready_one(g_ready.v[g_ready.n - 1])) g_ready.n--;
+    g_ready_at.n = g_ready.n;
+    return;
+  }
+  uint32_t i = 0;
+  while (i < n && g_nbatch < room && ready_one(g_ready.v[i])) i++;
+  if (i) {
+    memmove(g_ready.v, g_ready.v + i, (size_t)(n - i) * sizeof *g_ready.v);
+    memmove(g_ready_at.v, g_ready_at.v + i, (size_t)(n - i) * sizeof *g_ready_at.v);
+    g_ready.n = g_ready_at.n = n - i;
+  }
+}
+
+/* a few per pass, so the parked POSTs do not crowd one pass */
 static void release_held(void) {
-  for (uint32_t i = 0; i < g_held.n; i++) {
+  uint32_t end = g_held_off + HELD_PER_PASS;
+  if (end > g_held.n) end = g_held.n;
+  for (uint32_t i = g_held_off; i < end; i++) {
     struct ring_ctx *r = cid_ring(g_held.v[i]);
     uint32_t slot = g_held.v[i] & 0xffff;
     struct conn *c = &r->conns[slot];
@@ -418,7 +431,8 @@ static void release_held(void) {
     c->flags &= (uint8_t)~CF_HELD;
     conn_ready(r, slot);
   }
-  g_held.n = 0;
+  g_held_off = end;
+  if (end == g_held.n) g_held.n = g_held_off = 0;
 }
 
 static inline uint32_t ring_free(const struct ring_ctx *r) { return r->nslots - r->open - r->acc_inflight; }
@@ -991,7 +1005,7 @@ int main(void) {
     /* wait */
 
     /* ring 0 sleeps first, the others are collected after it */
-    int busy = g_ready.n > 0 || g_rq.n > 0;
+    int busy = g_ready.n > 0 || g_rq.n > 0 || (g_held.n && !g_db.writes_held);
     int spread = 0; /* connections or accepts on a ring that cannot wake ring 0 */
     for (int i = 1; i < g_nrings; i++) spread |= g_rings[i].open || g_rings[i].acc_inflight;
     struct ring_ctx *r0 = &g_rings[0];
@@ -1008,7 +1022,14 @@ int main(void) {
     clock_update();
     g_nbatch = 0;
     g_scratch_off = 0;
-    process_ready(); /* requests read by earlier passes go first */
+    int newest = g_ready.n >= BACKLOG_NEWEST, old_room = MAX_BATCH;
+    if (newest) {
+      uint32_t age = (uint32_t)g_now_ms - g_ready_at.v[0];
+      old_room = age <= BACKLOG_AGE_MS ? 0
+                 : age >= 2 * BACKLOG_AGE_MS ? MAX_BATCH
+                 : (int)((uint64_t)(age - BACKLOG_AGE_MS) * MAX_BATCH / BACKLOG_AGE_MS);
+    }
+    process_ready(0, old_room); /* the oldest waiting */
     turn++;
     for (int k = 0; k < g_nrings; k++) reap(&g_rings[(k + turn) % (unsigned)g_nrings]);
 
@@ -1022,7 +1043,7 @@ int main(void) {
         reap(r);
       }
     }
-    process_ready();
+    process_ready(newest, MAX_BATCH);
 
     /* execute, then answer */
     if (g_nbatch) {
@@ -1032,7 +1053,8 @@ int main(void) {
     }
     last = g_nbatch;
 
-    if (db_tick(&g_db, g_now_ms)) release_held();
+    db_tick(&g_db, g_now_ms);
+    if (g_held.n && !g_db.writes_held) release_held();
     accept_policy();
     /* the other rings' sends go out now */
     for (int i = 1; i < g_nrings; i++) ring_submit(&g_rings[i]);

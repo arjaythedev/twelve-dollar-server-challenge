@@ -9888,7 +9888,19 @@ static int hp_sqlite_wal_hook(void *arg, sqlite3 *db, const char *name, int nfra
 
 static void *hp_sqlite_ckpt_main(void *arg) {
     HpSqliteCkpt *w = (HpSqliteCkpt *)arg;
-    (void)setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 19);
+    /* HPHP_CKPT_NICE (0..19, default 19): the worker's nice value. On one
+     * CPU a nice-19 worker gets ~1.5% of the core while the event loop is
+     * busy, which can be less than the copy work the write rate creates; the
+     * WAL then grows until the synchronous forced checkpoint stalls the loop.
+     * A moderate value lets it keep pace in small slices. An unprivileged
+     * thread cannot lower its nice value later, so it is set once here. */
+    int nice_v = 19;
+    const char *nice_env = getenv("HPHP_CKPT_NICE");
+    if (nice_env && *nice_env) {
+        int v = atoi(nice_env);
+        if (v >= 0 && v <= 19) nice_v = v;
+    }
+    (void)setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nice_v);
     for (;;) {
         int mode, nlog = -1, ndone = -1;
         uint64_t generation;

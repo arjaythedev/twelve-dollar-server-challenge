@@ -279,6 +279,20 @@ caps. On the box (#511 at `82f5a50`) this held 270,000 with p95/p99 138 /
 both: 16 KiB receive buffers plus the feed tail walk and 1 ms group commit.
 42/42 Direct and 42/42 Classic pass.
 
+### Checkpoint worker that keeps pace
+
+#513 (`28a35be`, receive buffers plus feed tail walk and group commit) ran at
+28 µs/request and held 266,000; 280,000 passed its 2-minute probe (p95/p99
+401 / 621 ms) and then failed the 5-minute hold only on p99 (1.0 s at 85 %
+CPU). A failure that appears only in the long hold points at work that piles
+up. The background checkpoint worker ran at nice 19, which on one busy CPU is
+~1.5 % of the core, less than the copy work at the box's write rate; the WAL
+then grows until the synchronous forced checkpoint (65,536 frames) runs on the
+loop. `HPHP_CKPT_NICE` (0..19) sets the worker's nice value; the default is now
+10. Local 5-minute holds at 240k connections: WAL max 44 / 48 MB and still
+growing at nice 19, 22 / 19 MB and flat at nice 10, CPU per request 37.1 vs
+36.7 µs. 42/42 Direct and 42/42 Classic pass.
+
 ### The allocation round (`2f8507b` … `d75dd29`)
 
 Instrumentation first: `runtime_stats()` exposes generic runtime counters

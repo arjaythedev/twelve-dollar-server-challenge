@@ -12,6 +12,13 @@ export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
 # WAL tail is copied and SQLite can restart the log from frame 0. Without it
 # the WAL grew past 200 MB under sustained load. HPHP_CKPT_RESTART=0 disables.
 export HPHP_CKPT_RESTART="${HPHP_CKPT_RESTART:-1}"
+# Background checkpoint worker at nice 10 instead of 19. On one CPU a nice-19
+# worker gets ~1.5% of the core while the loop is busy, less than the copy
+# work at high write rates: the WAL then grows over a long hold until the
+# synchronous forced checkpoint stalls the loop. 240k connections, 5-minute
+# holds: WAL max 44/48 MB growing at nice 19, 22/19 MB flat at nice 10, same
+# CPU per request. HPHP_CKPT_NICE=19 restores the previous priority.
+export HPHP_CKPT_NICE="${HPHP_CKPT_NICE:-10}"
 # Open SQLite through unix-excl: the process holds the database lock, so
 # transactions take no fcntl() locks and the WAL index lives in process memory
 # (both SQLite connections share it). Same sync calls, so durability is

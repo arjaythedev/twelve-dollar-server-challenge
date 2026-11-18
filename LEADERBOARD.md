@@ -1316,6 +1316,10 @@ below #437's 310,000, so #516 is not merged.
 #427's newest head (`933290d`, 2026-11-18: `76af661` with the read transaction and schema-cookie check done once per
 read transaction instead of per request) held **300,000** at 81 % CPU (28,417 req/s, p95 28.7 / p99 359.0 ms, 0 errors,
 1,295 MB; 310k failed the 2-minute probe on p99 1.65 s, 320k on p99 2.79 s), below #437's 310,000, so #427 is not merged.
+#516's next head (`a23d3fd`, 2026-11-18: `da7cf01` with feeds answered after other requests in a backlog, `CHEAPFIRST`)
+held **280,000** at 75 % CPU (26,737 req/s, p95 23.7 / p99 134.1 ms, 0 errors, 1,403 MB; 290k failed the 2-minute probe
+on p99 1.20 s, 300k on p99 6.96 s, 320k on p99 3.65 s), below #437's 310,000, so #516 is not merged. Its head moved to
+`9707a46` during the run; that commit is queued.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

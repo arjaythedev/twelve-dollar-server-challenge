@@ -59,10 +59,9 @@ let main _ =
     let slots = int (min 65535UL rl.[0])
     let rings = max 1 (min 16 (Ring.envInt "RINGS" 8))
     let started = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
-    let bt = Db.openDb path (Ring.envInt "CACHE_KB" 96000) (env "WARM" "1" = "1")
+    let bt = Db.openDb path (Ring.envInt "CACHE_KB" 64000) (env "WARM" "1" = "1")
     let ck = if env "CKPT_THREAD" "1" = "1" then Db.Checkpointer(path, Ring.envInt "CKNICE" 10) else Unchecked.defaultof<_>
     let fds = Server.listen ip port (max 1 (Ring.envInt "LISTENERS" 8)) (Ring.envInt "DEFACC" 0)
-                  (Ring.envInt "ACCQ" 65535)
     if env "LOCK" "1" = "1" then lockCode ()
     if env "ANON" "1" = "1" then Pages.start (env "PAGELOG" "0" = "1")
     eprintfn "fsharp-uring on %O:%d: 1 loop thread, %d rings x %d slots, %d listeners, B-tree reads %s, WAL up to %d MB, SQLite %s"

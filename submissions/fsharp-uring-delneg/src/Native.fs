@@ -23,15 +23,6 @@ extern int socket(int domain, int typ, int protocol)
 [<DllImport(L, SetLastError = true)>]
 extern int setsockopt(int fd, int level, int name, int& value, int len)
 
-[<DllImport(L, EntryPoint = "setsockopt", SetLastError = true)>]
-extern int setsockoptPtr(int fd, int level, int name, nativeint value, int len)
-
-[<DllImport(L, SetLastError = true)>]
-extern int getsockopt(int fd, int level, int name, nativeint value, int& len)
-
-[<DllImport(L)>]
-extern int sched_getcpu()
-
 [<DllImport(L, SetLastError = true)>]
 extern int bind(int fd, nativeint addr, int len)
 
@@ -94,9 +85,6 @@ extern int posix_fadvise(int fd, int64 offset, int64 len, int advice)
 
 [<DllImport(L, SetLastError = true)>]
 extern int fdatasync(int fd)
-
-[<DllImport(L, SetLastError = true)>]
-extern int sync_file_range(int fd, int64 offset, int64 nbytes, uint32 flags)
 
 [<DllImport(L)>]
 extern int clock_gettime(int clk, int64[] ts)

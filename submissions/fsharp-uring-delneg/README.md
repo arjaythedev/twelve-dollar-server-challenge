@@ -21,7 +21,9 @@
   at a high-water mark (a quarter of its slots, at most 4,096, below full) while another ring has room, since an
   accept that finds the table full drops the connection. Eight `SO_REUSEPORT` listeners give eight accept queues,
   so a ramp's new connections wait there instead of being refused. A connection is accepted when its handshake
-  completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives).
+  completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives). The
+  listeners have `TCP_QUICKACK` off, and accepted sockets inherit it, so a connection's first request is acknowledged
+  by its response instead of by a bare ACK of its own (`QUICKACK=1` restores the kernel default).
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -78,27 +80,14 @@
   run starts at zero. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader
   goes back to them), so the file's length doesn't cost memory. The database file's pages go too, after the pass
   that syncs the file (the held one).
-  The checkpoint thread also paces its own writes to the database file (a second thin wrapper in the VFS shim, on
-  the database file's `xWrite`; the bytes and their order are SQLite's). A pass writes thousands of pages in a
-  fraction of a second, and when that lifts the kernel's dirty memory past the point where it pauses writers, the
-  next writer it pauses is the loop, in its WAL write. So after each MiB the thread reads `nr_dirty`, `nr_writeback`
-  and the two thresholds from `/proc/vmstat`; within a quarter of the level where writers start being paused, it
-  sends its own pages to the disk (`sync_file_range` on the database file) and waits up to 250 ms for the rest to
-  drain. Measured with the dirty limits set to 12 / 24 MB and the 25 MB/s cap: without it the loop was paused in
-  `balance_dirty_pages` 10 times in a run (up to 183 ms, 1.3 s in all), with it never, in two runs. At the default
-  limits it found dirty memory high 0 times in 771 looks and changes nothing: the pages stay dirty and the kernel
-  still writes each once however many passes wrote it.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
-  lives in its memory, shared by its two connections. 96 MB page cache, no mmap, statements prepared once. Startup
+  lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
   of the 250 MB seed (the two indexes that writes land on at random, 35 MB, the users table, and the newest end of
   everything else: a post is read and liked within seconds of being listed), and they grow by a few MB a minute. A
   cache with room for everything (256 MB before) also keeps every page ever appended, about 0.26 MB a second at 300k
-  users, in anonymous memory that reclaim can't take back when the box is at its memory wall; at 96 MB the oldest of
-  those give way instead. After the startup reads, the kernel's cached copy of the database file is dropped
-  (`POSIX_FADV_DONTNEED`; `DBDROP=0` leaves it): whoever wrote the file left up to 250 MB of it in the kernel's cache,
-  which a server that reads through SQLite's own cache never uses, and which reclaim would otherwise have to find
-  while the connections of the ramp are taking the memory. Inserts bind `created_at` in the column default's format
+  users, in anonymous memory that reclaim can't take back when the box is at its memory wall; at 64 MB the oldest of
+  those give way instead. Inserts bind `created_at` in the column default's format
   and take the id from `sqlite3_last_insert_rowid` (no `RETURNING`); a like is one `INSERT … SELECT … WHERE EXISTS
   … ON CONFLICT DO NOTHING`, and `sqlite3_changes` tells a new like from a repeat or a missing post.
 - **One write per commit.** A VFS of its own over `unix-excl` (SQLite's public VFS interface, the pattern of its own
@@ -187,7 +176,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `PACE` (1; 0: the checkpoint thread's database writes unpaced), `BUFS` (1024), `CACHE_KB` (96000), `DBDROP` (1), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
 

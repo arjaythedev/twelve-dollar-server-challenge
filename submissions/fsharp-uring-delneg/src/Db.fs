@@ -790,14 +790,6 @@ let openDb (path: string) (cacheKB: int) (warm: bool) =
         sqlite3_exec (db, z "SELECT sum(user_id) FROM likes INDEXED BY sqlite_autoindex_likes_1", 0n, 0n, 0n) |> ignore
         sqlite3_exec (db, z "SELECT sum(user_id) FROM posts INDEXED BY posts_user_id_idx", 0n, 0n, 0n) |> ignore
         sqlite3_exec (db, z "SELECT sum(length(username)) FROM users", 0n, 0n, 0n) |> ignore
-    // The kernel's cached copy of the database file (whoever wrote the file left it there, and the reads above added to
-    // it) is of no use to a server that reads through SQLite's own cache: dropped now, it is free memory during the
-    // ramp, not pages reclaim has to find at the top of it. DBDROP=0: left alone.
-    if Environment.GetEnvironmentVariable "DBDROP" <> "0" then
-        let fd = Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
-        if fd >= 0 then
-            Native.posix_fadvise (fd, 0L, 0L, 4) |> ignore // POSIX_FADV_DONTNEED
-            Native.close fd |> ignore
     useBt <- Environment.GetEnvironmentVariable "BTREE" <> "0" && btInit ()
     if useBt then
         useBt <- selfTest ()
@@ -843,7 +835,6 @@ type Checkpointer(path: string, nice: int) =
                         sqlite3_file_control (cdb, main, 6, &bytes) |> ignore
                     // kept open: closing any descriptor of the file would drop the process's POSIX locks on it
                     dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
-                    if dropFd >= 0 && Environment.GetEnvironmentVariable "PACE" <> "0" then Vfs.pace dropFd
             let mutable log = -1
             let mutable done' = -1
             let t0 = Diagnostics.Stopwatch.GetTimestamp()

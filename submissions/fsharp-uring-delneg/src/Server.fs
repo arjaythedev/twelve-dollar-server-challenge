@@ -28,16 +28,6 @@ let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
 let private lifoAge = uint32 (env "LIFOAGE" 8000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
-/// Admission: the loop takes new connections only while no request has waited admitMs or longer. While one has, a
-/// socket filter on the listeners drops incoming SYNs (and nothing else: a handshake under way completes and is
-/// accepted), and the client's TCP sends its SYN again.
-let admitOn = env "ADMIT" 1 = 1
-let private admitMs = uint32 (env "ADMITMS" 10)
-let private admitMaxMs = uint32 (env "ADMITMAX" 2000) // accepting resumes after this long whatever waits
-let private admitHoldMs = uint32 (env "ADMITHOLD" 100) // and not sooner than this
-// It also stops while the CPU the loop runs on has been idle less than admitIdle percent of the last 200 ms
-// (/proc/stat, looked at every 50 ms): a loop that is only just keeping up has nothing to spare for a burst.
-let private admitIdle = int64 (env "ADMITIDLE" 5)
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
@@ -351,89 +341,6 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable stPasses = 0L
     let mutable stAns = 0L
     let mutable stYields = 0L
-    let mutable admitOpen = true
-    let mutable admitClosedAt = 0u
-    // idle and total ticks of the loop's CPU at the last four looks, 50 ms apart
-    let cpuIdle = Array.zeroCreate<int64> 4
-    let cpuTotal = Array.zeroCreate<int64> 4
-    let cpuOf = Array.create 4 -1
-    let mutable cpuAt = 0u
-    let mutable cpuN = 0
-    let mutable lowIdle = false
-    let mutable statFd = -2
-    let statBuf = NativeMemory.Alloc(unativeint 8192) |> NativePtr.ofVoidPtr<byte>
-    /// Sets lowIdle from the "cpuN" line of /proc/stat for the CPU this thread is on.
-    let lookIdle () =
-        if statFd = -2 then statFd <- Native.``open`` ("/proc/stat\000"B, 0x80000)
-        let cpu = Native.sched_getcpu ()
-        let n = if statFd >= 0 && cpu >= 0 then int (Native.pread (statFd, NativePtr.toNativeInt statBuf, unativeint 8192, 0L)) else 0
-        let mutable i = 0
-        let mutable found = false
-        // the line "cpu<cpu> user nice system idle iowait irq softirq steal ..."
-        while not found && i + 4 < n do
-            if NativePtr.get statBuf i = 'c'B && NativePtr.get statBuf (i + 1) = 'p'B && NativePtr.get statBuf (i + 2) = 'u'B then
-                let mutable j = i + 3
-                let mutable v = -1
-                while j < n && NativePtr.get statBuf j >= '0'B && NativePtr.get statBuf j <= '9'B do
-                    v <- (max v 0) * 10 + int (NativePtr.get statBuf j - '0'B)
-                    j <- j + 1
-                if v = cpu then
-                    found <- true
-                    let mutable idle = 0L
-                    let mutable total = 0L
-                    let mutable k = 0
-                    while k < 8 && j < n && NativePtr.get statBuf j <> '\n'B do
-                        while j < n && NativePtr.get statBuf j = ' 'B do j <- j + 1
-                        let mutable x = 0L
-                        while j < n && NativePtr.get statBuf j >= '0'B && NativePtr.get statBuf j <= '9'B do
-                            x <- x * 10L + int64 (NativePtr.get statBuf j - '0'B)
-                            j <- j + 1
-                        total <- total + x
-                        if k = 3 || k = 4 then idle <- idle + x
-                        k <- k + 1
-                    let slot = cpuN &&& 3 // holds the look of 200 ms ago
-                    lowIdle <- cpuOf.[slot] = cpu && total > cpuTotal.[slot] && (idle - cpuIdle.[slot]) * 100L < admitIdle * (total - cpuTotal.[slot])
-                    cpuIdle.[slot] <- idle
-                    cpuTotal.[slot] <- total
-                    cpuOf.[slot] <- cpu
-                    cpuN <- cpuN + 1
-            while i < n && NativePtr.get statBuf i <> '\n'B do i <- i + 1
-            i <- i + 1
-        if not found then lowIdle <- false
-    // classic BPF on a TCP socket sees the segment from its TCP header: byte 13 holds the flags
-    let synFilter =
-        let code = [| 0x30us, 0uy, 0uy, 13u // A = flags
-                      0x54us, 0uy, 0uy, 0x12u // A &= SYN | ACK
-                      0x15us, 0uy, 1uy, 0x02u // SYN alone?
-                      0x06us, 0uy, 0uy, 0u // drop
-                      0x06us, 0uy, 0uy, 0xFFFFFFFFu |] // pass
-        let p = Marshal.AllocHGlobal(16 + 8 * code.Length)
-        code |> Array.iteri (fun i (c, jt, jf, k) ->
-            let q = p + 16n + nativeint (8 * i)
-            wr16 q c
-            wr8 (q + 2n) jt
-            wr8 (q + 3n) jf
-            Marshal.WriteInt32(q + 4n, int k))
-        Marshal.WriteInt64(p, int64 code.Length) // struct sock_fprog: len, then the pointer
-        Marshal.WriteIntPtr(p + 8n, p + 16n)
-        p
-    /// segments the listeners' filter has dropped (SO_MEMINFO's drop count), for the log
-    let synDrops () =
-        let p = Marshal.AllocHGlobal 64
-        let mutable n = 0L
-        for fd in listenFds do
-            let mutable len = 64
-            if Native.getsockopt (fd, 1, 55, p, &len) = 0 && len >= 36 then n <- n + int64 (uint32 (Marshal.ReadInt32(p + 32n)))
-        Marshal.FreeHGlobal p
-        n
-    let admit (isOpen: bool) =
-        for fd in listenFds do
-            if isOpen then
-                let mutable z = 0
-                Native.setsockopt (fd, 1, 27, &z, 4) |> ignore // SO_DETACH_FILTER
-            else Native.setsockoptPtr (fd, 1, 26, synFilter, 16) |> ignore // SO_ATTACH_FILTER
-    let mutable stAdmitCloses = 0L
-    let mutable stAdmitClosedMs = 0L
     let mutable stWalk = 0L
     let mutable stCommitUs = 0L
     let mutable stCommitMax = 0L
@@ -574,7 +481,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         ckRide <- false
         if res = 8 then
             if ck.Rc = 0 && ck.Backfilled >= 0 then ckBackfilled <- ck.Backfilled
-            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b pace %d/%d %d ms admit closed %d times %d ms, %d SYNs dropped" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold Vfs.paceHigh Vfs.paceLooks Vfs.paceMs stAdmitCloses stAdmitClosedMs (synDrops ())
+            if ckLog then eprintfn "ckpt wall %.1f ms cpu %.1f ms rc %d backfilled %d frames %d hold %b" (float ck.WallUs / 1000.0) (float ck.CpuUs / 1000.0) ck.Rc ck.Backfilled Db.walFrames ckHold
             if holdRem > 0 && not ckHold && ck.Rc = 0 && Db.walFrames >= ckHoldAt then
                 // past holdMax, hold anyway: passes aren't catching up with the writes
                 if Db.walFrames - ckBackfilled <= holdRem || Db.walFrames >= holdMax then
@@ -1326,22 +1233,6 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                         if conns.[cid].Fl &&& (LIVE ||| RECV) = LIVE then armRecv cid
                     rs.RqLen <- rs.RqLen - n
                     nrearm <- nrearm - n
-            if admitOn then
-                if admitIdle > 0L && passMs - cpuAt >= 50u then
-                    cpuAt <- passMs
-                    lookIdle ()
-                let waiting = nreq > reqHead
-                if admitOpen then
-                    if lowIdle || (waiting && passMs - reqs.[reqHead].Ms >= admitMs) then
-                        // behind on the connections it has, or about to be: no new ones until it has caught up
-                        admitOpen <- false
-                        admitClosedAt <- passMs
-                        stAdmitCloses <- stAdmitCloses + 1L
-                        admit false
-                elif (not waiting && not lowIdle && passMs - admitClosedAt >= admitHoldMs) || passMs - admitClosedAt >= admitMaxMs then
-                    admitOpen <- true
-                    stAdmitClosedMs <- stAdmitClosedMs + int64 (passMs - admitClosedAt)
-                    admit true
             if not (acceptArmedAnywhere ()) then
                 let q = acceptTarget ()
                 if q >= 0 then armAccept q
@@ -1351,7 +1242,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             Pages.tick t
 
 /// Listeners: `count` SO_REUSEPORT sockets on host:port, each with its own accept queue (somaxconn deep).
-let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) (backlog: int) =
+let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) =
     [| for _ in 1 .. count do
            let fd = Native.socket (2, 1 ||| 0x80000, 0) // AF_INET, SOCK_STREAM | SOCK_CLOEXEC
            if fd < 0 then failwithf "socket: errno %d" (Native.errno ())
@@ -1372,5 +1263,10 @@ let listen (ip: Net.IPAddress) (port: int) (count: int) (deferAccept: int) (back
                wr8 (sa + 4n + nativeint i) a.[i]
            if Native.bind (fd, sa, 16) < 0 then failwithf "bind %O:%d: errno %d" ip port (Native.errno ())
            Marshal.FreeHGlobal sa
-           if Native.listen (fd, backlog) < 0 then failwithf "listen: errno %d" (Native.errno ())
+           if Native.listen (fd, 65535) < 0 then failwithf "listen: errno %d" (Native.errno ())
+           // TCP_QUICKACK 0 on the listener (after listen()); accepted sockets inherit it, so a connection's first
+           // request is acknowledged by its response, as every later one is, instead of by a bare ACK of its own.
+           if env "QUICKACK" 0 = 0 then
+               let mutable zero = 0
+               Native.setsockopt (fd, 6, 12, &zero, 4) |> ignore // TCP_QUICKACK
            yield fd |]

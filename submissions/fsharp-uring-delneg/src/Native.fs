@@ -39,6 +39,24 @@ extern int eventfd(uint32 initval, int flags)
 extern nativeint write(int fd, nativeint buf, unativeint count)
 
 [<DllImport(L, SetLastError = true)>]
+extern nativeint read(int fd, nativeint buf, unativeint count)
+
+[<DllImport(L, SetLastError = true)>]
+extern nativeint pread(int fd, nativeint buf, unativeint count, int64 off)
+
+[<DllImport(L, SetLastError = true)>]
+extern nativeint pwrite(int fd, nativeint buf, unativeint count, int64 off)
+
+[<DllImport(L, SetLastError = true)>]
+extern int mprotect(nativeint addr, unativeint len, int prot)
+
+[<DllImport(L, SetLastError = true)>]
+extern nativeint mremap(nativeint addr, unativeint oldLen, unativeint newLen, int flags, nativeint newAddr)
+
+[<DllImport(L, SetLastError = true)>]
+extern int munmap(nativeint addr, unativeint len)
+
+[<DllImport(L, SetLastError = true)>]
 extern int setrlimit(int resource, uint64[] rlim)
 
 [<DllImport(L, SetLastError = true)>]
@@ -53,11 +71,20 @@ extern int setpriority(int which, int who, int prio)
 [<DllImport(L)>]
 extern int gettid()
 
+[<DllImport(L)>]
+extern int usleep(uint32 usec)
+
 [<DllImport(L, SetLastError = true)>]
 extern int ``open``(byte[] path, int flags)
 
+[<DllImport(L, EntryPoint = "open", SetLastError = true)>]
+extern int openAt(nativeint path, int flags)
+
 [<DllImport(L)>]
 extern int posix_fadvise(int fd, int64 offset, int64 len, int advice)
+
+[<DllImport(L, SetLastError = true)>]
+extern int fdatasync(int fd)
 
 [<DllImport(L)>]
 extern int clock_gettime(int clk, int64[] ts)

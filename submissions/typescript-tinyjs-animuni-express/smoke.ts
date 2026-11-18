@@ -21,7 +21,7 @@ const token = message + "." + createHmac("sha256", secret).update(message).diges
 
 async function withServer(sqlitePath: string, run: (url: string) => Promise<void>) {
   const child = Bun.spawn([process.execPath, cli, "serve", "--port", "0"], {
-    env: { ...process.env, SQLITE_PATH: sqlitePath, JWT_SECRET: secret },
+    env: { ...process.env, HOST: "127.0.0.1", PORT: "0", SQLITE_PATH: sqlitePath, JWT_SECRET: secret },
     stdout: "pipe",
   });
   try {
@@ -43,6 +43,10 @@ try {
     const post = (route: string, body?: string, authorization = "Bearer " + token) =>
       fetch(url + prefix + route, { method: "POST", headers: { authorization }, body });
     assert.equal((await get("/health")).status, 200);
+    const head = await fetch(url + prefix + "/feed", { method: "HEAD" });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+    assert.equal((await fetch(url + prefix + "/feed", { method: "POST" })).status, 405);
     if (prefix) assert.equal((await fetch(url + "/health")).status, 404);
     assert.deepEqual(await (await get("/")).json(), { error: "not found" });
     assert.deepEqual(await (await get("/unknown")).json(), { error: "not found" });

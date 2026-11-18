@@ -3,6 +3,8 @@
 # and compiles it together with the server as one translation unit, profile-guided.
 #
 #   PGO=0 bash build.sh     plain build (default: instrumented build, training run, final build)
+#   SHA256_ROLLING16=0 bash build.sh    previous SHA-256 compression function
+#   LTO=1 bash build.sh    experimental LTO on top of the existing PGO build
 set -euo pipefail
 cd "$(dirname "$0")"
 SQLITE=sqlite-amalgamation-3540100
@@ -34,13 +36,30 @@ CFLAGS="-std=gnu11 -O3 $ARCH -fno-plt -fno-semantic-interposition -fno-stack-pro
 case "$(uname -m)" in aarch64|arm64) CFLAGS=${CFLAGS//-mprefer-vector-width=256/}; CFLAGS=${CFLAGS//-fcf-protection=none/} ;; esac
 [ "${PROFILE:-0}" = 1 ] && CFLAGS="${CFLAGS//-fomit-frame-pointer/} -g -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
 LDFLAGS="-static -lpthread -lm"
+# Keep potentially toolchain-sensitive LTO opt-in until a controlled A/B result.
+CFLAGS="$CFLAGS -DSHA256_ROLLING16=${SHA256_ROLLING16:-1}"
+if [ "${LTO:-0}" = 1 ]; then
+  CFLAGS="$CFLAGS -flto"
+  LDFLAGS="-flto $LDFLAGS"
+fi
+
+# Test BOTH the previous and experimental SHA schedules on each build, not
+# only the currently selected path.  In particular, exercise multi-block and
+# chunked updates as well as RFC 4231 HMAC required by JWT verification.
+for mode in 0 1; do
+  $CC -std=gnu11 -O2 -Isrc -DSHA256_ROLLING16="$mode" src/test_sha256.c -o "bin/test-sha256-$mode"
+  "bin/test-sha256-$mode"
+  rm -f "bin/test-sha256-$mode"
+done
 
 $CC -std=gnu11 -O2 -I src -o bin/train src/train.c
 # Both passes compile to the same object name: the profile's file name is derived from it.
 if [ "${PGO:-1}" = 1 ]; then
   echo "== instrumented build"
   rm -rf pgo && mkdir -p pgo
-  $CC $CFLAGS -fprofile-generate -fprofile-update=single -fprofile-dir=pgo -c src/server.c -o bin/server.o
+  # prefer-atomic: the checkpoint thread runs SQLite during training too, and racing counters can
+  # leave a profile the optimized build rejects ("corrupted value profile")
+  $CC $CFLAGS -fprofile-generate -fprofile-update=prefer-atomic -fprofile-dir=pgo -c src/server.c -o bin/server.o
   $CC -fprofile-generate -o bin/server.inst bin/server.o $LDFLAGS
   echo "== training"
   if bash src/train.sh bin/server.inst bin/train; then

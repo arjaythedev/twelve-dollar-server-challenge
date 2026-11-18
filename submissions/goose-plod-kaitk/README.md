@@ -3,15 +3,15 @@
 The feed API written as an ordinary [Plod](https://github.com/kaitk/plod) application:
 routes, a bearer check, and SQL with bound parameters, on the framework's own HTTP
 server. There is no hand-written event loop, request parser, or B-tree code here, and
-no C: `app.goose` is the whole application, about 250 lines.
+no C: `app.goose` is the whole application, about 500 lines with its comments.
 
 | | |
 |---|---|
 | Language | [Goose](https://github.com/aardappel/goose) release `v2026.4`, which compiles to C; the official release, checked against its SHA-256 by `install.sh` |
-| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.12`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.19` (io_uring) |
+| Framework | [Plod](https://github.com/kaitk/plod) `v0.5.13`, a REST framework on the Actix model, on [goose-http](https://github.com/kaitk/goose-http) `v0.5.20` (io_uring) |
 | SQLite | [goose-sqlite](https://github.com/kaitk/goose-sqlite) `v0.0.4`, which builds SQLite 3.54.1's amalgamation, unmodified, into the program |
 | JWT | Plod's HS256 verifier, over [goose-hash](https://github.com/kaitk/goose-hash) `v0.0.4` |
-| C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`) |
+| C compiler | Ubuntu 24.04's gcc, at `goose build`'s defaults (`-O2`); SQLite's amalgamation from a profile (PGO) |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` itself (`0.0.0.0:80` on the benchmark box) |
 | Needs | Linux 6.1+ for goose-http's io_uring loop |
 
@@ -26,10 +26,15 @@ no C: `app.goose` is the whole application, about 250 lines.
   same core. goose-sqlite's `Conn` prepares each statement once and keeps it, and a
   query is its SQL and its values:
   `sqlite::query(db, ONE_POST, id) { r => post(out, r); }`.
-- **Each write commits before its response.** `INSERT ... RETURNING` for a post, and
-  `INSERT ... SELECT ... ON CONFLICT DO NOTHING` for a like, each its own transaction,
-  in WAL with `synchronous=NORMAL` (rule 6). A like that changes nothing is a repeat,
-  or a post that doesn't exist, which one more lookup tells apart.
+- **Writes commit together, each answered after its commit** (rule 6), in WAL with
+  `synchronous=NORMAL`. `INSERT ... RETURNING` for a post, and `INSERT ... SELECT ...
+  ON CONFLICT DO NOTHING` for a like, go into the open transaction, which the write
+  begins if none is open. The route then calls `plod::after_pass`, which calls it again
+  once the worker has handled the rest of its pass of events. The first of those calls
+  in a pass commits, and each write answers 201, or 500 if the commit failed. Reads
+  in the same pass see the writes before the commit, as in one transaction a pass. A
+  like that changes nothing is a repeat, or a post that doesn't exist, which one more
+  lookup tells apart; it is answered at once.
 - **One process.** Every k6 user keeps its connection open, and a process can hold
   only `LimitNOFILE` descriptors, 65,535 on the box. goose-http's `ring_direct` keeps
   connections as io_uring direct descriptors instead, in rings of 65,535 slots that
@@ -38,20 +43,160 @@ no C: `app.goose` is the whole application, about 250 lines.
   page caches.
 - **Batched waits.** `ring_batch_us: 1000` lets a wait hold up to 1 ms for more
   completions, so the worker wakes once for many requests, not once each.
+- **1,024 receive buffers.** Each connection with data in a pass takes one of the
+  ring's 4 KB receive buffers. With goose-http's default of 64, the other
+  connections' receives end with `ENOBUFS` and are queued again, pass after pass, so
+  CPU climbs with the number of connections ready at once. `ring_buffers: 1024` costs
+  4 MB.
 - **The connection** is opened `NO_MUTEX`, since only its worker uses it: a feed
   request reads 100 columns, and each read would otherwise take a lock.
+- **The feed in three range reads.** The plain query seeks into `posts` and into
+  `likes_post_id_idx` once for each of the twenty posts. Instead, the newest ids come
+  from `posts_created_at_id_idx` alone; posts are created in id order, so those ids
+  are one run of consecutive numbers, and one `BETWEEN` scan of `posts` joined to
+  `users` and one grouped `BETWEEN` scan of the likes index read the rest. When the ids
+  aren't one run, or the rows don't match them, the plain query answers. Both are SQL
+  through prepared statements, and the JSON is byte for byte the same.
+- **No foreign-key enforcement** on the worker's connection: a post's author and a
+  like's user come from the token, which SPEC.md says isn't looked up, and the like's
+  `INSERT` checks the post itself, so enforcement only adds seeks to each write.
 - **The single post's query** reads the author with a subquery, not a join. With the
   join, SQLite's constant propagation reads the bound id while planning, and
   re-prepares the statement for every request.
-- **Pragmas**: `locking_mode = EXCLUSIVE`, as the one process holds the database
-  alone: its lock is taken once, and the WAL index lives in memory, not in a shared
-  file. `cache_size` 16 MB, which leaves page reads at 0.03 a request, and
-  `wal_autocheckpoint` 16,000 pages. No `mmap`: with it, every page read looks the
-  page up in the WAL index, which was a third of the instructions in a profile.
+- **A checkpoint lane.** Copying the WAL back into the database waits on fsyncs, and
+  on the worker that wait stalls every connection. A goose-http lane, a thread with
+  its own connection, runs a PASSIVE checkpoint every 1,024 writes; PASSIVE never
+  holds up the worker's writes. Writes keep arriving while it runs, so it never
+  copies the whole WAL back, and the WAL can't start over.
+- **A checkpoint hold.** After 4,096 writes since the WAL last started over, the
+  write commits the open transaction and asks the lane for a checkpoint. It and the
+  writes after it wait, at most 250 ms, before they write; reads go on. With no
+  commits arriving, the checkpoint copies the whole WAL back, the waiting writes run,
+  and the first of them starts the WAL over. The worker checkpoints the WAL itself only
+  at 65,536 pages (`wal_autocheckpoint`), if holds fall behind. Before the hold, the
+  worker checkpointed at 16,000 pages, with fsyncs on its loop, and those were the
+  p99.
+- **The `unix-excl` VFS.** Both connections open the database as a `file:` URI on
+  SQLite's `unix-excl` VFS, as the one process holds the database alone: the file is
+  locked once, and the two connections share the WAL index in memory, with no `-shm`
+  file and no file locks per transaction.
+- **Pragmas**: `cache_size` 16 MB on the worker, which leaves page reads at 0.03 a
+  request. No `mmap`: with it, every page read looks the page up in the WAL index,
+  which was a third of the instructions in a profile.
+- **SQLite built from a profile.** `build.sh` first builds `train.goose` with only
+  `sqlite3.c` instrumented. The trainer makes its own database in the challenge's
+  schema (5,000 users, 50,000 posts, 400,000 likes), since the seed isn't promised at
+  build time, and serves `app.goose`'s routes in-process through `plod::serve_one`,
+  40,000 user loops in `bench/load.js`'s mix, writes and checkpoint holds included.
+  The server is then built with gcc's `-fprofile-use` on `sqlite3.c`. `pgo-gcc` is
+  the compiler `build.sh` passes `goose build`: it adds the flags for `sqlite3.c`
+  only, from two folders, as Goose keeps each compiler path's objects apart.
 - **JSON strings** go through `http::json_string`, which finds what to escape with
   std's `find_any`, not a byte-at-a-time loop.
 
 ## Measured
+
+On the board, the first version held 115,000 users, and the second, with the
+buffers, the lane, and the range reads below, 185,000. At 195,000 the second failed
+the hold on p99 (1.13 s), with no errors and the CPU at about 74%. Entries above it
+fail the same way at 72% to 88%: with fewer µs a request, and with a shorter tail
+from writes, which commit together and keep the WAL's checkpoints off the loop.
+
+Group commit and the hold, against the second version, on the x86-64 machine
+described below, at 10,000 users (about 16,400 requests and 1,200 writes a second),
+three alternating rounds each:
+
+| Build | CPU | p95 | p99 | max | µs a request |
+|---|---|---:|---:|---:|---:|
+| second version | 1 | 6.5 to 7.2 ms | 39.6 to 43.1 ms | 110 to 201 ms | 30.8 to 31.3 |
+| and group commit | 1 | 5.2 to 6.5 ms | 27.0 to 43.8 ms | 115 to 244 ms | 30.3 to 31.1 |
+| and the hold (`start.sh`) | 1 | 4.6 to 4.9 ms | 7.5 to 8.3 ms | 81 to 196 ms | 30.2 to 30.8 |
+| second version | 0.65 | 11.1 to 17.2 ms | 37.0 to 49.4 ms | 82 to 130 ms | 30.6 to 30.9 |
+| and group commit | 0.65 | 6.5 to 8.1 ms | 29.0 to 37.0 ms | 68 to 141 ms | 30.1 to 30.7 |
+| and the hold (`start.sh`) | 0.65 | 5.1 to 5.2 ms | 8.9 to 17.4 ms | 73 to 163 ms | 30.0 to 30.3 |
+| rust-iouring-kensac | 1 | 3.7 ms | 7.0 ms | | 27.6 |
+| rust-iouring-kensac | 0.65 | 3.4 to 4.3 ms | 5.8 to 13.4 ms | | 27.1 to 27.6 |
+
+The hold takes p99 to kensac's range at both CPU limits, in every round. Group commit
+alone is within the spread: at this rate a 1 ms pass holds about one write. The CPU a
+request is about the same as before, so the gain on the board is the tail, not the
+throughput.
+
+SQLite from a profile, against the same build without it, the same setup, three
+alternating rounds each:
+
+| Build | CPU | p95 | p99 | max | µs a request |
+|---|---|---:|---:|---:|---:|
+| the hold | 1 | 4.9 to 5.1 ms | 8.2 to 11.4 ms | 128 to 268 ms | 30.5 to 30.6 |
+| and PGO (`start.sh`) | 1 | 5.0 ms | 9.3 to 9.9 ms | 100 to 240 ms | 30.5 to 30.6 |
+| the hold | 0.65 | 5.3 to 6.1 ms | 12.1 to 52.7 ms | 74 to 170 ms | 30.4 to 30.7 |
+| and PGO (`start.sh`) | 0.65 | 5.1 to 6.0 ms | 8.9 to 48.4 ms | 78 to 165 ms | 30.3 to 30.7 |
+
+Under callgrind with its cache and branch simulation (300 users, 40 s, two runs
+each), PGO gives about 1% fewer instruction-cache misses and 4% fewer mispredicted
+conditional branches a request; instructions a request vary 3% from run to run, and
+the two builds overlap. The 5800X3D's 96 MB L3 hides most of those misses, so the
+rounds here are level; the box, with a smaller cache, may gain more.
+
+The first version, without `ring_buffers` or the lane, held 115,000 users on the
+board; it ran at half the CPU during the hold, and at 120,000 failed at 97% with
+timeouts. Past the CPU it has, connections queue, many are ready in each pass, and
+64 buffers leave the rest re-queuing their receives.
+
+On x86-64: an AMD Ryzen 7 5800X3D, Ubuntu 26.04 in WSL2 on Linux
+6.18.58.1-microsoft-standard-WSL2, Docker 29.8.2; the server in a container of 2 GB,
+k6 1.3.0 in another, `bench/load.js` with its think times divided by 20, 60 s after a
+15 s ramp, the three builds alternating, three rounds; kensac once at each load.
+With the server held to 0.4 CPU so that k6 saturates it, at 10,000 users:
+
+| Build | req/s | p95 | p99 | max | µs a request |
+|---|---:|---:|---:|---:|---:|
+| first version, 64 buffers | 9,897 to 9,931 | 529 to 551 ms | 623 to 878 ms | 853 to 2,493 ms | 35.1 to 35.2 |
+| 1,024 buffers | 10,982 to 11,181 | 413 to 432 ms | 501 to 532 ms | 585 to 765 ms | 31.2 to 31.7 |
+| 1,024 buffers and the lane (`start.sh`) | 11,274 to 11,405 | 331 to 348 ms | 366 to 475 ms | 452 to 629 ms | 30.9 to 31.4 |
+| rust-iouring-kensac | 13,454 | 184 ms | 204 ms | 286 ms | 25.6 |
+
+Below capacity, at 1 CPU and 4,000 users (6,500 requests a second):
+
+| Build | req/s | p95 | p99 | max | µs a request |
+|---|---:|---:|---:|---:|---:|
+| first version, 64 buffers | 6,557 to 6,563 | 1.7 ms | 116 to 124 ms | 218 to 237 ms | 32.3 to 32.6 |
+| 1,024 buffers | 6,544 to 6,563 | 1.7 ms | 115 to 123 ms | 237 to 254 ms | 32.3 to 32.6 |
+| 1,024 buffers and the lane (`start.sh`) | 6,586 to 6,591 | 1.6 ms | 2.5 to 2.7 ms | 58 to 82 ms | 32.5 to 32.7 |
+| rust-iouring-kensac | 6,588 | 1.4 ms | 1.8 ms | 28 ms | 27.1 |
+
+The buffers give 12% more requests a second past capacity, at 11% less CPU a
+request, and change nothing below it. The lane takes the checkpoint's wait off the
+worker: below capacity, that wait was the whole p99.
+
+The feed's range reads and no foreign keys, against the build before them, the same
+setup, three alternating rounds each:
+
+| Build | Load | req/s | p95 | p99 | µs a request | user |
+|---|---|---:|---:|---:|---:|---:|
+| buffers and the lane | 0.4 CPU, 10,000 users | 10,948 to 11,414 | 323 to 408 ms | 343 to 445 ms | 30.9 to 32.3 | 8.1 to 9.0 |
+| and the range reads (`start.sh`) | 0.4 CPU, 10,000 users | 11,670 to 12,018 | 277 to 312 ms | 297 to 341 ms | 29.1 to 30.1 | 5.4 to 6.9 |
+| buffers and the lane | 1 CPU, 4,000 users | 6,594 to 6,599 | 1.6 ms | 2.5 to 4.7 ms | 32.4 to 33.7 | 10.3 to 10.4 |
+| and the range reads (`start.sh`) | 1 CPU, 4,000 users | 6,581 to 6,588 | 1.5 ms | 2.4 to 2.5 ms | 30.6 to 30.7 | 8.4 to 8.5 |
+
+The range reads take a fifth off the user time a request; the feed is close to half
+the requests. Without foreign keys alone, the CPU a request was level with them.
+
+In Docker on an M1 Pro (Linux arm64), the server held to 0.4 CPU so that k6
+saturates it (20,000 users, think times divided by 10, 60 s after a 15 s ramp), two
+alternating runs each, before the lane:
+
+| Build | req/s | p95 | p99 | µs a request |
+|---|---:|---:|---:|---:|
+| 64 buffers | 13,084 to 13,110 | 459 to 634 ms | 693 to 1,075 ms | 24.9 to 25.3 |
+| 1,024 buffers | 14,805 to 15,021 | 200 to 261 ms | 329 to 393 ms | 21.7 to 22.2 |
+
+Below saturation the two are level: at 1 CPU and 8,000 requests a second, p99 11 to
+33 ms against 10 to 26 ms, and 21.5 to 21.7 µs a request against 21.3 to 23.3,
+three runs each. On the Mac the lane was level with the buffers alone at both
+loads, and cut p99 in half only with fsyncs slowed to 20 ms.
+
+The measurements below are of the first version, at 4,000 users.
 
 In Docker on an M1 Pro (Linux arm64), the server in a container of 1 CPU and 2 GB, k6
 in another, with `bench/load.js`'s think times divided by 20 so that 4,000 users make
@@ -75,8 +220,8 @@ Kernel time there is mostly Docker's bridge, the same for both. Most of the entr
 time is SQLite running the SQL, about 7.6 µs a request. The p99 comes from writes:
 without them it is 2 ms.
 
-These are not the box's numbers. Scaled by the ratio to kensac, the entry estimates
-between 225,000 and 260,000 users.
+These are not the box's numbers. The box runs the entry at about 36 µs a request
+against kensac's 25, a wider gap than here.
 
 ## Running it
 

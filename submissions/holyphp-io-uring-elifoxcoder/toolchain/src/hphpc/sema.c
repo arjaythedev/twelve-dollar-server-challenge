@@ -1983,6 +1983,10 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             /* element assignment on collections is allowed by runtime;
              * PHP-style: elements accept any value (arrays are dynamic) */
             if (tgt->kind == EX_INDEX) tt = NULL; /* skip element-type check */
+        } else if (tgt->kind == EX_DEREF) {
+            tt = check_expr(sc, tgt);
+            if (e->u.assign.op.kind != T_ASSIGN)
+                sema_error(&tgt->tok, "raw pointer stores currently require plain assignment");
         } else {
             tt = check_expr(sc, tgt);
             sema_error(&tgt->tok, "invalid assignment target");

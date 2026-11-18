@@ -1180,9 +1180,13 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
     {
         static const struct { const char *name; const char *params; char ret; } T[] = {
             {"iarr_new",          "i",   'i'},
+            {"iarr_new_uninit",   "i",   'i'},
             {"iarr_release",      "i",   'b'},
             {"iarr_get",          "ii",  'i'},
             {"iarr_set",          "iii", 'b'},
+            {"iarr_get_fast",     "ii",  'i'},
+            {"iarr_set_fast",    "iii", 'b'},
+            {"iarr_data_ptr",    "i",   'i'},
             {"iarr_len",          "i",   'i'},
             {"epoll_wait_iarr2",  "iii", 'b'},
             {"sb_new",           "",    'i'},
@@ -1210,7 +1214,9 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
             {"bt_next",          "i",   'i'},
             {"bt_seek",          "ii",  'i'},
             {"bt_multi_seek",    "iii", 'i'},
+            {"bt_tail",          "ii",  'i'},
             {"bt_multi_payloads", "ii", 'b'},
+            {"bt_multi_keys",    "ii",  'i'},
             {"bt_multi_release", "i",   'b'},
             {"bt_rowid",         "i",   'i'},
             {"bt_payload_ptr",   "i",   'i'},
@@ -1234,6 +1240,9 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
             {"strlen",           "s",   'i'},
             {"str_at_eq",        "siis", 'b'},
             {"str_to_int",       "s",   'i'},
+            {"str_to_int_range", "sii", 'i'},
+            {"http_request_bounds", "s", 'i'},
+            {"str_find_range", "ssi", 'i'},
             {"strtolower",       "s",   's'},
             {"trim",             "s",   's'},
             {"substr",           "sii", 's'},
@@ -2310,6 +2319,15 @@ static void emit_assign(Codegen *g, Expr *e, Buf *dst) {
         }
         free((void *)os); free((void *)vs);
         free(ix.data); free(o.data); free(v.data);
+        return;
+    }
+    if (tgt->kind == EX_DEREF && op == T_ASSIGN) {
+        Buf lval, value;
+        buf_init(&lval); buf_init(&value);
+        emit_expr(g, tgt, &lval);
+        emit_to_type(g, e->u.assign.value, tgt->type, &value);
+        buf_printf(dst, "(%s = %s)", buf_take(&lval), buf_take(&value));
+        free(lval.data); free(value.data);
         return;
     }
     if (tgt->kind == EX_FIELD) {

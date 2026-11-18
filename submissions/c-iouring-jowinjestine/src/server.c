@@ -33,6 +33,9 @@ static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
  * Experimental: 0 disables it. Does not interrupt a SQLite transaction or send. */
 static unsigned backlog_slice_us = 0;
 static uint64_t sliced_ready_passes;
+/* Opt-in stage timings for locating CPU/SQLite/event-loop stalls. */
+static int profile_stages;
+static uint64_t prof_ready_ns, prof_io_ns, prof_commit_ns, prof_flush_ns, prof_batches;
 static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
@@ -770,6 +773,12 @@ static void stats(uint64_t dt_ns) {
       (unsigned long long)(MG.cg_current >> 20), (unsigned long long)(MG.cg_limit >> 20),
       (unsigned long long)(MG.cg_sock >> 20), MG.tcp_mem_pages,
       (unsigned long long)MG.changes, (unsigned long long)MG.samples);
+  if (profile_stages) {
+    fprintf(stderr, " stage_profile batches=%llu ready_ms=%.2f io_ms=%.2f commit_ms=%.2f flush_ms=%.2f (totals over interval)\n",
+      (unsigned long long)prof_batches, (double)prof_ready_ns / 1e6, (double)prof_io_ns / 1e6,
+      (double)prof_commit_ns / 1e6, (double)prof_flush_ns / 1e6);
+    prof_ready_ns = prof_io_ns = prof_commit_ns = prof_flush_ns = prof_batches = 0;
+  }
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -1072,6 +1081,7 @@ int main(int argc, char **argv) {
   if (accept_stop < 16) accept_stop = 16;
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
+  profile_stages = env_long("PROFILE_STAGES", 0) != 0;
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
   poll_idle = env_long("IDLE_POLL", 0) != 0;
@@ -1145,15 +1155,19 @@ int main(int argc, char **argv) {
     writes_ok = !A.db.writes_held;
     if (writes_ok && db_begin_write(&A.db) < 0) writes_ok = 0; /* the tail thread is restarting the log: this batch reads only */
     answers_left = answers_per_pass;
+    uint64_t tp0 = profile_stages ? now_ns() : 0;
     run_ready(); /* oldest first: what earlier batches read, before this batch's arrivals can take the answer slots */
+    uint64_t tp1 = profile_stages ? now_ns() : 0;
     unsigned ncq = reap_all();
     ncq += read_rounds();
     if (writes_ok && nheld) release_held();
     uint64_t tc = now_ns();
+    if (profile_stages) { prof_ready_ns += tp1 - tp0; prof_io_ns += tc - tp1; }
     int failed = db_commit(&A.db) < 0;
     uint64_t tc2 = now_ns();
     if (tc2 - tc > S.max_commit_ns) S.max_commit_ns = tc2 - tc;
     flush_replies(failed);
+    if (profile_stages) { prof_commit_ns += tc2 - tc; prof_flush_ns += now_ns() - tc2; prof_batches++; }
     A.db.wrote = 0;
     db_tick(&A.db); /* no transaction is open: the only point where a hold starts or ends */
     for (unsigned i = 0; i < NR; i++) ring_buf_publish(&R[i].r);

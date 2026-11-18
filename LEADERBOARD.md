@@ -1320,6 +1320,10 @@ read transaction instead of per request) held **300,000** at 81 % CPU (28,417 re
 held **280,000** at 75 % CPU (26,737 req/s, p95 23.7 / p99 134.1 ms, 0 errors, 1,403 MB; 290k failed the 2-minute probe
 on p99 1.20 s, 300k on p99 6.96 s, 320k on p99 3.65 s), below #437's 310,000, so #516 is not merged. Its head moved to
 `9707a46` during the run; that commit is queued.
+#516's next head (`9707a46`, 2026-11-18: `da7cf01` with the old end's share of the backlog from 20 s and `TCP_QUICKACK`
+set off again after a late answer) held **295,000** at 78 % CPU (28,009 req/s, p95 22.6 / p99 148.1 ms, 0 errors, 802 MB;
+the 310k 5-minute hold failed on p99 2.15 s, 320k failed the 2-minute probe on p99 3.72 s), below #437's 310,000, so
+#516 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

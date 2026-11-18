@@ -18,6 +18,9 @@ enum class ReadState : uint8_t {
 enum class WriteState : uint8_t {
   Idle,
   Sending,
+  /* 数据已经全部交给内核（零拷贝发送返回了完整长度），但内核可能还在读这块缓冲：
+   * 必须等 IORING_CQE_F_NOTIF 到达才能把它还回池里。 */
+  Flushed,
 };
 
 struct Connection {
@@ -32,6 +35,7 @@ struct Connection {
   bool answered = false;
   bool held = false;
   bool ready_queued = false;
+  bool zbuf_done = false; /* 零拷贝发送的 NOTIF 已到 */
   uint32_t sent = 0;
   uint32_t last_active = 0;
   app::ByteBuf* out = nullptr;

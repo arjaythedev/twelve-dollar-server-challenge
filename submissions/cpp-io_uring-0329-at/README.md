@@ -70,6 +70,7 @@
 - 端口上是 **8 个共享的 `SO_REUSEPORT` listener**（固定 8 个，与 ring 数无关），每个有独立的 accept 队列；ring 按需增长（1 → 最多 16），每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时停止投递 accept，其他 ring 继续从全部 8 个 listener 接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.
 - 突发之后 multishot receive 会耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。
+- **大响应用零拷贝发送**（IORING_OP_SEND_ZC）：feed 的 JSON 约 5.5 KB，send_zc 让内核直接读用户缓冲，省掉一次 5.5 KB 的拷贝；完成时会多一个 IORING_CQE_F_NOTIF，缓冲必须等它到达才能还回池（连接状态多了 Flushed）。post/like 的响应只有几百字节，多一个 NOTIF 不划算，仍走普通 send；关闭中的响应也不用。内核不支持时（-EINVAL/-ENOSYS）自动回退并永久关闭，ZC=0 可手动关掉做 A/B。
 - 每个连接同一时间最多一个发送在途；流水线响应排在它后面。输出缓冲来自池（8 KB，启动预填 256 个），发送完成后归还；一次 feed 响应的 JSON 上界约 24 KB，所以回收阈值放到 `8 × 8 KB`，否则每个 feed 缓冲都会被丢掉重分配（实测：每请求一次 24 KB `malloc`，`brk` 37,738 次/10 s）。
 - 关闭是 `SHUTDOWN` 硬链接到 fixed-file `CLOSE`；每个 `user_data` 里的 generation 号会丢弃复用槽位的完成。
 - **backlog 清空后把空闲堆还给内核**：每 10 秒检查一次，只有在就绪队列和读队列都空时才调用 `malloc_trim(0)`。glibc 释放的内存默认留在进程 arena 里，RSS 只增不减——backlog 期间为 `part`/响应缓冲分配的块，在 backlog 清空后仍算在 RSS 上（c-iouring-jowinjestine #404 把这一条记成「backlog 碰过的每个连接都永久留着一块」，他们观测到 200k 个 deferred 请求约 100 MB）。本地 20k 连接、标准负载：p99 196 → 2.78 ms，max 655 → 39 ms。

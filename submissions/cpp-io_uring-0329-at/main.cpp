@@ -147,7 +147,11 @@ class Worker {
 class Server {
  public:
   Server(app::App* app, uint32_t slots, unsigned cq, uint32_t max_rings)
-      : app_(app), slots_(slots), cq_(cq), max_rings_(max_rings) {}
+      : app_(app), slots_(slots), cq_(cq), max_rings_(max_rings) {
+    /* ZC=0 关掉零拷贝发送，用来在评测机上做 A/B。 */
+    const char* zc = std::getenv("ZC");
+    if (zc && zc[0] == '0') zc_ok_ = false;
+  }
 
   bool init(const char* host, uint16_t port) {
     host_ = host;
@@ -489,14 +493,38 @@ class Server {
     w.table().at(idx).read = net::ReadState::Reading;
   }
 
+  /* 一次发送：首次用零拷贝（内核直接读用户缓冲，省掉 5.5 KB 的响应拷进内核），续传用普通
+   * send——续传时第一块缓冲还被内核占着，再发一次零拷贝会让 NOTIF 的归属变得复杂。
+   * 内核不支持时（-EINVAL/-ENOSYS）回退并永久关闭 ZC。 */
   void arm_send(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c) {
     io_uring_sqe* sqe = w.ring().sqe(1);
     if (!sqe) return;
-    io_uring_prep_send(sqe, static_cast<int>(idx), c.wire->p + c.sent, c.wire->len - c.sent,
-                       MSG_NOSIGNAL);
+    /* 只对大的响应用零拷贝：feed 的 JSON 约 5.5 KB，省下的那次拷贝值一个 NOTIF 完成；
+     * post/like 的响应只有几百字节，多一个 NOTIF 反而不划算（本地 20k 连接上就量到
+     * sys 53 → 62 µs）。关闭中的响应也不用，避免关闭路径上还挂着 NOTIF。 */
+    const bool zc = c.sent == 0 && !c.zbuf_done && zc_ok_ && !c.close_after && c.wire->len >= 4096;
+    if (zc) {
+      io_uring_prep_send_zc(sqe, static_cast<int>(idx), c.wire->p, c.wire->len, MSG_NOSIGNAL, 0);
+    } else {
+      io_uring_prep_send(sqe, static_cast<int>(idx), c.wire->p + c.sent, c.wire->len - c.sent,
+                         MSG_NOSIGNAL);
+    }
     sqe->flags |= IOSQE_FIXED_FILE;
     sqe->user_data = ev(kEvSend, wi, c.gen, idx);
     c.write = net::WriteState::Sending;
+  }
+
+  /* 一次发送彻底完成后的收尾：把 wire 还给池，处理排队中的响应或关闭。 */
+  void finish_send(Worker& w, uint32_t idx, net::Connection& c) {
+    app::give_buf(pool_, c.wire);
+    c.wire = nullptr;
+    c.write = net::WriteState::Idle;
+    c.zbuf_done = false;
+    if ((c.out && c.out->len) || c.close_after) {
+      mark(w, idx);
+    } else {
+      app::give_buf(pool_, c.out);
+    }
   }
 
   void arm_close(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c) {
@@ -752,10 +780,26 @@ class Server {
         }
         case kEvSend: {
           net::Connection& c = w.table().at(idx);
+          /* 零拷贝的 NOTIF：内核已经不再引用这块缓冲。数据是否已全部发出由普通完成决定，
+           * 所以这里只标记并把可能已结束的发送收尾。 */
+          if (flags & IORING_CQE_F_NOTIF) {
+            if (c.gen != gen) break;
+            c.zbuf_done = true;
+            if (c.write == net::WriteState::Flushed) finish_send(w, idx, c);
+            break;
+          }
           if (c.gen != gen || c.write != net::WriteState::Sending) break;
           if (res < 0) {
+            if (res == -EINVAL || res == -ENOSYS) {
+              /* 内核/驱动不支持零拷贝发送：关掉它，用普通 send 重发这一块。 */
+              zc_ok_ = false;
+              c.zbuf_done = false;
+              arm_send(w, wi, idx, c);
+              break;
+            }
             c.write = net::WriteState::Idle;
             app::give_buf(pool_, c.wire);
+            c.wire = nullptr;
             app::give_buf(pool_, c.out);
             c.close_after = true;
             mark(w, idx);
@@ -763,14 +807,11 @@ class Server {
             c.sent += static_cast<uint32_t>(res);
             if (c.sent < c.wire->len) {
               arm_send(w, wi, idx, c);
+            } else if (c.zbuf_done) {
+              finish_send(w, idx, c);
             } else {
-              c.write = net::WriteState::Idle;
-              app::give_buf(pool_, c.wire);
-              if ((c.out && c.out->len) || c.close_after) {
-                mark(w, idx);
-              } else {
-                app::give_buf(pool_, c.out);
-              }
+              /* 数据已全部交给内核，等 NOTIF 再归还缓冲。 */
+              c.write = net::WriteState::Flushed;
             }
           }
           break;
@@ -842,7 +883,9 @@ class Server {
         c.in_batch = false;
         c.answered = false;
         responded_++;
-        if (!c.open || c.closing || c.write == net::WriteState::Sending) continue;
+        if (!c.open || c.closing || c.write == net::WriteState::Sending ||
+            c.write == net::WriteState::Flushed)
+          continue;
         if (c.out && c.out->len) {
           c.wire = c.out;
           c.out = nullptr;
@@ -866,6 +909,7 @@ class Server {
   uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
   uint32_t answers_left_ = 0;
   uint64_t last_trim = 0;
+  bool zc_ok_ = true; /* 内核支持零拷贝发送；-EINVAL 后永久关闭 */
   std::deque<ReadyRef> ready_;
   unsigned cq_;
   const char* host_ = nullptr;

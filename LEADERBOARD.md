@@ -1313,6 +1313,9 @@ The follow-up **#516** (`b2c9bdb`, 2026-11-18: back to the `d0cf229` line, i.e. 
 truncate, checkpoint fdatasync and growing-WAL bound, plus `TCP_QUICKACK` off) held **270,000** at 72 % CPU (25,880
 req/s, p95 20.2 / p99 138.1 ms, 0 errors, 827 MB; 280k failed the 2-minute probe on p99 2.07 s, 320k on p99 5.71 s),
 below #437's 310,000, so #516 is not merged.
+#427's newest head (`933290d`, 2026-11-18: `76af661` with the read transaction and schema-cookie check done once per
+read transaction instead of per request) held **300,000** at 81 % CPU (28,417 req/s, p95 28.7 / p99 359.0 ms, 0 errors,
+1,295 MB; 310k failed the 2-minute probe on p99 1.65 s, 320k on p99 2.79 s), below #437's 310,000, so #427 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

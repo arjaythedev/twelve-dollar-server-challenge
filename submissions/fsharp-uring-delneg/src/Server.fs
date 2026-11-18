@@ -29,8 +29,9 @@ let private lifoMin = env "LIFOMIN" 0
 // The old end's share starts late. The load is closed-loop: a waiting request holds its client, so under an overload
 // of x % newest-first leaves about x % of the clients waiting, the same ones until it ends. A share for the old end
 // while the overload lasts takes capacity from fresh requests to answer ones that are already late, and makes more
-// requests late. 20 s is longer than a ramp's peak and, doubled, inside a client timeout of 60 s.
-let private lifoAge = uint32 (env "LIFOAGE" 20000)
+// requests late. So the share starts at 30 s (half of each pass) and is the whole pass from 45 s, which keeps the
+// longest wait inside a client timeout of 60 s.
+let private lifoAge = uint32 (env "LIFOAGE" 30000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
@@ -899,13 +900,13 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             let last = if nreq - first > budget then first + budget else nreq
             // A request answered more than 40 ms after it arrived costs the kernel a delayed-ACK timer and a bare ACK.
             // In a backlog, oldest-first makes every newcomer wait that long too. So past one pass of backlog the
-            // newest go first; the old end gets a share of the pass from lifoAge on (all of it at twice that age), so
+            // newest go first; the old end gets a share of the pass from lifoAge on (all of it at 1.5 times that age), so
             // waiting has a bound. A connection's own requests keep their order.
             let lifo = lifoOn && nreq - first > budget
             let mutable oldShare = budget
             if lifo then
                 let age = passMs - reqs.[first].Ms
-                oldShare <- budget * (if age >= lifoAge * 2u then 8 elif age >= lifoAge then lifoCap else lifoMin) / 8
+                oldShare <- budget * (if age >= lifoAge + lifoAge / 2u then 8 elif age >= lifoAge then lifoCap else lifoMin) / 8
             let mutable db = drain || lifo
             let mutable j = first
             while not db && j < last do

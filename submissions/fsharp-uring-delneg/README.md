@@ -59,8 +59,8 @@
   then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
-  first, keeping each connection's order, and the oldest get a share of each pass only from 20 s on (half, and all of
-  it from 40 s; `LIFOAGE`, ms), so no request waits without bound. The load is closed-loop: a request that waits holds
+  first, keeping each connection's order, and the oldest get a share of each pass only from 30 s on (half, and all of
+  it from 45 s; `LIFOAGE`, ms), so no request waits without bound. The load is closed-loop: a request that waits holds
   its client, so under a short overload of x % newest-first leaves about x % of the clients waiting, the same ones
   until it ends. With the share starting at 8 s, as before, a ramp-top overload longer than that sent half of every
   pass to requests that were already late, at the peak, and made many more late.

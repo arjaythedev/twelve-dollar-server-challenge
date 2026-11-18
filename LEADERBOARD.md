@@ -857,7 +857,12 @@ at 81 % CPU), 300,000 on p95/p99 (0.68 / 1.11 s at 84 % CPU) and 320,000 on p95/
 with 0 errors. #503 stays open. **#504** (`ae94623`: #486 with a WAL-growth forecast that starts the PASSIVE
 checkpoint early) held **270,000** (25,836 req/s, p95 58.1 / p99 772.5 ms, 0 err, 74 % CPU, 26 µs/req, 889 MB,
 2026-11-18), below #486's 300,000, so not merged: 280,000 failed the 2-minute probe on p95/p99 (0.46 / 1.06 s at 78 %
-CPU) and 320,000 on p95/p99 (1.57 / 1.95 s at 96 % CPU), all with 0 errors. #504 stays open.
+CPU) and 320,000 on p95/p99 (1.57 / 1.95 s at 96 % CPU), all with 0 errors. #504 stays open. **#505** (`29cfa02`:
+#486 with `io_uring_enter` submissions split into ≤128-SQE calls and every ring entered each 128 answers) held
+**266,000** (25,515 req/s, p95 36.8 / p99 205.7 ms, 0 err, 73 % CPU, 26 µs/req, 1,343 MB, 2026-11-18), below #486's
+300,000, so not merged: 280,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (0.20 / 1.76 s at
+79 % CPU), 290,000 failed the 2-minute probe on p95/p99 (0.77 / 2.68 s at 79 % CPU), 300,000 on p95/p99 (1.05 / 2.52 s
+at 88 % CPU) and 320,000 on p95/p99 (1.16 / 1.58 s at 93 % CPU), all with 0 errors. #505 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

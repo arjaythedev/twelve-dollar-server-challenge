@@ -1160,8 +1160,11 @@ other slot instead of all at once): it held **260,000** (25,008 req/s, p95 49.1 
 **The row is now follow-up #514 at `b76816c`** (feed id-span fast path widened from 64 to 512 posts, idea credited to
 #264): it held **270,000** (25,812 req/s, p95 103.5 / p99 567.4 ms, 0 errors, 79 % CPU, 28 µs/req, 1,097 MB,
 2026-11-18). 280,000 failed the 2-minute probe on p99 (2.52 s, 0 errors) and 320,000 on p99 14.5 s with 0.29 %
-timeouts. The head moved to `8015284` during that run, so #514 isn't merged yet: `8015284` is queued for its own run,
-and the merged code is still #492's `e1696c8` (260,000).
+timeouts. The head moved during that run, so #514 isn't merged yet, and the merged code is still #492's `e1696c8`
+(260,000). #514's next head `caef8ce` (`IORING_OP_SEND_ZC` for responses of 4 KB and up, a `std::pmr` pool for
+deferred buffers, PGO built on the box) scored **0** (2026-11-18): it passed the tests, but every probe from 20,000
+down to 500 users lost requests to 60 s timeouts at almost idle CPU (37.9 % at 20,000, 22.7 % at 500, with every like
+and a third of `/feed` requests unanswered), so it isn't merged and the row stays at `b76816c`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

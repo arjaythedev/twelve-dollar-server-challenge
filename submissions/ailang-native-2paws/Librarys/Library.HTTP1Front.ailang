@@ -315,6 +315,12 @@ Function.Front.OnResp {
                     } ElseBlock: {
                         HTTP1.ResetParse(conn)
                         HTTP1.ReleaseOut(conn)
+                        fill = HTTP1.CGet(conn, HTTP1Off.FILL)
+                        IfCondition GreaterThan(fill, 0) ThenBlock: {
+                            HTTP1.OnRecv(Add(idx, 1), BitwiseAnd(HTTP1.CGet(conn, HTTP1Off.GEN), 255), 0)
+                        } ElseBlock: {
+                            HTTP1.QueueRecv(idx)
+                        }
                     }
                 }
             }

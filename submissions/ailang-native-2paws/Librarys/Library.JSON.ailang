@@ -379,7 +379,7 @@ Function.JSON.EscapeString {
         src = str
         out_len = 0
         WhileLoop EqualTo(1, 1) {
-            ch = RDMEM_64(src, "byte")
+            ch = RDMEM_8(src, 0)
             IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
             IfCondition EqualTo(ch, 34) ThenBlock: { out_len = Add(out_len, 2) }
             ElseBlock: {
@@ -408,7 +408,7 @@ Function.JSON.EscapeString {
             copy = Allocate(Add(in_len, 1))
             i = 0
             WhileLoop LessThan(i, in_len) {
-                b = RDMEM_64(Add(str, i), "byte")
+                b = RDMEM_8(Add(str, i), 0)
                 WRMEM_8(copy, i, b)
                 i = Add(i, 1)
             }
@@ -421,7 +421,7 @@ Function.JSON.EscapeString {
         src = str
         dst = 0
         WhileLoop EqualTo(1, 1) {
-            ch = RDMEM_64(src, "byte")
+            ch = RDMEM_8(src, 0)
             IfCondition EqualTo(ch, 0) ThenBlock: { BreakLoop }
 
             IfCondition EqualTo(ch, 34) ThenBlock: {
@@ -714,7 +714,7 @@ Function.ParseJSON {
 Function.JSON.SkipWhitespace {
     Body: {
         WhileLoop LessThan(JParse.pos, JParse.size) {
-            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
             is_ws = 0
             IfCondition EqualTo(ch, 32) ThenBlock: { is_ws = 1 }
             IfCondition EqualTo(ch, 9) ThenBlock: { is_ws = 1 }
@@ -734,7 +734,7 @@ Function.JSON.ParseValue {
             ReturnValue(JSON.Tag(JType.NULL, 0))
         }
 
-        ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+        ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
 
         IfCondition EqualTo(ch, 123) ThenBlock: {
             ReturnValue(JSON.ParseObject())
@@ -761,7 +761,7 @@ Function.JSON.ParseObject {
         JSON.SkipWhitespace()
 
         IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
             IfCondition EqualTo(ch, 125) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
                 ReturnValue(JSON.Tag(JType.OBJECT, obj))
@@ -779,7 +779,7 @@ Function.JSON.ParseObject {
             JSON.SkipWhitespace()
 
             IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-                ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+                ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
                 IfCondition EqualTo(ch, 58) ThenBlock: {
                     JParse.pos = Add(JParse.pos, 1)
                 }
@@ -793,7 +793,7 @@ Function.JSON.ParseObject {
             JSON.SkipWhitespace()
 
             IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-                ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+                ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
                 IfCondition EqualTo(ch, 125) ThenBlock: {
                     JParse.pos = Add(JParse.pos, 1)
                     parsing = 0
@@ -822,7 +822,7 @@ Function.JSON.ParseArray {
         JSON.SkipWhitespace()
 
         IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
             IfCondition EqualTo(ch, 93) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
                 ReturnValue(JSON.Tag(JType.ARRAY, arr))
@@ -839,7 +839,7 @@ Function.JSON.ParseArray {
             JSON.SkipWhitespace()
 
             IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-                ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+                ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
                 IfCondition EqualTo(ch, 93) ThenBlock: {
                     JParse.pos = Add(JParse.pos, 1)
                     parsing = 0
@@ -868,7 +868,7 @@ Function.JSON.ParseString {
         scan = JParse.pos
         out_len = 0
         WhileLoop LessThan(scan, JParse.size) {
-            ch = RDMEM_64(Add(JParse.buffer, scan), "byte")
+            ch = RDMEM_8(Add(JParse.buffer, scan), 0)
             IfCondition EqualTo(ch, 92) ThenBlock: {
                 out_len = Add(out_len, 1)
                 scan = Add(scan, 1)
@@ -895,13 +895,13 @@ Function.JSON.ParseString {
 
         WhileLoop And(LessThan(JParse.pos, scan), LessThan(JParse.pos, JParse.size)) {
             IfCondition GreaterEqual(dst, out_len) ThenBlock: { BreakLoop }
-            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
 
             IfCondition EqualTo(ch, 92) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
                 IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
                     IfCondition GreaterEqual(dst, out_len) ThenBlock: { BreakLoop }
-                    esc = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+                    esc = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
                     IfCondition EqualTo(esc, 34) ThenBlock: {
                         WRMEM_8(str, dst, 34)
                         dst = Add(dst, 1)
@@ -949,7 +949,7 @@ Function.JSON.ParseString {
         WRMEM_8(str, dst, 0)
 
         IfCondition LessThan(JParse.pos, JParse.size) ThenBlock: {
-            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
             IfCondition EqualTo(ch, 34) ThenBlock: {
                 JParse.pos = Add(JParse.pos, 1)
             }
@@ -965,7 +965,7 @@ Function.JSON.ParsePrimitive {
         start = JParse.pos
 
         WhileLoop LessThan(JParse.pos, JParse.size) {
-            ch = RDMEM_64(Add(JParse.buffer, JParse.pos), "byte")
+            ch = RDMEM_8(Add(JParse.buffer, JParse.pos), 0)
             is_delim = 0
             IfCondition EqualTo(ch, 32) ThenBlock: { is_delim = 1 }
             IfCondition EqualTo(ch, 9) ThenBlock: { is_delim = 1 }
@@ -987,7 +987,7 @@ Function.JSON.ParsePrimitive {
         token = Allocate(Add(length, 1))
         i = 0
         WhileLoop LessThan(i, length) {
-            b = RDMEM_64(Add(JParse.buffer, Add(start, i)), "byte")
+            b = RDMEM_8(Add(JParse.buffer, Add(start, i)), 0)
             WRMEM_8(token, i, b)
             i = Add(i, 1)
         }
@@ -1008,7 +1008,7 @@ Function.JSON.ParsePrimitive {
             ReturnValue(JSON.Tag(JType.NULL, 0))
         }
 
-        first = RDMEM_64(Add(token, 0), "byte")
+        first = RDMEM_8(Add(token, 0), 0)
         is_num = 0
         IfCondition And(GreaterEqual(first, 48), LessEqual(first, 57)) ThenBlock: { is_num = 1 }
         IfCondition EqualTo(first, 45) ThenBlock: { is_num = 1 }

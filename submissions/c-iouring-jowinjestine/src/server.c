@@ -37,7 +37,7 @@ static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
 
-enum { UD_ACCEPT = 1, UD_RECV, UD_READ, UD_SEND, UD_SHUTDOWN, UD_CLOSE, UD_CANCEL, UD_POLL, UD_EVENTFD };
+enum { UD_ACCEPT = 1, UD_RECV, UD_READ, UD_SEND, UD_SHUTDOWN, UD_CLOSE, UD_CANCEL, UD_POLL, UD_EVENTFD, UD_RCVBUF_INSTALL };
 #define UD(op, ring, gen, slot) (((uint64_t)(op) << 56) | ((uint64_t)(ring) << 48) | ((uint64_t)(gen) << 32) | (uint64_t)(slot))
 #define UD_OP(u) ((unsigned)((u) >> 56))
 #define UD_RING(u) ((unsigned)((u) >> 48) & 0xff)
@@ -58,7 +58,8 @@ enum {
   CF_RECVING = 256,    /* a single-shot read in flight */
   CF_MULTI = 512,      /* the multishot receive is armed */
   CF_POLL = 1024,      /* a multishot POLL_ADD is armed */
-  CF_POLL_REARM = 2048 /* a poll ended: rearm after this batch */
+  CF_POLL_REARM = 2048, /* a poll ended: rearm after this batch */
+  CF_RCVBUF_UPDATING = 4096
 };
 
 struct arena {
@@ -72,7 +73,7 @@ struct conn {
   uint16_t flags;
   uint32_t pend_len; /* partial or waiting input, rare */
   uint32_t pend_cap;
-  uint32_t pad;
+  uint32_t rcvbuf_target;
   uint8_t *pend;
   struct arena *send_arena;
 };
@@ -100,6 +101,7 @@ static int ring_grow_failed;
 static int LFD[NLISTEN];
 static struct app A;
 static int writes_ok = 1;
+static void on_rcvbuf_install(unsigned ri, struct io_uring_cqe *cqe);
 
 static struct arena *pool;
 static unsigned pool_n;
@@ -441,6 +443,7 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   if (c->flags & CF_OPEN) { fprintf(stderr, "accept: slot %u still open\n", slot); return; }
   c->flags = CF_OPEN;
   c->pend_len = 0;
+  c->rcvbuf_target = 0;
   c->send_arena = NULL;
   rs->open++;
   S.accepts++;
@@ -553,6 +556,7 @@ static unsigned reap(unsigned ri) {
     case UD_READ: on_recv(ri, cqe, 0); break;
     case UD_SEND: on_send(ri, cqe); break;
     case UD_ACCEPT: on_accept(ri, cqe); break;
+    case UD_RCVBUF_INSTALL: on_rcvbuf_install(ri, cqe); break;
     case UD_CLOSE: on_close(ri, cqe); break;
     default: break; /* shutdown, cancel: nothing to do */
     }
@@ -721,7 +725,61 @@ static struct {
   unsigned high_streak, low_streak;
   double psi_some10, psi_full10;
   unsigned long tcp_mem_pages;
+  int live_enabled, live_unsupported;
+  unsigned live_budget, live_ring, live_slot;
+  uint64_t live_attempts, live_success, live_errors;
 } MG;
+
+/* IORING_OP_FIXED_FD_INSTALL creates a temporary ordinary fd for setsockopt.
+ * Always close it, even if the fixed slot has since been recycled. */
+static void on_rcvbuf_install(unsigned ri, struct io_uring_cqe *cqe) {
+  uint32_t slot = UD_SLOT(cqe->user_data);
+  int fd = cqe->res;
+  struct conn *c = &R[ri].conns[slot];
+  int live = c->gen == UD_GEN(cqe->user_data) && (c->flags & CF_OPEN);
+  if (live) c->flags &= (uint16_t)~CF_RCVBUF_UPDATING;
+  if (fd < 0) {
+    MG.live_errors++;
+    if (fd == -EINVAL || fd == -EOPNOTSUPP || fd == -ENOSYS)
+      MG.live_unsupported = 1;
+    return;
+  }
+  if (live && !(c->flags & CF_CLOSING)) {
+    int target = MG.current_rcvbuf;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &target, sizeof target) == 0) {
+      c->rcvbuf_target = (uint32_t)target;
+      MG.live_success++;
+    } else MG.live_errors++;
+  }
+  close(fd);
+}
+
+/* Bounded round-robin scan: no mass update in a single loop iteration. */
+static void memgov_update_live(void) {
+  if (!MG.live_enabled || MG.live_unsupported || !MG.enabled || !MG.live_budget) return;
+  unsigned visited = 0, submitted = 0;
+  while (visited < MG.live_budget * 8 && submitted < MG.live_budget && NR) {
+    unsigned ri = MG.live_ring;
+    unsigned slot = MG.live_slot++;
+    if (MG.live_slot >= ring_slots) {
+      MG.live_slot = 0;
+      MG.live_ring = (ri + 1) % NR;
+    }
+    visited++;
+    struct conn *c = &R[ri].conns[slot];
+    if (!(c->flags & CF_OPEN) || (c->flags & (CF_CLOSING | CF_RCVBUF_UPDATING)) ||
+        c->rcvbuf_target == (uint32_t)MG.current_rcvbuf) continue;
+    struct io_uring_sqe *sqe = ring_sqe(&R[ri].r);
+    sqe->opcode = IORING_OP_FIXED_FD_INSTALL;
+    sqe->flags = IOSQE_FIXED_FILE;
+    sqe->fd = (int)slot;
+    sqe->install_fd_flags = 0;
+    sqe->user_data = UD(UD_RCVBUF_INSTALL, ri, c->gen, slot);
+    c->flags |= CF_RCVBUF_UPDATING;
+    submitted++;
+    MG.live_attempts++;
+  }
+}
 
 /* ---------- housekeeping ---------- */
 
@@ -770,6 +828,9 @@ static void stats(uint64_t dt_ns) {
       (unsigned long long)(MG.cg_current >> 20), (unsigned long long)(MG.cg_limit >> 20),
       (unsigned long long)(MG.cg_sock >> 20), MG.tcp_mem_pages,
       (unsigned long long)MG.changes, (unsigned long long)MG.samples);
+  if (MG.live_enabled) fprintf(stderr, " tcp_live_rcvbuf attempts=%llu success=%llu errors=%llu unsupported=%d budget=%u\n",
+      (unsigned long long)MG.live_attempts, (unsigned long long)MG.live_success,
+      (unsigned long long)MG.live_errors, MG.live_unsupported, MG.live_budget);
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -815,6 +876,9 @@ static int apply_listener_rcvbuf(int requested) {
 }
 static int memgov_start(void) {
   MG.enabled = env_long("TCP_MEM_GOVERNOR", 1) != 0;
+  MG.live_enabled = env_long("TCP_LIVE_RCVBUF", 1) != 0;
+  MG.live_budget = (unsigned)env_long("TCP_LIVE_RCVBUF_BUDGET", 512);
+  if (MG.live_budget > 8192) MG.live_budget = 8192;
   if (!MG.enabled) return 0;
   MG.normal_rcvbuf = (int)env_long("TCP_RCVBUF_NORMAL", 16384);
   MG.pressure_rcvbuf = (int)env_long("TCP_RCVBUF_PRESSURE", 8192);
@@ -863,6 +927,7 @@ static void memgov_tick(uint64_t now) {
   } else if (MG.low_streak >= 4 && MG.current_rcvbuf != MG.normal_rcvbuf) {
     if (apply_listener_rcvbuf(MG.normal_rcvbuf) == 0) MG.low_streak = 0;
   }
+  memgov_update_live();
 }
 
 /* Keeps the binary's code and data in RAM: file-backed pages are what reclaim takes first when

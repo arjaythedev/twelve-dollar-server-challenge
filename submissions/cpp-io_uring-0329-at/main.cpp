@@ -383,7 +383,6 @@ class Server {
        * 留着一块」，我们在 210k 连接时看到的 674 MB 里绝大部分就是这个。没有 backlog 才 trim，
        * 免得在正忙的时候去遍历堆。 */
       if (p4 - last_trim >= 10000000000ULL) {
-        last_trim = p4;
         bool backlog = !ready_.empty();
         if (!backlog) {
           for (auto& wp : workers_) {
@@ -393,8 +392,16 @@ class Server {
             }
           }
         }
-        /* 只 malloc_trim：part 用 std::vector，释放的块由 glibc 归还，不需要额外处理。 */
-        if (!backlog) malloc_trim(0);
+        /* backlog 清空时每 10 秒收一次；backlog 持续不断时也每 30 秒收一次——原来只要还有
+         * 积压就永远不 trim，而 270k 的保持期恰恰一直是那种状态，堆只涨不还。
+         * malloc_trim 走 mprotect/brk，几十微秒量级，30 秒一次不影响 p99。 */
+        if (!backlog) {
+          last_trim = p4;
+          malloc_trim(0);
+        } else if (p4 - last_trim >= 30000000000ULL) {
+          last_trim = p4;
+          malloc_trim(0);
+        }
       }
       if (p4 - last_sweep >= 50000000ULL) {
         last_sweep = p4;
@@ -1081,6 +1088,9 @@ const char* env_or(const char* k, const char* d) {
 static void on_term(int) { std::exit(0); }
 
 int main() {
+  /* 只留一个 malloc arena：事件循环和 checkpoint 线程轮流跑，各自一个 arena 意味着两份
+   * 高水位，而 glibc 在 free 之后不会把 arena 缩回去（c-iouring-raoz 的做法）。 */
+  mallopt(M_ARENA_MAX, 1);
   std::signal(SIGTERM, on_term);
   std::signal(SIGINT, on_term);
   {

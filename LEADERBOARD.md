@@ -898,7 +898,10 @@ demand-driven poll receive on by default) held **270,000** (25,876 req/s, p95 29
 **#520** (`022d7f3`: #486 with `READ_BACKLOG_LIMIT` 1024, backlog-aware read admission, on by default) held **280,000**
 (26,705 req/s, p95 122.6 / p99 396.6 ms, 0 err, 78 % CPU, 26 µs/req, 1,396 MB, 2026-11-19), below #486's 300,000, so
 not merged: 290,000 failed the 2-minute probe on p95/p99 (1.80 / 2.99 s at 81 % CPU) and 300,000 on p95/p99 (1.47 /
-2.71 s at 83 % CPU), all with 0 errors. #520 stays open.
+2.71 s at 83 % CPU), all with 0 errors. #520 stays open. **#521** (`e9f04b4`: #486 with live `SO_RCVBUF` updates for
+already-accepted connections, on by default) held **270,000** (25,837 req/s, p95 57.5 / p99 534.5 ms, 0 err, 75 % CPU,
+26 µs/req, 1,043 MB, 2026-11-19), below #486's 300,000, so not merged: 280,000 failed the 2-minute probe on p95/p99
+(862 ms / 1.23 s at 76 % CPU) and 320,000 on p95/p99 (1.34 / 1.55 s at 91 % CPU), all with 0 errors. #521 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

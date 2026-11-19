@@ -1167,8 +1167,9 @@ static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anyth
 // The log is copied back by a worker thread at low priority, on its own connection, so the loop never waits for an
 // fsync. The loop alone decides: it asks for a pass by eventfd and the outcome comes back as a ring completion. A
 // log can only restart once all of it is copied, which steady writes prevent, so if frames arrived during a pass the
-// loop stops taking POSTs (reads go on) for one more pass. Past WAL_MAX frames it waits for that pass however long
-// it takes, because a saturated CPU starves the worker and the log would otherwise grow without bound.
+// loop stops taking POSTs (reads go on) for one more pass, for at most POST_WAIT_NS. Past WAL_MAX frames each hold is
+// still 250 ms, then one pass of POSTs goes through and the next hold starts: a slow disk grows the log, it never
+// holds a POST for seconds.
 #ifndef WAL_START
 #define WAL_START 8192
 #endif
@@ -1182,6 +1183,9 @@ static int64_t post_deadline;  // 0: no limit
 // once a limit ran out, every later hold was let go at once and the log grew for the rest of the run.
 #ifndef MAX_HOLD_NS
 #define MAX_HOLD_NS 0
+#endif
+#ifndef HOLD_CAP
+#define HOLD_CAP 1  // no hold outlives POST_WAIT_NS; past WAL_MAX the next pass re-arms a fresh one (#522, #264). 0: unbounded hold
 #endif
 static int64_t full_since;
 static int64_t full_deadline(void) { if (!MAX_HOLD_NS) return 0; if (!full_since) full_since = mono_ns(); return full_since + MAX_HOLD_NS; }
@@ -1202,15 +1206,19 @@ static void wal_copied(uint64_t outcome) {
   // All copied, and nothing committed since the pass was asked for: the next write restarts the log.
   if (outcome == WAL_ALL && wal_frames == wal_asked_at) { wal_frames = 0; wal_last_pass = 0; hold_posts = 0; full_since = 0; return; }
   if (wal_last_pass) { wal_last_pass = 0; hold_posts = 0; return; }  // POSTs were let go early, or the pass failed: try again later
-  wal_last_pass = 1; hold_posts = 1;
-  post_deadline = wal_frames >= WAL_MAX ? full_deadline() : mono_ns() + POST_WAIT_NS;
+  wal_last_pass = 1;
+  if (!HOLD_CAP || !hold_posts) post_deadline = wal_frames >= WAL_MAX && !HOLD_CAP ? full_deadline() : mono_ns() + POST_WAIT_NS;
+  hold_posts = 1;  // HOLD_CAP: a hold already running keeps its deadline, so none outlives POST_WAIT_NS
   wal_ask();
 }
 // Between batches, with no transaction open: a write only restarts the log from a read transaction begun after the
 // last copy, so POSTs can't be let go in the middle of a batch.
 static void wal_after_commit(void) {
   if (wal_outcome) { uint64_t o = wal_outcome; wal_outcome = 0; wal_copied(o); }
-  if (wal_frames >= WAL_MAX && wal_busy) { hold_posts = 1; post_deadline = full_deadline(); }
+  if (wal_frames >= WAL_MAX && wal_busy) {
+    if (!HOLD_CAP) { hold_posts = 1; post_deadline = full_deadline(); }
+    else if (!hold_posts) { hold_posts = 1; post_deadline = mono_ns() + POST_WAIT_NS; }  // one pass of POSTs between holds
+  }
   else if (!wal_busy && wal_frames >= WAL_START) wal_ask();
 }
 static int wal_hold_over(void) {

@@ -97,7 +97,7 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   The loop asks for a `PASSIVE` pass over an eventfd after 8,192 WAL frames (32 MB) and the outcome comes back on a second
   eventfd as an ordinary ring completion, so the loop never waits for an fsync. A log only restarts once fully copied, which
   steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, for at most 250 ms (reads go
-  on). Past 32,768 frames (a CPU saturated long enough to starve the worker) they wait for that pass with no time limit, so the log stays bounded. 1,024-frame passes were tried and scored lower on the benchmark box (270,000 and 260,000 against 280,000). Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
+  on). Past 32,768 frames (a disk or CPU too slow for the worker) each hold is still 250 ms, then one pass of POSTs goes through and the next hold starts, as in cpp-io_uring-0329-at (#522) and rust-iouring-kensac (#264): a slow disk lets the log grow instead of holding POSTs for seconds. 1,024-frame passes were tried and scored lower on the benchmark box (270,000 and 260,000 against 280,000). Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
   waits for its `COMMIT`. If a commit fails, nothing from a batch with writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
@@ -250,7 +250,7 @@ WAL 136 MB.
 
 Code adapted from rust-iouring-kensac (`csrc/shim.c`, #248 and #264): `key_info`, `seek_row`, `rootpage`, `layout_is`, `prep` and
 the setup of the index seek in `likes_from` follow it closely, including some names. Ideas from the same entry: B-tree cursor
-reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds, `SO_REUSEPORT` listeners,
+reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds (each capped at 250 ms, also as in cpp-io_uring-0329-at #522), `SO_REUSEPORT` listeners,
 `DEFER_TASKRUN` on every ring, and bounded reads and answers after a burst (#264). Checkpoint coordination and the likes count
 were rewritten for this entry, and its read bound was chosen by the sweep above. The `resv[0]` retry is also from
 rust-iouring-kensac and from c-iouring-pavlyhalim (#245). From objc-uring-delneg (#326, `1baccb2`): the newest-first order

@@ -116,7 +116,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 21 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
 | 21 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
 | 21 | holyphp-io-uring-elifoxcoder | #490 | HolyPHP (io_uring, SQLite B-tree reads) | **270,000** ᵘ | 25,816 | 234.0 | 584.6 | 0.00 | 84 | 29 | 1,325 | 2026-11-17 |
-| 21 | cpp-io_uring-0329-at | #514 | C++ (io_uring, SQLite B-tree reads) | **270,000** ᴹ | 25,812 | 103.5 | 567.4 | 0.00 | 79 | 28 | 1,097 | 2026-11-18 |
+| 21 | cpp-io_uring-0329-at | #514 | C++ (io_uring, SQLite B-tree reads) | **270,000** ᴹ | 25,867 | 69.5 | 218.3 | 0.00 | 76 | 27 | 1,085 | 2026-11-19 |
 | 33 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 34 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
 | 35 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
@@ -1178,7 +1178,12 @@ and a third of `/feed` requests unanswered), so it isn't merged and the row stay
 `0e3f5fd` (fix for the zero-copy send deadlock, listener receive buffer capped at 16 KiB) held **270,000** (25,846
 req/s, p95 80.7 / p99 277.2 ms, 0 errors, 77 % CPU, 27 µs/req, 1,214 MB, 2026-11-19); 280,000 failed the 2-minute
 probe on p99 (2.26 s, 0 errors) and 320,000 on p99 10.8 s with 0.051 % timeouts. That ties `b76816c`, and the head
-moved during the run (to `7bac38a`, now queued), so it isn't merged and the row stays at `b76816c`.
+moved during the run (to `7bac38a`, now queued), so it isn't merged and the row stays at `b76816c`. **The row is
+now #514's merged commit `7bac38a`** (a receive-buffer governor for new connections driven by the box's TCP memory
+pressure, credited to #486, and a 16 s aging tier, credited to #326): it held **270,000** (25,867 req/s, p95 69.5 /
+p99 218.3 ms, 0 errors, 76 % CPU, 27 µs/req, 1,085 MB, 2026-11-19). 280,000 failed the 2-minute probe on p99 (38.6 s,
+0.51 % timeouts) and 320,000 on p99 12.8 s with 0.060 % timeouts. It beats the merged 260,000 (`e1696c8`), so #514 is
+merged and the row moves to `7bac38a`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

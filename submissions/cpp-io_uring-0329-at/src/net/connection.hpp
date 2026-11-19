@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <sys/mman.h>
 #include <memory>
-#include <memory_resource>
 #include <vector>
 
 #include "buf.hpp"
@@ -42,10 +41,9 @@ struct Connection {
   uint32_t last_active = 0;
   app::ByteBuf* out = nullptr;
   app::ByteBuf* wire = nullptr;
-  /* backlog 时每个被延后的连接都要在自己身上留一份未处理字节。用 pmr 的池资源接管：
-   * 固定块复用、没有每次 malloc 的元数据与 1.5 倍扩容浪费（270k 连接时这一项约 400 MB）。
-   * 池在 backlog 清空、malloc_trim 的时候一起 release()。 */
-  std::unique_ptr<std::pmr::vector<uint8_t>> part;
+  /* 不完整请求的暂存；唯一所有者。刻意不用 pmr 池：池会持有不归还的空闲块，
+   * 270k 连接时实测比 std::vector + malloc_trim 还高 117 MB。 */
+  std::unique_ptr<std::vector<uint8_t>> part;
 
   bool live() const { return open && !closing; }
 };

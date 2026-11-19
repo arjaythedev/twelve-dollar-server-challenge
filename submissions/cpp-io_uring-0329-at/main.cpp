@@ -75,10 +75,6 @@ static void shim_log_sink(const char* s, size_t n) {
   std::fputc('\n', stderr);
 }
 
-/* part 缓冲的池资源。unsynchronized：只用在一个线程上（事件循环），省掉锁。
- * 默认 resource 指向它，所有 std::pmr 容器都走池。 */
-std::pmr::unsynchronized_pool_resource g_part_pool;
-
 template <typename... Args>
 void errlog(std::format_string<Args...> fmt, Args&&... args) {
   const std::string line = std::format(fmt, std::forward<Args>(args)...);
@@ -397,9 +393,7 @@ class Server {
             }
           }
         }
-        /* 只 malloc_trim：pmr 池里的块由池自己复用，不能 release()——ready 队列为空并不
-         * 意味着没有存活的 part（serve() 会把解析不完的半包存回连接），release 会让那些
-         * vector 的指针悬垂。 */
+        /* 只 malloc_trim：part 用 std::vector，释放的块由 glibc 归还，不需要额外处理。 */
         if (!backlog) malloc_trim(0);
       }
       if (p4 - last_sweep >= 50000000ULL) {
@@ -673,7 +667,7 @@ class Server {
   // 把收到的字节留在连接上，本 pass 不回答。
   void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
              size_t n) {
-    if (!c.part) c.part = std::make_unique<std::pmr::vector<uint8_t>>();
+    if (!c.part) c.part = std::make_unique<std::vector<uint8_t>>();
     c.part->insert(c.part->end(), data, data + n);
     if (!c.ready_queued) {
       c.ready_queued = true;
@@ -715,7 +709,7 @@ class Server {
   void serve(Worker& w, uint32_t wi, uint32_t idx, const uint8_t* data, size_t n) {
     net::Connection& c = w.table().at(idx);
     if (c.close_after) return;
-    std::pmr::vector<uint8_t> part;
+    std::vector<uint8_t> part;
     bool joined = false;
     if (c.part) {
       part = std::move(*c.part);
@@ -774,10 +768,10 @@ class Server {
     }
     if (off < len) {
       if (!joined) {
-        c.part = std::make_unique<std::pmr::vector<uint8_t>>(buf + off, buf + len);
+        c.part = std::make_unique<std::vector<uint8_t>>(buf + off, buf + len);
       } else {
         part.erase(part.begin(), part.begin() + static_cast<ptrdiff_t>(off));
-        c.part = std::make_unique<std::pmr::vector<uint8_t>>(std::move(part));
+        c.part = std::make_unique<std::vector<uint8_t>>(std::move(part));
       }
     }
   }
@@ -1117,7 +1111,6 @@ int main() {
   auto app = std::make_unique<app::App>(std::move(db),
                                         reinterpret_cast<const uint8_t*>(secret),
                                         std::strlen(secret));
-  std::pmr::set_default_resource(&g_part_pool);
   dbx_set_logger(shim_log_sink);
   constexpr unsigned cq = kCqEntries;
   const uint32_t slots = descriptor_slots();

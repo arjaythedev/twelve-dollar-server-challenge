@@ -1191,7 +1191,7 @@ merged and the row moves to `7bac38a`. Follow-up #522 (`cefdf9b`: ready-queue ba
 reverted, accepting resumed once the ring drains, credited to #264): it held **310,000** (29,278 req/s, p95 61.1 /
 p99 234.0 ms, 0 errors, 82 % CPU, 25 µs/req, 853 MB, 2026-11-19). 320,000 failed the 2-minute probe on p99 13.0 s with
 0.33 % timeouts. The head moved during that run (to `656946e`), so `d3ab60c` was never merged. **The row is now
-#522's merged commit `656946e`** (ready-queue backpressure and one malloc arena again, accept depth 1,024): it held
+#522's merged commit `656946e`** (`d3ab60c` with the accept depth cut from 2,048 to 1,024): it held
 **290,000** (27,526 req/s, p95 79.9 / p99 678.7 ms, 0 errors, 79 % CPU, 26 µs/req, 773 MB, 2026-11-19). 300,000 failed
 the 2-minute probe on p99 (4.45 s, 0 errors) and 320,000 on p99 (4.50 s, 0 errors). It beats the merged 270,000
 (`7bac38a`), so #522 is merged and the row moves to `656946e`, replacing the unmerged `d3ab60c` (310,000).

@@ -20,6 +20,9 @@ class Db(path: String) {
 
     private val health: PreparedStatement
     private val feed: PreparedStatement
+    private val feedIds: PreparedStatement
+    private val feedLikes: PreparedStatement
+    private val feedRows: PreparedStatement
     private val post: PreparedStatement
     private val insertPost: PreparedStatement
     private val postExists: PreparedStatement
@@ -34,6 +37,10 @@ class Db(path: String) {
             "json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username," +
                 "'like_count',(SELECT count(*) FROM likes l WHERE l.post_id=p.id))"
 
+        private const val FEED_SPAN = 256
+        private val FEED_HEAD = "{\"posts\":[".toByteArray()
+        private val LIKE_KEY = ",\"like_count\":".toByteArray()
+
         fun config(busyMs: Int = 5000): SQLiteConfig = SQLiteConfig().apply {
             setJournalMode(SQLiteConfig.JournalMode.WAL)
             setSynchronous(SQLiteConfig.SynchronousMode.NORMAL) // rule 6 minimum: WAL + NORMAL
@@ -42,9 +49,12 @@ class Db(path: String) {
             setTempStore(SQLiteConfig.TempStore.MEMORY)
         }
 
-        private fun tune(c: Connection, cacheKb: Int) = c.createStatement().use { st ->
-            st.execute("PRAGMA mmap_size=536870912")     // reads go through the OS page cache
-            st.execute("PRAGMA cache_size=-$cacheKb")
+        private fun tune(c: Connection) = c.createStatement().use { st ->
+            // No mmap: pages come through SQLite's own page cache (pread on a miss). Measured LOCAL at 112k users,
+            // two interleaved pairs: 50.3/48.9 -> 43.9/45.0 us/req vs mmap_size=512 MB + an 8 MB cache.
+            // (Same direction as mojo/pavlyhalim/le0nvfx on the leaderboard; ~64 MiB is their sweet spot.)
+            st.execute("PRAGMA mmap_size=0")
+            st.execute("PRAGMA cache_size=-65536")       // 64 MiB, only as much as gets touched is allocated
             st.execute("PRAGMA wal_autocheckpoint=0")     // checkpoints run on the Checkpointer thread
             st.execute("PRAGMA journal_size_limit=67108864") // truncate the WAL file back to 64 MB after a reset
         }
@@ -52,14 +62,22 @@ class Db(path: String) {
 
     init {
         conn = DriverManager.getConnection("jdbc:sqlite:$path", config().toProperties())
-        tune(conn, 8000)
+        tune(conn)
         wconn = DriverManager.getConnection("jdbc:sqlite:$path", config(busyMs = 0).toProperties())
-        tune(wconn, 2000)
+        tune(wconn)
         health = conn.prepareStatement("SELECT 1")
         feed = conn.prepareStatement(
             "SELECT '{\"posts\":['||coalesce(group_concat(j,',' ORDER BY ca DESC,id DESC),'')||']}' FROM (" +
                 "SELECT p.id id,p.created_at ca,$POST_JSON j FROM posts p JOIN users u ON u.id=p.user_id " +
                 "ORDER BY p.created_at DESC,p.id DESC LIMIT 20)"
+        )
+        // Two-step feed (see feed()). Credit: the range-scan pattern is from zig-iouring-unorig-username
+        // (arjaythedev/twelve-dollar-server-challenge, src/main.zig feedRange, MIT).
+        feedIds = conn.prepareStatement("SELECT id FROM posts ORDER BY created_at DESC,id DESC LIMIT 20")
+        feedLikes = conn.prepareStatement("SELECT post_id FROM likes WHERE post_id BETWEEN ?1 AND ?2")
+        feedRows = conn.prepareStatement(
+            "SELECT p.id,json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username) " +
+                "FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id BETWEEN ?1 AND ?2"
         )
         post = conn.prepareStatement(
             "SELECT '{\"post\":'||$POST_JSON||'}' FROM posts p JOIN users u ON u.id=p.user_id WHERE p.id=?"
@@ -81,7 +99,60 @@ class Db(path: String) {
         health.executeQuery().use { if (!it.next()) error("SELECT 1 returned no row") }
     }
 
-    fun feed(): ByteArray = feed.executeQuery().use { it.next(); it.getBytes(1) }
+    private val fIds = LongArray(20)
+    private val fSlot = IntArray(FEED_SPAN)
+    private val fLikes = IntArray(20)
+    private val fRows = arrayOfNulls<ByteArray>(20)
+    private val fNum = ByteArray(20)
+
+    /**
+     * The 20 newest ids first (index-only), then, when they sit in a narrow id range (they do as soon as anybody
+     * posts: new posts get the newest timestamps and the next ids), one range scan of likes_post_id_idx tallied
+     * into an array plus one rowid range over posts JOIN users, reordered here. Otherwise (or if a row is missing)
+     * the original single query with 20 correlated count(*)s. Same bytes either way: SQLite still builds each
+     * post's JSON; only the like_count is appended here.
+     */
+    fun feed(): ByteArray = feedRange() ?: feed.executeQuery().use { it.next(); it.getBytes(1) }
+
+    private fun feedRange(): ByteArray? {
+        var n = 0
+        feedIds.executeQuery().use { while (it.next()) fIds[n++] = it.getLong(1) }
+        if (n == 0) return null
+        var lo = fIds[0]; var hi = fIds[0]
+        for (i in 1 until n) { val v = fIds[i]; if (v < lo) lo = v; if (v > hi) hi = v }
+        if (hi - lo >= FEED_SPAN) return null
+        java.util.Arrays.fill(fSlot, 0, (hi - lo + 1).toInt(), -1)
+        for (i in 0 until n) { fSlot[(fIds[i] - lo).toInt()] = i; fLikes[i] = 0; fRows[i] = null }
+        feedLikes.setLong(1, lo); feedLikes.setLong(2, hi)
+        feedLikes.executeQuery().use { while (it.next()) { val k = fSlot[(it.getLong(1) - lo).toInt()]; if (k >= 0) fLikes[k]++ } }
+        var found = 0
+        var size = 12 + n * 26  // per post: "," + like key + up to 10 digits + "}" - the dropped "}"
+        feedRows.setLong(1, lo); feedRows.setLong(2, hi)
+        feedRows.executeQuery().use {
+            while (it.next()) {
+                val k = fSlot[(it.getLong(1) - lo).toInt()]
+                if (k < 0) continue
+                val j = it.getBytes(2); fRows[k] = j; size += j.size; found++
+            }
+        }
+        if (found != n) return null
+        val out = ByteArray(size)
+        var o = put(out, 0, FEED_HEAD)
+        for (i in 0 until n) {
+            if (i > 0) out[o++] = ','.code.toByte()
+            val j = fRows[i]!!
+            System.arraycopy(j, 0, out, o, j.size - 1); o += j.size - 1   // drop the closing '}'
+            o = put(out, o, LIKE_KEY)
+            var v = fLikes[i]; var p = fNum.size
+            do { fNum[--p] = ('0'.code + v % 10).toByte(); v /= 10 } while (v > 0)
+            System.arraycopy(fNum, p, out, o, fNum.size - p); o += fNum.size - p
+            out[o++] = '}'.code.toByte()
+        }
+        out[o++] = ']'.code.toByte(); out[o++] = '}'.code.toByte()
+        return if (o == out.size) out else out.copyOf(o)
+    }
+
+    private fun put(dst: ByteArray, at: Int, src: ByteArray): Int { System.arraycopy(src, 0, dst, at, src.size); return at + src.size }
 
     fun post(id: Long): ByteArray? {
         post.setLong(1, id)
@@ -112,24 +183,4 @@ class Db(path: String) {
     }
     fun commit() { commit.executeUpdate() }
     fun rollback() { try { rollback.executeUpdate() } catch (_: Exception) {} }
-}
-
-/** Runs WAL checkpoints off the response path, on its own connection. */
-class Checkpointer(private val path: String) : Thread("checkpointer") {
-    init { isDaemon = true; priority = MIN_PRIORITY }
-
-    override fun run() {
-        val c = DriverManager.getConnection("jdbc:sqlite:$path", Db.config().toProperties())
-        val st = c.createStatement()
-        while (true) {
-            try {
-                sleep(1000)
-                st.execute("PRAGMA wal_checkpoint(PASSIVE)")
-            } catch (e: InterruptedException) {
-                return
-            } catch (e: Exception) {
-                System.err.println("checkpoint: $e")
-            }
-        }
-    }
 }

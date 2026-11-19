@@ -41,6 +41,10 @@ int db_reads_direct(void);
 // pages, both in kB (0 and 0 if the block could not be set up). For the startup log.
 void db_page_memory(long *block_kb, long *huge_kb);
 
+// The program text that was moved onto anonymous memory at startup: its size and how much of
+// it is on 2 MB pages, both in kB. Returns "" if it was moved, otherwise why it was not.
+const char *db_text_memory(long *moved_kb, long *huge_kb);
+
 // 1 if `SELECT 1` works.
 int db_health(void);
 

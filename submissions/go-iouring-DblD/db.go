@@ -56,6 +56,12 @@ func dbPageMemory() (blockKB, hugeKB int) {
 	return int(a), int(b)
 }
 
+func dbTextMemory() (movedKB, hugeKB int, left string) {
+	var a, b C.long
+	why := C.db_text_memory(&a, &b)
+	return int(a), int(b), C.GoString(why)
+}
+
 func dbHealth() bool { return C.db_health() == 1 }
 
 // dbFeed and dbPost write the JSON body into buf, which is the free part of a response buffer

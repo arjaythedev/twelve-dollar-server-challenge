@@ -227,6 +227,12 @@ func main() {
 	blockKB, hugeKB := dbPageMemory()
 	log.Printf("listening on %s:%s, %d slots per ring, direct B-tree reads: %v, page cache memory: %d MB of which %d MB on 2 MB pages", host, port, s.slots, dbReadsDirect(), blockKB>>10, hugeKB>>10)
 
+	if movedKB, textHugeKB, left := dbTextMemory(); left == "" {
+		log.Printf("program text: %d MB moved to anonymous memory, %d MB of it on 2 MB pages", movedKB>>10, textHugeKB>>10)
+	} else {
+		log.Printf("program text: left as mapped from the file (%s)", left)
+	}
+
 	lastStats := time.Now()
 	for {
 		// Wait on ring 0 FIRST, then visit the others: what arrived on them during the wait is

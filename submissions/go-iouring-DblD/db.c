@@ -258,26 +258,117 @@ static void page_memory(void) {
   page_block_len = len;
 }
 
-// For the startup log: the size of the block in kB and how much of it the kernel put on
-// 2 MB pages (from /proc/self/smaps). Where huge pages are switched off or none are free,
-// the second number is 0 and the block works as ordinary pages.
-void db_page_memory(long *block_kb, long *huge_kb) {
-  *block_kb = (long)(page_block_len >> 10);
-  *huge_kb = 0;
-  FILE *f = page_block ? fopen("/proc/self/smaps", "r") : 0;
-  if (!f) return;
+// How much of an address range the kernel has put on 2 MB pages, in kB (from
+// /proc/self/smaps).
+static long huge_kb_in(uintptr_t lo, uintptr_t hi) {
+  long total = 0;
+  FILE *f = fopen("/proc/self/smaps", "r");
+  if (!f) return 0;
   char line[256];
   int ours = 0;
   while (fgets(line, sizeof line, f)) {
     unsigned long from, to;
     long kb;
     if (sscanf(line, "%lx-%lx ", &from, &to) == 2) {
-      ours = from < (unsigned long)(uintptr_t)page_block + page_block_len && to > (unsigned long)(uintptr_t)page_block;
+      ours = from < hi && to > lo;
     } else if (ours && sscanf(line, "AnonHugePages: %ld kB", &kb) == 1) {
-      *huge_kb += kb;
+      total += kb;
     }
   }
   fclose(f);
+  return total;
+}
+
+// For the startup log: the size of the block in kB and how much of it the kernel put on
+// 2 MB pages. Where huge pages are switched off or none are free, the second number is 0
+// and the block works as ordinary pages.
+void db_page_memory(long *block_kb, long *huge_kb) {
+  *block_kb = (long)(page_block_len >> 10);
+  *huge_kb = page_block ? huge_kb_in((uintptr_t)page_block, (uintptr_t)page_block + page_block_len) : 0;
+}
+
+// The program's own code on a 2 MB page.
+//
+// The instructions of a program are memory too, and the CPU translates their addresses
+// through the same small cache (the instruction TLB). This binary's code is about 2.3 MB,
+// which is some 600 pages of 4 KB. The kernel of the scoring image can put anonymous memory
+// on 2 MB pages but not a program file's text (it is built without huge pages for files), so
+// the text is copied: into anonymous memory that asks for 2 MB pages, which is then moved
+// over the original addresses with one mremap call. The bytes at every address are the same
+// before and after, so the code that is running, this function included, does not notice.
+//
+// Only whole 2 MB units inside the binary's read-only start (its header pages and its text)
+// are moved, and the linker puts SQLite, the C in this file and the Go loop in the first
+// one. The moved range is read-only and executable as a whole; nothing in it is ever
+// writable. It runs before the Go runtime starts, while the process has one thread. It asks
+// only about this process's own memory and changes no setting of the box. Where the box has
+// huge pages switched off, the text has no whole unit, or any call fails, the text stays as
+// the kernel mapped it; the startup log says which happened.
+static uintptr_t text_from, text_to;
+static const char *text_left = "not tried";
+__attribute__((constructor)) static void text_to_huge(void) {
+  const uintptr_t H = 2u << 20;
+  char exe[512], line[1024];
+  FILE *f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+  if (!f || !fgets(line, sizeof line, f) || strstr(line, "[never]")) {
+    if (f) fclose(f);
+    text_left = "2 MB pages are off on this box";
+    return;
+  }
+  fclose(f);
+  ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  f = fopen("/proc/self/maps", "r");
+  if (n <= 0 || !f) {
+    if (f) fclose(f);
+    text_left = "cannot read the memory map";
+    return;
+  }
+  exe[n] = 0;
+  uintptr_t lo = 0, hi = 0;
+  while (fgets(line, sizeof line, f)) { // the binary's mappings, from its start to the end of its text
+    unsigned long s, e;
+    char perm[8];
+    if (sscanf(line, "%lx-%lx %7s", &s, &e, perm) != 3 || !strstr(line, exe)) continue;
+    if (!lo) lo = hi = s;
+    if (s != hi || perm[1] == 'w') break;
+    hi = e;
+    if (perm[2] == 'x') break;
+  }
+  fclose(f);
+  uintptr_t a = (lo + H - 1) & ~(H - 1), b = hi & ~(H - 1);
+  if (!lo || b <= a) {
+    text_left = "no whole 2 MB unit in the text";
+    return;
+  }
+  size_t len = b - a;
+  char *raw = mmap(0, len + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (raw == MAP_FAILED) {
+    text_left = "no memory for the copy";
+    return;
+  }
+  char *copy = (char *)(((uintptr_t)raw + H - 1) & ~(H - 1));
+  madvise(copy, len, MADV_HUGEPAGE);
+  memcpy(copy, (void *)a, len);
+  if (mprotect(copy, len, PROT_READ | PROT_EXEC) ||
+      mremap(copy, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)a) == MAP_FAILED) {
+    munmap(raw, len + H);
+    text_left = "the kernel refused the move";
+    return;
+  }
+  // The copy has moved; give back the alignment slack on both sides of where it was.
+  if (copy > raw) munmap(raw, (size_t)(copy - raw));
+  munmap(copy + len, (size_t)(raw + H - copy));
+  text_from = a;
+  text_to = b;
+  text_left = "";
+}
+
+// For the startup log: how much of the program text was moved (kB), how much of that the
+// kernel put on 2 MB pages, and, when nothing was moved, why.
+const char *db_text_memory(long *moved_kb, long *huge_kb) {
+  *moved_kb = (long)((text_to - text_from) >> 10);
+  *huge_kb = text_to ? huge_kb_in(text_from, text_to) : 0;
+  return text_left;
 }
 
 int db_open(const char *path) {

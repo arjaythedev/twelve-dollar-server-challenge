@@ -485,6 +485,10 @@ Its follow-up **#449** (`8bb2212`, bounds completed epoll input buffers; held, n
 row) scored **175,000** (17,202 req/s, p95 73.8 / p99 216 ms, 0 err, 87 % CPU, 47 µs/req, 1,328 MB, 2026-11-15).
 CPU-bound: 180,000 failed the 2-minute probe on p95/p99 (1.04 s / 1.87 s at 92 % CPU). Its WAL grew past 4 GB during
 the 5-minute hold (not checkpointed under load), which nearly filled the target's disk; the hold itself was clean.
+Its follow-up **#525** (`7d359e1`, single-owner multi-ring io_uring, off-loop WAL checkpointer; held, not merged: it
+didn't beat the merged row) scored **209,000** (20,463 req/s, p95 96.5 / p99 198 ms, 0 err, 77 % CPU, 35 µs/req, 514 MB,
+2026-11-19). 220,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (256 ms / 1.22 s at 82 % CPU);
+230,000 failed the 2-minute probe on refused connections (74 % err at 96 % CPU).
 
 ᶻ **swift-iouring-Tabonx** stays on its merged #173 row. Its follow-up **#293** (`38868fc`; held, not merged: it
 didn't beat the merged row, it tied it) also held **219,000** (21,352 req/s, p95 16.9 / p99 567 ms, 0 err, 63 % CPU,

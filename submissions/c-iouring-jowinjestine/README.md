@@ -407,3 +407,25 @@ seed and PGO binary, preferably from a separate k6 host, and collect
 p95/p99, errors, CPU/request, RAM, `enobufs`, retransmissions and TCP
 memory. A smaller receive window may hurt throughput, so **do not enable
 without an A/B win**. No performance claim until the official benchmark.
+
+
+## Experimental predictive WAL checkpoint scheduling (against #486)
+
+This experiment preserves #486's SQLite/WAL durability, single-loop SQL execution,
+background PASSIVE checkpoint threads, tail write-hold semantics, existing hard
+thresholds, and TCP memory governor. Only the **start time** of a background
+checkpoint cycle is changed.
+
+While the checkpoint state is idle, sample committed WAL frame growth at most
+four times per second and maintain an exponentially weighted frame/sec rate
+(75% previous rate, 25% current rate). Forecast WAL size two seconds ahead.
+Start the existing asynchronous bulk checkpoint if the forecast crosses the
+normal `CKPT_FRAMES` threshold, **but never before the current WAL reaches
+half that threshold**. The existing threshold still triggers unconditionally,
+and the existing urgent and force safeguards are unchanged. Reset the
+prediction when the WAL frame count decreases after a restart.
+
+This is a hypothesis about checkpoint scheduling and tail latency, not a
+measured improvement. It may increase background I/O or checkpoint frequency.
+Validate 42/42 correctness, five-minute k6 hold, p95/p99, CPU, WAL growth,
+checkpoint passes, tail hold duration, and peak memory against merged #486.

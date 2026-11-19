@@ -1,3 +1,5 @@
 bin/
 sqlite/
 sqlite.zip
+db.syso
+pgo/

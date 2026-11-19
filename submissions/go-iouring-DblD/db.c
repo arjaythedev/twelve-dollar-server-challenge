@@ -1,3 +1,10 @@
+//go:build ignore
+
+// build.sh compiles this file with gcc itself, into db.syso, which the go tool links. The line
+// above keeps the go tool from compiling it a second time. (Why not leave it to cgo: for the
+// profile-guided build gcc must compile the file twice under the same object name, and cgo
+// compiles in a temporary folder with a new name every time.)
+//
 // See db.h. Plain SQL through prepared statements (B-tree reads replace parts of this in stage 5),
 // one transaction per loop pass, and a background thread that checkpoints the WAL.
 #define _GNU_SOURCE // before any header: SQLite uses mremap
@@ -361,15 +368,18 @@ static inline void wr_lit(wr_t *w, const char *s, size_t n) {
 }
 #define WR(w, s) wr_lit(w, s, sizeof(s) - 1)
 
-// Decimal digits two at a time from a table: half the divisions of the one-digit loop, and
-// no division at all for a number below 10 (most like counts).
+// Decimal digits two at a time from a table, written straight into the output from the last
+// digit back. The number of digits is known first: for a value below 2^32 from the position
+// of its top bit (1233/4096 is log10 of 2) and one comparison, with 32-bit arithmetic from
+// there on; for a larger one by counting. A number below 10 (most like counts) is one store.
 static const char digit_pairs[] =
     "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
     "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
     "8081828384858687888990919293949596979899";
 
 static void wr_int(wr_t *w, int64_t v) {
-  if (!wr_room(w, 24)) return;
+  static const uint32_t pow10[10] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
+  if (!wr_room(w, 24)) return; // a sign and at most 20 digits
   uint8_t *p = w->p;
   uint64_t u = (uint64_t)v;
   if (v < 0) {
@@ -381,23 +391,41 @@ static void wr_int(wr_t *w, int64_t v) {
     w->p = p;
     return;
   }
-  char tmp[40]; // digits end at tmp[20]; the zeroed rest is so a fixed 20 bytes can be copied
-  memset(tmp + 20, 0, 20);
-  int i = 20;
+  if (u <= 0xffffffffu) {
+    uint32_t x = (uint32_t)u;
+    unsigned t = (unsigned)(32 - __builtin_clz(x)) * 1233 >> 12; // digits, or one less
+    unsigned n = t + (x >= pow10[t]);
+    uint8_t *q = p + n;
+    w->p = q;
+    while (x >= 100) {
+      uint32_t r = x % 100;
+      x /= 100;
+      q -= 2;
+      memcpy(q, digit_pairs + 2 * r, 2);
+    }
+    if (x >= 10) memcpy(q - 2, digit_pairs + 2 * x, 2);
+    else q[-1] = (uint8_t)('0' + x);
+    return;
+  }
+  unsigned n = 10;
+  for (uint64_t t = 10000000000ull; n < 20 && u >= t; t *= 10) n++;
+  uint8_t *q = p + n;
+  w->p = q;
   while (u >= 100) {
     unsigned r = (unsigned)(u % 100);
     u /= 100;
-    i -= 2;
-    memcpy(tmp + i, digit_pairs + 2 * r, 2);
+    q -= 2;
+    memcpy(q, digit_pairs + 2 * r, 2);
   }
-  if (u >= 10) {
-    i -= 2;
-    memcpy(tmp + i, digit_pairs + 2 * u, 2);
-  } else {
-    tmp[--i] = (char)('0' + u);
-  }
-  memcpy(p, tmp + i, 20); // 20 - i of these are digits; the room for all 20 was checked
-  w->p = p + (20 - i);
+  if (u >= 10) memcpy(q - 2, digit_pairs + 2 * u, 2);
+  else q[-1] = (uint8_t)('0' + u);
+}
+
+// For json_test.go: the integer writer alone.
+int db_json_int(int64_t v, uint8_t *out, int cap) {
+  wr_t w = {out, out + cap, 0};
+  wr_int(&w, v);
+  return w.full ? -1 : (int)(w.p - out);
 }
 
 #if defined(__SSE2__)
@@ -422,10 +450,44 @@ static void wr_str(wr_t *w, const uint8_t *s, size_t n) {
   uint8_t *p = w->p;
   *p++ = '"';
   size_t i = 0;
+#if defined(__SSE2__)
+  const __m128i quote = _mm_set1_epi8('"'), slash = _mm_set1_epi8('\\'), low = _mm_set1_epi8(0x1f);
+#define BAD16(x) _mm_movemask_epi8(_mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(x, quote), _mm_cmpeq_epi8(x, slash)), _mm_cmpeq_epi8(_mm_min_epu8(x, low), x)))
+  // The usual case first: nothing to escape. Whole blocks, then the last 16 bytes as one more
+  // block that overlaps the one before it (8 to 15 bytes: the first 8 and the last 8), so no
+  // length has a byte-by-byte tail. The first block with something to escape goes to the
+  // general loop below, which starts again at the last position known to be clean.
+  if (n >= 16) {
+    for (; i + 16 <= n; i += 16) {
+      __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
+      _mm_storeu_si128((__m128i *)(p + i), x);
+      if (BAD16(x)) goto general;
+    }
+    if (i < n) {
+      __m128i x = _mm_loadu_si128((const __m128i *)(s + n - 16));
+      _mm_storeu_si128((__m128i *)(p + n - 16), x);
+      if (BAD16(x)) goto general;
+    }
+    p[n] = '"';
+    w->p = p + n + 1;
+    return;
+  }
+  if (n >= 8) {
+    __m128i x = _mm_unpacklo_epi64(_mm_loadl_epi64((const __m128i *)s), _mm_loadl_epi64((const __m128i *)(s + n - 8)));
+    if (BAD16(x)) goto general;
+    _mm_storel_epi64((__m128i *)p, x);
+    _mm_storel_epi64((__m128i *)(p + n - 8), _mm_unpackhi_epi64(x, x));
+    p[n] = '"';
+    w->p = p + n + 1;
+    return;
+  }
+general:
+  p += i;
+#undef BAD16
+#endif
   for (;;) {
     size_t k;
 #if defined(__SSE2__)
-    const __m128i quote = _mm_set1_epi8('"'), slash = _mm_set1_epi8('\\'), low = _mm_set1_epi8(0x1f);
     while (i + 16 <= n) {
       __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
       _mm_storeu_si128((__m128i *)p, x);

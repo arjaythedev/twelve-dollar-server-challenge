@@ -55,6 +55,7 @@ int db_post(int64_t id, uint8_t *out, int cap);
 // asks for up to 26 bytes more room than the result needs.
 // (Used by db_feed and db_post; exported so a test can hold it to the Go version.)
 int db_json_string(const uint8_t *s, int n, uint8_t *out, int cap);
+int db_json_int(int64_t v, uint8_t *out, int cap);
 
 // 1 if the post exists, 0 if not, -1 on error.
 int db_post_exists(int64_t id);

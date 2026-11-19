@@ -280,6 +280,13 @@ func (r *ring) drain(fn func(c *cqe)) int {
 	return n
 }
 
+// peek calls fn for every completion that is waiting, without taking any off the queue.
+func (r *ring) peek(fn func(c *cqe)) {
+	for head, tail := *r.cqHead, atomic.LoadUint32(r.cqTail); head != tail; head++ {
+		fn(&r.cqes[head&r.cqMask])
+	}
+}
+
 // bufPool is a "provided buffer ring": a pool of receive buffers we lend to the kernel.
 // A connection that is idle holds none of them. When data arrives the kernel picks one,
 // tells us which, and we hand it back as soon as we have parsed the request. That is how

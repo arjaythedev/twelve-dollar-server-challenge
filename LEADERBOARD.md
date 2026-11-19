@@ -1174,7 +1174,11 @@ timeouts. The head moved during that run, so #514 isn't merged yet, and the merg
 (260,000). #514's next head `caef8ce` (`IORING_OP_SEND_ZC` for responses of 4 KB and up, a `std::pmr` pool for
 deferred buffers, PGO built on the box) scored **0** (2026-11-18): it passed the tests, but every probe from 20,000
 down to 500 users lost requests to 60 s timeouts at almost idle CPU (37.9 % at 20,000, 22.7 % at 500, with every like
-and a third of `/feed` requests unanswered), so it isn't merged and the row stays at `b76816c`.
+and a third of `/feed` requests unanswered), so it isn't merged and the row stays at `b76816c`. #514's next head
+`0e3f5fd` (fix for the zero-copy send deadlock, listener receive buffer capped at 16 KiB) held **270,000** (25,846
+req/s, p95 80.7 / p99 277.2 ms, 0 errors, 77 % CPU, 27 µs/req, 1,214 MB, 2026-11-19); 280,000 failed the 2-minute
+probe on p99 (2.26 s, 0 errors) and 320,000 on p99 10.8 s with 0.051 % timeouts. That ties `b76816c`, and the head
+moved during the run (to `7bac38a`, now queued), so it isn't merged and the row stays at `b76816c`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

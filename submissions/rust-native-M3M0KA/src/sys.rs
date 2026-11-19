@@ -26,9 +26,14 @@ pub const SOCK_CLOEXEC: c_int = 0o2000000;
 
 const SOL_SOCKET: c_int = 1;
 const SO_REUSEADDR: c_int = 2;
+const SO_REUSEPORT: c_int = 15;
+const AF_INET: c_int = 2;
+const AF_INET6: c_int = 10;
+const SOCK_STREAM: c_int = 1;
 const IPPROTO_TCP: c_int = 6;
 const TCP_NODELAY: c_int = 1;
 const RLIMIT_NOFILE: c_int = 7;
+const LISTEN_BACKLOG: c_int = 4096;
 
 pub const MSG_NOSIGNAL: c_int = 0x4000;
 
@@ -71,6 +76,9 @@ extern "C" {
     fn fork() -> c_int;
     pub fn send(fd: c_int, buf: *const c_void, len: usize, flags: c_int) -> isize;
     pub fn close(fd: c_int) -> c_int;
+    pub fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
+    pub fn bind(fd: c_int, addr: *const c_void, len: u32) -> c_int;
+    pub fn listen(fd: c_int, backlog: c_int) -> c_int;
     pub fn setsockopt(fd: c_int, level: c_int, name: c_int, val: *const c_void, len: u32) -> c_int;
     pub fn getrlimit(resource: c_int, rlim: *mut Rlimit) -> c_int;
     pub fn setrlimit(resource: c_int, rlim: *const Rlimit) -> c_int;
@@ -112,6 +120,139 @@ pub fn set_reuseaddr(fd: c_int) {
             std::mem::size_of::<c_int>() as u32,
         );
     }
+}
+
+#[repr(C)]
+struct SockAddrIn {
+    sin_family: u16,
+    sin_port: u16,
+    sin_addr: u32,
+    sin_zero: [u8; 8],
+}
+
+#[repr(C)]
+struct SockAddrIn6 {
+    sin6_family: u16,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
+}
+
+fn bind_addr(addr: std::net::SocketAddr, count: usize) -> std::io::Result<Vec<c_int>> {
+    let target = if addr.port() == 0 { 1 } else { count.max(1) };
+    let (family, sa_v4, sa_v6, addr_len): (c_int, SockAddrIn, SockAddrIn6, u32) = match addr {
+        std::net::SocketAddr::V4(v4) => (
+            AF_INET,
+            SockAddrIn {
+                sin_family: AF_INET as u16,
+                sin_port: v4.port().to_be(),
+                sin_addr: u32::from_ne_bytes(v4.ip().octets()),
+                sin_zero: [0; 8],
+            },
+            SockAddrIn6 { sin6_family: 0, sin6_port: 0, sin6_flowinfo: 0, sin6_addr: [0; 16], sin6_scope_id: 0 },
+            std::mem::size_of::<SockAddrIn>() as u32,
+        ),
+        std::net::SocketAddr::V6(v6) => (
+            AF_INET6,
+            SockAddrIn { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: [0; 8] },
+            SockAddrIn6 {
+                sin6_family: AF_INET6 as u16,
+                sin6_port: v6.port().to_be(),
+                sin6_flowinfo: v6.flowinfo(),
+                sin6_addr: v6.ip().octets(),
+                sin6_scope_id: v6.scope_id(),
+            },
+            std::mem::size_of::<SockAddrIn6>() as u32,
+        ),
+    };
+    let addr_ptr: *const c_void = if family == AF_INET {
+        &sa_v4 as *const SockAddrIn as *const c_void
+    } else {
+        &sa_v6 as *const SockAddrIn6 as *const c_void
+    };
+
+    let mut fds = Vec::with_capacity(target);
+    let one: c_int = 1;
+    let mut reuseport_failed = false;
+
+    for i in 0..target {
+        let fd = unsafe { socket(family, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0) };
+        if fd < 0 {
+            if i == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            for &extra in &fds[1..] {
+                unsafe { close(extra); }
+            }
+            fds.truncate(1);
+            return Ok(fds);
+        }
+        set_reuseaddr(fd);
+        set_nodelay(fd);
+        if target > 1 {
+            let rc = unsafe {
+                setsockopt(
+                    fd,
+                    SOL_SOCKET,
+                    SO_REUSEPORT,
+                    &one as *const c_int as *const c_void,
+                    std::mem::size_of::<c_int>() as u32,
+                )
+            };
+            if rc < 0 {
+                if i == 0 {
+                    reuseport_failed = true;
+                } else {
+                    unsafe { close(fd); }
+                    for &extra in &fds[1..] {
+                        unsafe { close(extra); }
+                    }
+                    fds.truncate(1);
+                    return Ok(fds);
+                }
+            }
+        }
+        if unsafe { bind(fd, addr_ptr, addr_len) } < 0 || unsafe { listen(fd, LISTEN_BACKLOG) } < 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe { close(fd); }
+            if i == 0 {
+                return Err(err);
+            }
+            for &extra in &fds[1..] {
+                unsafe { close(extra); }
+            }
+            fds.truncate(1);
+            return Ok(fds);
+        }
+        fds.push(fd);
+        if reuseport_failed {
+            break;
+        }
+    }
+    Ok(fds)
+}
+
+/// Binds up to `count` nonblocking `SO_REUSEPORT` TCP listeners with a 4,096
+/// SYN/accept backlog and inherited `TCP_NODELAY`, falling back to a single
+/// 4,096-backlog listener if `SO_REUSEPORT` or secondary sockets fail.
+pub fn bind_listeners(host: &str, port: u16, count: usize) -> std::io::Result<Vec<c_int>> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<std::net::SocketAddr> = (host, port).to_socket_addrs()?.collect();
+    if addrs.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no socket address resolved",
+        ));
+    }
+    let mut last_err = None;
+    for addr in addrs {
+        match bind_addr(addr, count) {
+            Ok(fds) => return Ok(fds),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "bind failed")))
 }
 
 /// The soft descriptor limit of this process (what the service unit sets).
@@ -257,4 +398,24 @@ pub fn drain_counter(fd: c_int) {
 
 pub fn would_block() -> bool {
     std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
+}
+
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+
+    #[test]
+    fn binds_reuseport_listeners_and_accepts() {
+        let probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let fds = bind_listeners("127.0.0.1", port, 4).unwrap();
+        assert!(fds.len() == 4 || fds.len() == 1, "unexpected listener count {}", fds.len());
+        let client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        drop(client);
+        for fd in fds {
+            assert!(fd >= 0);
+            unsafe { close(fd); }
+        }
+    }
 }

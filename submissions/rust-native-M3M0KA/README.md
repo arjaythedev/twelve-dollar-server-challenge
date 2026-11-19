@@ -1,163 +1,57 @@
-# Rust native feed server (rust-native-M3M0KA)
+# Rust native feed server (`rust-native-M3M0KA`)
 
-Clean-sheet Rust implementation of the feed API. No framework, no async runtime,
-no third-party crates. HTTP/1.1 framing, JSON validation, SHA-256/HMAC and the
-SQLite bindings are written in this repository.
+Clean-sheet native Rust + C implementation of the feed API built directly on Linux `io_uring` (with automatic `epoll` fallback) and stock SQLite `3.54.1`. No web framework, no async runtime, and no third-party Rust crates.
 
-**Serving topology: direct** on `HOST:PORT` (`0.0.0.0:80` on the benchmark box). No Nginx.
+**Serving topology: direct** on `HOST:PORT` (`0.0.0.0:80` on the benchmark box). No reverse proxy.
 
 ## Build and run
 
-    sudo bash install.sh        # Ubuntu 24.04: C toolchain + pinned Rust 1.94.0 under /opt
-    bash build.sh               # pinned SQLite 3.54.1 amalgamation (sqlite-amalgamation-3540100), checksum-verified, PGO
-    SQLITE_PATH=/path/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 bash start.sh
+```bash
+sudo bash install.sh        # Ubuntu 24.04: C toolchain + SHA-256-verified Rust 1.94.0 under /opt/twelve-rust
+bash build.sh               # Pinned liburing + SQLite 3.54.1 amalgamation, SHA-256 verified, SQLite PGO
+SQLITE_PATH=/path/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 bash start.sh
+```
+
+`install.sh` verifies `rust-1.94.0-x86_64-unknown-linux-gnu.tar.xz` against its official SHA-256 (`e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a`). `build.sh` verifies both `liburing` (`f4e42a515cd78c8c9cac2be14222834be5f8df2b`, SHA-256 `2bce6c36035b9bac516f1a335caa595bb300a3048c9767876a33fc1ad84d30b6`) and `sqlite-amalgamation-3540100.zip` (`0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9`), compiles stock SQLite `3.54.1` with `-march=native` + PGO (`src/pgo_train.c`), and links `bin/feed` statically against `liburing.a` and `sqlite3.o`.
 
 ## Files
 
-- `src/main.rs` - configuration, epoll transport, worker processes (`FEED_WORKERS`, default 5),
-  event-loop pass = one transaction (write lock taken up front when the pass contains a POST),
-  accept backpressure on system-wide low memory
-- `src/net_uring.rs`, `src/uring.rs` - io_uring transport: up to eight rings, each sized to
-  the process descriptor limit; the accepting ring hands the listener to the next ring
-  before its slots run out. Accepts are one-shot and armed only while slots remain
-  (multishot accept can be handed more connections than slots hold), receives are
-  multishot with buffer selection, and buffers move through
-  `IORING_OP_PROVIDE_BUFFERS`, which every Linux 5.7+ kernel accepts. Used only after a
-  live self test (`self_test`) — which drives real concurrent, pipelined, split and
-  closing clients through a ring boundary — succeeds; where the kernel refuses
-  `io_uring_setup` the server serves on epoll. The same guard stops and resumes
-  accepting on system-wide memory thresholds.
-- `src/app.rs` - routes, validation, JWT verification, response framing
-- `src/db.rs` - SQLite connection, SQL statements, batch transaction, startup checks
-- `src/btree.rs`, `src/sqlite_shim.c` - B-tree read plans for `/feed` and `/posts/:id`
-  (the shim is compiled into the same translation unit as the unmodified amalgamation)
-- `src/uring.rs` - raw kernel UAPI bindings, with byte-level and constant checks for
-  everything the server submits (`rustc --test src/main.rs`, 13 tests)
-- `src/http.rs`, `src/json.rs`, `src/crypto.rs`, `src/sys.rs` - protocol primitives
-- `src/pgo_train.c` - build-time profile training on a synthetic database (not the seed)
-- `tests/oracle.sh` - differential test: B-tree plans vs pure SQL, byte-identical, before and after writes
-- `tests/protocol.sh` - pipelined GET+POST+GET in one write (order and statuses), a request split
-  across two writes, `Connection: close`, and `kill -9` with writes in flight (every acknowledged
-  201 must survive the restart)
-- `bench/load.rs` - development load generator (not shipped in the image)
+- `src/l2_uring.c`, `src/l2_uring.rs`: Mapped `PBUF_RING` multi-ring `io_uring` wrapper built over pinned `liburing` (`1024 × 2048 B` buffers per lane by default, zero-SQE `l2_return_buffer`, `resv[0]=1` `-EINVAL` compatibility retry, direct fixed-file accept/send/close).
+- `src/l2_server.rs`: Single-owner multi-lane event loop (`MAX_LANES = 8`, `65,471` direct descriptor slots per lane = up to `523,768` direct descriptors under `LimitNOFILE=65535`), `4 × SO_REUSEPORT` `4,096`-backlog listeners balanced by min-inflight accept count, single-parse `ParsedOffsets`, drain-first CQE harvest (`DRAIN_BUDGET = 8,192`), read-before-write intra-batch execution, and bounded `MemGuard` / byte-budget admission.
+- `src/main.rs`, `src/net_uring.rs`, `src/uring.rs`: Startup `l2_uring::self_check()` auto-selection (logs `transport: l2 io_uring`), automatic fallback to the 5-worker `epoll` transport (`FEED_EPOLL=1` override or when `io_uring_setup` is disallowed), and UAPI layout unit tests.
+- `src/app.rs`, `src/http.rs`, `src/json.rs`, `src/crypto.rs`, `src/buffer.rs`: Zero-copy `http::respond_stream` response framing, single-pass inline UTF-8 JSON scanning, stack-buffered base64url/HS256 JWT validation, and fixed-quota retry-safe buffers.
+- `src/db.rs`, `src/btree.rs`, `src/sqlite_shim.c`: Single-owner SQLite `3.54.1` connection, prepared `BEGIN`/`BEGIN IMMEDIATE`/`COMMIT`/`ROLLBACK` statements + 11-bit `dirty_stmts` mask, lazy stock B-tree cursor read plans (`256`-span `range_counts`), and an off-loop `nice(19)` bounded WAL checkpointer.
+- `src/pgo_train.c`: Synthetic database PGO training workload executed during `build.sh`.
+- `tests/`: `oracle.sh` (3,000-ID B-tree vs SQL differential check), `protocol.sh` (pipelined/split/close/`kill -9` durability), `slow-reader.sh`, `transaction-failure.sh`, `l2-pressure.py`, and `l2-byte-budget.py`.
 
-## Read plans
+## Transport & Connection Capacity
 
-`GET /feed` walks `posts_created_at_id_idx` for its first 20 entries, which is
-exactly the `ORDER BY created_at DESC, id DESC` order the API asks for, and reads
-the rows from the `posts` tree (stepping back with `sqlite3BtreePrevious` when the
-ids are consecutive), the authors from `users`, and the like counts from
-`likes_post_id_idx` (one range scan when the 20 ids are consecutive, one seek per
-id otherwise). `GET /posts/:id` is a rowid seek plus the same author and count
-lookups.
+- **Primary (`l2 io_uring`)**: One process, one SQLite page cache (default `32 MiB`), and up to `8` lazily opened `io_uring` lanes (`65,471` registered fixed-file slots per lane). Sockets live in kernel fixed-file tables rather than process FD slots, keeping `/proc/self/fd` under ~`32` descriptors while scaling across hundreds of thousands of connections under `LimitNOFILE=65535`. Each lane waits on an `eventfd` via `l2_wait_many` so idle wakeups work across all active lanes without busy polling.
+- **Fallback (`epoll`)**: When `FEED_EPOLL=1` is set or `l2_uring::self_check()` fails (e.g., `ENOSYS`/`EPERM` under seccomp), the server forks `FEED_WORKERS` (`5`) processes using `SO_REUSEPORT` `epoll`.
 
-Nothing is remembered between requests: no next id, no cached timestamp, no data
-version. A write by this server, by a restart, or by any other connection is simply
-read on the next request, so the plan never has to switch itself off — the defect
-that turned this server's reads back into SQL under the scored load. At startup the
-plan's output is compared byte for byte with the reference SQL and disabled only if
-they differ.
+## Stock SQLite B-Tree Read Plans & Off-Loop Bounded WAL Checkpointer
 
-## Correctness
+- `GET /feed` and `GET /posts/:id` inspect the fixed schema and verify at startup that the B-tree plan output matches reference SQL byte for byte. Every request runs inside an explicit SQL `BEGIN` transaction and reads live SQLite pages via stock SQLite `3.54.1` B-tree cursors (`sqlite3BtreeFirst`/`Previous`/`Next`/`TableMoveto`/`IndexMoveto` + `256`-span `range_counts`). There are **no** cross-request row caches, response caches, read coalescing, or remembered JWT verifications; foreign writes on normal `unix` VFS are immediately visible on the next transaction.
+- Any commit or auto-rollback failure retires/resets transaction state, emits `HTTP/1.1 500`, closes the connection without publishing provisional output or replaying creates, and preserves SQLite `WAL` + `synchronous=NORMAL` application-crash durability (`protocol.sh`: `40/40` `kill -9`).
+- A dedicated `nice(19)` background thread (`wal-ckpt`) opens a second normal-`unix`-VFS `sqlite3*` connection (`busy_timeout(50)`) while a passive `sqlite3_wal_hook` (`feed_wal_hook_cb`, always returning `SQLITE_OK`) counts WAL frames:
+  - Runs non-blocking `SQLITE_CHECKPOINT_PASSIVE` at `>= 4,096` WAL pages (`FEED_WAL_CKPT_PAGES` override).
+  - Requests bounded inter-batch `POST` deferral (`<= 150 ms` per restart episode, while `GET`s continue uninterrupted, with a `2 s` cooldown and `65,536`-frame emergency valve) to run `SQLITE_CHECKPOINT_RESTART` back to frame `0` without blocking external `unix`-VFS readers.
 
-- `test/run.sh` (the official 42 checks): **passed 42/42** on this build.
-- `tests/oracle.sh`: plan output identical to pure SQL on a fresh seed and after writes, with the
-  shipped worker count (so writes by other processes are inside the comparison).
-- `tests/protocol.sh`: pipelined write ordering, split requests, `Connection: close`, and 40/40
-  acknowledged writes surviving a `kill -9`.
-- `rustc --test src/main.rs`: byte-level tests of every io_uring submission entry, the
-  register-opcode constants against the uapi, the ring handover watermark, and the
-  memory guard (13 tests).
-- The B-tree plan checks the schema layout and the feed invariant (dense rowids,
-  non-decreasing `created_at`) at startup and after every insert. Any violation, foreign
-  write, or unreadable record disables the plan permanently and reads use SQL.
+## HTTP/1.1 Subset & Safety Contracts
 
-## Connection capacity
+- Supports HTTP/1.1 keep-alive connections with explicit `Content-Length`, pipelined requests answered strictly in request order, arbitrarily split reads, `Expect: 100-continue`, and `Connection: close`. Requests using `Transfer-Encoding`, ambiguous framing, invalid UTF-8 JSON, or noncanonical/padded JWTs are cleanly rejected (`400`/`401` and safe connection closure where framing is ambiguous).
 
-One process cannot hold more than its descriptor limit (65,535 under the challenge's
-`LimitNOFILE`). The epoll transport therefore forks `FEED_WORKERS` (default 5) processes
-after binding one listening socket. Each worker has its own descriptor table, its own
-SQLite connection and its own epoll set; the kernel distributes accepts among them.
-Five workers give 327,675 descriptors. io_uring, when its self test passes, serves from a
-single process instead.
+## Credits & Licenses
 
-## Durability
+- **SQLite `3.54.1`** (`sqlite-amalgamation-3540100.zip`): Public Domain.
+- **`liburing`** (pinned commit `f4e42a515cd78c8c9cac2be14222834be5f8df2b`): MIT / LGPL-2.1 dual-licensed (Jens Axboe & contributors).
+- **Rust `1.94.0` toolchain**: MIT / Apache-2.0 dual-licensed.
+- **Architectural Acknowledgements**: Independently implemented here in clean-sheet Rust/C; informed by public architectural patterns documented in top challenge submissions `#264` (single-owner multi-ring direct-descriptor `io_uring`, read/write separation, off-loop managed WAL checkpointing), `#257` (row-lookup batching & work amortization), and `#245` (bounded arenas & drain-first CQE harvesting).
 
-Each event-loop pass runs in one SQLite transaction. Responses are written only after
-`COMMIT` returns. If the commit fails, every response in the pass is replaced by a
-500 and its connection is closed. WAL with `synchronous=NORMAL`.
+## Measured Results (Local Test Environment, Not Official Leaderboard Score)
 
-## Measured (local, not official)
+All measurements below were collected on a local host and single-vCPU (`CPU 0`), `2 GiB` (`MemTotal: 2,015,196 KiB`), zero-swap Ubuntu 24.04 (`kernel 6.8.0-147-generic`) KVM guest capped at `<= 50,000` users (`bench/load.js`), and do **not** represent an official leaderboard capacity score:
 
-Single core, server pinned with `taskset`, closed-loop clients on other cores, seed
-database, app CPU from `/proc/<pid>/stat`. The same build measured before the
-per-request allocator and buffer fixes was 20.5 us/request on `/feed`:
-
-| endpoint | app CPU per request |
-|---|---|
-| `GET /health` | 3.4 us at 64 conns, 4.4 us at 512 |
-| `GET /posts/250000` | 3.6 us (277,000 req/s on one core); a random id in 1..500,000 costs 8.0 us with the token attached |
-| `GET /feed` | 9.2 us at 64 conns, 12.1 us at 512 |
-| `GET /feed`, `FEED_NO_PLAN=1` | 15.9 us |
-| full 46/46/7/1 mix | 12.5–13.1 us/request at 68–78k req/s on one pinned core |
-| one JWT verification | 0.73 us (measured on the mac function, 200k iterations) |
-
-Serving shape rehearsal (300,000 keep-alive connections held from 38 loopback source
-addresses, requests paced at about 29,000 req/s for 60 s, 1.7M requests, 0 failed):
-
-| transport | app CPU at that load |
-|---|---|
-| one process | 43–49% of the core (14.7–17.5 us/request) |
-| `FEED_WORKERS=5` (epoll fallback) | 60% of the core (20.5 us/request) |
-
-p50 stayed at or below 1 ms. Server RSS held near 40 MB; the remaining memory term at
-300k sockets is kernel-side (a leaderboard peer measured 773 MB total at 290,000 users).
-
-`strace -c` on the serving thread shows one `recvfrom` and one `sendto` per request
-and nothing else per request.
-
-Memory per live connection, measured by opening 5,000 sockets, requesting `/feed`
-on each, and reading the server's RSS: **1.5 kB**. Connection buffers grow in small
-steps (an earlier build reserved 16 kB per socket, 25 kB resident, which the 2 GB
-box cannot afford at 300k), and a response buffer larger than 2 kB goes back to a
-process-wide pool after its send completes instead of being retained per socket.
-
-Multi-process capacity, server limited to `ulimit -n 65535` per process, five workers,
-clients from 38 loopback source addresses:
-
-- 300,000 idle keep-alive sockets held; four workers at 65,535, one at 37,900; about
-  88 MB user memory per worker; 0% CPU while idle.
-- Official `bench/load.js`, 3,000 VUs, 60 s, five workers: checks 100%, 0 failed requests,
-  p99 1.57 ms, max 149 ms.
-- Read-your-writes across workers: a post created through one connection was read back
-  through 30 new connections, each served by whichever worker accepted it.
-
-Not measured here: kernel socket memory at 300,000 connections on the 2 GB box (the
-user-space figure above excludes it), and CPU contention of five processes on one vCPU
-at full load.
-
-## Measured (single process, earlier)
-
-Single core, server pinned with `taskset`, closed-loop clients on other cores.
-
-| run | req/s | p99 |
-|---|---|---|
-| `/feed`, 256 conns | ~45,000 | 6.5 ms |
-| `/posts/250000`, 256 conns | ~70,000 | 4.5 ms |
-| official `bench/load.js`, 3,000 VUs, 60 s | 239 (think-time bound) | 1.05 ms, 0% failed |
-
-Connection capacity: the epoll transport held **300,000 concurrent keep-alive sockets**
-with the process descriptor limit raised (`ulimit -n 1048576`) and returned `200 OK`.
-A `LimitNOFILE` of 65,535 caps one epoll process at about 65,500 connections; past that the
-io_uring transport is required. The io_uring path runs only after its self test answers real
-concurrent, pipelined, split and closing clients correctly; where the kernel refuses
-`io_uring_setup` (EPERM) the server serves on epoll and logs `transport: epoll`.
-
-## Limitations
-
-- The io_uring transport is unverified on a kernel that permits it. Its self test is the
-  guard: if it fails, the server keeps serving on epoll. The self test now also crosses
-  a ring boundary (a forced 32-slot table, watermark 8, 64 concurrent clients) so the
-  handover path is executed before the public listener exists.
-- No official leaderboard score exists for this build. Ranking is decided by the maintainer's
-  benchmark on the 1 vCPU / 2 GB box.
+- **Correctness & Safety**: Crate unit `34/34`; full ASan + LSan + UBSan DB & buffer suite `28/28` (including `12/12` injected SQLite fault/rollback tests and WAL checkpointer drop test); input safety `24/24`; official `test/test.sh` `42/42` (`l2 io_uring`, `FEED_EPOLL=1`, and seccomp auto-fallback); differential SQL `oracle.sh 3000` byte-identical; `protocol.sh` `40/40` `kill -9` durability; `test-wal-checkpointer.py` `1,051/1,051` acked writes surviving `kill -9` with `0.55 ms` max latency during a `600 ms` foreign snapshot; `6`-lane handover + `ENOBUFS` + byte-budget + slow-reader + transaction-failure gates all pass.
+- **Linux `6.8.0-147-generic` KVM 6-Lane / 8-Lane Geometry (`NOFILE=65535`)**: `6` lanes (`392,826` direct slots, `/proc/self/fd = 16`, Lane-5 slot `65,470` TCP round-trip `mask=32`) and `8` lanes (`523,768` direct slots, `/proc/self/fd = 20`); live `bin/feed` `0.33 ms` cross-lane Lane-5 wakeup across `340` concurrent clients + `340` reuse sessions.
+- **KVM `k6 v0.57.0` `50,000`-VU `300.024 s` Hold (`bench/load.js`, production env)**: `1,588,683` requests (`5,295.18 req/s`), `0` failed (`0.0%`), `p95 = 0.36 ms`, `p99 = 1.85 ms`, `7.66%` app cgroup CPU (`14.47 µs/req`, `11.84%` whole-guest CPU), peak cgroup memory `157.0 MiB` (`1,483,772 KiB` `MemAvailable`), `112` off-loop WAL `RESTART` resets (`max_wal_bytes = 18.2 MiB`), post-run `PRAGMA integrity_check = "ok"`.

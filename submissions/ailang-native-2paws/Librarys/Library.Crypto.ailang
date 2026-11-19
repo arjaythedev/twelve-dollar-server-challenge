@@ -166,31 +166,64 @@ Function.Crypto.EnsureInit {
 }
 
 // One 64-byte block into SHA256H. Everything stays in locals: a 32-bit rotate of x
-// is a shift of xx = x | x<<32, so each sigma is shifts, XORs and one mask.
+// is a shift of xx = x | x<<32, so each sigma is shifts, XORs and one mask. Written
+// one operation per statement and stepping pointers: nested expressions compile to
+// push/pop chains, and this shape runs about a quarter faster.
 Function.Crypto.SHA256_Compress {
     Input: block: Address
     Body: {
         wtab = CryptoSt.wtab
         ktab = CryptoSt.ktab
         m32 = 4294967295
-        i = 0
-        WhileLoop LessThan(i, 16) {
-            v = RDMEM_32(Add(block, Multiply(i, 4)))
-            be = BitwiseOr(BitwiseOr(LeftShift(BitwiseAnd(v, 255), 24), LeftShift(BitwiseAnd(v, 65280), 8)), BitwiseOr(BitwiseAnd(RightShift(v, 8), 65280), RightShift(v, 24)))
-            WRMEM_64(Add(wtab, Multiply(i, 8)), be)
-            i = Add(i, 1)
+        // message schedule, words 0-15: big-endian loads
+        src = block
+        wp = wtab
+        wend = Add(wtab, 128)
+        WhileLoop LessThan(wp, wend) {
+            v = RDMEM_32(src)
+            b0 = BitwiseAnd(v, 255)
+            b0 = LeftShift(b0, 24)
+            b1 = BitwiseAnd(v, 65280)
+            b1 = LeftShift(b1, 8)
+            b2 = RightShift(v, 8)
+            b2 = BitwiseAnd(b2, 65280)
+            b3 = RightShift(v, 24)
+            b0 = BitwiseOr(b0, b1)
+            b2 = BitwiseOr(b2, b3)
+            b0 = BitwiseOr(b0, b2)
+            WRMEM_64(wp, b0)
+            src = Add(src, 4)
+            wp = Add(wp, 8)
         }
-        WhileLoop LessThan(i, 64) {
-            w2 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 2), 8)))
-            w15 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 15), 8)))
-            x2 = BitwiseOr(w2, LeftShift(w2, 32))
-            x15 = BitwiseOr(w15, LeftShift(w15, 32))
-            s1 = BitwiseXor(BitwiseXor(BitwiseAnd(RightShift(x2, 17), m32), BitwiseAnd(RightShift(x2, 19), m32)), RightShift(w2, 10))
-            s0 = BitwiseXor(BitwiseXor(BitwiseAnd(RightShift(x15, 7), m32), BitwiseAnd(RightShift(x15, 18), m32)), RightShift(w15, 3))
-            w7 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 7), 8)))
-            w16 = RDMEM_64(Add(wtab, Multiply(Subtract(i, 16), 8)))
-            WRMEM_64(Add(wtab, Multiply(i, 8)), BitwiseAnd(Add(Add(s1, w7), Add(s0, w16)), m32))
-            i = Add(i, 1)
+        // words 16-63
+        wend = Add(wtab, 512)
+        WhileLoop LessThan(wp, wend) {
+            w2 = RDMEM_64(Subtract(wp, 16))
+            x = LeftShift(w2, 32)
+            x = BitwiseOr(x, w2)
+            r1 = RightShift(x, 17)
+            r2 = RightShift(x, 19)
+            r1 = BitwiseXor(r1, r2)
+            r1 = BitwiseAnd(r1, m32)
+            r3 = RightShift(w2, 10)
+            s1 = BitwiseXor(r1, r3)
+            w15 = RDMEM_64(Subtract(wp, 120))
+            y = LeftShift(w15, 32)
+            y = BitwiseOr(y, w15)
+            q1 = RightShift(y, 7)
+            q2 = RightShift(y, 18)
+            q1 = BitwiseXor(q1, q2)
+            q1 = BitwiseAnd(q1, m32)
+            q3 = RightShift(w15, 3)
+            s0 = BitwiseXor(q1, q3)
+            w7 = RDMEM_64(Subtract(wp, 56))
+            w16 = RDMEM_64(Subtract(wp, 128))
+            s1 = Add(s1, w7)
+            s0 = Add(s0, w16)
+            s1 = Add(s1, s0)
+            s1 = BitwiseAnd(s1, m32)
+            WRMEM_64(wp, s1)
+            wp = Add(wp, 8)
         }
         a = SHA256H.h0
         b = SHA256H.h1
@@ -200,24 +233,51 @@ Function.Crypto.SHA256_Compress {
         f = SHA256H.h5
         g = SHA256H.h6
         h = SHA256H.h7
-        i = 0
-        WhileLoop LessThan(i, 64) {
-            xe = BitwiseOr(e, LeftShift(e, 32))
-            se = BitwiseAnd(BitwiseXor(BitwiseXor(RightShift(xe, 6), RightShift(xe, 11)), RightShift(xe, 25)), m32)
-            ch = BitwiseXor(g, BitwiseAnd(e, BitwiseXor(f, g)))
-            t1 = Add(Add(Add(h, se), Add(ch, RDMEM_64(Add(ktab, Multiply(i, 8))))), RDMEM_64(Add(wtab, Multiply(i, 8))))
-            xa = BitwiseOr(a, LeftShift(a, 32))
-            sa = BitwiseAnd(BitwiseXor(BitwiseXor(RightShift(xa, 2), RightShift(xa, 13)), RightShift(xa, 22)), m32)
-            mj = BitwiseOr(BitwiseAnd(a, b), BitwiseAnd(c, BitwiseOr(a, b)))
+        wp = wtab
+        kp = ktab
+        WhileLoop LessThan(wp, wend) {
+            xe = LeftShift(e, 32)
+            xe = BitwiseOr(xe, e)
+            t = RightShift(xe, 6)
+            u = RightShift(xe, 11)
+            t = BitwiseXor(t, u)
+            u = RightShift(xe, 25)
+            t = BitwiseXor(t, u)
+            se = BitwiseAnd(t, m32)
+            ch = BitwiseXor(f, g)
+            ch = BitwiseAnd(ch, e)
+            ch = BitwiseXor(ch, g)
+            t1 = Add(h, se)
+            t1 = Add(t1, ch)
+            k = RDMEM_64(kp)
+            t1 = Add(t1, k)
+            w = RDMEM_64(wp)
+            t1 = Add(t1, w)
+            xa = LeftShift(a, 32)
+            xa = BitwiseOr(xa, a)
+            t = RightShift(xa, 2)
+            u = RightShift(xa, 13)
+            t = BitwiseXor(t, u)
+            u = RightShift(xa, 22)
+            t = BitwiseXor(t, u)
+            sa = BitwiseAnd(t, m32)
+            mj = BitwiseOr(a, b)
+            mj = BitwiseAnd(mj, c)
+            u = BitwiseAnd(a, b)
+            mj = BitwiseOr(mj, u)
             h = g
             g = f
             f = e
-            e = BitwiseAnd(Add(d, t1), m32)
+            e = Add(d, t1)
+            e = BitwiseAnd(e, m32)
             d = c
             c = b
             b = a
-            a = BitwiseAnd(Add(t1, Add(sa, mj)), m32)
-            i = Add(i, 1)
+            sa = Add(sa, mj)
+            a = Add(t1, sa)
+            a = BitwiseAnd(a, m32)
+            wp = Add(wp, 8)
+            kp = Add(kp, 8)
         }
         SHA256H.h0 = BitwiseAnd(Add(SHA256H.h0, a), m32)
         SHA256H.h1 = BitwiseAnd(Add(SHA256H.h1, b), m32)

@@ -24,6 +24,35 @@ FixedPool.FeedSt {
     "uname": Initialize=0, CanChange=True
     // The new post's trimmed body, copied out of the scratch arena (at most 500 bytes)
     "body": Initialize=0, CanChange=True
+    // A feed post's fixed JSON pieces as little-endian words, stored 8 bytes at a time
+    // (the bytes past each piece are overwritten by what follows). Set in Feed.Init.
+    "k_id": Initialize=0, CanChange=True
+    "k_body0": Initialize=0, CanChange=True
+    "k_body1": Initialize=0, CanChange=True
+    "k_cr0": Initialize=0, CanChange=True
+    "k_cr1": Initialize=0, CanChange=True
+    "k_au0": Initialize=0, CanChange=True
+    "k_au1": Initialize=0, CanChange=True
+    "k_lc0": Initialize=0, CanChange=True
+    "k_lc1": Initialize=0, CanChange=True
+    // x / 10 = (x * recip10) >> 35 for 0 <= x < 2^32. Kept in a variable: the compiler
+    // mis-encodes Multiply by an immediate above 2^31.
+    "recip10": Initialize=0, CanChange=True
+}
+
+Function.Feed.Init {
+    Body: {
+        FeedSt.k_id = 63919387910779
+        FeedSt.k_body0 = 4189044075680375340
+        FeedSt.k_body1 = 34
+        FeedSt.k_cr0 = 8386095523104435234
+        FeedSt.k_cr1 = 2466321629183960165
+        FeedSt.k_au0 = 8027794383277534242
+        FeedSt.k_au1 = 574235250
+        FeedSt.k_lc0 = 6874018506780847138
+        FeedSt.k_lc1 = 16363432113958755
+        FeedSt.recip10 = 3435973837
+    }
 }
 
 Function.Feed.NowUnix {
@@ -189,6 +218,17 @@ Function.Feed.PutInt {
             ReturnValue(0)
         }
         i = Subtract(n, 1)
+        IfCondition LessThan(x, 4294967296) ThenBlock: {
+            r = FeedSt.recip10
+            WhileLoop GreaterEqual(i, 0) {
+                q = RightShift(Multiply(x, r), 35)
+                WRMEM_8(out, Add(ol, i), Add(48, Subtract(x, Multiply(q, 10))))
+                x = q
+                i = Subtract(i, 1)
+            }
+            FeedSt.len = Add(ol, n)
+            ReturnValue(0)
+        }
         WhileLoop GreaterEqual(i, 0) {
             d = Modulo(x, 10)
             WRMEM_8(out, Add(ol, i), Add(48, d))
@@ -309,53 +349,49 @@ Function.Feed.PutEscN {
     }
 }
 
+// One feed entry. The output buffer has 64 bytes of slack past cap, and a feed is far
+// below cap, so the 8-byte stores of the fixed pieces never leave it.
 Function.Feed.PutPost {
     Body: {
+        out = FeedSt.out
         ol = FeedSt.len
-        dst = Add(FeedSt.out, ol)
+        WRMEM_64(Add(out, ol), FeedSt.k_id)
         FeedSt.len = Add(ol, 6)
-        MemoryCopy(dst, "{\"id\":", 6)
         Feed.PutInt(SQLitePost.id)
         ol = FeedSt.len
-        dst = Add(FeedSt.out, ol)
+        p = Add(out, ol)
+        WRMEM_64(p, FeedSt.k_body0)
+        WRMEM_64(Add(p, 8), FeedSt.k_body1)
         FeedSt.len = Add(ol, 9)
-        MemoryCopy(dst, ",\"body\":\"", 9)
         Feed.PutEscN(SQLitePost.body, SQLitePost.body_n)
         ol = FeedSt.len
-        dst = Add(FeedSt.out, ol)
-        FeedSt.len = Add(ol, 16)
-        MemoryCopy(dst, "\",\"created_at\":\"", 16)
+        p = Add(out, ol)
+        WRMEM_64(p, FeedSt.k_cr0)
+        WRMEM_64(Add(p, 8), FeedSt.k_cr1)
+        ol = Add(ol, 16)
         cp = SQLitePost.created
         cn = SQLitePost.created_n
-        IfCondition NotEqual(cp, 0) ThenBlock: {
-            IfCondition GreaterThan(cn, 0) ThenBlock: {
-                ol = FeedSt.len
-                dst = Add(FeedSt.out, ol)
-                FeedSt.len = Add(ol, cn)
-                MemoryCopy(dst, cp, cn)
-            }
+        IfCondition And(NotEqual(cp, 0), GreaterThan(cn, 0)) ThenBlock: {
+            MemoryCopy(Add(out, ol), cp, cn)
+            ol = Add(ol, cn)
         }
-        ol = FeedSt.len
-        dst = Add(FeedSt.out, ol)
-        FeedSt.len = Add(ol, 12)
-        MemoryCopy(dst, "\",\"author\":\"", 12)
+        p = Add(out, ol)
+        WRMEM_64(p, FeedSt.k_au0)
+        WRMEM_64(Add(p, 8), FeedSt.k_au1)
+        ol = Add(ol, 12)
         ap = SQLitePost.author
         an = SQLitePost.author_n
-        IfCondition NotEqual(ap, 0) ThenBlock: {
-            IfCondition GreaterThan(an, 0) ThenBlock: {
-                ol = FeedSt.len
-                dst = Add(FeedSt.out, ol)
-                FeedSt.len = Add(ol, an)
-                MemoryCopy(dst, ap, an)
-            }
+        IfCondition And(NotEqual(ap, 0), GreaterThan(an, 0)) ThenBlock: {
+            MemoryCopy(Add(out, ol), ap, an)
+            ol = Add(ol, an)
         }
-        ol = FeedSt.len
-        dst = Add(FeedSt.out, ol)
+        p = Add(out, ol)
+        WRMEM_64(p, FeedSt.k_lc0)
+        WRMEM_64(Add(p, 8), FeedSt.k_lc1)
         FeedSt.len = Add(ol, 15)
-        MemoryCopy(dst, "\",\"like_count\":", 15)
         Feed.PutInt(SQLitePost.likes)
         ol = FeedSt.len
-        WRMEM_8(FeedSt.out, ol, 125)
+        WRMEM_8(out, ol, 125)
         FeedSt.len = Add(ol, 1)
     }
 }
@@ -934,7 +970,8 @@ SubRoutine.Main {
     Crypto.EnsureInit()
     FeedSt.uname = Allocate(256)
     FeedSt.body = Allocate(512)
-    FeedSt.out = Allocate(FeedSt.cap)
+    FeedSt.out = Allocate(Add(FeedSt.cap, 64))
+    Feed.Init()
     FeedSt.ts = Allocate(16)
     FeedSt.iso = Allocate(32)
     MemorySet(FeedSt.ts, 0, 16)

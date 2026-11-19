@@ -451,6 +451,8 @@ dependencies = [
  "axum",
  "base64",
  "hmac",
+ "itoa",
+ "libc",
  "rusqlite",
  "serde",
  "serde_json",

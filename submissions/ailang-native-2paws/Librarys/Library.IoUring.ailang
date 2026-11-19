@@ -1,7 +1,9 @@
 // Library.IoUring.ailang — raw io_uring for AILang
 //
 // Minimal io_uring via syscalls 425/426/427 + mmap. No liburing, no C.
-// Uses RDMEM_IO / WRMEM_IO for shared ring memory (kernel is the device).
+// RDMEM_IO / WRMEM_IO (volatile) only for what the kernel reads or writes while we run: the
+// SQ/CQ head and tail (Rd32/Wr32) and the provided-buffer ring tail. SQE and CQE contents
+// and buffer entries use plain accesses; they are ordered by those IO accesses.
 //
 // Designed for single-threaded network servers:
 //   IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN
@@ -359,15 +361,15 @@ Function.IoUring.GetSqe {
         }
         idx = BitwiseAnd(tail, IoUring.sq_mask)
         sqe = Add(IoUring.sqes, Multiply(idx, SqeOff.SIZE))
-        WRMEM_IO_64(sqe, 0, 0)
-        WRMEM_IO_64(sqe, 8, 0)
-        WRMEM_IO_64(sqe, 16, 0)
-        WRMEM_IO_64(sqe, 24, 0)
-        WRMEM_IO_64(sqe, 32, 0)
-        WRMEM_IO_64(sqe, 40, 0)
-        WRMEM_IO_64(sqe, 48, 0)
-        WRMEM_IO_64(sqe, 56, 0)
-        WRMEM_IO_32(IoUring.sq_ring, Add(IoUring.sq_array_off, Multiply(idx, 4)), idx)
+        WRMEM_64(Add(sqe, 0), 0)
+        WRMEM_64(Add(sqe, 8), 0)
+        WRMEM_64(Add(sqe, 16), 0)
+        WRMEM_64(Add(sqe, 24), 0)
+        WRMEM_64(Add(sqe, 32), 0)
+        WRMEM_64(Add(sqe, 40), 0)
+        WRMEM_64(Add(sqe, 48), 0)
+        WRMEM_64(Add(sqe, 56), 0)
+        WRMEM_32(Add(IoUring.sq_ring, Add(IoUring.sq_array_off, Multiply(idx, 4))), idx)
         ReturnValue(sqe)
     }
 }
@@ -386,52 +388,52 @@ Function.IoUring.SqeSetOp {
     Input: opcode: Integer
     Input: fd: Integer
     Body: {
-        WRMEM_IO_8(sqe, SqeOff.OPCODE, opcode)
-        WRMEM_IO_32(sqe, SqeOff.FD, BitwiseAnd(fd, 4294967295))
+        WRMEM_8(sqe, SqeOff.OPCODE, opcode)
+        WRMEM_32(Add(sqe, SqeOff.FD), BitwiseAnd(fd, 4294967295))
     }
 }
 
 Function.IoUring.SqeSetFlags {
     Input: sqe: Address
     Input: flags: Integer
-    Body: { WRMEM_IO_8(sqe, SqeOff.FLAGS, flags) }
+    Body: { WRMEM_8(sqe, SqeOff.FLAGS, flags) }
 }
 
 Function.IoUring.SqeSetAddr {
     Input: sqe: Address
     Input: addr: Integer
-    Body: { WRMEM_IO_64(sqe, SqeOff.ADDR, addr) }
+    Body: { WRMEM_64(Add(sqe, SqeOff.ADDR), addr) }
 }
 
 Function.IoUring.SqeSetLen {
     Input: sqe: Address
     Input: len: Integer
-    Body: { WRMEM_IO_32(sqe, SqeOff.LEN, len) }
+    Body: { WRMEM_32(Add(sqe, SqeOff.LEN), len) }
 }
 
 Function.IoUring.SqeSetUserData {
     Input: sqe: Address
     Input: data: Integer
-    Body: { WRMEM_IO_64(sqe, SqeOff.USER_DATA, data) }
+    Body: { WRMEM_64(Add(sqe, SqeOff.USER_DATA), data) }
 }
 
 Function.IoUring.SqeSetRwFlags {
     Input: sqe: Address
     Input: flags: Integer
-    Body: { WRMEM_IO_32(sqe, SqeOff.RW_FLAGS, flags) }
+    Body: { WRMEM_32(Add(sqe, SqeOff.RW_FLAGS), flags) }
 }
 
 Function.IoUring.SqeSetBufGroup {
     Input: sqe: Address
     Input: group: Integer
-    Body: { WRMEM_IO_16(sqe, SqeOff.BUF_INDEX, group) }
+    Body: { WRMEM_16(Add(sqe, SqeOff.BUF_INDEX), group) }
 }
 
 // file_index (u32 at 44): accept/socket target slot, or close's slot + 1
 Function.IoUring.SqeSetFileIndex {
     Input: sqe: Address
     Input: v: Integer
-    Body: { WRMEM_IO_32(sqe, SqeOff.SPLICE_FD_IN, v) }
+    Body: { WRMEM_32(Add(sqe, SqeOff.SPLICE_FD_IN), v) }
 }
 
 
@@ -577,7 +579,7 @@ Function.IoUring.PeekCqe {
 Function.IoUring.CqeUserData {
     Input: cqe: Address
     Output: Integer
-    Body: { ReturnValue(RDMEM_IO_64(cqe, CqeOff.USER_DATA)) }
+    Body: { ReturnValue(RDMEM_64(Add(cqe, CqeOff.USER_DATA))) }
 }
 
 // Read res from a CQE (s32 — the syscall return value)
@@ -585,14 +587,14 @@ Function.IoUring.CqeUserData {
 Function.IoUring.CqeRes {
     Input: cqe: Address
     Output: Integer
-    Body: { ReturnValue(RDMEM_IO_S32(cqe, CqeOff.RES)) }
+    Body: { ReturnValue(RDMEM_S32(Add(cqe, CqeOff.RES))) }
 }
 
 // Read flags from a CQE (u32)
 Function.IoUring.CqeFlags {
     Input: cqe: Address
     Output: Integer
-    Body: { ReturnValue(RDMEM_IO_32(cqe, CqeOff.FLAGS)) }
+    Body: { ReturnValue(RDMEM_32(Add(cqe, CqeOff.FLAGS))) }
 }
 
 // Advance the CQ head by 1 (call after processing a CQE)
@@ -719,7 +721,7 @@ Function.IoUring.PrepAcceptMulti {
         IoUring.SqeSetAddr(sqe, 0)
         IoUring.SqeSetLen(sqe, 0)
         // ioprio = IORING_ACCEPT_MULTISHOT
-        WRMEM_IO_16(sqe, SqeOff.IOPRIO, IoUringAccept.MULTISHOT)
+        WRMEM_16(Add(sqe, SqeOff.IOPRIO), IoUringAccept.MULTISHOT)
         IoUring.SqeSetUserData(sqe, user_data)
         IoUring.SubmitAdvance()
         ReturnValue(0)
@@ -780,7 +782,7 @@ Function.IoUring.PrepRecvMulti {
         sqe = IoUring.GetSqe()
         IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
         IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
-        WRMEM_IO_16(sqe, SqeOff.IOPRIO, IoUringAccept.RECV_MULTISHOT)
+        WRMEM_16(Add(sqe, SqeOff.IOPRIO), IoUringAccept.RECV_MULTISHOT)
         IoUring.SqeSetFlags(sqe, BitwiseOr(IoUringSqe.BUFFER_SELECT, sflags))
         IoUring.SqeSetBufGroup(sqe, bgid)
         IoUring.SqeSetUserData(sqe, user_data)
@@ -822,7 +824,7 @@ Function.IoUring.PrepAcceptDirect {
         IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
         IoUring.SqeSetOp(sqe, IoUringOp.ACCEPT, listen_fd)
         IoUring.SqeSetFileIndex(sqe, IoUringAccept.FILE_INDEX_ALLOC)
-        IfCondition EqualTo(multishot, 1) ThenBlock: { WRMEM_IO_16(sqe, SqeOff.IOPRIO, IoUringAccept.MULTISHOT) }
+        IfCondition EqualTo(multishot, 1) ThenBlock: { WRMEM_16(Add(sqe, SqeOff.IOPRIO), IoUringAccept.MULTISHOT) }
         IoUring.SqeSetUserData(sqe, user_data)
         IoUring.SubmitAdvance()
         ReturnValue(0)
@@ -922,12 +924,13 @@ Function.IoUring.PBufRingAdd {
     Input: bid: Integer
     Input: mask: Integer
     Body: {
-        tail = RDMEM_IO_16(ring, PBufRingOff.TAIL)
+        tail = RDMEM_16(Add(ring, PBufRingOff.TAIL))
         entry = Add(Add(ring, PBufRingOff.BUFS), Multiply(BitwiseAnd(tail, mask), PBufOff.SIZE))
-        // IO stores keep the entry ahead of the tail; the tail is one 16-bit store so it never tears
-        WRMEM_IO_64(entry, PBufOff.ADDR, buf_addr)
-        WRMEM_IO_32(entry, PBufOff.LEN, buf_len)
-        WRMEM_IO_16(entry, PBufOff.BID, bid)
+        // Plain stores for the entry; the tail is an IO store, so it stays after them, and one
+        // 16-bit store, so it never tears. Only this process writes the tail.
+        WRMEM_64(Add(entry, PBufOff.ADDR), buf_addr)
+        WRMEM_32(Add(entry, PBufOff.LEN), buf_len)
+        WRMEM_16(Add(entry, PBufOff.BID), bid)
         WRMEM_IO_16(ring, PBufRingOff.TAIL, BitwiseAnd(Add(tail, 1), 65535))
     }
 }

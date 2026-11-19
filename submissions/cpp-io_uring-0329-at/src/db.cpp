@@ -313,8 +313,11 @@ bool Db::feed_rows() {
     const long long lo = rows_[order_[0]].id;
     const long long hi = rows_[order_.back()].id;
     const long long span = hi - lo;
-    if (span >= 0 && span < 64) {
-      std::array<int8_t, 64> slot{};
+    /* 20 个 post 的 id 在持续写入下跨度很容易超过 64；超过就退回 20 次独立 seek，每次都是一次
+     * 从根到叶的下降（~285 ns）。rust-iouring-kensac #264 的区间阈值是 512，这里对齐：一次
+     * seek 加顺序走 span 个 cell 仍然比 20 次下降便宜。 */
+    if (span >= 0 && span < 512) {
+      std::array<int8_t, 512> slot{};
       slot.fill(-1);
       for (size_t i = 0; i < order_.size(); i++)
         slot[rows_[order_[i]].id - lo] = static_cast<int8_t>(i);

@@ -29,15 +29,17 @@
 
 **批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 2,048 个请求**，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
 
-**backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。
+**backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），**等过 16 秒的全部优先**（objc-uring-delneg #326 的第二级），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。
 
 **ring 模型。** ring **按需增长**：起步 1 个，最新一个的表**半满**时加下一个（一次补齐多个，ramp 不落后），上限 **16**。ring 数量按目标连接数推导：`ceil(400,000 / 每 ring 槽位)`。每 ring 的槽位上限是 262,144，但**实际取 `min(硬 RLIMIT_NOFILE, 262,144)`**——基准机 `LimitNOFILE=65535` 时就是 7 个 ring × 65,535 = **458,745 连接**，`NOFILE=1M` 时 2 个 ring × 262,144 = 524,288。表尺寸不按 `RLIMIT_NOFILE` 一次预分配：旧版按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上就是 300k 连接装不装得下的区别。每 pass 的 `io_uring_enter` 是 1 次/ring；非 0 号 ring 不设 `DEFER_TASKRUN`、只提交不取事件，所以环数增加几乎不加系统调用（3 ring 存活时实测 `enter[wait=1040 sqe=0 ring=66]`）。
 
 **listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时只停止投递 accept，不关闭共享 listener。
 
-**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
+**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找（20 个 id 跨度 < 512 时用一次 seek 加顺序扫描，否则退回逐个 seek；阈值与 rust-iouring-kensac #264 的 512 对齐）；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
 
 **C++23 编译期计算。** 响应头由 `consteval` 在编译期拼成 `std::array`（状态行 + Content-Type + Content-Length 占位），运行时一次拷贝；JSON 转义表、base64url 表、两位数字表和 serial-type 长度表都是 `constexpr`；record 里的整数用 `std::byteswap` + 位运算解码，输入用 `std::string_view`/`std::span` 表达。
+
+**PGO。** `build.sh` 默认跑两遍：先用 `-fprofile-generate` 编一版，起一个临时实例（端口 3987、临时库）跑完整的 42 项检查加 300 次 `/feed` 训练，再用 `-fprofile-use` 重编——分支布局和内联决策据此优化，和 c-iouring-public 的 `PGO=0` 开关是同一套做法。训练只在 shell + curl 上完成（CI 没有 k6），任何一步失败就退回普通 `-O3` 构建；`PGO=0 ./build.sh` 可跳过。
 
 **微架构与构建。** 编译用 `-O3 -march=native -fno-plt -fno-semantic-interposition -flto`，另加 `-falign-functions=32 -falign-loops=32`、`-fipa-pta`、`-flto-partition=one`；io_uring 的 ring 启用 `COOP_TASKRUN`/`TASKRUN_FLAG`，连接表和接收缓冲用 `MADV_HUGEPAGE` + `MADV_POPULATE_READ` 预触；有 mold 时用 `-fuse-ld=mold` 并行链接。
 
@@ -67,11 +69,14 @@
 每个 k6 用户持有一个 keep-alive 连接，所以高分意味着在 `LimitNOFILE=65535` 下数十万个 socket。
 
 - 接受的 socket 是 io_uring **直接描述符**：它们位于 ring 的文件表，不占进程 fd 表。表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144），所以同一个二进制在 `NOFILE=65535` 的 CI runner 上会注册 65,535 项并正常起来，在基准机上拿满 262,144。
+- **listener 上设 `SO_RCVBUF=16384`**，accept 出来的连接继承（`ss -tin` 实测服务器侧 `rcv_space:16384`，客户端侧仍是默认值）。默认的自动调优会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上（c-iouring-jowinjestine #486 对同一件事的处理：平时 16 KiB；**PSI 高压时降到 8 KiB**——每 2 秒读一次 `/sys/fs/cgroup/memory.pressure` （full avg10 ≥ 2 % 或 some avg10 ≥ 10 %）与 cgroup 用量（>85 % 上限），连续两次高压才降、连续四次低压才恢复，且只影响**未来 accept** 的连接，绝不节流或关闭已有连接（c-iouring-jowinjestine #486 的迟滞规则）。请求只有一两百字节，16 KiB 放得下几十个；`RCVBUF=` 可覆盖。
 - 端口上是 **8 个共享的 `SO_REUSEPORT` listener**（固定 8 个，与 ring 数无关），每个有独立的 accept 队列；ring 按需增长（1 → 最多 16），每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时停止投递 accept，其他 ring 继续从全部 8 个 listener 接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.
 - 突发之后 multishot receive 会耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。
+- **大响应用零拷贝发送**（IORING_OP_SEND_ZC）：feed 的 JSON 约 5.5 KB，send_zc 让内核直接读用户缓冲，省掉一次 5.5 KB 的拷贝；完成时会多一个 IORING_CQE_F_NOTIF，缓冲必须等它到达才能还回池（连接状态多了 Flushed）。post/like 的响应只有几百字节，多一个 NOTIF 不划算，仍走普通 send；关闭中的响应也不用。内核不支持时（-EINVAL/-ENOSYS）自动回退并永久关闭，ZC=0 可手动关掉做 A/B。还有两条边界：第一个完成若没有 IORING_CQE_F_MORE，说明不会再有 NOTIF，必须立刻视作已通知；以及**普通 send 根本不会有 NOTIF**，它的完成必须直接收尾——错判成 Flushed 会让连接永远等下去（响应其实已经发出，所以 42 项测试照过，但 keep-alive 的下一个请求就超时）。
 - 每个连接同一时间最多一个发送在途；流水线响应排在它后面。输出缓冲来自池（8 KB，启动预填 256 个），发送完成后归还；一次 feed 响应的 JSON 上界约 24 KB，所以回收阈值放到 `8 × 8 KB`，否则每个 feed 缓冲都会被丢掉重分配（实测：每请求一次 24 KB `malloc`，`brk` 37,738 次/10 s）。
 - 关闭是 `SHUTDOWN` 硬链接到 fixed-file `CLOSE`；每个 `user_data` 里的 generation 号会丢弃复用槽位的完成。
+- **`part` 缓冲走 `std::pmr` 的池资源**：backlog 时每个被延后的连接都要留一份未处理字节，270k 连接时这一项约 400–500 MB；`std::vector` 每份都带 24 B 对象头、malloc 元数据和 1.5 倍扩容的容量浪费。改成 `std::pmr::vector` + `unsynchronized_pool_resource`（单线程用，无锁），固定块复用、按需增长，池在 backlog 清空时随 `malloc_trim` 一起 `release()`。
 - **backlog 清空后把空闲堆还给内核**：每 10 秒检查一次，只有在就绪队列和读队列都空时才调用 `malloc_trim(0)`。glibc 释放的内存默认留在进程 arena 里，RSS 只增不减——backlog 期间为 `part`/响应缓冲分配的块，在 backlog 清空后仍算在 RSS 上（c-iouring-jowinjestine #404 把这一条记成「backlog 碰过的每个连接都永久留着一块」，他们观测到 200k 个 deferred 请求约 100 MB）。本地 20k 连接、标准负载：p99 196 → 2.78 ms，max 655 → 39 ms。
 
 ## 请求路径

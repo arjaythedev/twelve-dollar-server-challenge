@@ -8,6 +8,11 @@ set_toolchains("gcc")
 
 set_policy("build.optimization.lto", true)
 
+-- PGO：PGO_MODE=generate 出一版带计数的二进制，训练后再用 PGO_MODE=use 重编。
+-- 训练数据放独立目录，两遍的构建目录一致，gcda 才能对上（见 build.sh）。
+local pgo_mode = os.getenv("PGO_MODE") or "off"
+local pgo_dir = os.getenv("PGO_DIR") or "/tmp/pgo"
+
 target("server")
     set_kind("binary")
     set_targetdir(".")
@@ -37,6 +42,15 @@ target("server")
         "SQLITE_OMIT_TCL_VARIABLE",
         "HAVE_FDATASYNC=1",
         "HAVE_USLEEP=1")
+
+    if pgo_mode == "generate" then
+        add_cflags("-fprofile-generate=" .. pgo_dir)
+        add_cxxflags("-fprofile-generate=" .. pgo_dir)
+        add_ldflags("-fprofile-generate=" .. pgo_dir)
+    elseif pgo_mode == "use" then
+        add_cflags("-fprofile-use=" .. pgo_dir .. " -fprofile-correction -Wno-missing-profile")
+        add_cxxflags("-fprofile-use=" .. pgo_dir .. " -fprofile-correction -Wno-missing-profile")
+    end
 
     if is_plat("linux") then
         add_cflags("-march=native", "-fno-plt", "-fno-semantic-interposition", "-falign-functions=32", "-falign-loops=32", "-fipa-pta", "-mprefer-vector-width=256")

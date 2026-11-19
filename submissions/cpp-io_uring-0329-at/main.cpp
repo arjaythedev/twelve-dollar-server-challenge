@@ -75,6 +75,10 @@ static void shim_log_sink(const char* s, size_t n) {
   std::fputc('\n', stderr);
 }
 
+/* part 缓冲的池资源。unsynchronized：只用在一个线程上（事件循环），省掉锁。
+ * 默认 resource 指向它，所有 std::pmr 容器都走池。 */
+std::pmr::unsynchronized_pool_resource g_part_pool;
+
 template <typename... Args>
 void errlog(std::format_string<Args...> fmt, Args&&... args) {
   const std::string line = std::format(fmt, std::forward<Args>(args)...);
@@ -147,13 +151,19 @@ class Worker {
 class Server {
  public:
   Server(app::App* app, uint32_t slots, unsigned cq, uint32_t max_rings)
-      : app_(app), slots_(slots), cq_(cq), max_rings_(max_rings) {}
+      : app_(app), slots_(slots), cq_(cq), max_rings_(max_rings) {
+    /* ZC=0 关掉零拷贝发送，用来在评测机上做 A/B。 */
+    const char* zc = std::getenv("ZC");
+    if (zc && zc[0] == '0') zc_ok_ = false;
+  }
 
   bool init(const char* host, uint16_t port) {
     host_ = host;
     port_ = port;
     app::preload_pool(pool_);
-    return add_ring();
+    if (!add_ring()) return false;
+    memgov_init(); /* listener 已经建好，这里设接收缓冲上限 */
+    return true;
   }
 
   // ring 按需创建：一个就够，直到它的描述符表接近满；在单 vCPU 上每多一个 ring，每个 pass 就
@@ -183,6 +193,13 @@ class Server {
           return false;
         }
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        /* 接收缓冲上限设在 listener 上，accept 出来的连接会继承（c-iouring-jowinjestine #486
+         * 就是这么做的：8 个 listener 一律 16 KiB，PSI 高压时再降到 8 KiB）。默认的自动调优
+         * 会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上的。请求只有
+         * 一两百字节，16 KiB 足够放下几十个，且上限一旦设定，内核就不会再往上调。 */
+        int rcvbuf = 16384;
+        if (const char* v = std::getenv("RCVBUF")) rcvbuf = std::atoi(v);
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
         if (bind(fd, reinterpret_cast<struct sockaddr*>(&a), sizeof a) < 0 ||
             listen(fd, 65535) < 0) {
           ::close(fd);
@@ -380,6 +397,9 @@ class Server {
             }
           }
         }
+        /* 只 malloc_trim：pmr 池里的块由池自己复用，不能 release()——ready 队列为空并不
+         * 意味着没有存活的 part（serve() 会把解析不完的半包存回连接），release 会让那些
+         * vector 的指针悬垂。 */
         if (!backlog) malloc_trim(0);
       }
       if (p4 - last_sweep >= 50000000ULL) {
@@ -388,6 +408,7 @@ class Server {
         sweep_slice();
       }
       const uint64_t p5 = now_ns();
+      memgov_tick(p5);
       t_wait += p1 - p0;
       t_drain += p2 - p1;
       t_read += p3 - p2;
@@ -489,14 +510,132 @@ class Server {
     w.table().at(idx).read = net::ReadState::Reading;
   }
 
+  /* 一次发送：首次用零拷贝（内核直接读用户缓冲，省掉 5.5 KB 的响应拷进内核），续传用普通
+   * send——续传时第一块缓冲还被内核占着，再发一次零拷贝会让 NOTIF 的归属变得复杂。
+   * 内核不支持时（-EINVAL/-ENOSYS）回退并永久关闭 ZC。 */
   void arm_send(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c) {
     io_uring_sqe* sqe = w.ring().sqe(1);
     if (!sqe) return;
-    io_uring_prep_send(sqe, static_cast<int>(idx), c.wire->p + c.sent, c.wire->len - c.sent,
-                       MSG_NOSIGNAL);
+    /* 只对大的响应用零拷贝：feed 的 JSON 约 5.5 KB，省下的那次拷贝值一个 NOTIF 完成；
+     * post/like 的响应只有几百字节，多一个 NOTIF 反而不划算（本地 20k 连接上就量到
+     * sys 53 → 62 µs）。关闭中的响应也不用，避免关闭路径上还挂着 NOTIF。 */
+    const bool zc = c.sent == 0 && !c.zbuf_done && zc_ok_ && !c.close_after && c.wire->len >= 4096;
+    c.zc_used = zc;
+    if (zc) {
+      io_uring_prep_send_zc(sqe, static_cast<int>(idx), c.wire->p, c.wire->len, MSG_NOSIGNAL, 0);
+    } else {
+      io_uring_prep_send(sqe, static_cast<int>(idx), c.wire->p + c.sent, c.wire->len - c.sent,
+                         MSG_NOSIGNAL);
+    }
     sqe->flags |= IOSQE_FIXED_FILE;
     sqe->user_data = ev(kEvSend, wi, c.gen, idx);
     c.write = net::WriteState::Sending;
+  }
+
+  /* 一次发送彻底完成后的收尾：把 wire 还给池，处理排队中的响应或关闭。 */
+  /* ---- TCP 接收内存治理（c-iouring-jowinjestine #486） --------------------------------
+   * 只改**未来 accept** 的连接继承到的缓冲上限，绝不动已有连接、也不节流或拒绝任何连接。
+   * cgroup v2 的 PSI 与 sock 统计每 2 秒采一次，避免在热路径上做文件 I/O。 */
+  struct MemGov {
+    bool enabled = false;
+    int normal = 16384;
+    int pressure = 8192;
+    int current = 16384;
+    uint32_t high_streak = 0;
+    uint32_t low_streak = 0;
+    uint64_t last_ns = 0;
+    double psi_some = 0.0;
+    double psi_full = 0.0;
+    uint64_t cg_cur = 0;
+    uint64_t cg_max = 0;
+    uint64_t cg_sock = 0;
+    uint64_t changes = 0;
+    uint64_t samples = 0;
+  } mg_;
+
+  static bool slurp(const char* path, char* buf, size_t cap) {
+    int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t n = ::read(fd, buf, cap - 1);
+    ::close(fd);
+    if (n <= 0) return false;
+    buf[n] = 0;
+    return true;
+  }
+
+  static uint64_t read_u64(const char* path) {
+    char buf[64];
+    if (!slurp(path, buf, sizeof buf) || buf[0] < '0' || buf[0] > '9') return 0; /* "max" → 0 */
+    return std::strtoull(buf, nullptr, 10);
+  }
+
+  bool apply_listener_rcvbuf(int v) {
+    for (uint32_t li = 0; li < kListeners; li++) {
+      if (listeners_[li] < 0) continue;
+      if (::setsockopt(listeners_[li], SOL_SOCKET, SO_RCVBUF, &v, sizeof v) < 0) return false;
+    }
+    mg_.current = v;
+    mg_.changes++;
+    return true;
+  }
+
+  void memgov_init() {
+    if (const char* e = std::getenv("TCP_MEM_GOVERNOR"); e && e[0] == '0') return;
+    if (const char* e = std::getenv("TCP_RCVBUF_NORMAL")) mg_.normal = std::atoi(e);
+    if (const char* e = std::getenv("TCP_RCVBUF_PRESSURE")) mg_.pressure = std::atoi(e);
+    if (mg_.pressure < 4096 || mg_.normal > (1 << 20) || mg_.pressure > mg_.normal) return;
+    if (apply_listener_rcvbuf(mg_.normal)) mg_.enabled = true;
+  }
+
+  void memgov_tick(uint64_t now) {
+    if (!mg_.enabled || (mg_.last_ns && now - mg_.last_ns < 2000000000ULL)) return;
+    mg_.last_ns = now;
+    mg_.samples++;
+    mg_.cg_cur = read_u64("/sys/fs/cgroup/memory.current");
+    mg_.cg_max = read_u64("/sys/fs/cgroup/memory.max");
+    mg_.cg_sock = 0;
+    mg_.psi_some = 0.0;
+    mg_.psi_full = 0.0;
+    char buf[8192];
+    bool psi_ok = false;
+    if (slurp("/sys/fs/cgroup/memory.stat", buf, sizeof buf)) {
+      if (const char* p = std::strstr(buf, "sock ")) mg_.cg_sock = std::strtoull(p + 5, nullptr, 10);
+    }
+    if (slurp("/sys/fs/cgroup/memory.pressure", buf, sizeof buf)) {
+      const char* p = std::strstr(buf, "some avg10=");
+      const char* q = std::strstr(buf, "full avg10=");
+      if (p && q && std::sscanf(p, "some avg10=%lf", &mg_.psi_some) == 1 &&
+          std::sscanf(q, "full avg10=%lf", &mg_.psi_full) == 1)
+        psi_ok = true;
+    }
+    /* 高压：PSI 明显停顿，或者 cgroup 已经用掉 85% 以上。 */
+    const bool high = (psi_ok && (mg_.psi_full >= 2.0 || mg_.psi_some >= 10.0)) ||
+                      (mg_.cg_max && mg_.cg_cur > mg_.cg_max * 85 / 100);
+    if (high) {
+      mg_.high_streak++;
+      mg_.low_streak = 0;
+    } else {
+      mg_.low_streak++;
+      mg_.high_streak = 0;
+    }
+    if (mg_.high_streak >= 2 && mg_.current != mg_.pressure) {
+      if (apply_listener_rcvbuf(mg_.pressure)) mg_.high_streak = 0;
+    } else if (mg_.low_streak >= 4 && mg_.current != mg_.normal) {
+      if (apply_listener_rcvbuf(mg_.normal)) mg_.low_streak = 0;
+    }
+  }
+
+  void finish_send(Worker& w, uint32_t idx, net::Connection& c) {
+    app::give_buf(pool_, c.wire);
+    c.wire = nullptr;
+    c.write = net::WriteState::Idle;
+    c.zbuf_done = false;
+    c.zc_used = false;
+    if ((c.out && c.out->len) || c.close_after) {
+      mark(w, idx);
+    } else {
+      app::give_buf(pool_, c.out);
+    }
   }
 
   void arm_close(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c) {
@@ -534,7 +673,7 @@ class Server {
   // 把收到的字节留在连接上，本 pass 不回答。
   void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
              size_t n) {
-    if (!c.part) c.part = std::make_unique<std::vector<uint8_t>>();
+    if (!c.part) c.part = std::make_unique<std::pmr::vector<uint8_t>>();
     c.part->insert(c.part->end(), data, data + n);
     if (!c.ready_queued) {
       c.ready_queued = true;
@@ -551,8 +690,12 @@ class Server {
        * half of each pass），而不是一旦老化就整批取队尾——backlog 持续时队尾会一直老化，全取
        * 队尾就退化成最老优先，新请求又被拖回原来的问题里（基准机 230k 探针 p99 3.08 s 就是
        * 这个形状）。连接内部顺序不变，`serve()` 按自己的 part 缓冲顺序处理。 */
-      const bool aged = (now - ready_.back().ts) > kAgedAfterNs;
-      const bool take_old = aged && ((turn++ & 1u) == 0);
+      const uint64_t waited = now - ready_.back().ts;
+      const bool aged = waited > kAgedAfterNs;
+      /* 8 秒拿一半，16 秒全给老的（objc-uring-delneg #326 的第二级）——再久也不让任何请求
+       * 无限期被新请求插队。 */
+      const bool very_old = waited > 2 * kAgedAfterNs;
+      const bool take_old = very_old || (aged && ((turn++ & 1u) == 0));
       const ReadyRef r = take_old ? ready_.back() : ready_.front();
       if (take_old) {
         ready_.pop_back();
@@ -572,7 +715,7 @@ class Server {
   void serve(Worker& w, uint32_t wi, uint32_t idx, const uint8_t* data, size_t n) {
     net::Connection& c = w.table().at(idx);
     if (c.close_after) return;
-    std::vector<uint8_t> part;
+    std::pmr::vector<uint8_t> part;
     bool joined = false;
     if (c.part) {
       part = std::move(*c.part);
@@ -631,10 +774,10 @@ class Server {
     }
     if (off < len) {
       if (!joined) {
-        c.part = std::make_unique<std::vector<uint8_t>>(buf + off, buf + len);
+        c.part = std::make_unique<std::pmr::vector<uint8_t>>(buf + off, buf + len);
       } else {
         part.erase(part.begin(), part.begin() + static_cast<ptrdiff_t>(off));
-        c.part = std::make_unique<std::vector<uint8_t>>(std::move(part));
+        c.part = std::make_unique<std::pmr::vector<uint8_t>>(std::move(part));
       }
     }
   }
@@ -752,25 +895,47 @@ class Server {
         }
         case kEvSend: {
           net::Connection& c = w.table().at(idx);
+          /* 零拷贝的 NOTIF：内核已经不再引用这块缓冲。数据是否已全部发出由普通完成决定，
+           * 所以这里只标记并把可能已结束的发送收尾。 */
+          if (flags & IORING_CQE_F_NOTIF) {
+            if (c.gen != gen) break;
+            c.zbuf_done = true;
+            if (c.write == net::WriteState::Flushed) finish_send(w, idx, c);
+            break;
+          }
           if (c.gen != gen || c.write != net::WriteState::Sending) break;
           if (res < 0) {
+            if (res == -EINVAL || res == -ENOSYS) {
+              /* 内核/驱动不支持零拷贝发送：关掉它，用普通 send 重发这一块。 */
+              zc_ok_ = false;
+              c.zbuf_done = false;
+              arm_send(w, wi, idx, c);
+              break;
+            }
             c.write = net::WriteState::Idle;
             app::give_buf(pool_, c.wire);
+            c.wire = nullptr;
+            c.zbuf_done = false;
+            c.zc_used = false;
             app::give_buf(pool_, c.out);
             c.close_after = true;
             mark(w, idx);
           } else {
+            /* IORING_CQE_F_MORE 缺席 = 内核不会发 NOTIF（例如完成被合并，或本次没有走到
+             * 零拷贝路径）。c-iouring-public 的 loop.c 也是这么处理的：否则连接会永远停在
+             * Flushed 等一个不会到来的完成。 */
+            if (c.zc_used && !(flags & IORING_CQE_F_MORE)) c.zbuf_done = true;
             c.sent += static_cast<uint32_t>(res);
             if (c.sent < c.wire->len) {
               arm_send(w, wi, idx, c);
+            } else if (c.zbuf_done || !c.zc_used) {
+              /* 普通 send 不会有 NOTIF，完成即可收尾；只有真正走过零拷贝的才等 NOTIF。
+               * 早先这里少判了 !c.zc_used，于是 post/like（响应 < 4 KB，走普通 send）完成后也
+               * 被置成 Flushed，永远等一个不会来的通知——连接从此不再发响应，表现就是 CPU
+               * 空闲、请求 60 秒超时，而 42 项测试照过（响应其实已经发出去了）。 */
+              finish_send(w, idx, c);
             } else {
-              c.write = net::WriteState::Idle;
-              app::give_buf(pool_, c.wire);
-              if ((c.out && c.out->len) || c.close_after) {
-                mark(w, idx);
-              } else {
-                app::give_buf(pool_, c.out);
-              }
+              c.write = net::WriteState::Flushed;
             }
           }
           break;
@@ -842,7 +1007,9 @@ class Server {
         c.in_batch = false;
         c.answered = false;
         responded_++;
-        if (!c.open || c.closing || c.write == net::WriteState::Sending) continue;
+        if (!c.open || c.closing || c.write == net::WriteState::Sending ||
+            c.write == net::WriteState::Flushed)
+          continue;
         if (c.out && c.out->len) {
           c.wire = c.out;
           c.out = nullptr;
@@ -866,6 +1033,7 @@ class Server {
   uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
   uint32_t answers_left_ = 0;
   uint64_t last_trim = 0;
+  bool zc_ok_ = true; /* 内核支持零拷贝发送；-EINVAL 后永久关闭 */
   std::deque<ReadyRef> ready_;
   unsigned cq_;
   const char* host_ = nullptr;
@@ -949,6 +1117,7 @@ int main() {
   auto app = std::make_unique<app::App>(std::move(db),
                                         reinterpret_cast<const uint8_t*>(secret),
                                         std::strlen(secret));
+  std::pmr::set_default_resource(&g_part_pool);
   dbx_set_logger(shim_log_sink);
   constexpr unsigned cq = kCqEntries;
   const uint32_t slots = descriptor_slots();

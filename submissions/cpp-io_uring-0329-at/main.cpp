@@ -388,10 +388,10 @@ class Server {
             }
           }
         }
-        if (!backlog) {
-          g_part_pool.release(); /* 池里的空闲块一起还给内核 */
-          malloc_trim(0);
-        }
+        /* 只 malloc_trim：pmr 池里的块由池自己复用，不能 release()——ready 队列为空并不
+         * 意味着没有存活的 part（serve() 会把解析不完的半包存回连接），release 会让那些
+         * vector 的指针悬垂。 */
+        if (!backlog) malloc_trim(0);
       }
       if (p4 - last_sweep >= 50000000ULL) {
         last_sweep = p4;
@@ -822,10 +822,13 @@ class Server {
             c.sent += static_cast<uint32_t>(res);
             if (c.sent < c.wire->len) {
               arm_send(w, wi, idx, c);
-            } else if (c.zbuf_done) {
+            } else if (c.zbuf_done || !c.zc_used) {
+              /* 普通 send 不会有 NOTIF，完成即可收尾；只有真正走过零拷贝的才等 NOTIF。
+               * 早先这里少判了 !c.zc_used，于是 post/like（响应 < 4 KB，走普通 send）完成后也
+               * 被置成 Flushed，永远等一个不会来的通知——连接从此不再发响应，表现就是 CPU
+               * 空闲、请求 60 秒超时，而 42 项测试照过（响应其实已经发出去了）。 */
               finish_send(w, idx, c);
             } else {
-              /* 数据已全部交给内核，等 NOTIF 再归还缓冲。 */
               c.write = net::WriteState::Flushed;
             }
           }

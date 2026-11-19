@@ -807,7 +807,7 @@ let walFrameBytes () = 24 + int (scalar "PRAGMA page_size")
 /// A thread with its own connection runs PASSIVE checkpoints when the loop asks, so the copy and its two fsyncs never
 /// stop the loop. It signals each finished pass on an eventfd that the loop reads through its ring.
 [<Sealed>]
-type Checkpointer(path: string, nice: int) =
+type Checkpointer(path: string, nice: int, idle: bool) =
     let efd = Native.eventfd (0u, 0x80000)
     let one = Marshal.AllocHGlobal 8
     let wake = new AutoResetEvent(false)
@@ -818,7 +818,13 @@ type Checkpointer(path: string, nice: int) =
     let mutable syncDb = false
     let frameBytes = walFrameBytes ()
     let run () =
-        if nice <> 0 then Native.setpriority (0, Native.gettid (), nice) |> ignore
+        // SCHED_IDLE (5): the thread runs when the loop has nothing to do, and a request that arrives takes the CPU
+        // from it at once. At nice 19 it still got about 1 % of the CPU while the loop had requests queued, i.e. at
+        // the top of a ramp, where every 1 % short is that share of the clients waiting. Nothing waits for a pass (the
+        // WAL grows until the thread catches up), so it can go without. CKIDLE=0 keeps the nice value.
+        let mutable prio = 0
+        if not (idle && Native.sched_setscheduler (0, 5, &prio) = 0) && nice <> 0 then
+            Native.setpriority (0, Native.gettid (), nice) |> ignore
         let mutable cdb = 0n
         let mutable dropFd = -1
         let mutable walFd = -1

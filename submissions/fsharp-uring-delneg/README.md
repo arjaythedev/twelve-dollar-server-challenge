@@ -11,8 +11,11 @@
 ## Design
 
 - **One thread drives everything** (the box has one CPU): an io_uring loop over several rings, the HTTP parser, the
-  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, at nice 19 (`CKNICE`):
-  it gets ~1 % of the CPU while the loop has requests queued. At the end of a ramp a pass then takes seconds instead
+  handlers and SQLite. The second thread runs WAL checkpoints on a connection of its own, in the kernel's idle
+  class (`SCHED_IDLE`; `CKIDLE=0`: at nice 19, `CKNICE`, as before): it runs when the loop has nothing to do, and a
+  request that arrives takes the CPU from it at once. At nice 19 it still got ~1 % of the CPU while the loop had
+  requests queued, which is the top of a ramp, where each 1 % the loop is short leaves that share of the clients
+  waiting. At the end of a ramp a pass then takes seconds instead
   of 15-30 ms, which used to make write holds time out; writes no longer wait for checkpoints (see below), so a slow
   pass now delays nothing, and the CPU that nice 10 gave the thread at the busiest moment (up to ~10 %) stays with
   the loop.
@@ -216,7 +219,8 @@ io_uring must be allowed (Docker's default seccomp profile blocks it). Optional 
 `LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
-startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `STATS` (1: a line a second on stderr).
+startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `CKIDLE` (1; 0: the
+checkpoint thread at nice `CKNICE`, 19, instead of `SCHED_IDLE`), `STATS` (1: a line a second on stderr).
 
 ## Credits
 

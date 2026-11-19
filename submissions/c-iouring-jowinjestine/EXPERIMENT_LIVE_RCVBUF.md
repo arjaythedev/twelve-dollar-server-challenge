@@ -1,21 +1,19 @@
-# Experimental design: live receive-buffer governor (not benchmark-ready)
+# Live receive-buffer governor experiment
 
-## Goal
+## Implementation
 
-Change SO_RCVBUF on **already accepted** TCP sockets in response to cgroup memory pressure, without changing the fixed SQLite schema, request semantics, or connection fairness. This is distinct from the existing listener-only governor, which affects future accepts.
+This branch implements live SO_RCVBUF adjustment for accepted sockets using IORING_OP_FIXED_FD_INSTALL. It installs a **temporary ordinary fd** for an existing io_uring fixed-file slot, calls setsockopt on that ordinary fd, and closes it on every successful install completion. It never treats a fixed-file index as a POSIX fd.
 
-## Blocking issue
+The pre-existing listener governor still controls the requested cap for newly accepted sockets. Each accepted connection records the listener cap inherited at accept time; only connections whose last applied cap differs from the current governor cap are scheduled for an update.
 
-The current io_uring multishot accept uses **direct descriptors** (fixed-file table slots), not normal process file descriptors. Ordinary `setsockopt(fd, SOL_SOCKET, SO_RCVBUF, ...)` cannot use those slots. Calling it on a slot number would act on an unrelated process fd or return EBADF. Do **not** implement that shortcut.
+## Controls
 
-## Proposed implementation
+- TCP_MEM_GOVERNOR=1: existing listener governor, required for live updates
+- TCP_LIVE_RCVBUF=1: enable bounded updates of existing accepted sockets; set 0 to restore baseline behavior
+- TCP_LIVE_RCVBUF_BUDGET=512: maximum temporary fd installs per 2-second sampling interval (clamped at 8192)
 
-1. Prototype a separate opt-in acceptance path that obtains a normal fd, applies `SO_RCVBUF`, and safely registers/moves it into the ring fixed-file table. Preserve the slot/generation scheme and ensure no descriptor leaks. Measure registration cost.
-2. For resizing existing connections, establish a safe mechanism to obtain a temporary normal fd referring to the same socket (subject to kernel support and privilege), or retain an owned normal fd with an explicit memory/fd budget. Never assume io_uring fixed-file slots are POSIX fds.
-3. Maintain a bounded round-robin scan of live connections. Apply at most N updates per sampling interval; skip closing connections. Track actual effective buffer sizes and errors.
-4. Hysteresis: reduce limits after sustained cgroup PSI/memory pressure, restore after recovery. Avoid oscillation and global mass updates in a single event-loop turn.
-5. Benchmark at 280K, 300K and 320K against #486. Record TCP memory, retransmits, p95/p99, CPU, fd count, and update overhead.
+The live updater uses a round-robin scan across rings and slots, marks each in-flight connection, checks the generation on completion, and closes the temporary fd even if the connection has been recycled. If the kernel rejects the operation as unsupported, it disables further attempts.
 
-## Exit criteria
+## Validation status
 
-Only enable in production when it passes 42/42 tests, remains compatible with the challenge kernel, and demonstrably improves the 5-minute hold. This PR is a **draft design**, not an implemented or benchmarkable optimization.
+Code committed; **not compiled or tested on the challenge box**. Run build.sh and test/test.sh (42/42) and compare the five-minute hold against #486. Record live update counters, fd usage, TCP memory, p95/p99, and CPU. This is a performance experiment, not a demonstrated improvement.

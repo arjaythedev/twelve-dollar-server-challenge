@@ -80,7 +80,7 @@ The server ran in a transient systemd scope (`MemoryMax=1800M`, `MemorySwapMax=0
 | 220,000, database on tmpfs | 23,300 | 4.9 | 9.1 | 0.000 | 92 | 1,103 | pass |
 | 240,000, database on tmpfs | 25,387 | 253 | 2,168 | 0.000 | 96 | 1,266 | fail |
 
-The 200,000 row predates the checkpoint process; at 220,000 without it the hold failed (p99 7.4 s) on checkpoint syncs. A repeat 220,000 hold, with slow-operation logging on and other work running on the machine, passed with p95 103 ms and p99 755 ms. The p99 at 220,000 on the SSD comes from a few stalls of 1 to 3 s: logging showed the WAL writes blocked in the kernel's dirty-page throttling while the disk was busy with checkpoint syncs. With the database on tmpfs those stalls disappear. At 240,000 the CPU is full: the hold itself ran at about 25,400 req/s with p99 near 15 ms, but the end of the ramp pushed latency past the limit.
+The 200,000 row predates the checkpoint process; at 220,000 without it the hold failed (p99 7.4 s) on checkpoint syncs. The p99 at 220,000 on the SSD comes from a few stalls of 1 to 3 s: logging showed the WAL writes blocked in the kernel's dirty-page throttling while the disk was busy with checkpoint syncs. With the database on tmpfs those stalls disappear. At 240,000 the CPU is full: the hold itself ran at about 25,400 req/s with p99 near 15 ms, but the end of the ramp pushed latency past the limit.
 
 The earlier design (three front processes, `HTTP_DIRECT=0`) held 200,000 users on the same harness with 19,769 req/s, p95 355 ms, p99 625 ms and 0.4% errors.
 

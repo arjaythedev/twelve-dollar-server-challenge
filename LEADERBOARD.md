@@ -1183,7 +1183,11 @@ now #514's merged commit `7bac38a`** (a receive-buffer governor for new connecti
 pressure, credited to #486, and a 16 s aging tier, credited to #326): it held **270,000** (25,867 req/s, p95 69.5 /
 p99 218.3 ms, 0 errors, 76 % CPU, 27 µs/req, 1,085 MB, 2026-11-19). 280,000 failed the 2-minute probe on p99 (38.6 s,
 0.51 % timeouts) and 320,000 on p99 12.8 s with 0.060 % timeouts. It beats the merged 260,000 (`e1696c8`), so #514 is
-merged and the row moves to `7bac38a`.
+merged and the row moves to `7bac38a`. Follow-up #522 (`cefdf9b`: ready-queue backpressure at 65,536,
+`M_ARENA_MAX=1`, trimming during backlog, the `std::pmr` pool reverted) held **260,000** (24,894 req/s, p95 107.7 / p99
+672.0 ms, 0 errors, 77 % CPU, 28 µs/req, 952 MB, 2026-11-19); 270,000 and 280,000 failed the 2-minute probe on
+`connection refused` (73.6 %, 55.9 %) and 320,000 on p99 10.5 s with 0.008 % timeouts. That is below the merged
+270,000, so #522 isn't merged and the row stays at `7bac38a`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

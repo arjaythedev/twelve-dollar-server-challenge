@@ -191,6 +191,13 @@ class Server {
           return false;
         }
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        /* 接收缓冲上限设在 listener 上，accept 出来的连接会继承（c-iouring-jowinjestine #486
+         * 就是这么做的：8 个 listener 一律 16 KiB，PSI 高压时再降到 8 KiB）。默认的自动调优
+         * 会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上的。请求只有
+         * 一两百字节，16 KiB 足够放下几十个，且上限一旦设定，内核就不会再往上调。 */
+        int rcvbuf = 16384;
+        if (const char* v = std::getenv("RCVBUF")) rcvbuf = std::atoi(v);
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof rcvbuf);
         if (bind(fd, reinterpret_cast<struct sockaddr*>(&a), sizeof a) < 0 ||
             listen(fd, 65535) < 0) {
           ::close(fd);

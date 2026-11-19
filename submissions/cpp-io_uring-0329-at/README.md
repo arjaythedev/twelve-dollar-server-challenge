@@ -69,6 +69,7 @@
 每个 k6 用户持有一个 keep-alive 连接，所以高分意味着在 `LimitNOFILE=65535` 下数十万个 socket。
 
 - 接受的 socket 是 io_uring **直接描述符**：它们位于 ring 的文件表，不占进程 fd 表。表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144），所以同一个二进制在 `NOFILE=65535` 的 CI runner 上会注册 65,535 项并正常起来，在基准机上拿满 262,144。
+- **listener 上设 `SO_RCVBUF=16384`**，accept 出来的连接继承（`ss -tin` 实测服务器侧 `rcv_space:16384`，客户端侧仍是默认值）。默认的自动调优会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上（c-iouring-jowinjestine #486 对同一件事的处理：平时 16 KiB，PSI 高压时降到 8 KiB）。请求只有一两百字节，16 KiB 放得下几十个；`RCVBUF=` 可覆盖。
 - 端口上是 **8 个共享的 `SO_REUSEPORT` listener**（固定 8 个，与 ring 数无关），每个有独立的 accept 队列；ring 按需增长（1 → 最多 16），每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时停止投递 accept，其他 ring 继续从全部 8 个 listener 接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.
 - 突发之后 multishot receive 会耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。

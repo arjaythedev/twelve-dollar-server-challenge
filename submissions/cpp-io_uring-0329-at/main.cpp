@@ -32,7 +32,12 @@ namespace {
 
 constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
 constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-kensac #264 uses 16) */
-constexpr uint32_t kAcceptDepth = 2048;   /* total, divided by the live ring count */
+/* accept 在途总量（按存活 ring 数均分，再按 8 个 listener 均分）。2,048 是 5 个 ring 时
+ * 每 listener 51 个，而 ring 表只有 65,535 项——ramp 期这些在途 accept 会提前把
+ * open + kAcceptDepth 顶到表上限，让 accept 提前停摆。c-iouring-kensac #264 的
+ * ACCEPT_DEPTH 是 512（每 ring）、每 listener 64，思路是「够用就少占」。这里取 1,024：
+ * 5 个 ring 时每 listener 25，仍高于 arm_accept 的 16 下限，同时把预占的表项减半。 */
+constexpr uint32_t kAcceptDepth = 1024;
 constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
 
 // 同一端口上相互独立的 SO_REUSEPORT listener，由所有 ring 共享。每个 listener 有自己的
@@ -74,10 +79,6 @@ static void shim_log_sink(const char* s, size_t n) {
   std::fwrite(s, 1, n, stderr);
   std::fputc('\n', stderr);
 }
-
-/* part 缓冲的池资源。unsynchronized：只用在一个线程上（事件循环），省掉锁。
- * 默认 resource 指向它，所有 std::pmr 容器都走池。 */
-std::pmr::unsynchronized_pool_resource g_part_pool;
 
 template <typename... Args>
 void errlog(std::format_string<Args...> fmt, Args&&... args) {
@@ -130,6 +131,10 @@ class Worker {
 
   // ring 满了就停止继续投递 accept；listener 本身是共享的，为其他 ring 保持打开。
   void stop_accepting() { accepting_ = false; }
+  /* 恢复接客：ring 满之后 open 会随着关闭回落，必须能重新开始，否则一次短暂的表满就永久
+   * 拒绝新连接（270k/280k 的 connection refused 就是这么来的）。kensac #264 的恢复条件是
+   * open + 2*margin < slots，这里用 kAcceptDepth 作 margin。 */
+  void resume_accepting() { accepting_ = true; }
 
  private:
   uint32_t index_ = 0;
@@ -387,7 +392,6 @@ class Server {
        * 留着一块」，我们在 210k 连接时看到的 674 MB 里绝大部分就是这个。没有 backlog 才 trim，
        * 免得在正忙的时候去遍历堆。 */
       if (p4 - last_trim >= 10000000000ULL) {
-        last_trim = p4;
         bool backlog = !ready_.empty();
         if (!backlog) {
           for (auto& wp : workers_) {
@@ -397,10 +401,16 @@ class Server {
             }
           }
         }
-        /* 只 malloc_trim：pmr 池里的块由池自己复用，不能 release()——ready 队列为空并不
-         * 意味着没有存活的 part（serve() 会把解析不完的半包存回连接），release 会让那些
-         * vector 的指针悬垂。 */
-        if (!backlog) malloc_trim(0);
+        /* backlog 清空时每 10 秒收一次；backlog 持续不断时也每 30 秒收一次——原来只要还有
+         * 积压就永远不 trim，而 270k 的保持期恰恰一直是那种状态，堆只涨不还。
+         * malloc_trim 走 mprotect/brk，几十微秒量级，30 秒一次不影响 p99。 */
+        if (!backlog) {
+          last_trim = p4;
+          malloc_trim(0);
+        } else if (p4 - last_trim >= 30000000000ULL) {
+          last_trim = p4;
+          malloc_trim(0);
+        }
       }
       if (p4 - last_sweep >= 50000000ULL) {
         last_sweep = p4;
@@ -673,7 +683,7 @@ class Server {
   // 把收到的字节留在连接上，本 pass 不回答。
   void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
              size_t n) {
-    if (!c.part) c.part = std::make_unique<std::pmr::vector<uint8_t>>();
+    if (!c.part) c.part = std::make_unique<std::vector<uint8_t>>();
     c.part->insert(c.part->end(), data, data + n);
     if (!c.ready_queued) {
       c.ready_queued = true;
@@ -715,7 +725,7 @@ class Server {
   void serve(Worker& w, uint32_t wi, uint32_t idx, const uint8_t* data, size_t n) {
     net::Connection& c = w.table().at(idx);
     if (c.close_after) return;
-    std::pmr::vector<uint8_t> part;
+    std::vector<uint8_t> part;
     bool joined = false;
     if (c.part) {
       part = std::move(*c.part);
@@ -774,10 +784,10 @@ class Server {
     }
     if (off < len) {
       if (!joined) {
-        c.part = std::make_unique<std::pmr::vector<uint8_t>>(buf + off, buf + len);
+        c.part = std::make_unique<std::vector<uint8_t>>(buf + off, buf + len);
       } else {
         part.erase(part.begin(), part.begin() + static_cast<ptrdiff_t>(off));
-        c.part = std::make_unique<std::pmr::vector<uint8_t>>(std::move(part));
+        c.part = std::make_unique<std::vector<uint8_t>>(std::move(part));
       }
     }
   }
@@ -976,6 +986,11 @@ class Server {
       } else {
         arm_accept(w, wi);
       }
+    } else if (w.open() + 2 * kAcceptDepth < w.table().size()) {
+      /* 从「满」里退出来了：让出余量（两个 margin）再恢复，避免在边界上来回抖。 */
+      w.full() = false;
+      w.resume_accepting();
+      arm_accept(w, wi);
     }
     return n;
   }
@@ -1087,6 +1102,9 @@ const char* env_or(const char* k, const char* d) {
 static void on_term(int) { std::exit(0); }
 
 int main() {
+  /* 只留一个 malloc arena：事件循环和 checkpoint 线程轮流跑，各自一个 arena 意味着两份
+   * 高水位，而 glibc 在 free 之后不会把 arena 缩回去（c-iouring-raoz 的做法）。 */
+  mallopt(M_ARENA_MAX, 1);
   std::signal(SIGTERM, on_term);
   std::signal(SIGINT, on_term);
   {
@@ -1117,7 +1135,6 @@ int main() {
   auto app = std::make_unique<app::App>(std::move(db),
                                         reinterpret_cast<const uint8_t*>(secret),
                                         std::strlen(secret));
-  std::pmr::set_default_resource(&g_part_pool);
   dbx_set_logger(shim_log_sink);
   constexpr unsigned cq = kCqEntries;
   const uint32_t slots = descriptor_slots();

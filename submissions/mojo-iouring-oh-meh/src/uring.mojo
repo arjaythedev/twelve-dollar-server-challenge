@@ -50,6 +50,7 @@ def buf_return(i: Int, bid: Int):
     external_call["sh_buf_return", NoneType](c_int(i), UInt32(bid))
 
 
+# Hands returned buffers back to the kernel; returns how many.
 @always_inline
 def buf_flush(i: Int) -> Int:
     return Int(external_call["sh_buf_flush", c_int](c_int(i)))
@@ -100,6 +101,12 @@ def prep_accept(i: Int, lfd: Int, ud: UInt64) -> Int:
 @always_inline
 def prep_recv(i: Int, slot: Int, ud: UInt64) -> Int:
     return Int(external_call["sh_prep_recv", c_int](c_int(i), c_int(slot), ud))
+
+
+# Single-shot read into a provided buffer, never waiting (MSG_DONTWAIT): for the read queue.
+@always_inline
+def prep_read(i: Int, slot: Int, ud: UInt64) -> Int:
+    return Int(external_call["sh_prep_read", c_int](c_int(i), c_int(slot), ud))
 
 
 @always_inline

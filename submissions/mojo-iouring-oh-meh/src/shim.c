@@ -46,6 +46,7 @@ struct ring {
 };
 
 static struct ring rings[MAX_RINGS];
+#define CQ_ENTRIES 65536  // IORING_MAX_CQ_ENTRIES on 6.8; CLAMP lowers it where a kernel allows less
 static int epfd = -1;
 static unsigned cfg_sq, cfg_table, cfg_nbufs, cfg_bufsize;
 
@@ -103,12 +104,16 @@ int sh_ring_open(int i) {
   memset(&p, 0, sizeof p);
   p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG |
             IORING_SETUP_CQSIZE | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CLAMP;
-  p.cq_entries = cfg_sq * 4;
+  // 65,536 completions (the kernel's most) so a burst after a stall, when every one of a
+  // ring's connections completes at once, lands in the ring and not in the kernel's
+  // overflow list, which allocates per completion just when memory is shortest.
+  p.cq_entries = CQ_ENTRIES;
   int rc = io_uring_queue_init_params(cfg_sq, &r->ring, &p);
   if (rc < 0) {
     fprintf(stderr, "ring %d: io_uring_queue_init: %s\n", i, strerror(-rc));
     return rc;
   }
+  if (i == 0) fprintf(stderr, "ring 0: sq %u cq %u entries\n", p.sq_entries, p.cq_entries);
   rc = io_uring_register_files_sparse(&r->ring, cfg_table);
   if (rc < 0) {
     fprintf(stderr, "ring %d: register_files_sparse(%u): %s\n", i, cfg_table, strerror(-rc));
@@ -160,26 +165,34 @@ void sh_buf_return(int i, unsigned bid) {
 }
 
 // Re-provide every returned buffer, one SQE per contiguous run of ids. Buffers are
-// consumed FIFO, so a batch's returns are mostly one or two runs. Returns 0, or -1 if
-// the SQ was full even after a submit (the buffers stay pending for the next flush).
+// consumed FIFO, so a batch's returns are mostly one or two runs. Returns the number
+// of buffers handed back; if the SQ was full even after a submit, the rest stay
+// pending for the next flush.
 int sh_buf_flush(int i) {
   struct ring *r = &rings[i];
   if (!r->npending) return 0;
+  int flushed = 0;
   unsigned words = (r->nbufs + 63) / 64;
   for (unsigned w = 0; w < words; w++) {
     while (r->pending[w]) {
       unsigned start = w * 64 + (unsigned)__builtin_ctzll(r->pending[w]);
       unsigned end = start;
       while (end + 1 < r->nbufs && (r->pending[(end + 1) >> 6] >> ((end + 1) & 63) & 1)) end++;
-      SQE_OR_FAIL(i);
+      struct io_uring_sqe *s = io_uring_get_sqe(&r->ring);
+      if (!s) {
+        io_uring_submit(&r->ring);
+        s = io_uring_get_sqe(&r->ring);
+        if (!s) return flushed;
+      }
       io_uring_prep_provide_buffers(s, r->bufs + (size_t)start * r->bufsize, (int)r->bufsize,
                                     (int)(end - start + 1), 0, (int)start);
       s->flags |= IOSQE_CQE_SKIP_SUCCESS;
       for (unsigned b = start; b <= end; b++) r->pending[b >> 6] &= ~(1ull << (b & 63));
       r->npending -= end - start + 1;
+      flushed += (int)(end - start + 1);
     }
   }
-  return 0;
+  return flushed;
 }
 
 int sh_listen(const char *host, int port, int backlog) {
@@ -187,6 +200,7 @@ int sh_listen(const char *host, int port, int backlog) {
   if (fd < 0) return -errno;
   int one = 1, err = 0;
   (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+  (void)setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);  // several listeners share the port
   struct sockaddr_in a;
   memset(&a, 0, sizeof a);
   a.sin_family = AF_INET;
@@ -274,6 +288,18 @@ int sh_prep_accept(int i, int lfd, uint64_t ud) {
 int sh_prep_recv(int i, int slot, uint64_t ud) {
   SQE_OR_FAIL(i);
   io_uring_prep_recv_multishot(s, slot, NULL, 0, 0);
+  s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
+  s->buf_group = 0;
+  io_uring_sqe_set_data64(s, ud);
+  return 0;
+}
+// One bounded read for a connection on the read queue: a single-shot receive into a
+// provided buffer that never waits (MSG_DONTWAIT, so an empty socket completes with
+// EAGAIN at submission instead of arming a poll). Completes inside the submit when
+// the socket has data, so the pass that issued it reaps it.
+int sh_prep_read(int i, int slot, uint64_t ud) {
+  SQE_OR_FAIL(i);
+  io_uring_prep_recv(s, slot, NULL, 0, MSG_DONTWAIT);
   s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
   s->buf_group = 0;
   io_uring_sqe_set_data64(s, ud);

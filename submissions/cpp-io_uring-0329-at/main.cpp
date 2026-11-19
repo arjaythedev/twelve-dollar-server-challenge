@@ -32,7 +32,12 @@ namespace {
 
 constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
 constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-kensac #264 uses 16) */
-constexpr uint32_t kAcceptDepth = 2048;   /* total, divided by the live ring count */
+/* accept 在途总量（按存活 ring 数均分，再按 8 个 listener 均分）。2,048 是 5 个 ring 时
+ * 每 listener 51 个，而 ring 表只有 65,535 项——ramp 期这些在途 accept 会提前把
+ * open + kAcceptDepth 顶到表上限，让 accept 提前停摆。c-iouring-kensac #264 的
+ * ACCEPT_DEPTH 是 512（每 ring）、每 listener 64，思路是「够用就少占」。这里取 1,024：
+ * 5 个 ring 时每 listener 25，仍高于 arm_accept 的 16 下限，同时把预占的表项减半。 */
+constexpr uint32_t kAcceptDepth = 1024;
 constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
 
 // 同一端口上相互独立的 SO_REUSEPORT listener，由所有 ring 共享。每个 listener 有自己的

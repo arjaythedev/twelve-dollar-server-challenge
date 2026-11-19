@@ -100,6 +100,20 @@
   also at its heaviest (new connections still arriving, every client's first feed), and kswapd scanned 9,000 to
   91,000 pages from there on; with the drop it scanned none in the same runs and the box kept 120 MB more free at
   its lowest point.
+- **WAL writeback.** A commit leaves its WAL pages dirty in the kernel's cache, and SQLite syncs the WAL only when
+  a checkpoint pass starts (every 16,000 frames, 62 MB). The database pages a pass writes stay dirty too: SQLite
+  syncs the database only after a pass that copied the whole WAL. The kernel starts its flusher at 10 % and makes
+  writers wait at 20 % of free memory plus file cache, which is about 40 and 80 MB on a 2 GB box holding 320k
+  sockets. So the WAL's sawtooth alone kept dirty memory at the first threshold: the flusher ran most of the time,
+  at normal priority on the one CPU, and each time it also wrote the database's dirty pages out again. Now, every
+  8 MB of new WAL (`WALKICK_MB`), the loop queues a `sync_file_range(SYNC_FILE_RANGE_WRITE)` for those pages on its
+  ring. io_uring runs it on a kernel worker thread of the process, so the loop never waits for it; it starts the
+  writes and waits for nothing. Durability is as before (a 201 follows its commit's `write()` to the WAL; the
+  checkpoint thread's syncs are unchanged). Test box with the thresholds set to 40/80 MB, 320k users, two runs
+  each way: 47,014 and 52,598 disk write requests a run before, 22,843 and 19,545 now (108 and 93 MB written per
+  5 s); the flusher's 1.1 s of CPU a run gone, the checkpoint thread 1.0 s lighter, the worker thread 1.2 s; requests
+  over 1 s 16,050 and 756 before, 2,955 and 163 now; CPU per request unchanged (13.5 and 13.6 µs before, 13.6 and
+  13.1 now).
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
@@ -204,7 +218,7 @@ io_uring must be allowed (Docker's default seccomp profile blocks it). Optional 
 `LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
-startup), `STATS` (1: a line a second on stderr).
+startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `STATS` (1: a line a second on stderr).
 
 ## Credits
 

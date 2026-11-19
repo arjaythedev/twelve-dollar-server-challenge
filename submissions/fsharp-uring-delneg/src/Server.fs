@@ -36,6 +36,9 @@ let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
+// The WAL's new pages are started for the disk every this many MB (0: left to the checkpoint thread's sync and to the
+// kernel's flusher): see the end of `flush`.
+let private walKickBytes = int64 (env "WALKICK_MB" 8) <<< 20
 /// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 4 GB of them, or half of the
 /// free space on the database's disk at startup when that is less.
 let walCap =
@@ -81,6 +84,7 @@ let UdClose = 4UL
 let UdCkpt = 6UL
 let UdIgnore = 7UL
 let UdOpt = 8UL
+let UdKick = 9UL
 let NoGen = 0xFFFFFFu
 
 let inline private ud (t: uint64) (slot: int) (gen: uint32) =
@@ -333,6 +337,11 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable passMs = 0u
     let mutable lastWriteMs = 0u
     let mutable nHeldNow = 0
+    // the WAL's bytes below this offset have been started for the disk; the descriptor the kernel worker gets
+    let mutable kickedTo = 0L
+    let mutable kickFd = -1
+    let mutable kickOn = walKickBytes > 0L
+    let frameBytes = int64 (Db.walFrameBytes ())
     let mutable now = 0L
     let mutable uptime = 0L
     // checkpointer state
@@ -358,6 +367,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable stWalk = 0L
     let mutable stCommitUs = 0L
     let mutable stCommitMax = 0L
+    let mutable stKicks = 0L
     let mutable stCommits = 0L
     let mutable lastStats = 0L
     let mutable lastUtc = 0L
@@ -1016,6 +1026,26 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 stCommits <- stCommits + 1L
                 if us > stCommitMax then stCommitMax <- us
             elif not txn && not (Db.carrying ()) then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
+            if wrote && ok && kickOn then
+                // A commit leaves its WAL pages dirty in the kernel's cache. Until now they stayed so until the checkpoint
+                // thread's next sync, 60 MB or more later (longer when that thread, at nice 19, gets no CPU), and the
+                // kernel's dirty thresholds are 10 % and 20 % of what is free or file cache: a few tens of MB on a
+                // 2 GB box full of sockets. Past them the kernel makes whoever dirties pages wait inside write(), and
+                // here that is the loop. So every WALKICK_MB the new pages are started for the disk
+                // (sync_file_range with SYNC_FILE_RANGE_WRITE: it starts the writes and waits for nothing), through
+                // io_uring, which runs it on a kernel worker thread of the process, never in the loop. Whole pages only:
+                // the last one is still filling.
+                let fin = (32L + int64 Db.walFrames * frameBytes) &&& ~~~4095L
+                if fin < kickedTo then kickedTo <- 0L // the WAL was rewound
+                if fin - kickedTo >= walKickBytes then
+                    if kickFd < 0 then
+                        kickFd <- Native.``open`` (Sqlite.z (Environment.GetEnvironmentVariable "SQLITE_PATH" + "-wal"), 0x80000) // O_RDONLY | O_CLOEXEC
+                        if kickFd < 0 then kickOn <- false
+                    if kickFd >= 0 then
+                        let n = min (fin - kickedTo) (1L <<< 30)
+                        R.[0].Ring.SyncFileRange(kickFd, kickedTo, uint32 n, 2u, ud UdKick 0 NoGen) // SYNC_FILE_RANGE_WRITE
+                        kickedTo <- kickedTo + n
+                        stKicks <- stKicks + 1L
             if not ok && wrote then
                 // never acknowledge an uncommitted write: every connection of this pass closes without an answer
                 for d in 0 .. dirty.Count - 1 do
@@ -1141,6 +1171,9 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 if rs.High && rs.Live + lowGap < highWater then rs.High <- false
         | 6UL -> ckDone res
         | 8UL -> if res = -22 || res = -95 then lateAck <- false // a kernel without the command: EINVAL, EOPNOTSUPP
+        | 9UL -> // a kernel or a file system that can't: no more asking
+            if kickOn then eprintfn "sync_file_range: %d" res
+            kickOn <- false
         | _ -> ()
 
     let reap (k: int) =
@@ -1157,10 +1190,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         for k in 0 .. nrings - 1 do
             live <- live + R.[k].Live
             ovf <- ovf + R.[k].Ring.CqOverflow
-        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d yields=%d"
+        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d yields=%d kicks=%d"
             (now - started) live accErr lastAccErr ovf nobufs nrearm maxBatch pool.Count (Db.cacheKB ()) stPasses stAns
             Db.walFrames (GC.CollectionCount 0) (GC.CollectionCount 2) (GC.GetTotalMemory false >>> 20) stWalk wqLen
-            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked stYields
+            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked stYields stKicks
         stCommits <- 0L
         stCommitUs <- 0L
         stCommitMax <- 0L

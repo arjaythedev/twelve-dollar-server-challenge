@@ -39,10 +39,11 @@ let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new W
 // The WAL's new pages are started for the disk every this many MB (0: left to the checkpoint thread's sync and to the
 // kernel's flusher): see the end of `flush`.
 let private walKickBytes = int64 (env "WALKICK_MB" 8) <<< 20
-/// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 4 GB of them, or half of the
-/// free space on the database's disk at startup when that is less.
+/// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 8.6 GB of them, or half of the
+/// free space on the database's disk at startup when that is less. At 16-17 MB of WAL a second (300-320k users) 4.3 GB
+/// came up once in a 5-minute hold, never in a 2-minute probe; 8.6 GB is nine minutes of writes.
 let walCap =
-    let want = env "HOLDMAX" 1048576
+    let want = env "HOLDMAX" 2097152
     try
         let dir = IO.Path.GetDirectoryName(IO.Path.GetFullPath(Environment.GetEnvironmentVariable "SQLITE_PATH"))
         max 16384 (int (min (int64 want) (IO.DriveInfo(dir).AvailableFreeSpace / 2L / 4120L)))

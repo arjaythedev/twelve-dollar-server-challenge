@@ -80,12 +80,15 @@
   and a pass writes each page once however many of its frames hold it, so a pass over 16,000 frames writes fewer
   pages per frame than one over 4,000: the disk got 4-5 times fewer write requests under the cap (26,091-28,911 a run
   against 145,203-154,034).
-  The WAL has a bound: 4 GB, or half of the free space on the database's disk at startup if that is less (the startup
-  line says which). Near it the passes follow one another, each a little shorter, and the checkpoint thread also
+  The WAL has a bound: 8.6 GB, or half of the free space on the database's disk at startup if that is less (the
+  startup line says which). Near it the passes follow one another, each a little shorter, and the checkpoint thread also
   syncs the database file after each (while writes flow); when a pass leaves at most 2,000 frames, writes wait for one
   more, short pass (up to 1.5 s, `HOLDRIDE`; SQLite's own sync at its end has only that pass's pages left), and the
-  first write after it rewinds the WAL, alone in its commit. At 300k users the WAL grows about 16 MB a second, so
-  with 4 GB that is once in four minutes; under the 25 MB/s cap such a hold kept writes 0.2 to 1.4 s. A WAL
+  first write after it rewinds the WAL, alone in its commit. At 300k users the WAL grows about 16 MB a second. The
+  bound was 4.3 GB, which came up once in four and a half minutes: inside every 5-minute hold at 300k and above, and
+  never in a 2-minute probe (two heads of this entry passed a probe and then failed the hold at the same load). With
+  8.6 GB it comes up once in nine minutes, when the disk has 17 GB free. Under the 25 MB/s cap such a hold kept writes
+  0.2 to 1.4 s. A WAL
   left by an earlier run is copied into the database and emptied at startup (`wal_checkpoint(TRUNCATE)`), so every
   run starts at zero. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader
   goes back to them), so the file's length doesn't cost memory. The database file's pages go too, after the pass
@@ -215,7 +218,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
 startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `STATS` (1: a line a second on stderr).

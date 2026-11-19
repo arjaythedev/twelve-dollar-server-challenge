@@ -161,7 +161,9 @@ class Server {
     host_ = host;
     port_ = port;
     app::preload_pool(pool_);
-    return add_ring();
+    if (!add_ring()) return false;
+    memgov_init(); /* listener 已经建好，这里设接收缓冲上限 */
+    return true;
   }
 
   // ring 按需创建：一个就够，直到它的描述符表接近满；在单 vCPU 上每多一个 ring，每个 pass 就
@@ -406,6 +408,7 @@ class Server {
         sweep_slice();
       }
       const uint64_t p5 = now_ns();
+      memgov_tick(p5);
       t_wait += p1 - p0;
       t_drain += p2 - p1;
       t_read += p3 - p2;
@@ -530,6 +533,98 @@ class Server {
   }
 
   /* 一次发送彻底完成后的收尾：把 wire 还给池，处理排队中的响应或关闭。 */
+  /* ---- TCP 接收内存治理（c-iouring-jowinjestine #486） --------------------------------
+   * 只改**未来 accept** 的连接继承到的缓冲上限，绝不动已有连接、也不节流或拒绝任何连接。
+   * cgroup v2 的 PSI 与 sock 统计每 2 秒采一次，避免在热路径上做文件 I/O。 */
+  struct MemGov {
+    bool enabled = false;
+    int normal = 16384;
+    int pressure = 8192;
+    int current = 16384;
+    uint32_t high_streak = 0;
+    uint32_t low_streak = 0;
+    uint64_t last_ns = 0;
+    double psi_some = 0.0;
+    double psi_full = 0.0;
+    uint64_t cg_cur = 0;
+    uint64_t cg_max = 0;
+    uint64_t cg_sock = 0;
+    uint64_t changes = 0;
+    uint64_t samples = 0;
+  } mg_;
+
+  static bool slurp(const char* path, char* buf, size_t cap) {
+    int fd = ::open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return false;
+    ssize_t n = ::read(fd, buf, cap - 1);
+    ::close(fd);
+    if (n <= 0) return false;
+    buf[n] = 0;
+    return true;
+  }
+
+  static uint64_t read_u64(const char* path) {
+    char buf[64];
+    if (!slurp(path, buf, sizeof buf) || buf[0] < '0' || buf[0] > '9') return 0; /* "max" → 0 */
+    return std::strtoull(buf, nullptr, 10);
+  }
+
+  bool apply_listener_rcvbuf(int v) {
+    for (uint32_t li = 0; li < kListeners; li++) {
+      if (listeners_[li] < 0) continue;
+      if (::setsockopt(listeners_[li], SOL_SOCKET, SO_RCVBUF, &v, sizeof v) < 0) return false;
+    }
+    mg_.current = v;
+    mg_.changes++;
+    return true;
+  }
+
+  void memgov_init() {
+    if (const char* e = std::getenv("TCP_MEM_GOVERNOR"); e && e[0] == '0') return;
+    if (const char* e = std::getenv("TCP_RCVBUF_NORMAL")) mg_.normal = std::atoi(e);
+    if (const char* e = std::getenv("TCP_RCVBUF_PRESSURE")) mg_.pressure = std::atoi(e);
+    if (mg_.pressure < 4096 || mg_.normal > (1 << 20) || mg_.pressure > mg_.normal) return;
+    if (apply_listener_rcvbuf(mg_.normal)) mg_.enabled = true;
+  }
+
+  void memgov_tick(uint64_t now) {
+    if (!mg_.enabled || (mg_.last_ns && now - mg_.last_ns < 2000000000ULL)) return;
+    mg_.last_ns = now;
+    mg_.samples++;
+    mg_.cg_cur = read_u64("/sys/fs/cgroup/memory.current");
+    mg_.cg_max = read_u64("/sys/fs/cgroup/memory.max");
+    mg_.cg_sock = 0;
+    mg_.psi_some = 0.0;
+    mg_.psi_full = 0.0;
+    char buf[8192];
+    bool psi_ok = false;
+    if (slurp("/sys/fs/cgroup/memory.stat", buf, sizeof buf)) {
+      if (const char* p = std::strstr(buf, "sock ")) mg_.cg_sock = std::strtoull(p + 5, nullptr, 10);
+    }
+    if (slurp("/sys/fs/cgroup/memory.pressure", buf, sizeof buf)) {
+      const char* p = std::strstr(buf, "some avg10=");
+      const char* q = std::strstr(buf, "full avg10=");
+      if (p && q && std::sscanf(p, "some avg10=%lf", &mg_.psi_some) == 1 &&
+          std::sscanf(q, "full avg10=%lf", &mg_.psi_full) == 1)
+        psi_ok = true;
+    }
+    /* 高压：PSI 明显停顿，或者 cgroup 已经用掉 85% 以上。 */
+    const bool high = (psi_ok && (mg_.psi_full >= 2.0 || mg_.psi_some >= 10.0)) ||
+                      (mg_.cg_max && mg_.cg_cur > mg_.cg_max * 85 / 100);
+    if (high) {
+      mg_.high_streak++;
+      mg_.low_streak = 0;
+    } else {
+      mg_.low_streak++;
+      mg_.high_streak = 0;
+    }
+    if (mg_.high_streak >= 2 && mg_.current != mg_.pressure) {
+      if (apply_listener_rcvbuf(mg_.pressure)) mg_.high_streak = 0;
+    } else if (mg_.low_streak >= 4 && mg_.current != mg_.normal) {
+      if (apply_listener_rcvbuf(mg_.normal)) mg_.low_streak = 0;
+    }
+  }
+
   void finish_send(Worker& w, uint32_t idx, net::Connection& c) {
     app::give_buf(pool_, c.wire);
     c.wire = nullptr;
@@ -595,8 +690,12 @@ class Server {
        * half of each pass），而不是一旦老化就整批取队尾——backlog 持续时队尾会一直老化，全取
        * 队尾就退化成最老优先，新请求又被拖回原来的问题里（基准机 230k 探针 p99 3.08 s 就是
        * 这个形状）。连接内部顺序不变，`serve()` 按自己的 part 缓冲顺序处理。 */
-      const bool aged = (now - ready_.back().ts) > kAgedAfterNs;
-      const bool take_old = aged && ((turn++ & 1u) == 0);
+      const uint64_t waited = now - ready_.back().ts;
+      const bool aged = waited > kAgedAfterNs;
+      /* 8 秒拿一半，16 秒全给老的（objc-uring-delneg #326 的第二级）——再久也不让任何请求
+       * 无限期被新请求插队。 */
+      const bool very_old = waited > 2 * kAgedAfterNs;
+      const bool take_old = very_old || (aged && ((turn++ & 1u) == 0));
       const ReadyRef r = take_old ? ready_.back() : ready_.front();
       if (take_old) {
         ready_.pop_back();

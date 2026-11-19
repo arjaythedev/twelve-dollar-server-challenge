@@ -4,7 +4,7 @@ export DEBIAN_FRONTEND=noninteractive
 export XMAKE_ROOT=y
 apt-get update
 apt-get install -y --no-install-recommends \
-  build-essential liburing-dev ca-certificates curl unzip wget git mold
+  build-essential liburing-dev ca-certificates curl unzip wget mold
 
 if ! command -v xmake >/dev/null 2>&1; then
   apt-get install -y --no-install-recommends software-properties-common gnupg

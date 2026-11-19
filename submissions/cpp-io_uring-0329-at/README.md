@@ -29,7 +29,7 @@
 
 **批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 2,048 个请求**，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
 
-**backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。
+**backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），**等过 16 秒的全部优先**（objc-uring-delneg #326 的第二级），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。
 
 **ring 模型。** ring **按需增长**：起步 1 个，最新一个的表**半满**时加下一个（一次补齐多个，ramp 不落后），上限 **16**。ring 数量按目标连接数推导：`ceil(400,000 / 每 ring 槽位)`。每 ring 的槽位上限是 262,144，但**实际取 `min(硬 RLIMIT_NOFILE, 262,144)`**——基准机 `LimitNOFILE=65535` 时就是 7 个 ring × 65,535 = **458,745 连接**，`NOFILE=1M` 时 2 个 ring × 262,144 = 524,288。表尺寸不按 `RLIMIT_NOFILE` 一次预分配：旧版按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上就是 300k 连接装不装得下的区别。每 pass 的 `io_uring_enter` 是 1 次/ring；非 0 号 ring 不设 `DEFER_TASKRUN`、只提交不取事件，所以环数增加几乎不加系统调用（3 ring 存活时实测 `enter[wait=1040 sqe=0 ring=66]`）。
 
@@ -69,7 +69,7 @@
 每个 k6 用户持有一个 keep-alive 连接，所以高分意味着在 `LimitNOFILE=65535` 下数十万个 socket。
 
 - 接受的 socket 是 io_uring **直接描述符**：它们位于 ring 的文件表，不占进程 fd 表。表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144），所以同一个二进制在 `NOFILE=65535` 的 CI runner 上会注册 65,535 项并正常起来，在基准机上拿满 262,144。
-- **listener 上设 `SO_RCVBUF=16384`**，accept 出来的连接继承（`ss -tin` 实测服务器侧 `rcv_space:16384`，客户端侧仍是默认值）。默认的自动调优会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上（c-iouring-jowinjestine #486 对同一件事的处理：平时 16 KiB，PSI 高压时降到 8 KiB）。请求只有一两百字节，16 KiB 放得下几十个；`RCVBUF=` 可覆盖。
+- **listener 上设 `SO_RCVBUF=16384`**，accept 出来的连接继承（`ss -tin` 实测服务器侧 `rcv_space:16384`，客户端侧仍是默认值）。默认的自动调优会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上（c-iouring-jowinjestine #486 对同一件事的处理：平时 16 KiB；**PSI 高压时降到 8 KiB**——每 2 秒读一次 `/sys/fs/cgroup/memory.pressure` （full avg10 ≥ 2 % 或 some avg10 ≥ 10 %）与 cgroup 用量（>85 % 上限），连续两次高压才降、连续四次低压才恢复，且只影响**未来 accept** 的连接，绝不节流或关闭已有连接（c-iouring-jowinjestine #486 的迟滞规则）。请求只有一两百字节，16 KiB 放得下几十个；`RCVBUF=` 可覆盖。
 - 端口上是 **8 个共享的 `SO_REUSEPORT` listener**（固定 8 个，与 ring 数无关），每个有独立的 accept 队列；ring 按需增长（1 → 最多 16），每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时停止投递 accept，其他 ring 继续从全部 8 个 listener 接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.
 - 突发之后 multishot receive 会耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。

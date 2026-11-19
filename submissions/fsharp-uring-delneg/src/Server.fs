@@ -35,10 +35,11 @@ let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
-/// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 4 GB of them, or half of the
-/// free space on the database's disk at startup when that is less.
+/// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 8.6 GB of them, or half of the
+/// free space on the database's disk at startup when that is less. At 16-17 MB of WAL a second (300-320k users) 4.3 GB
+/// came up once in a 5-minute hold, never in a 2-minute probe; 8.6 GB is nine minutes of writes.
 let walCap =
-    let want = env "HOLDMAX" 1048576
+    let want = env "HOLDMAX" 2097152
     try
         let dir = IO.Path.GetDirectoryName(IO.Path.GetFullPath(Environment.GetEnvironmentVariable "SQLITE_PATH"))
         max 16384 (int (min (int64 want) (IO.DriveInfo(dir).AvailableFreeSpace / 2L / 4120L)))

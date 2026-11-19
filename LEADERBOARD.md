@@ -101,7 +101,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 10 | c-uring-willwang | #403 | C (io_uring, SQLite B-tree reads) | **280,000** ᵁ | 26,747 | 33.0 | 146.6 | 0.00 | 82 | 28 | 1,485 | 2026-11-12 |
 | 10 | c-iouring-PROGABBOMALA | #430 | C (io_uring, SQLite B-tree reads) | **280,000** | 26,712 | 151.1 | 479.1 | 0.00 | 78 | 26 | 1,550 | 2026-11-14 |
 | 10 | zig-iouring-harshitkhandelwal208 | #460 | Zig (io_uring, SQLite B-tree reads) | **280,000** | 26,674 | 114.3 | 369.9 | 0.00 | 90 | 30 | 910 | 2026-11-16 |
-| 10 | go-iouring-DblD | #498 | Go (io_uring, SQLite B-tree reads) | **280,000** | 26,707 | 32.0 | 803.8 | 0.00 | 80 | 27 | 738 | 2026-11-17 |
+| 10 | go-iouring-DblD | #498 | Go (io_uring, SQLite B-tree reads) | **280,000** ᵉ | 26,707 | 32.0 | 803.8 | 0.00 | 80 | 27 | 738 | 2026-11-17 |
 | 18 | c-iouring-shivanshthapliyal | #250 | C (io_uring, SQLite B-tree reads) | **276,000** | 26,403 | 23 | 147 | 0.00 | 77 | 26 | 638 | 2026-11-01 |
 | 18 | go-iouring-huykn | #369 | Go (io_uring, SQLite B-tree reads) | **276,000** ⁿ | 26,338 | 95.6 | 578.8 | 0.00 | 93 | 32 | 933 | 2026-11-09 |
 | 20 | c-iouring-public | #158 | C (io_uring, SQLite B-tree reads) | **275,000** ᵇ | 26,227 | 128 | 672 | 0.00 | 80 | 28 | 625 | 2026-10-31 |
@@ -1444,6 +1444,12 @@ box, one read transaction per pass; not merged: it scored below the merged row) 
 p99 189.9 ms, 0 err, 87 % CPU, 39 µs/req, 658 MB, 2026-11-19), 42/42 tests: 220,000 failed the 2-minute probe on p95/p99
 (788 ms / 1.80 s at 89 % CPU, 0 errors), 240,000 on p95/p99 (1.01 / 2.24 s at 94 % CPU) and 320,000 with 69 % connection
 refused.
+
+ᵉ **go-iouring-DblD** stays on its merged #498 row. Its follow-up **#523** (`a0a8a72`, profile-guided build recorded by
+`build.sh` on a scratch database, a look ahead at connections, faster JSON writers; not merged: it scored below the merged
+row) held **266,000** (25,524 req/s, p95 21.1 / p99 191.8 ms, 0 err, 72 % CPU, 26 µs/req, 1,348 MB, 2026-11-19), 42/42
+tests: the 280,000 5-minute hold failed on p99 (1.07 s at 77 % CPU, 0 errors) after passing the 2-minute probe; 290,000,
+300,000 and 320,000 failed the 2-minute probe on p99 (1.02 / 1.40 / 3.83 s, 0 errors).
 
 ## Patches (ᵖ) and failures
 

@@ -5,7 +5,7 @@ A submission written in AILANG, a programming language designed for AI-assisted 
 | | |
 |---|---|
 | **Language** | AILANG, compiled to a standalone x86-64 Linux binary |
-| **Framework** | None. HTTP/1.1 with persistent connections, event-driven (`Library.HTTP1`), plus front processes (`Library.HTTP1Front`) |
+| **Framework** | None. HTTP/1.1 with persistent connections, on io_uring (`Library.HTTP1`, `Library.IoUring`) |
 | **SQLite driver** | None. `Library.SQLite` reads and writes the SQLite file directly using memory mapping and write-ahead logging. No `libsqlite3`, no shared libraries |
 | **Authentication** | `Library.Crypto`: JWT HS256, signature and expiry checked on every authenticated request |
 | **Nginx or direct** | **Direct**. Listens on `$HOST:$PORT` (use `0.0.0.0:80`) |
@@ -30,7 +30,9 @@ SQLITE_PATH=/path/to/copy-of-feed.db JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash st
 Each user holds one keep-alive connection, so the open-descriptor limit is the connection limit. On the official box `LimitNOFILE=65535` applies to each process:
 
 - `HTTP_NSLOT` (default 65,520) is the connection table size of each process. It sits just under the descriptor limit, leaving a few descriptors for the server's own files, so a connection beyond the table is accepted and closed at once instead of waiting in the kernel backlog. Raise it only together with the descriptor limit.
-- `HTTP_FRONTS` (default 3) is the number of front processes. Each has its own descriptor limit and connection table, so the default holds up to 262,080 connections. Set it to 0 for a single process.
+- `HTTP_DIRECT` (default 1) keeps accepted sockets as io_uring direct descriptors, in io_uring's own file tables instead of the process's, so one process holds more connections than its descriptor limit: up to 8 rings of `HTTP_NSLOT` each, opened as needed.
+- `HTTP_RXMULTI` (default 1) receives with multishot receives into a shared ring of 4,096 × 2 KB buffers per io_uring ring, so an idle connection holds no receive buffer.
+- With `HTTP_DIRECT=0`, `HTTP_FRONTS` (default 3) front processes accept connections instead, each with its own descriptor limit, and pass requests to the database process through shared memory (the earlier design, kept as a fallback).
 
 Check it with the challenge's own tests (from the repository root):
 
@@ -42,7 +44,7 @@ bash test/run.sh submissions/ailang-native-2paws
 
 AILANG is self-hosting and has no apt package. Its compiler is one static binary, `ailang.x`, published in the AILANG repository at [AiLang-Author/Ailang-Self-Hosting-](https://github.com/AiLang-Author/Ailang-Self-Hosting-) together with its source.
 
-- `install.sh` downloads `ailang.x` from that repository at a pinned commit (`2c027a8e`, branch `master`), checks its sha256 (`67e25f5b47f77bb461f7b7aad5f719aaa2ea7ddc403a569fe9d3a7962cf65c37`) and installs it to `/usr/local/bin/ailang.x`.
+- `install.sh` downloads `ailang.x` from that repository at a pinned commit (`ed228e9e`, branch `master`), checks its sha256 (`7cc4128adaf3c1be31de15007aca1f4d4e187187026a6618c509d2f9c50f2ec4`) and installs it to `/usr/local/bin/ailang.x`.
 - `build.sh` compiles the server with it. Set `AILANG_COMPILER` to use a different compiler.
 - No compiler or server binary is committed here. The compiler belongs to the AILANG project and is not covered by this repository's MIT license.
 
@@ -52,8 +54,8 @@ AILANG is self-hosting and has no apt package. Its compiler is one static binary
 - The feed reads the 20 newest posts by walking the posts table in reverse primary-key order. No indexes were added.
 - Usernames are found through a lookup table of the users table's own B-tree page boundaries, rebuilt at startup. This is the database's structure, not a copy of its data. There is no cache of likes or of users.
 - **Batched writes (group commit):** new posts and first-time likes are not committed one by one. All writes handled in one pass of the event loop share a single WAL commit, and their responses are delayed until that commit completes.
-- **Front processes:** one process owns the database and runs every request. Front processes, forked before the database opens, accept connections on their own `SO_REUSEPORT` sockets (the kernel spreads new connections over all of them), parse each request and pass it through a ring in shared memory. The database process runs it on a virtual connection, with the same handler and group commit, and the response goes back through a second ring. If the database process falls behind, a front queues requests rather than failing them.
-- **I/O process, `synchronous=NORMAL`:** the database process never writes a file. It appends each commit's WAL frames to a ring in shared memory, and an I/O process writes them in order and reports back; the responses for a commit go out once its frames are in the WAL file. Every 4 MB of WAL, the pages committed since the last checkpoint are written back into the database file after the WAL is synced, and the server drops its own copies of them. Every 64 MB the database file is synced and the WAL starts over from the beginning, as SQLite does. A disk stall therefore delays only the writes waiting on it; reads keep going. If the database process dies, the I/O process finishes the queued writes before it exits, so a crash loses nothing that was acknowledged (tested with `kill -9` under load).
+- **io_uring, one process:** one thread runs accepts, receives and sends through io_uring. Accepted sockets are direct descriptors (multishot accept into a sparse registered file table), closed by a linked shutdown and close, so they never use the process's descriptor limit. When a ring's table is nearly full, accepting moves to another ring (up to 8). Receives are multishot into a provided buffer ring; if the buffers run out, the affected connections are re-armed a bounded number per pass so the loop does not stall.
+- **I/O process, `synchronous=NORMAL`:** the database process never writes a file. It appends each commit's WAL frames to a ring in shared memory, and an I/O process writes them in order and reports back; the responses for a commit go out once its frames are in the WAL file. Every 4 MB of WAL, a checkpoint writes the pages committed since the last one back into the database file, and the server drops its own copies of them. Every 8 MB the database file is synced and the WAL starts over from the beginning, as SQLite does. Checkpoints run in a separate checkpoint process with its own ring: it syncs the WAL once the I/O process has written the checkpoint's frames, then writes the pages back, then syncs the database, so WAL appends never queue behind a checkpoint's disk work. A disk stall therefore delays only the writes waiting on it; reads keep going. If the database process dies, the I/O process finishes the queued writes before it exits, so a crash loses nothing that was acknowledged (tested with `kill -9` under load).
 - **Lookups:** pages are searched by binary search, an insert finds its place the same way, and a feed's 20 like counts come from one walk over the `likes(post_id)` index, counting runs that span whole pages without decoding them.
 - **Memory:** requests and responses use two shared buffers; a connection only borrows a buffer from a pool while a request or response is incomplete. An idle connection costs its slot (256 bytes) and the kernel's socket memory.
 
@@ -69,20 +71,30 @@ The load generator spreads its connections over 16 loopback source addresses (`S
 
 **local, FX-8320, 1 core, MemoryMax=1800M, no swap, LimitNOFILE=65535**
 
-The server ran in a transient systemd scope (`MemoryMax=1800M`, `MemorySwapMax=0`, `CPUQuota=100%`, one core, open files 65,535), on a fresh copy of the seed database each run, with a ramp of 95 s (190,000 users) or 100 s (200,000). RAM is the scope's `memory.peak`, CPU is the scope's CPU use during the hold. These limits are part of the test harness only; `build.sh` and `start.sh` set none of them.
+The server ran in a transient systemd scope (`MemoryMax=1800M`, `MemorySwapMax=0`, `CPUQuota=100%`, one core, open files 65,535), on a fresh copy of the seed database each run (on the machine's SATA SSD unless noted), with a 100 s ramp. RAM is the scope's peak memory, CPU is the scope's CPU use during the hold. These limits are part of the test harness only; `build.sh` and `start.sh` set none of them. All rows use the default `start.sh` settings and the compiler `install.sh` installs.
 
-| Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | RAM MB |
-|---:|---:|---:|---:|---:|---:|---:|
-| **200,000** | **20,857** | **407** | **704** | **0.000** | **100** | **1,208** |
-| 190,000 | 20,408 | 94 | 274 | 0.000 | 99 | 1,095 |
+| Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | RAM MB | Result |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| **220,000** | **23,244** | **27** | **583** | **0.000** | **93** | **1,290** | **pass** |
+| 200,000 | 21,146 | 37 | 233 | 0.000 | 92 | 1,109 | pass |
+| 220,000, database on tmpfs | 23,300 | 4.9 | 9.1 | 0.000 | 92 | 1,103 | pass |
+| 240,000, database on tmpfs | 25,387 | 253 | 2,168 | 0.000 | 96 | 1,266 | fail |
 
-The 200,000 row is the default configuration (three front processes); the 190,000 row ran with `HTTP_FRONTS=2`. 210,000 users failed the same hold (p95 8.1 s, p99 12.0 s, 0 errors): with the CPU already full at 200,000, the extra connections pushed memory to the 1,800 MB limit and the kernel's reclaim stalled the server. No run was OOM-killed. After each passing hold, SQLite's own `PRAGMA integrity_check` on the database and WAL returned `ok`: 66,956 new posts and 501,515 new likes after the 200,000 hold.
+The 200,000 row predates the checkpoint process; at 220,000 without it the hold failed (p99 7.4 s) on checkpoint syncs. A repeat 220,000 hold, with slow-operation logging on and other work running on the machine, passed with p95 103 ms and p99 755 ms. The p99 at 220,000 on the SSD comes from a few stalls of 1 to 3 s: logging showed the WAL writes blocked in the kernel's dirty-page throttling while the disk was busy with checkpoint syncs. With the database on tmpfs those stalls disappear. At 240,000 the CPU is full: the hold itself ran at about 25,400 req/s with p99 near 15 ms, but the end of the ramp pushed latency past the limit.
 
-These rows were measured with a server built by the AILANG optimizing compiler `ailang-opt11.x`. Built with the stock `ailang.x` that `install.sh` now installs, one 200,000-user hold on the same machine gave 20,422 req/s, p95 868 ms and p99 1,147 ms, with 0 errors.
+The earlier design (three front processes, `HTTP_DIRECT=0`) held 200,000 users on the same harness with 19,769 req/s, p95 355 ms, p99 625 ms and 0.4% errors.
 
-Memory at 190,000 connections: 1,095 MB peak, against 49 MB idle, or about 5.5 KB per connection. About 4 KB of that is the kernel's own socket memory; most of the rest is database pages in the page cache.
+**Above the connection limit:** each io_uring ring accepts at most `HTTP_NSLOT` connections and the server opens up to 8 rings. A connection beyond that is accepted and closed at once, so the client sees it closed, and the server keeps serving the connections it has.
 
-**Above the connection limit:** each process accepts at most `HTTP_NSLOT` connections, so the default three front processes and the database process hold 262,080 together. A connection beyond that is accepted and closed at once, so the client sees it closed, and the server keeps serving the connections it has. With a single process (`HTTP_FRONTS=0`) that limit is 65,520; it held 65,500 users with 0 errors. If `HTTP_NSLOT` is set above the descriptor limit, new connections wait in the kernel's backlog instead and the server spends its time retrying `accept`, which is why the default stays under it.
+### The Rust entry on the same harness
+
+For comparison, the Rust entry `rust-iouring-kensac` (PR #264, built from that PR on 17 November 2026) was run on the same machine, harness and load generator:
+
+| Users held 5 min | req/s | p95 ms | p99 ms | err % | CPU % | RAM MB | Result |
+|---:|---:|---:|---:|---:|---:|---:|---|
+| 200,000 | 19,080 | 3,531 | 5,309 | 0.000 | 58 | 1,217 | fail |
+
+It used only 58% of its core during the hold, and its latency alternated between healthy 10-second intervals (p99 under 50 ms) and stalls of 2 to 7 s. That pattern points at the disk, not the CPU: its design holds writes while a checkpoint copies the WAL's last frames, and falls back to checkpointing on the event loop when its low-priority checkpoint thread falls behind. On this machine's slow SATA SSD both take much longer than on the droplet's disk, so this result says more about the test machine than about that server. In a CPU-only profile it used about 30 µs of CPU per request against about 43 µs for this server. If `HTTP_NSLOT` is set above the descriptor limit, new connections wait in the kernel's backlog instead and the server spends its time retrying `accept`, which is why the default stays under it.
 
 ### Without memory or descriptor limits (earlier build)
 
@@ -124,7 +136,8 @@ Checking the database with SQLite itself after load runs found bugs in the earli
 | | |
 |---|---|
 | `feed_server.ailang` | The server |
-| `Librarys/Library.HTTP1Front.ailang` | The front processes and their shared-memory rings |
+| `Librarys/Library.IoUring.ailang` | io_uring setup, submission and completion |
+| `Librarys/Library.HTTP1Front.ailang` | The front processes for `HTTP_DIRECT=0` |
 | `Librarys/` | The AILANG libraries it uses (HTTP, SQLite, JSON, crypto, and so on) |
 | `build.sh`, `start.sh`, `install.sh` | The challenge scripts |
 | `triumvirate-engineering/` | Description of the AI working method used, for reference |

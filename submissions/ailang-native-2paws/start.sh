@@ -11,9 +11,13 @@ export PORT="${PORT:-3000}"
 # uses almost all of them while leaving room to accept and close a connection
 # when the table is full. Raise it only together with the fd limit.
 export HTTP_NSLOT="${HTTP_NSLOT:-65520}"
-# Front processes, each with its own descriptor limit and HTTP_NSLOT more
-# connections; requests reach the one database process through shared memory.
-# Three fronts and the database process hold up to 262,080 connections.
+# io_uring direct descriptors: accepted sockets live in io_uring's own file
+# tables, not the process fd table, so one process holds connections past
+# LimitNOFILE (up to 8 rings of HTTP_NSLOT) without front processes.
+# HTTP_DIRECT=0 goes back to plain descriptors and HTTP_FRONTS front processes.
+export HTTP_DIRECT="${HTTP_DIRECT:-1}"
+# Multishot receive into a shared provided-buffer ring (4,096 x 2 KB per ring)
+export HTTP_RXMULTI="${HTTP_RXMULTI:-1}"
 export HTTP_FRONTS="${HTTP_FRONTS:-3}"
 export HTTP_BUFSZ="${HTTP_BUFSZ:-8192}"
 exec ./feed_server.x

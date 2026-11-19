@@ -58,6 +58,14 @@ constexpr size_t kDrainBudget = 2048;
 // 最老优先回答，所以一个繁忙的 pass 不会把它后面排队的所有请求一起拖慢
 // （rust-iouring-kensac #264 同样限制 2,048，并用就绪队列保序）。
 constexpr uint32_t kAnswersPerPass = 2048;
+/* 就绪队列的高水位：65,536。20k 连接时队列最多到 2 万（每连接一个待答请求），阈值必须远高于
+ * 它，否则正常负载也会被误伤（定 16,384 时 20k 那档的 p99 从 218 ms 涨到 483 ms）。280k 的
+ * ramp 期队列能到十几万，那时才该停读。
+ *过了这条线就不再读新数据——数据留在 socket 里（内核可回收），而不是
+ * 复制进用户态、把 backlog 越堆越深。280k 的探针在 p99 38.6 s 上卡死就是这个形状：ramp 期
+ * 每个连接都有请求，照单全收堆到 16 s 老化都救不回来，内存一紧 PSI 又把 rcvbuf 压到 8 KB，
+ * 来回放大。kensac #264 的 "bounded reads after a burst" 是同一件事。 */
+constexpr size_t kBacklogHigh = 65536;
 constexpr uint32_t kIdleSeconds = 90;
 
 constexpr uint64_t kEvAccept = 1;
@@ -491,7 +499,16 @@ class Server {
     }
   }
 
+  bool backoff() const { return ready_.size() > kBacklogHigh; }
+
   void arm_recv(Worker& w, uint32_t wi, uint32_t idx, uint16_t gen) {
+    /* 背压：就绪队列过深时不再读，让数据留在 socket 里等积压消化。 */
+    if (backoff()) {
+      net::Connection& c = w.table().at(idx);
+      c.read = net::ReadState::Queued;
+      w.pending().push_back(idx);
+      return;
+    }
     io_uring_sqe* sqe = w.ring().sqe(1);
     if (!sqe) return;
     io_uring_prep_recv_multishot(sqe, static_cast<int>(idx), nullptr, 0, 0);
@@ -982,6 +999,7 @@ class Server {
   }
 
   void run_reads(Worker& w, uint32_t wi) {
+    if (backoff()) return; /* 同上：积压深的时候不再主动读 */
     while (!w.pending().empty() && w.reads() < kBufCount) {
       const uint32_t idx = w.pending().front();
       w.pending().pop_front();

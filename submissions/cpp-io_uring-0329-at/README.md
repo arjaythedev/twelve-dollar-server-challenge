@@ -27,6 +27,8 @@
 
 **连接状态机。** 每个连接有两个正交的状态：`ReadState`（`Idle` 表示 multishot receive 已装好，`Queued` 表示等单发读，`Reading` 表示单发读在途）和 `WriteState`（`Idle`/`Sending`），加上 `open`/`closing`（关闭已提交）/`close_after`（待关闭）三个布尔。状态转移集中在 `drain` 的 switch 里，不再用位标志表达。
 
+**背压。** 就绪队列超过 **65,536** 就不再读新数据：`arm_recv` 不再装 multishot，`run_reads` 也不再给排队连接发单发读——请求留在 socket 里（内核可回收），而不是复制进用户态。280k 的探针 p99 38.6 s 就是这个形状：ramp 期每个连接都有请求，照单全收堆到 16 s 老化都救不回来，内存一紧 PSI 再把 rcvbuf 压到 8 KB，来回放大（kensac #264 的 *bounded reads after a burst*）。阈值必须远高于「连接数」，定成 16,384 时 20k 那档的正常负载会被误伤（p99 218 → 483 ms）；65,536 下 20k 是 p99 198 ms，不触发。
+
 **批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 2,048 个请求**，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
 
 **backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），**等过 16 秒的全部优先**（objc-uring-delneg #326 的第二级），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。

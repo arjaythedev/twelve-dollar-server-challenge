@@ -1338,6 +1338,9 @@ the 310k 5-minute hold failed on p99 2.15 s, 320k failed the 2-minute probe on p
 transaction check, the old end's share from 20 s and `TCP_QUICKACK` off again after a late answer) held **300,000** at
 76 % CPU (28,469 req/s, p95 20.2 / p99 69.5 ms, 0 errors, 1,224 MB; 310k failed the 2-minute probe on p99 16.7 s, 320k on
 p99 2.65 s), below #437's 310,000, so #427 is not merged.
+#516's next head (`8add040`, 2026-11-19: `9707a46` with the growing-WAL bound raised from 4.3 to 8.6 GB) held
+**300,000** at 80 % CPU (28,372 req/s, p95 31.4 / p99 742.3 ms, 0 errors, 1,529 MB; 310k failed the 2-minute probe on
+p99 1.42 s, 320k on p99 3.68 s), below #437's 310,000, so #516 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

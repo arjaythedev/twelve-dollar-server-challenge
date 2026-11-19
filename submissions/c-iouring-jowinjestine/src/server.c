@@ -101,6 +101,7 @@ static int ring_grow_failed;
 static int LFD[NLISTEN];
 static struct app A;
 static int writes_ok = 1;
+static int accepted_rcvbuf_target;
 static void on_rcvbuf_install(unsigned ri, struct io_uring_cqe *cqe);
 
 static struct arena *pool;
@@ -443,7 +444,7 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   if (c->flags & CF_OPEN) { fprintf(stderr, "accept: slot %u still open\n", slot); return; }
   c->flags = CF_OPEN;
   c->pend_len = 0;
-  c->rcvbuf_target = 0;
+  c->rcvbuf_target = (uint32_t)accepted_rcvbuf_target;
   c->send_arena = NULL;
   rs->open++;
   S.accepts++;
@@ -871,6 +872,7 @@ static int apply_listener_rcvbuf(int requested) {
   if (!getsockopt(LFD[0], SOL_SOCKET, SO_RCVBUF, &effective, &len))
     fprintf(stderr, "tcp governor: listener cap requested=%d effective=%d (Linux doubles requested)\n", requested, effective);
   MG.current_rcvbuf = requested;
+  accepted_rcvbuf_target = requested;
   MG.changes++;
   return 0;
 }

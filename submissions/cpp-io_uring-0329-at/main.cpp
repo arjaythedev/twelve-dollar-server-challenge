@@ -126,6 +126,10 @@ class Worker {
 
   // ring 满了就停止继续投递 accept；listener 本身是共享的，为其他 ring 保持打开。
   void stop_accepting() { accepting_ = false; }
+  /* 恢复接客：ring 满之后 open 会随着关闭回落，必须能重新开始，否则一次短暂的表满就永久
+   * 拒绝新连接（270k/280k 的 connection refused 就是这么来的）。kensac #264 的恢复条件是
+   * open + 2*margin < slots，这里用 kAcceptDepth 作 margin。 */
+  void resume_accepting() { accepting_ = true; }
 
  private:
   uint32_t index_ = 0;
@@ -977,6 +981,11 @@ class Server {
       } else {
         arm_accept(w, wi);
       }
+    } else if (w.open() + 2 * kAcceptDepth < w.table().size()) {
+      /* 从「满」里退出来了：让出余量（两个 margin）再恢复，避免在边界上来回抖。 */
+      w.full() = false;
+      w.resume_accepting();
+      arm_accept(w, wi);
     }
     return n;
   }

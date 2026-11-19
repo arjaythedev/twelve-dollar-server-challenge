@@ -33,7 +33,7 @@
 
 **ring 模型。** ring **按需增长**：起步 1 个，最新一个的表**半满**时加下一个（一次补齐多个，ramp 不落后），上限 **16**。ring 数量按目标连接数推导：`ceil(400,000 / 每 ring 槽位)`。每 ring 的槽位上限是 262,144，但**实际取 `min(硬 RLIMIT_NOFILE, 262,144)`**——基准机 `LimitNOFILE=65535` 时就是 7 个 ring × 65,535 = **458,745 连接**，`NOFILE=1M` 时 2 个 ring × 262,144 = 524,288。表尺寸不按 `RLIMIT_NOFILE` 一次预分配：旧版按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上就是 300k 连接装不装得下的区别。每 pass 的 `io_uring_enter` 是 1 次/ring；非 0 号 ring 不设 `DEFER_TASKRUN`、只提交不取事件，所以环数增加几乎不加系统调用（3 ring 存活时实测 `enter[wait=1040 sqe=0 ring=66]`）。
 
-**listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时只停止投递 accept，不关闭共享 listener。
+**listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时只停止投递 accept，不关闭共享 listener；**等 open 回落到「两个 margin」以下再恢复**（`open + 2*kAcceptDepth < slots`，kensac #264 的恢复条件）——早先只有停、没有恢复，一次短暂的表满就会永久拒绝新连接（270k/280k 的 connection refused）。
 
 **数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找（20 个 id 跨度 < 512 时用一次 seek 加顺序扫描，否则退回逐个 seek；阈值与 rust-iouring-kensac #264 的 512 对齐）；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
 

@@ -89,7 +89,17 @@
   left by an earlier run is copied into the database and emptied at startup (`wal_checkpoint(TRUNCATE)`), so every
   run starts at zero. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader
   goes back to them), so the file's length doesn't cost memory. The database file's pages go too, after the pass
-  that syncs the file (the held one).
+  that syncs the file (the held one), and once at startup, by the checkpoint thread before its first pass
+  (`fdatasync`, then `POSIX_FADV_DONTNEED`; `DROPDB=0` leaves that out). The seed is 250 MB that the kernel has just
+  written or read, and the server reads through its own page cache. Since writes stopped waiting for checkpoints, no
+  pass copies the whole WAL before it reaches its bound, minutes into a run, so nothing gave those pages back in time, and on a 2 GB box they are what
+  reclaim has to take when the sockets have filled memory. A connection holds 3.9 KB of kernel memory (on the test
+  box, from `/proc/slabinfo` at 300k: TCP socket 2,368 bytes, socket inode 832, file 256, dentry 192, the armed
+  receive's request 256, LSM 32): 1.2 GB at 300k, +39 MB per 10,000 users, beside the process's 165 MB and the
+  system. With the test box's memory filled to match, free memory ran out at the top of the ramp, when the load is
+  also at its heaviest (new connections still arriving, every client's first feed), and kswapd scanned 9,000 to
+  91,000 pages from there on; with the drop it scanned none in the same runs and the box kept 120 MB more free at
+  its lowest point.
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
@@ -193,7 +203,8 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
 `LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
-process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
+process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
+startup), `STATS` (1: a line a second on stderr).
 
 ## Credits
 

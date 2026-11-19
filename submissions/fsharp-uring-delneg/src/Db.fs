@@ -34,6 +34,8 @@ let walBuf = vfsName = "unix-excl" && Environment.GetEnvironmentVariable "WALBUF
 let mutable private vfs = z vfsName
 
 let private chunkMB = match Int32.TryParse(Environment.GetEnvironmentVariable "CHUNK_MB") with | true, v when v > 0 -> v | _ -> 0
+/// the kernel's cache of the database file is dropped at startup (DROPDB=0: only after a pass that copied the whole WAL)
+let private dropDb = Environment.GetEnvironmentVariable "DROPDB" <> "0"
 
 let mutable private db = 0n
 let mutable private sHealth = 0n
@@ -843,6 +845,15 @@ type Checkpointer(path: string, nice: int) =
         let mutable dropFd = -1
         let mutable walFd = -1
         let main = z "main"
+        if dropDb then
+            // The kernel's copy of the database file (the seed, 250 MB, just written or just read) goes now, while
+            // nothing else needs the CPU: left in the cache it is what reclaim has to take back, page by page on the one
+            // CPU, at the moment the sockets have filled the rest of memory. The server reads from its own page cache.
+            // (kept open: closing any descriptor of the file would drop the process's POSIX locks on it)
+            dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
+            if dropFd >= 0 then
+                Native.fdatasync dropFd |> ignore // a page still dirty can't be dropped
+                Native.posix_fadvise (dropFd, 0L, 0L, 4) |> ignore // POSIX_FADV_DONTNEED
         while true do
             wake.WaitOne() |> ignore
             if cdb = 0n then
@@ -856,7 +867,7 @@ type Checkpointer(path: string, nice: int) =
                         let mutable bytes = chunkMB <<< 20
                         sqlite3_file_control (cdb, main, 6, &bytes) |> ignore
                     // kept open: closing any descriptor of the file would drop the process's POSIX locks on it
-                    dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
+                    if dropFd < 0 then dropFd <- Native.``open`` (z path, 0x80000) // O_RDONLY | O_CLOEXEC
             let mutable log = -1
             let mutable done' = -1
             let t0 = Diagnostics.Stopwatch.GetTimestamp()

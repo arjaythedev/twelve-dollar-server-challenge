@@ -25,7 +25,7 @@
 #define READS_PER_PASS 16384
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
-static unsigned answers_per_pass = 2048, wait_min = 256;
+static unsigned answers_per_pass = 16384, wait_min = 256;
 static int poll_idle = 0; /* IDLE_POLL=1: idle sockets wait on a multishot poll instead of a multishot receive */
 static int eventfd_wake = 0; /* EVENTFD_WAKE=1: other rings wake ring 0 through an eventfd (more, smaller batches: more CPU) */
 static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
@@ -1072,7 +1072,7 @@ int main(int argc, char **argv) {
   if (accept_stop < 16) accept_stop = 16;
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
-  answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
+  answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 16384);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
   poll_idle = env_long("IDLE_POLL", 0) != 0;
   eventfd_wake = env_long("EVENTFD_WAKE", 0) != 0;

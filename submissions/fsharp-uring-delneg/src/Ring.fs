@@ -30,6 +30,7 @@ let REGISTER_FILES2 = 13L
 let REGISTER_PBUF_RING = 22L
 
 let OP_READ = 22uy
+let OP_SYNC_FILE_RANGE = 8uy
 let OP_ACCEPT = 13uy
 let OP_ASYNC_CANCEL = 14uy
 let OP_CLOSE = 19uy
@@ -275,6 +276,18 @@ type Ring(sqEntries0: uint32, cqEntries0: uint32) =
         wr64 (s + 32n) ud
         wr32 (s + 44n) 4u
         wr64 (s + 48n) (uint64 value)
+
+    /// sync_file_range(2) on a plain descriptor. io_uring always hands it to a kernel worker thread of the process, so
+    /// the caller never waits for the disk; posts a completion only when it fails
+    member this.SyncFileRange(fd: int, off: int64, len: uint32, flags: uint32, ud: uint64) =
+        let s = this.Sqe()
+        wr8 s OP_SYNC_FILE_RANGE
+        wr8 (s + 1n) SQE_CQE_SKIP_SUCCESS
+        wri32 (s + 4n) fd
+        wr64 (s + 8n) (uint64 off)
+        wr32 (s + 24n) len
+        wr32 (s + 28n) flags
+        wr64 (s + 32n) ud
 
     member this.Cancel(target: uint64, ud: uint64) =
         let s = this.Sqe()

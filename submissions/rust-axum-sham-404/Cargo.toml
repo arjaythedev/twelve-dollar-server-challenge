@@ -1,0 +1,20 @@
+[package]
+name = "rust_server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = "0.7.9"
+tokio = { version = "1.43.0", features = ["rt", "net", "macros"] }
+base64 = "0.22.1"
+hmac = "0.12.1"
+serde_json = "1.0.138"
+sha2 = "0.10.8"
+rusqlite = { version = "0.43.0", features = ["bundled"] }
+serde = { version = "1.0.217", features = ["derive"] }
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

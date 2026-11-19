@@ -1,0 +1,7 @@
+[project]
+name = "python-granian-hoopengo"
+version = "0.1.0"
+description = "Granian + APSW + ORJSON"
+readme = "README.md"
+requires-python = ">=3.15"
+dependencies = ["apsw>=3.54.0.0", "granian[uvloop]>=2.8.4", "orjson>=3.13.0"]

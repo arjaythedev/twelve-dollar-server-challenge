@@ -994,6 +994,14 @@ SubRoutine.Main {
     // Every file write (WAL frames, checkpoints, fdatasync) runs in the I/O process
     // SQLITE_CKWORKER_OFF=1 keeps checkpoint syncs and write-back on the I/O ring
     IfCondition EqualTo(Env.GetInt("SQLITE_CKWORKER_OFF"), 1) ThenBlock: { SQLiteIo.want_ck = 0 }
+    // SQLITE_CKPT_MB: WAL bytes between checkpoints (default 4); the WAL restarts at twice that
+    ckmb = Env.GetInt("SQLITE_CKPT_MB")
+    IfCondition GreaterThan(ckmb, 0) ThenBlock: {
+        SQLiteDB.ckpt_at = Multiply(ckmb, 1048576)
+        SQLiteDB.reset_at = Multiply(ckmb, 2097152)
+    }
+    SQLiteIo.slow = Env.GetInt("SQLITE_CKSLOW_MS")
+    IfCondition LessThan(SQLiteIo.slow, 0) ThenBlock: { SQLiteIo.slow = 0 }
     SQLite.StartSyncer(path)
     dbok = SQLite.Open(path)
     FeedSt.ok = dbok

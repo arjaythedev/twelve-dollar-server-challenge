@@ -91,6 +91,11 @@ FixedPool.HTTP1St {
     "st_cqe": Initialize=0, CanChange=True
     "st_maxcq": Initialize=0, CanChange=True
     "st_nobuf": Initialize=0, CanChange=True
+    // HTTP_STATS: wall-clock ms at the last pass, a 16-byte timespec, and the
+    // gap that gets a "gap" line (HTTP_GAP_MS, default 200)
+    "st_last": Initialize=0, CanChange=True
+    "st_ts": Initialize=0, CanChange=True
+    "st_gap": Initialize=200, CanChange=True
     "starve": Initialize=0, CanChange=True
     "starve_n": Initialize=0, CanChange=True
     "direct": Initialize=0, CanChange=True
@@ -1419,6 +1424,21 @@ Function.HTTP1.Stats {
     Body: {
         HTTP1St.st_pass = Add(HTTP1St.st_pass, 1)
         IfCondition GreaterThan(cq0, HTTP1St.st_maxcq) ThenBlock: { HTTP1St.st_maxcq = cq0 }
+        IfCondition EqualTo(HTTP1St.st_ts, 0) ThenBlock: { HTTP1St.st_ts = Allocate(16) }
+        SystemCall(228, 0, HTTP1St.st_ts)
+        now = Add(Multiply(RDMEM_64(HTTP1St.st_ts), 1000), Divide(RDMEM_64(Add(HTTP1St.st_ts, 8)), 1000000))
+        IfCondition NotEqual(HTTP1St.st_last, 0) ThenBlock: {
+            IfCondition GreaterEqual(Subtract(now, HTTP1St.st_last), HTTP1St.st_gap) ThenBlock: {
+                PrintMessage("gap ms=")
+                PrintNumber(Subtract(now, HTTP1St.st_last))
+                PrintMessage(" end=")
+                PrintNumber(now)
+                PrintMessage(" cq0=")
+                PrintNumber(cq0)
+                PrintMessage("\n")
+            }
+        }
+        HTTP1St.st_last = now
         t = SystemCall(201, 0)
         IfCondition EqualTo(HTTP1St.st_t, 0) ThenBlock: { HTTP1St.st_t = t }
         IfCondition LessThan(t, Add(HTTP1St.st_t, 10)) ThenBlock: { ReturnValue(0) }

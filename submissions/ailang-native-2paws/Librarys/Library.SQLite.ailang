@@ -72,6 +72,9 @@ FixedPool.SQLiteIo {
     "cq_vals": Initialize=0, CanChange=True
     "cq_i": Initialize=0, CanChange=True
     "want_ck": Initialize=1, CanChange=True
+    // SQLITE_CKSLOW_MS: log every disk op or wait that takes at least this long (0 off)
+    "slow": Initialize=0, CanChange=True
+    "ts": Initialize=0, CanChange=True
 }
 
 FixedPool.SQLiteOp {
@@ -2316,6 +2319,8 @@ Function.SQLite.Commit {
         }
         Array.Destroy(vals)
         Hash.Clear(SQLiteDB.txn)
+        t0 = 0
+        IfCondition NotEqual(SQLiteIo.slow, 0) ThenBlock: { t0 = SQLite.Ms() }
         IfCondition NotEqual(SQLiteIo.blk, 0) ThenBlock: { SQLiteIo.commit_seq = SQLite.IoMark() }
         SQLite.SyncApply()
         SQLite.CkptMaybe()
@@ -2330,6 +2335,8 @@ Function.SQLite.Commit {
             SQLite.BuildUDir()
             SQLiteDB.users_dirty = 0
         }
+        // op 24: commit bookkeeping (checkpoint steps, remap, caches); arg = ck step
+        IfCondition NotEqual(t0, 0) ThenBlock: { SQLite.Slow("db", 24, SQLiteIo.ck, t0) }
         ReturnValue(1)
     }
 }
@@ -2555,10 +2562,16 @@ Function.SQLite.IoDone {
 Function.SQLite.IoRoom {
     Input: need: Integer
     Body: {
+        t0 = 0
         WhileLoop 1 {
             tail = RDMEM_64(SQLiteIo.blk)
             used = Subtract(Add(SQLiteIo.head, need), tail)
-            IfCondition LessEqual(used, SQLiteIo.size) ThenBlock: { ReturnValue(0) }
+            IfCondition LessEqual(used, SQLiteIo.size) ThenBlock: {
+                // op 21: the database process blocked on a full I/O ring
+                IfCondition NotEqual(t0, 0) ThenBlock: { SQLite.Slow("db", 21, need, t0) }
+                ReturnValue(0)
+            }
+            IfCondition And(EqualTo(t0, 0), NotEqual(SQLiteIo.slow, 0)) ThenBlock: { t0 = SQLite.Ms() }
             SQLite.IoKick()
             WRMEM_64(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
             SystemCall(SQLiteSys.POLL, SQLiteIo.pfd, 1, 10)
@@ -2600,11 +2613,15 @@ Function.SQLite.IoPut {
 Function.SQLite.IoWait {
     Input: seq: Integer
     Body: {
+        t0 = 0
+        IfCondition And(LessThan(SQLite.IoDone(), seq), NotEqual(SQLiteIo.slow, 0)) ThenBlock: { t0 = SQLite.Ms() }
         WhileLoop LessThan(SQLite.IoDone(), seq) {
             SQLite.IoKick()
             WRMEM_64(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
             SystemCall(SQLiteSys.POLL, SQLiteIo.pfd, 1, 10)
         }
+        // op 22: the database process waited for a commit mark (pending queue full)
+        IfCondition NotEqual(t0, 0) ThenBlock: { SQLite.Slow("db", 22, seq, t0) }
     }
 }
 
@@ -2659,6 +2676,8 @@ Function.SQLite.IoServe {
                     arg = RDMEM_64(Add(p, 8))
                     len = RDMEM_64(Add(p, 24))
                     src = Add(p, 32)
+                    t0 = 0
+                    IfCondition NotEqual(SQLiteIo.slow, 0) ThenBlock: { t0 = SQLite.Ms() }
                     IfCondition EqualTo(op, SQLiteOp.WAL) ThenBlock: { SystemCall(SQLiteSys.PWRITE, wfd, src, len, arg) }
                     IfCondition EqualTo(op, SQLiteOp.DB) ThenBlock: { SystemCall(SQLiteSys.PWRITE, dfd, src, len, arg) }
                     IfCondition EqualTo(op, SQLiteOp.SYNC_WAL) ThenBlock: { SystemCall(SQLiteSys.FDATASYNC, wfd, 0, 0) }
@@ -2668,6 +2687,7 @@ Function.SQLite.IoServe {
                         WRMEM_64(buf, 1)
                         SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_done, buf, 8)
                     }
+                    IfCondition NotEqual(t0, 0) ThenBlock: { SQLite.Slow("io", op, arg, t0) }
                     tail = Add(tail, Add(32, BitwiseAnd(Add(len, 7), -8)))
                 }
                 WRMEM_64(blk, tail)
@@ -2752,6 +2772,41 @@ Function.SQLite.IoBackfill {
     }
 }
 
+// Wall clock in ms (CLOCK_REALTIME, to line up with the load generator's samples)
+Function.SQLite.Ms {
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIo.ts, 0) ThenBlock: { SQLiteIo.ts = Allocate(16) }
+        SystemCall(SQLiteSys.CLOCK, 0, SQLiteIo.ts)
+        ReturnValue(Add(Multiply(RDMEM_64(SQLiteIo.ts), 1000), Divide(RDMEM_64(Add(SQLiteIo.ts, 8)), 1000000)))
+    }
+}
+
+// One "slow" line when the op that started at t0 took at least SQLiteIo.slow ms
+Function.SQLite.Slow {
+    Input: who: Address
+    Input: op: Integer
+    Input: arg: Integer
+    Input: t0: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIo.slow, 0) ThenBlock: { ReturnValue(0) }
+        t1 = SQLite.Ms()
+        d = Subtract(t1, t0)
+        IfCondition LessThan(d, SQLiteIo.slow) ThenBlock: { ReturnValue(0) }
+        PrintMessage("slow ")
+        PrintMessage(who)
+        PrintMessage(" op=")
+        PrintNumber(op)
+        PrintMessage(" arg=")
+        PrintNumber(arg)
+        PrintMessage(" ms=")
+        PrintNumber(d)
+        PrintMessage(" end=")
+        PrintNumber(t1)
+        PrintMessage("\n")
+    }
+}
+
 // ---- Checkpoint worker ring. Without it (map failed) everything goes to the I/O ring.
 
 // 1 when a record of len bytes fits in the worker ring with room left for the
@@ -2817,11 +2872,15 @@ Function.SQLite.CkPut {
         room = Subtract(sz, phys)
         skip = 0
         IfCondition LessThan(room, need) ThenBlock: { skip = room }
+        t0 = 0
         WhileLoop GreaterThan(Subtract(Add(Add(SQLiteIo.chead, skip), need), RDMEM_64(SQLiteIo.cblk)), sz) {
+            IfCondition And(EqualTo(t0, 0), NotEqual(SQLiteIo.slow, 0)) ThenBlock: { t0 = SQLite.Ms() }
             SQLite.CkKick()
             WRMEM_64(SQLiteIo.pfd, BitwiseOr(SQLiteDB.sync_done, LeftShift(1, 32)))
             SystemCall(SQLiteSys.POLL, SQLiteIo.pfd, 1, 10)
         }
+        // op 23: blocked on a full worker ring
+        IfCondition NotEqual(t0, 0) ThenBlock: { SQLite.Slow("db", 23, op, t0) }
         data = Add(SQLiteIo.cblk, 64)
         IfCondition GreaterThan(skip, 0) ThenBlock: {
             IfCondition GreaterEqual(room, 32) ThenBlock: { WRMEM_64(Add(data, phys), 0) }
@@ -2885,10 +2944,17 @@ Function.SQLite.CkServe {
                     arg = RDMEM_64(Add(p, 8))
                     len = RDMEM_64(Add(p, 24))
                     src = Add(p, 32)
+                    t0 = 0
+                    IfCondition NotEqual(SQLiteIo.slow, 0) ThenBlock: { t0 = SQLite.Ms() }
                     IfCondition EqualTo(op, SQLiteOp.DB) ThenBlock: { SystemCall(SQLiteSys.PWRITE, dfd, src, len, arg) }
                     IfCondition EqualTo(op, SQLiteOp.SYNC_WAL) ThenBlock: {
                         WhileLoop LessThan(RDMEM_64(wdone), arg) {
                             SystemCall(SQLiteSys.POLL, pfd, 0, 1)
+                        }
+                        // op 13: waiting for the WAL writer to reach the mark
+                        IfCondition NotEqual(t0, 0) ThenBlock: {
+                            SQLite.Slow("ck", 13, arg, t0)
+                            t0 = SQLite.Ms()
                         }
                         SystemCall(SQLiteSys.FDATASYNC, wfd, 0, 0)
                     }
@@ -2898,6 +2964,7 @@ Function.SQLite.CkServe {
                         WRMEM_64(buf, 1)
                         SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_done, buf, 8)
                     }
+                    IfCondition NotEqual(t0, 0) ThenBlock: { SQLite.Slow("ck", op, arg, t0) }
                     tail = Add(tail, Add(32, BitwiseAnd(Add(len, 7), -8)))
                 }
                 WRMEM_64(blk, tail)

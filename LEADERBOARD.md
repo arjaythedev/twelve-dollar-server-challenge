@@ -148,7 +148,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 61 | wat-wasmedge-delneg | #288 | WebAssembly (hand-written WAT, WasmEdge AOT, io_uring, SQLite B-tree reads) | **220,000** ᵒ | 21,464 | 21.9 | 263.7 | 0.00 | 72 | 31 | 913 | 2026-11-04 |
 | 61 | c-iouring-le0nvfx | #352 | C (io_uring, SQLite B-tree reads) | **220,000** ᵡ | 21,431 | 142.3 | 633.1 | 0.00 | 82 | 35 | 702 | 2026-11-07 |
 | 61 | goose-iouring-davidhsv | #384 | Goose (compiles to C, io_uring, SQLite B-tree reads, PGO) | **220,000** | 21,486 | 11.4 | 101.5 | 0.00 | 59 | 25 | 820 | 2026-11-10 |
-| 61 | julia-iouring-amanica | #472 | Julia (io_uring, SQLite) | **220,000** | 21,436 | 95.6 | 811.9 | 0.00 | 91 | 39 | 1,484 | 2026-11-16 |
+| 61 | julia-iouring-amanica | #472 | Julia (io_uring, SQLite) | **220,000** ᶰ | 21,436 | 95.6 | 811.9 | 0.00 | 91 | 39 | 1,484 | 2026-11-16 |
 | 65 | swift-iouring-Tabonx | #173 | Swift (io_uring, SQLite) | **219,000** ᶻ | 21,284 | 135 | 352 | 0.00 | 80 | 35 | 1,128 | 2026-10-29 |
 | 65 | lean-derive-batched-hargup | #451 | Lean 4 (generated C, io_uring, SQLite B-tree reads) | **219,000** | 21,366 | 40.6 | 234.0 | 0.00 | 74 | 32 | 1,059 | 2026-11-15 |
 | 67 | cpp-eastl-io_uring-pgo-hendy643 | #32 | C++ (io_uring, EASTL) | **210,000** | 20,436 | 322 | 672 | 0.00 | 73 | 33 | 633 | 2026-10-26 |
@@ -1403,6 +1403,12 @@ signature compare, reads on a second SQLite connection, its own copy of Ubuntu's
 scored below the merged row) held **100,000** (9,826 req/s, p95 54.2 / p99 122.6 ms, 0 err, 88 % CPU, 83 µs/req,
 489 MB, 2026-11-15), 42/42 tests. CPU-bound: 105,000 and 110,000 failed the 2-minute probe on p95/p99 (1.66 / 4.32 s
 and 1.80 / 3.05 s at 93 % CPU, 0 errors).
+
+ᶰ **julia-iouring-amanica** stays on its merged #472 row. Its follow-up **#518** (`a19d62f`, AOT `juliac` build on the
+box, one read transaction per pass; not merged: it scored below the merged row) held **210,000** (20,575 req/s, p95 35.0 /
+p99 189.9 ms, 0 err, 87 % CPU, 39 µs/req, 658 MB, 2026-11-19), 42/42 tests: 220,000 failed the 2-minute probe on p95/p99
+(788 ms / 1.80 s at 89 % CPU, 0 errors), 240,000 on p95/p99 (1.01 / 2.24 s at 94 % CPU) and 320,000 with 69 % connection
+refused.
 
 ## Patches (ᵖ) and failures
 

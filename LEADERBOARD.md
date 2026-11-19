@@ -1356,6 +1356,9 @@ p99 1.42 s, 320k on p99 3.68 s), below #437's 310,000, so #516 is not merged.
 #516's next head (`9134fa5`, 2026-11-19: `36e318d` with WAL writeback started every 8 MB of new WAL, `WALKICK_MB`)
 held **310,000** at 82 % CPU (29,221 req/s, p95 32.6 / p99 513.7 ms, 0 errors, 825 MB; 320k failed the 2-minute probe
 on p99 2.01 s), which ties #437's 310,000 and is not above it, so #516 is not merged.
+#516's next head (`864f8b9`, 2026-11-19: `9134fa5` with the checkpoint thread in the idle scheduling class,
+`SCHED_IDLE`) held **300,000** at 80 % CPU (28,445 req/s, p95 26.7 / p99 203.6 ms, 0 errors, 1,508 MB; 310k failed the
+2-minute probe on p99 3.91 s, 320k on p99 3.37 s), below #437's 310,000, so #516 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

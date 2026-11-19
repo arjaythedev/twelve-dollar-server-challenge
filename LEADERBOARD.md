@@ -1370,6 +1370,9 @@ on p99 2.01 s), which ties #437's 310,000 and is not above it, so #516 is not me
 #516's next head (`864f8b9`, 2026-11-19: `9134fa5` with the checkpoint thread in the idle scheduling class,
 `SCHED_IDLE`) held **300,000** at 80 % CPU (28,445 req/s, p95 26.7 / p99 203.6 ms, 0 errors, 1,508 MB; 310k failed the
 2-minute probe on p99 3.91 s, 320k on p99 3.37 s), below #437's 310,000, so #516 is not merged.
+#427's newest head (`ac64f72`, 2026-11-19: `1101bd0` with the old end's share from 30 s, `DROPDB`, `WALKICK_MB` 8 and
+the hold cap raised to 2,097,152) held **289,000** at 78 % CPU (27,474 req/s, p95 26.7 / p99 328.3 ms, 0 errors,
+775 MB; the 304k and 320k 5-minute holds failed on p99 3.87 s and 4.32 s), below #437's 310,000, so #427 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

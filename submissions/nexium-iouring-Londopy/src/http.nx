@@ -1,0 +1,260 @@
+// http.nx: the request-level kernels of the C server's server.c: the head
+// parser (parse_request with hdr_is), the post id in a path (parse_id), the
+// text checks for a post body (utf8_text_ok, is_ws), and the status lines
+// responses start with (status_line).
+//
+// Offsets into the request bytes where the C code keeps pointers. The
+// scans are glibc's memmem, memchr and strncasecmp, called through
+// @cImport exactly where server.c calls them: they are SIMD inside, and
+// Nexium's own byte loops measured 1.8 times slower here.
+
+const cstr = @cImport("string.h")
+const cstrs = @cImport("strings.h")
+
+/// The largest request body accepted (server.c's MAX_REQ).
+pub const MAX_REQ: usize = 65536
+
+/// What parse_request found, as offsets into the request bytes p: the
+/// method is p[0..mlen], the path p[path..path + plen], the Authorization
+/// value p[auth..auth + alen] when has_auth, the body p[body..body + blen].
+pub struct Req {
+    mlen: usize
+    path: usize
+    plen: usize
+    has_auth: bool
+    auth: usize
+    alen: usize
+    body: usize
+    blen: usize
+}
+
+pub fn new_req() -> Req {
+    return Req{ .mlen = 0, .path = 0, .plen = 0, .has_auth = false, .auth = 0, .alen = 0, .body = 0, .blen = 0 }
+}
+
+/// memchr(p + from, b, to - from), as an index into p.
+fn index_of(p: []u8, from: usize, to: usize, b: u8) -> ?usize {
+    unsafe {
+        let base = p.ptr as usize
+        let r = cstr.memchr((base + from) as *u8, b as i32, to - from) as usize
+        if r == 0 { return null }
+        return r - base
+    }
+}
+
+/// memmem(p, n, "\r\n\r\n", 4), as an index into p.
+fn find_head_end(p: []u8) -> ?usize {
+    unsafe {
+        let base = p.ptr as usize
+        let r = cstr.memmem(p.ptr, p.len, "\r\n\r\n".ptr, 4) as usize
+        if r == 0 { return null }
+        return r - base
+    }
+}
+
+/// hdr_is: whether the nl bytes at p[at] are `want`, ignoring ASCII case
+/// (strncasecmp, as server.c).
+fn hdr_is(p: []u8, at: usize, nl: usize, want: []u8) -> bool {
+    if nl != want.len { return false }
+    unsafe { return cstrs.strncasecmp((p.ptr as usize + at) as *u8, want.ptr, want.len) == 0 }
+}
+
+/// Parses one request from p: its total length (head and body), 0 if it is
+/// incomplete, -1 if it cannot be parsed. Sets expect_continue when the
+/// head is complete but the body is not, and the client asked for
+/// 100-continue. As server.c, q is filled as far as parsing got: the
+/// request line and Authorization once the request line parses, the body
+/// only when the request is complete.
+pub fn parse_request(p: []u8, q: *mut Req, expect_continue: *mut bool) -> i64 {
+    let n = p.len
+    let he = find_head_end(p) orelse return if n > 16384 { -1 } else { 0 }
+    let end = he + 2                       // the end of the last header line's CRLF
+    let sp1 = index_of(p, 0, end, ' ') orelse return -1
+    let sp2o = index_of(p, sp1 + 1, end, ' ')
+    let leo = index_of(p, 0, end, '\n')
+    let sp2 = sp2o orelse return -1
+    let le = leo orelse return -1
+    if sp2 > le { return -1 }
+    q.mlen = sp1
+    q.path = sp1 + 1
+    q.plen = sp2 - sp1 - 1
+    q.has_auth = false
+    q.auth = 0
+    q.alen = 0
+    var clen: usize = 0
+    var expect = false
+    var l = le + 1
+    while l < end {
+        let e = index_of(p, l, end, '\n') orelse return -1
+        var ve = e
+        if ve > l and p[ve - 1] == '\r' { ve -= 1 }
+        if let colon = index_of(p, l, ve, ':') {
+            let nl = colon - l
+            var v = colon + 1
+            while v < ve and (p[v] == ' ' or p[v] == '\t') { v += 1 }
+            var vend = ve
+            while vend > v and (p[vend - 1] == ' ' or p[vend - 1] == '\t') { vend -= 1 }
+            // one test on the first letter, folded to lower case, before
+            // any name comparison, as server.c's switch
+            let first = p[l] | 0x20
+            if first == 'a' {
+                if hdr_is(p, l, nl, "authorization") {
+                    q.has_auth = true
+                    q.auth = v
+                    q.alen = vend - v
+                }
+            } else if first == 'c' {
+                if hdr_is(p, l, nl, "content-length") {
+                    clen = 0
+                    if v == vend or vend - v > 9 { return -1 }
+                    for d in p[v..vend] {
+                        if d < '0' or d > '9' { return -1 }
+                        clen = clen * 10 + (d - '0') as usize
+                    }
+                }
+            } else if first == 'e' {
+                if hdr_is(p, l, nl, "expect") and vend - v == 12 and hdr_is(p, v, 12, "100-continue") { expect = true }
+            } else if first == 't' {
+                if hdr_is(p, l, nl, "transfer-encoding") { return -1 }    // chunked bodies unsupported
+            }
+        }
+        l = e + 1
+    }
+    if clen > MAX_REQ { return -1 }
+    let hlen = he + 4
+    if n < hlen + clen {
+        expect_continue.* = expect
+        return 0
+    }
+    q.body = hlen
+    q.blen = clen
+    return (hlen + clen) as i64
+}
+
+/// The post id in a path segment: 0 with the id, 1 for an id too long to
+/// exist (more than 18 digits; id set to 0, so the caller answers "not
+/// found"), -1 for anything else: empty, not all digits, or zero.
+pub fn parse_id(s: []u8, id: *mut i64) -> i32 !allocates !blocks {
+    let n = s.len
+    if n == 0 or n > 18 {
+        if n > 18 {
+            for c in s {
+                if c < '0' or c > '9' { return -1 }
+            }
+            id.* = 0
+            return 1
+        }
+        return -1
+    }
+    // at most 18 digits: below 10^18, so this cannot overflow
+    var v: i64 = 0
+    for c in s {
+        if c < '0' or c > '9' { return -1 }
+        v = v * 10 + (c - '0') as i64
+    }
+    if v <= 0 { return -1 }
+    id.* = v
+    return 0
+}
+
+/// C's isspace in the C locale: space, \t, \n, \r, \v and \f.
+pub fn is_ws(c: u8) -> bool !allocates !blocks {
+    return c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == 11 or c == 12
+}
+
+/// Valid UTF-8 with no NUL. The schema's CHECK (length(body) BETWEEN 1 AND
+/// 500) is SQLite's length(), which stops at a NUL and counts malformed
+/// sequences its own way; on valid UTF-8 without NUL it is exactly one per
+/// byte that is not a continuation byte, which is what the post's length
+/// check counts. The B-tree write path relies on that: it checks the
+/// constraints here, not in SQLite.
+pub fn utf8_text_ok(p: []u8) -> bool !allocates !blocks {
+    let n = p.len
+    var i: usize = 0
+    while i < n {
+        var c = p[i] as u32
+        if c < 0x80 {
+            if c == 0 { return false }
+            i += 1
+            continue
+        }
+        var len: usize = 0
+        var min: u32 = 0
+        if (c & 0xE0) == 0xC0 {
+            len = 2
+            min = 0x80
+            c = c & 0x1F
+        } else if (c & 0xF0) == 0xE0 {
+            len = 3
+            min = 0x800
+            c = c & 0x0F
+        } else if (c & 0xF8) == 0xF0 {
+            len = 4
+            min = 0x10000
+            c = c & 0x07
+        } else {
+            return false
+        }
+        if n - i < len { return false }
+        for k in 1..len {
+            let b = p[i + k]
+            if (b & 0xC0) != 0x80 { return false }
+            c = (c << 6) | ((b & 0x3F) as u32)
+        }
+        if c < min or c > 0x10FFFF or (c >= 0xD800 and c <= 0xDFFF) { return false }    // overlong, too big, surrogate
+        i += len
+    }
+    return true
+}
+
+/// The start of a response head for status st, up to the Content-Length
+/// value: byte for byte server.c's status_line, whose default is 500.
+pub fn status_line(st: i32) -> []u8 !allocates !blocks {
+    return match st {
+        200 => "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ",
+        201 => "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: ",
+        400 => "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: ",
+        401 => "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: ",
+        404 => "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: ",
+        503 => "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: ",
+        _ => "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: ",
+    }
+}
+
+test "a request head with a body, pipelined input, and the limits" {
+    let r = "POST /posts HTTP/1.1\r\nHost: x\r\nauthorization:  Bearer abc \r\nContent-Length: 4\r\n\r\nbodyGET"
+    var q = new_req()
+    var ex = false
+    let k = parse_request(r, &mut q, &mut ex)
+    expect(k == (r.len - 3) as i64)
+    expect(r[0..q.mlen] == "POST" and r[q.path..q.path + q.plen] == "/posts")
+    expect(q.has_auth and r[q.auth..q.auth + q.alen] == "Bearer abc")
+    expect(r[q.body..q.body + q.blen] == "body")
+    let part = "POST /posts HTTP/1.1\r\nExpect: 100-Continue\r\nContent-Length: 10\r\n\r\nab"
+    expect(parse_request(part, &mut q, &mut ex) == 0 and ex)
+    expect(parse_request("GET / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n", &mut q, &mut ex) == -1)
+    expect(parse_request("GET / HTTP/1.1\r\nContent-Length: 65537\r\n\r\n", &mut q, &mut ex) == -1)
+    expect(parse_request("GET / HTTP/1.1\r\n", &mut q, &mut ex) == 0)
+}
+
+test "post ids" {
+    var id: i64 = -5
+    expect(parse_id("42", &mut id) == 0 and id == 42)
+    expect(parse_id("007", &mut id) == 0 and id == 7)
+    expect(parse_id("0", &mut id) == -1)
+    expect(parse_id("", &mut id) == -1)
+    expect(parse_id("-1", &mut id) == -1)
+    expect(parse_id("999999999999999999", &mut id) == 0 and id == 999999999999999999)
+    expect(parse_id("9223372036854775808", &mut id) == 1 and id == 0)
+    expect(parse_id("12345678901234567890x", &mut id) == -1)
+}
+
+test "UTF-8 text" {
+    expect(utf8_text_ok("caf\xc3\xa9 \xf0\x9f\x98\x80"))
+    expect(!utf8_text_ok("a\x00b"))
+    expect(!utf8_text_ok(b"\xc0\x80"))
+    expect(!utf8_text_ok(b"\xed\xa0\x80"))
+    expect(!utf8_text_ok(b"\xf4\x90\x80\x80"))
+    expect(!utf8_text_ok(b"\xe2\x82"))
+    expect(status_line(201)[9..12] == "201" and status_line(7)[9..12] == "500")
+}

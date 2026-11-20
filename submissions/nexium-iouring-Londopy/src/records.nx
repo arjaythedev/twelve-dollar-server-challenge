@@ -1,0 +1,410 @@
+// records.nx: SQLite's record format as db.c reads and writes it, the twin of
+// db.c's serial_len, serial_int, rec_decode, int_serial, rec_build and
+// now_text, with the varint routines they use (sqlite3GetVarint32,
+// sqlite3GetVarint, sqlite3PutVarint, sqlite3VarintLen, which the
+// amalgamation keeps static).
+//
+// A record is a header, its own length as a varint and then one serial type
+// per column, each a varint, followed by the column values. Serial types:
+// 0 NULL; 1 to 6 big-endian integers of 1, 2, 3, 4, 6 and 8 bytes; 7 a
+// float; 8 and 9 the integers 0 and 1; from 12, even a blob and odd text of
+// (t - 12) / 2 bytes.
+//
+// Where db.c keeps a pointer into a record this keeps an offset into the
+// record's slice. Unsigned arithmetic that wraps in C wraps here too.
+
+const tmh = @cImport("time.h")
+
+/// One decoded column: its serial type, and the offset of its value in the
+/// record (db.c's fld keeps a pointer).
+pub struct Fld {
+    t: u32
+    p: usize
+}
+
+pub fn new_fld() -> Fld {
+    return Fld{ .t = 0, .p = 0 }
+}
+
+/// A value to put in a record: kind 0 NULL, 1 the integer i, 2 the text s
+/// (db.c's wval; its n is s.len).
+pub struct WVal {
+    kind: u8
+    i: i64
+    s: []u8
+}
+
+pub fn wnull() -> WVal { return WVal{ .kind = 0, .i = 0, .s = "" } }
+pub fn wint(i: i64) -> WVal { return WVal{ .kind = 1, .i = i, .s = "" } }
+pub fn wtext(s: []u8) -> WVal { return WVal{ .kind = 2, .i = 0, .s = s } }
+
+// ------------------------------------------------------------ varints
+
+/// sqlite3GetVarint at d[i]: the bytes read (1 to 9) and the value in v, or
+/// 0 when the varint runs past the end of d. SQLite reads those bytes
+/// anyway; here they are not the record's, so the caller sees a malformed
+/// record instead.
+pub fn get_varint(d: []u8, i: usize, v: *mut u64) -> u32 {
+    var x: u64 = 0
+    var k: usize = 0
+    while k < 8 {
+        if i + k >= d.len { return 0 }
+        let b = d[i + k]
+        x = (x << 7) | ((b & 0x7f) as u64)
+        if b < 0x80 {
+            v.* = x
+            return (k + 1) as u32
+        }
+        k += 1
+    }
+    if i + 8 >= d.len { return 0 }
+    x = (x << 8) | (d[i + 8] as u64)          // the ninth byte keeps all 8 bits
+    v.* = x
+    return 9
+}
+
+/// db.c's getVarint32 at d[i] (the macro, then sqlite3GetVarint32): the
+/// bytes read and the value in v, 0xffffffff for a value over 32 bits; 0
+/// when the varint runs past the end of d.
+pub fn get_varint32(d: []u8, i: usize, v: *mut u32) -> u32 {
+    if i >= d.len { return 0 }
+    let a = d[i]
+    if a < 0x80 {
+        v.* = a as u32
+        return 1
+    }
+    if i + 1 >= d.len { return 0 }
+    let b = d[i + 1]
+    if (b & 0x80) == 0 {
+        v.* = (((a & 0x7f) as u32) << 7) | (b as u32)
+        return 2
+    }
+    if i + 2 >= d.len { return 0 }
+    let c = d[i + 2]
+    if (c & 0x80) == 0 {
+        v.* = (((a & 0x7f) as u32) << 14) | (((b & 0x7f) as u32) << 7) | (c as u32)
+        return 3
+    }
+    var x: u64 = 0
+    let n = get_varint(d, i, &mut x)
+    if n == 0 { return 0 }
+    v.* = if (x & 0xffffffff) != x { 0xffffffff } else { x as u32 }
+    return n
+}
+
+/// sqlite3PutVarint: v at out[at..] in 1 to 9 bytes; the bytes written.
+pub fn put_varint(out: []mut u8, at: usize, v: u64) -> u32 {
+    if v <= 0x7f {
+        out[at] = v as u8
+        return 1
+    }
+    if v <= 0x3fff {
+        out[at] = (((v >> 7) & 0x7f) as u8) | 0x80
+        out[at + 1] = (v & 0x7f) as u8
+        return 2
+    }
+    if (v & 0xff00000000000000) != 0 {
+        // nine bytes: the last one holds 8 bits
+        out[at + 8] = @truncate(u8, v)
+        var x = v >> 8
+        var j: usize = 8
+        while j > 0 {
+            j -= 1
+            out[at + j] = ((x & 0x7f) as u8) | 0x80
+            x = x >> 7
+        }
+        return 9
+    }
+    var buf: [10]u8 = undefined
+    var n: usize = 0
+    var x = v
+    while true {
+        buf[n] = ((x & 0x7f) as u8) | 0x80
+        n += 1
+        x = x >> 7
+        if x == 0 { break }
+    }
+    buf[0] = buf[0] & 0x7f
+    var j: usize = 0
+    while j < n {
+        out[at + j] = buf[n - 1 - j]
+        j += 1
+    }
+    return n as u32
+}
+
+/// sqlite3VarintLen: how many 7-bit groups v has (10 for the largest values,
+/// one more than sqlite3PutVarint writes for them, as in SQLite).
+pub fn varint_len(v: u64) -> u32 {
+    var i: u32 = 1
+    var x = v >> 7
+    while x != 0 {
+        i += 1
+        x = x >> 7
+    }
+    return i
+}
+
+// ------------------------------------------------------------ reading
+
+const SERIAL_LEN: [12]u8 = [0, 1, 2, 3, 4, 6, 8, 8, 0, 0, 0, 0]
+
+/// The size of a value of serial type t.
+pub fn serial_len(t: u32) -> u32 {
+    return if t >= 12 { (t - 12) >> 1 } else { SERIAL_LEN[t as usize] as u32 }
+}
+
+/// The integer column f of record d into v: true, or false when f is not an
+/// integer (db.c's serial_int).
+pub fn serial_int(d: []u8, f: Fld, v: *mut i64) -> bool {
+    let p = f.p
+    let t = f.t
+    if t == 1 {
+        v.* = @bitCast(i8, d[p]) as i64
+        return true
+    }
+    if t == 2 {
+        v.* = @bitCast(i16, ((d[p] as u16) << 8) | (d[p + 1] as u16)) as i64
+        return true
+    }
+    if t == 3 {
+        let x = ((d[p] as u32) << 24) | ((d[p + 1] as u32) << 16) | ((d[p + 2] as u32) << 8)
+        v.* = (@bitCast(i32, x) >> 8) as i64
+        return true
+    }
+    if t == 4 {
+        let x = ((d[p] as u32) << 24) | ((d[p + 1] as u32) << 16) | ((d[p + 2] as u32) << 8) | (d[p + 3] as u32)
+        v.* = @bitCast(i32, x) as i64
+        return true
+    }
+    if t == 5 {
+        let hi = @bitCast(i16, ((d[p] as u16) << 8) | (d[p + 1] as u16)) as i64
+        let lo = ((d[p + 2] as u32) << 24) | ((d[p + 3] as u32) << 16) | ((d[p + 4] as u32) << 8) | (d[p + 5] as u32)
+        v.* = @bitCast(i64, (@bitCast(u64, hi) << 32) | (lo as u64))
+        return true
+    }
+    if t == 6 {
+        var x: u64 = 0
+        for k in 0..8 { x = (x << 8) | (d[p + k] as u64) }
+        v.* = @bitCast(i64, x)
+        return true
+    }
+    if t == 8 {
+        v.* = 0
+        return true
+    }
+    if t == 9 {
+        v.* = 1
+        return true
+    }
+    return false
+}
+
+pub fn is_text(f: Fld) -> bool { return f.t >= 13 and (f.t & 1) != 0 }
+pub fn text_len(f: Fld) -> u32 { return (f.t - 13) >> 1 }
+
+/// The text of column f of record d (is_text(f) holds).
+pub fn text(d: []u8, f: Fld) -> []u8 {
+    return d[f.p..f.p + (text_len(f) as usize)]
+}
+
+/// Decodes up to f.len columns of record d into f: the count, or -1 if the
+/// record is malformed (db.c's rec_decode; a varint that runs past the end
+/// of the record makes it malformed, see get_varint). As db.c's getVarint32
+/// macro does, a one-byte varint (nearly every one) is read here and only a
+/// longer one costs a call.
+pub fn rec_decode(d: []u8, f: []mut Fld) -> i32 {
+    let n = @truncate(u32, d.len)
+    if n == 0 { return -1 }
+    var hdr = d[0] as u32
+    var i: u32 = 1
+    if hdr >= 0x80 {
+        i = get_varint32(d, 0, &mut hdr)
+        if i == 0 { return -1 }
+    }
+    if hdr > n or hdr < i { return -1 }
+    var off = hdr
+    var k: usize = 0
+    while i < hdr and k < f.len {
+        var t = d[i as usize] as u32                // i < hdr <= n: within the record
+        if t < 0x80 {
+            i += 1
+        } else {
+            let l = get_varint32(d, i as usize, &mut t)
+            if l == 0 { return -1 }
+            i += l
+        }
+        let len = serial_len(t)
+        if off +% len > n { return -1 }
+        f[k] = Fld{ .t = t, .p = off as usize }
+        off += len
+        k += 1
+    }
+    return k as i32
+}
+
+// ------------------------------------------------------------ writing
+
+/// The serial type of integer v and its size in len: the smallest encoding,
+/// as SQLite writes it; 0 and 1 have their own types from file format 4
+/// (db.c's int_serial, which reads the file format from a global).
+pub fn int_serial(v: i64, len: *mut u32, file_format: i32) -> u32 {
+    if file_format >= 4 and (v == 0 or v == 1) {
+        len.* = 0
+        return if v == 0 { 8 } else { 9 }
+    }
+    let u: u64 = if v < 0 { ~@bitCast(u64, v) } else { @bitCast(u64, v) }
+    if u <= 127 {
+        len.* = 1
+        return 1
+    }
+    if u <= 32767 {
+        len.* = 2
+        return 2
+    }
+    if u <= 8388607 {
+        len.* = 3
+        return 3
+    }
+    if u <= 2147483647 {
+        len.* = 4
+        return 4
+    }
+    if u <= 0x7fffffffffff {
+        len.* = 6
+        return 5
+    }
+    len.* = 8
+    return 6
+}
+
+/// Encodes v as a record at the start of out: the header (its own size,
+/// then a serial type per value), then the values. The length, or 0 when it
+/// does not fit in out or the header would need more than one byte for its
+/// size (db.c's rec_build, whose cap is out.len here; at most 6 values).
+pub fn rec_build(out: []mut u8, v: []WVal, file_format: i32) -> u32 {
+    var types: [6]u32 = undefined
+    var lens: [6]u32 = undefined
+    var hdr: u32 = 1
+    var body: u32 = 0
+    for x, k in v {
+        if x.kind == 0 {
+            types[k] = 0
+            lens[k] = 0
+        } else if x.kind == 1 {
+            var l: u32 = 0
+            types[k] = int_serial(x.i, &mut l, file_format)
+            lens[k] = l
+        } else {
+            let n = @truncate(u32, x.s.len)
+            types[k] = n *% 2 +% 13
+            lens[k] = n
+        }
+        hdr = hdr +% varint_len(types[k] as u64)
+        body = body +% lens[k]
+    }
+    if hdr > 127 or hdr +% body > @truncate(u32, out.len) { return 0 }
+    out[0] = hdr as u8
+    var p: usize = 1
+    for k in 0..v.len { p += put_varint(out, p, types[k] as u64) as usize }
+    for x, k in v {
+        if x.kind == 1 {
+            var u = @bitCast(u64, x.i)
+            var b = lens[k] as usize
+            while b > 0 {
+                b -= 1
+                out[p + b] = @truncate(u8, u)
+                u = u >> 8
+            }
+            p += lens[k] as usize
+        } else if x.kind == 2 {
+            out[p..p + x.s.len].copy_from(x.s)
+            p += x.s.len
+        }
+    }
+    return p as u32
+}
+
+// ------------------------------------------------------------ created_at
+
+/// The column default's text, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'), in o:
+/// UTC to the millisecond, the milliseconds truncated as SQLite's clock does
+/// (db.c's now_text). The length.
+pub fn now_text(o: *mut [32]u8) -> u32 {
+    var ts: tmh.timespec = undefined
+    unsafe { _ = tmh.clock_gettime(tmh.CLOCK_REALTIME, &mut ts) }
+    return utc_text(o, ts.tv_sec, ts.tv_nsec)
+}
+
+/// The time sec + nsec (nsec in 0..1e9) as db.c's now_text prints it:
+/// snprintf's "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ" of gmtime_r's fields.
+/// gmtime_r itself cannot be called from nx 1.5.0 (@cImport drops functions
+/// that return a struct pointer), so the date comes from the day count by
+/// the proleptic Gregorian calendar, which is what gmtime_r computes for UTC.
+/// The length (24 for years 0 to 9999).
+pub fn utc_text(o: *mut [32]u8, sec: i64, nsec: i64) -> u32 {
+    var days = sec / 86400
+    var rem = sec % 86400
+    if rem < 0 {
+        rem += 86400
+        days -= 1
+    }
+    // civil_from_days: the year, month and day of a day count from 1970-01-01
+    let z = days + 719468
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let day = doy - (153 * mp + 2) / 5 + 1
+    let month = if mp < 10 { mp + 3 } else { mp - 9 }
+    let year = yoe + era * 400 + (if month <= 2 { 1 } else { 0 })
+    let out = o[0..32]
+    var at = put_padded(out, 0, year, 4)
+    out[at] = '-'
+    at = put_padded(out, at + 1, month, 2)
+    out[at] = '-'
+    at = put_padded(out, at + 1, day, 2)
+    out[at] = 'T'
+    at = put_padded(out, at + 1, rem / 3600, 2)
+    out[at] = ':'
+    at = put_padded(out, at + 1, (rem % 3600) / 60, 2)
+    out[at] = ':'
+    at = put_padded(out, at + 1, rem % 60, 2)
+    out[at] = '.'
+    at = put_padded(out, at + 1, nsec / 1000000, 3)
+    out[at] = 'Z'
+    return (at + 1) as u32
+}
+
+/// printf's "%0<width>d" of v at out[at..]: zero-padded to width characters,
+/// a minus sign counted in the width; the end.
+fn put_padded(out: []mut u8, at: usize, v: i64, width: usize) -> usize {
+    var digits: [20]u8 = undefined
+    var n: usize = 0
+    var u: u64 = if v < 0 { (0 as u64) -% @bitCast(u64, v) } else { @bitCast(u64, v) }
+    while true {
+        digits[n] = '0' + ((u % 10) as u8)
+        n += 1
+        u = u / 10
+        if u == 0 { break }
+    }
+    var p = at
+    var used = n
+    if v < 0 {
+        out[p] = '-'
+        p += 1
+        used += 1
+    }
+    while used < width {
+        out[p] = '0'
+        p += 1
+        used += 1
+    }
+    while n > 0 {
+        n -= 1
+        out[p] = digits[n]
+        p += 1
+    }
+    return p
+}

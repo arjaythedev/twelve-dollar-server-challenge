@@ -1,0 +1,154 @@
+// sha256.nx: SHA-256 and HMAC-SHA256 with precomputed key pads, on fixed
+// buffers and with no allocation: sha256_block, sha256_finish,
+// hmac_key_init and hmac_sha256 from the C server's jwt.h.
+//
+// std.hash's Sha256 keeps its pending block in a String and returns the
+// digest as a String, and std has no HMAC; the request path needs neither
+// allocation, so this is its own code.
+
+const K: [64]u32 = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]
+
+pub const IV: [8]u32 = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+/// The SHA-256 states after absorbing key^ipad and key^opad: all of the
+/// HMAC that depends on the key alone, computed once.
+pub struct HmacKey {
+    inner: [8]u32
+    outer: [8]u32
+}
+
+fn ror(x: u32, n: u32) -> u32 {
+    return (x >> n) | (x << (32 - n))
+}
+
+/// Absorbs the 64-byte block blk[at..at + 64] into s.
+pub fn block(s: *mut [8]u32, blk: []u8, at: usize) !allocates !blocks {
+    var w: [64]u32 = undefined
+    for i in 0..16 {
+        let j = at + i * 4
+        w[i] = ((blk[j] as u32) << 24) | ((blk[j + 1] as u32) << 16) | ((blk[j + 2] as u32) << 8) | (blk[j + 3] as u32)
+    }
+    for i in 16..64 {
+        let s0 = ror(w[i - 15], 7) ^ ror(w[i - 15], 18) ^ (w[i - 15] >> 3)
+        let s1 = ror(w[i - 2], 17) ^ ror(w[i - 2], 19) ^ (w[i - 2] >> 10)
+        w[i] = w[i - 16] +% s0 +% w[i - 7] +% s1
+    }
+    var a = s[0]
+    var b = s[1]
+    var c = s[2]
+    var d = s[3]
+    var e = s[4]
+    var f = s[5]
+    var g = s[6]
+    var h = s[7]
+    for i in 0..64 {
+        let big1 = ror(e, 6) ^ ror(e, 11) ^ ror(e, 25)
+        let ch = (e & f) ^ (~e & g)
+        let t1 = h +% big1 +% ch +% K[i] +% w[i]
+        let big0 = ror(a, 2) ^ ror(a, 13) ^ ror(a, 22)
+        let mj = (a & b) ^ (a & c) ^ (b & c)
+        let t2 = big0 +% mj
+        h = g
+        g = f
+        f = e
+        e = d +% t1
+        d = c
+        c = b
+        b = a
+        a = t1 +% t2
+    }
+    s[0] = s[0] +% a
+    s[1] = s[1] +% b
+    s[2] = s[2] +% c
+    s[3] = s[3] +% d
+    s[4] = s[4] +% e
+    s[5] = s[5] +% f
+    s[6] = s[6] +% g
+    s[7] = s[7] +% h
+}
+
+/// Finishes a hash whose state `st` already absorbed `prefix` bytes (a
+/// multiple of 64), continuing with msg; the 32-byte digest into out.
+pub fn finish(st: [8]u32, prefix: u64, msg: []u8, out: *mut [32]u8) !allocates !blocks {
+    var s = st
+    let total = prefix +% msg.len as u64
+    var at: usize = 0
+    var n = msg.len
+    while n >= 64 {
+        block(&mut s, msg, at)
+        at += 64
+        n -= 64
+    }
+    var tail: [128]u8 = undefined
+    tail[0..n].copy_from(msg[at..at + n])
+    tail[n] = 0x80
+    let padlen: usize = if n < 56 { 64 } else { 128 }
+    tail[n + 1..padlen].fill(0)
+    let bits = total *% 8
+    for i in 0..8 {
+        tail[padlen - 1 - i] = @truncate(u8, bits >> ((8 * i) as u64))
+    }
+    block(&mut s, tail[..], 0)
+    if padlen == 128 { block(&mut s, tail[..], 64) }
+    for i in 0..8 {
+        out[i * 4] = @truncate(u8, s[i] >> 24)
+        out[i * 4 + 1] = @truncate(u8, s[i] >> 16)
+        out[i * 4 + 2] = @truncate(u8, s[i] >> 8)
+        out[i * 4 + 3] = @truncate(u8, s[i])
+    }
+}
+
+/// The key schedule for HMAC-SHA256 with `key` (hmac_key_init): a key longer
+/// than a block is hashed first, a shorter one padded with zeros.
+pub fn hmac_key(key: []u8) -> HmacKey !allocates !blocks {
+    var kb: [64]u8 = undefined
+    kb[..].fill(0)
+    if key.len > 64 {
+        var d: [32]u8 = undefined
+        finish(IV, 0, key, &mut d)
+        kb[0..32].copy_from(d[..])
+    } else {
+        kb[0..key.len].copy_from(key)
+    }
+    var k = HmacKey{ .inner = IV, .outer = IV }
+    var pad: [64]u8 = undefined
+    for i in 0..64 { pad[i] = kb[i] ^ 0x36 }
+    block(&mut k.inner, pad[..], 0)
+    for i in 0..64 { pad[i] = kb[i] ^ 0x5c }
+    block(&mut k.outer, pad[..], 0)
+    return k
+}
+
+/// HMAC-SHA256 of msg under the key schedule k, into out.
+pub fn hmac(k: *HmacKey, msg: []u8, out: *mut [32]u8) !allocates !blocks {
+    var ih: [32]u8 = undefined
+    finish(k.inner, 64, msg, &mut ih)
+    finish(k.outer, 64, ih[..], out)
+}
+
+test "sha256 of abc and the HMAC test vector of RFC 4231 case 2" {
+    var d: [32]u8 = undefined
+    finish(IV, 0, "abc", &mut d)
+    expect(d[0] == 0xba and d[1] == 0x78 and d[31] == 0xad)
+    let k = hmac_key("Jefe")
+    hmac(&k, "what do ya want for nothing?", &mut d)
+    expect(d[0] == 0x5b and d[1] == 0xdc and d[30] == 0x38 and d[31] == 0x43)
+}
+
+test "a key longer than a block is hashed first (RFC 4231 case 6)" {
+    var key: [131]u8 = undefined
+    key[..].fill(0xaa)
+    let k = hmac_key(key[..])
+    var d: [32]u8 = undefined
+    hmac(&k, "Test Using Larger Than Block-Size Key - Hash Key First", &mut d)
+    expect(d[0] == 0x60 and d[1] == 0xe4 and d[30] == 0x7f and d[31] == 0x54)
+}

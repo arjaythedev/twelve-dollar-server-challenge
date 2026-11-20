@@ -1,0 +1,1060 @@
+// db.nx: the database layer, the twin of the C entry's db.c.
+//
+// SQLite is opened as usual (WAL, synchronous=NORMAL), but requests run no
+// SQL. Reads position SQLite's own B-tree cursors on the posts and users
+// tables and on posts_created_at_id_idx and likes_post_id_idx, and decode
+// the records in place (records.nx). Writes put each row into its table and
+// an entry into every index on it, inside a BEGIN IMMEDIATE ... COMMIT that
+// spans a batch (group commit). That is still SQLite reading and writing its
+// own pages, through its page cache, WAL and transactions; it skips SQL
+// compilation and the bytecode VM. The reference SQL stays for anything
+// unexpected (a record that does not decode, a post whose author row is
+// missing), for VERIFY=1 and for WRITES=sql. A nice-19 thread with its own
+// connection checkpoints the WAL.
+//
+// SQLite's private B-tree calls go through sqlite_shim.c, one wrapper per
+// call or field; the public API is called directly. Only the event-loop
+// thread calls these functions, except where noted, as in db.c.
+
+import records
+import json
+
+const sq = @cImport("sqlite_shim.h")
+const cstr = @cImport("string.h")
+const cstdlib = @cImport("stdlib.h")
+const tmh = @cImport("time.h")
+const res = @cImport("sys/resource.h")
+const unistd = @cImport("unistd.h")
+const sysno = @cImport("sys/syscall.h")
+
+// The pinned amalgamation sits in deps/ next to src/, as in the C entry.
+artifact link { c_sources = ["sqlite_shim.c"], include = ["../deps"] }
+
+const FEED_N: usize = 20
+
+/// Results of feed_json and post_json besides a length: db.h's NULL (no
+/// such post) and DB_ERR.
+pub const NOT_FOUND: i64 = -1
+pub const ERR: i64 = -2
+/// bt_feed's NULL and bt_post's BT_FALLBACK: answer with the reference SQL.
+const FALLBACK: i64 = -3
+
+const LARGEST_INT64: i64 = 0x7fffffffffffffff
+/// Room a view of C memory may span: more than any record or column.
+const VIEW_MAX: usize = 2147483648
+
+// ------------------------------------------------------------ state
+// db.c's statics. Globals in Nexium are touched only inside `unsafe`; the
+// pointers start out null (an `undefined` global is zero-initialized C).
+
+var g_db: *mut sq.sqlite3 = undefined
+var g_bt: *mut sq.Btree = undefined
+var g_path: *mut u8 = undefined
+var g_root_posts: u32 = 0
+var g_root_users: u32 = 0
+var g_root_likes_idx: u32 = 0
+var g_root_created_idx: u32 = 0
+var g_ki_created: *mut sq.KeyInfo = undefined
+var g_ki_likes: *mut sq.KeyInfo = undefined
+var g_ur_likes: *mut sq.UnpackedRecord = undefined
+var c_posts: *mut sq.BtCursor = undefined
+var c_users: *mut sq.BtCursor = undefined
+var c_likes: *mut sq.BtCursor = undefined
+var c_created: *mut sq.BtCursor = undefined
+var c_wposts: *mut sq.BtCursor = undefined          // used only inside write transactions
+var c_widx: *mut sq.BtCursor = undefined
+var g_read_active: bool = false
+var g_verify: bool = false
+// B-tree writes (see "writes" below)
+var g_root_likes: u32 = 0
+var g_root_likes_pk: u32 = 0
+var g_root_user_idx: u32 = 0
+var g_ki_user: *mut sq.KeyInfo = undefined
+var g_ki_likes_pk: *mut sq.KeyInfo = undefined
+var g_ur_pk: *mut sq.UnpackedRecord = undefined
+var g_file_format: i32 = 4
+var g_sql_writes: bool = false      // WRITES=sql, or the schema is not the expected one
+var g_wpoison: bool = false         // a write failed halfway: this transaction must not commit
+
+var st_begin: *mut sq.sqlite3_stmt = undefined
+var st_commit: *mut sq.sqlite3_stmt = undefined
+var st_rollback: *mut sq.sqlite3_stmt = undefined
+var st_ins_post: *mut sq.sqlite3_stmt = undefined
+var st_post_exists: *mut sq.sqlite3_stmt = undefined
+var st_ins_like: *mut sq.sqlite3_stmt = undefined
+var st_sql_post: *mut sq.sqlite3_stmt = undefined
+var st_sql_feed: *mut sq.sqlite3_stmt = undefined
+
+/// The search keys' fields that likes_seek and the uniqueness probe set on
+/// every call, found once at open (each address is one shim call) so that
+/// setting them is a plain store, as in db.c.
+var ul_flags: *mut u16 = undefined           // g_ur_likes->aMem[0].flags
+var ul_int: *mut i64 = undefined             // g_ur_likes->aMem[0].u.i
+var ul_nfield: *mut u16 = undefined
+var ul_default_rc: *mut i8 = undefined
+var ul_eq_seen: *mut u8 = undefined
+var ul_err_code: *mut u8 = undefined
+var up_flags0: *mut u16 = undefined          // g_ur_pk->aMem[0] and [1]
+var up_int0: *mut i64 = undefined
+var up_flags1: *mut u16 = undefined
+var up_int1: *mut i64 = undefined
+var up_nfield: *mut u16 = undefined
+var up_default_rc: *mut i8 = undefined
+var up_eq_seen: *mut u8 = undefined
+var up_err_code: *mut u8 = undefined
+
+/// The WAL state, shared with the checkpointer thread and written by the
+/// WAL hook (sqlite_shim.c) after every commit: [0] the frames in the WAL
+/// (db.c's g_wal_frames), [1] the commits so far (g_commits). i64 because
+/// Nexium's atomics are i64 only.
+var g_wal: [2]i64 = [0, 0]
+var g_ckpt_gen: i64 = 0                      // bumps when a checkpoint fully backfills
+var g_ckpt_start: u32 = 2048
+var g_ckpt_arg: i64 = 0                      // thread.start wants an argument
+var g_starter_tid: i64 = 0
+var g_cache_total: u64 = 0                   // db_cache_misses' static total
+
+var g_scratch: [3][65536]u8 = undefined      // records that spill to overflow pages
+var g_vbuf: [1048576]u8 = undefined          // the reference answer in verify mode
+var g_wrec: [4096]u8 = undefined             // bt_insert_post's static rec
+
+// ------------------------------------------------------------ helpers
+
+fn null_u8() -> *mut u8 {
+    unsafe { return (0 as usize) as *mut u8 }
+}
+
+fn null_ki() -> *mut sq.KeyInfo {
+    unsafe { return (0 as usize) as *mut sq.KeyInfo }
+}
+
+fn is_null(p: *u8) -> bool {
+    unsafe { return (p as usize) == 0 }
+}
+
+/// The n bytes of C memory at p.
+fn view(p: *u8, n: usize) -> []u8 {
+    unsafe { return (p as *[VIEW_MAX]u8)[0..n] }
+}
+
+/// The text of a column of record d, its value at d[p..] (serial type t).
+/// Scalars, not the Fld: the view rules would take a view made from a
+/// struct argument for a view into that argument.
+fn col_text(d: []u8, p: usize, t: u32) -> []u8 {
+    return d[p..p + (((t - 13) >> 1) as usize)]
+}
+
+/// A C string's bytes, without its NUL.
+fn cstring(p: *u8) -> []u8 {
+    unsafe { return view(p, cstr.strlen(p)) }
+}
+
+fn die(what: []u8) -> never {
+    unsafe {
+        if (g_db as usize) != 0 {
+            eprintln("db: {}: {}", .{what, cstring(sq.sqlite3_errmsg(g_db))})
+        } else {
+            eprintln("db: {}: ?", .{what})
+        }
+    }
+    os.exit(1)
+}
+
+fn prep(sql: *u8) -> *mut sq.sqlite3_stmt {
+    var s: *mut sq.sqlite3_stmt = undefined
+    unsafe {
+        if sq.shim_prepare(g_db, sql, -1, sq.SQLITE_PREPARE_PERSISTENT as u32, &mut s) != sq.SQLITE_OK { die(cstring(sql)) }
+    }
+    return s
+}
+
+fn exec_or_die(db: *mut sq.sqlite3, sql: *u8) {
+    var err = null_u8()
+    unsafe {
+        if sq.shim_exec(db, sql, &mut err) != sq.SQLITE_OK {
+            if is_null(err) {
+                eprintln("db: {}: ?", .{cstring(sql)})
+            } else {
+                eprintln("db: {}: {}", .{cstring(sql), cstring(err)})
+            }
+            os.exit(1)
+        }
+    }
+}
+
+fn gettid() -> i64 {
+    unsafe { return unistd.syscall(sysno.SYS_gettid as i64) }
+}
+
+// ------------------------------------------------------------ open
+
+fn alloc_cursor(csz: i32) -> *mut sq.BtCursor {
+    unsafe {
+        let p = sq.sqlite3_malloc(csz)
+        if (p as usize) == 0 { die("cursor alloc") }
+        _ = cstr.memset(p, 0, csz as usize)
+        return p as *mut sq.BtCursor
+    }
+}
+
+pub fn open(path: []u8) -> i32 {
+    unsafe {
+        // the checkpointer opens the same file later: keep a C string of it
+        // (through an integer: the checker would take the copy for a view of path)
+        g_path = (cstr.strndup(path.ptr, path.len) as usize) as *mut u8
+        if sq.sqlite3_open_v2(g_path, &mut g_db, sq.SQLITE_OPEN_READWRITE | sq.SQLITE_OPEN_NOMUTEX, @cstr("unix-excl")) != sq.SQLITE_OK { die("open") }
+        exec_or_die(g_db, @cstr("PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA wal_autocheckpoint=0;PRAGMA temp_store=MEMORY;PRAGMA mmap_size=0;PRAGMA busy_timeout=5000;"))
+        // A small page cache. The random-access working set (posts, the likes
+        // indexes) is ~135 MB, far more than any cache we could afford, so the
+        // OS page cache serves the misses either way; a big SQLite cache only
+        // holds a second copy of hot pages, in memory the kernel can't reclaim
+        // for sockets. atol is glibc's strtol(s, NULL, 10), which db.c calls
+        // (strtol's char ** cannot be passed from nx 1.5.0 with gcc 15).
+        let ck = cstdlib.getenv(@cstr("CACHE_KIB"))
+        var cache_kib: i64 = if (ck as usize) != 0 and ck.* != 0 { cstdlib.atol(ck) } else { 8192 }
+        if cache_kib <= 0 { cache_kib = 8192 }
+        if cache_kib > (1 << 30) { cache_kib = 1 << 30 }         // SQLite reads the pragma as a 32-bit int
+        var pragma: [64]u8 = undefined
+        pragma[0..19].copy_from("PRAGMA cache_size=-")
+        var n = 19 + json.i64_to_dec(pragma[19..], cache_kib)
+        pragma[n] = ';'
+        pragma[n + 1] = 0
+        exec_or_die(g_db, pragma[..].ptr)
+        sq.shim_wal_hook(g_db, &mut g_wal[0])
+
+        let s = prep(@cstr("SELECT name, rootpage FROM sqlite_schema WHERE rootpage > 0"))
+        while sq.sqlite3_step(s) == sq.SQLITE_ROW {
+            let name = cstring(sq.sqlite3_column_text(s, 0))
+            let r = @truncate(u32, sq.sqlite3_column_int64(s, 1))
+            if name == "posts" { g_root_posts = r }
+            else if name == "users" { g_root_users = r }
+            else if name == "likes_post_id_idx" { g_root_likes_idx = r }
+            else if name == "posts_created_at_id_idx" { g_root_created_idx = r }
+            else if name == "likes" { g_root_likes = r }
+            else if name == "sqlite_autoindex_likes_1" { g_root_likes_pk = r }
+            else if name == "posts_user_id_idx" { g_root_user_idx = r }
+        }
+        _ = sq.sqlite3_finalize(s)
+        if g_root_posts == 0 or g_root_users == 0 or g_root_likes_idx == 0 or g_root_created_idx == 0 { die("schema roots") }
+        let wm = cstdlib.getenv(@cstr("WRITES"))
+        g_sql_writes = ((wm as usize) != 0 and cstring(wm) == "sql") or g_root_likes == 0 or g_root_likes_pk == 0 or g_root_user_idx == 0
+        let schema = sq.shim_main_schema(g_db)
+        if (schema as usize) != 0 { g_file_format = sq.shim_schema_file_format(schema) }
+        if sq.shim_db_enc(g_db) != sq.SQLITE_UTF8 { g_sql_writes = true }     // records hold text as UTF-8 bytes
+
+        g_bt = sq.shim_main_btree(g_db)
+        let desc = sq.SHIM_KEYINFO_ORDER_DESC as u8
+        // posts_created_at_id_idx: (created_at DESC, id DESC) + rowid
+        g_ki_created = sq.shim_keyinfo_alloc(g_db, 2, 1)
+        let sf = sq.shim_keyinfo_sort_flags(g_ki_created) as *mut [2]u8
+        sf[0] = desc
+        sf[1] = desc
+        // likes_post_id_idx: (post_id) + rowid
+        g_ki_likes = sq.shim_keyinfo_alloc(g_db, 1, 1)
+        g_ur_likes = sq.shim_unpacked_alloc(g_ki_likes)
+        if (g_ki_created as usize) == 0 or (g_ki_likes as usize) == 0 or (g_ur_likes as usize) == 0 { die("keyinfo") }
+        let lm = sq.shim_unpacked_mem(g_ur_likes, 0)
+        _ = cstr.memset(lm as *mut u8, 0, sq.SHIM_SIZEOF_MEM as usize)
+        sq.shim_mem_enc(lm).* = sq.SQLITE_UTF8 as u8
+        sq.shim_mem_db(lm).* = g_db
+        // posts_user_id_idx: (user_id) + rowid; sqlite_autoindex_likes_1: (user_id, post_id) + rowid
+        g_ki_user = sq.shim_keyinfo_alloc(g_db, 1, 1)
+        g_ki_likes_pk = sq.shim_keyinfo_alloc(g_db, 2, 1)
+        if (g_ki_likes_pk as usize) != 0 { g_ur_pk = sq.shim_unpacked_alloc(g_ki_likes_pk) }
+        if (g_ki_user as usize) == 0 or (g_ki_likes_pk as usize) == 0 or (g_ur_pk as usize) == 0 { die("keyinfo") }
+        let pm0 = sq.shim_unpacked_mem(g_ur_pk, 0)
+        let pm1 = sq.shim_unpacked_mem(g_ur_pk, 1)
+        _ = cstr.memset(pm0 as *mut u8, 0, 2 * (sq.SHIM_SIZEOF_MEM as usize))
+        sq.shim_mem_enc(pm0).* = sq.SQLITE_UTF8 as u8
+        sq.shim_mem_db(pm0).* = g_db
+        sq.shim_mem_enc(pm1).* = sq.SQLITE_UTF8 as u8
+        sq.shim_mem_db(pm1).* = g_db
+        ul_flags = sq.shim_mem_flags(lm)
+        ul_int = sq.shim_mem_int(lm)
+        ul_nfield = sq.shim_unpacked_nfield(g_ur_likes)
+        ul_default_rc = sq.shim_unpacked_default_rc(g_ur_likes)
+        ul_eq_seen = sq.shim_unpacked_eq_seen(g_ur_likes)
+        ul_err_code = sq.shim_unpacked_err_code(g_ur_likes)
+        up_flags0 = sq.shim_mem_flags(pm0)
+        up_int0 = sq.shim_mem_int(pm0)
+        up_flags1 = sq.shim_mem_flags(pm1)
+        up_int1 = sq.shim_mem_int(pm1)
+        up_nfield = sq.shim_unpacked_nfield(g_ur_pk)
+        up_default_rc = sq.shim_unpacked_default_rc(g_ur_pk)
+        up_eq_seen = sq.shim_unpacked_eq_seen(g_ur_pk)
+        up_err_code = sq.shim_unpacked_err_code(g_ur_pk)
+
+        let csz = sq.shim_cursor_size()
+        c_posts = alloc_cursor(csz)
+        c_users = alloc_cursor(csz)
+        c_likes = alloc_cursor(csz)
+        c_created = alloc_cursor(csz)
+        c_wposts = alloc_cursor(csz)
+        c_widx = alloc_cursor(csz)
+
+        st_begin = prep(@cstr("BEGIN IMMEDIATE"))
+        st_commit = prep(@cstr("COMMIT"))
+        st_rollback = prep(@cstr("ROLLBACK"))
+        st_ins_post = prep(@cstr("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at"))
+        st_post_exists = prep(@cstr("SELECT 1 FROM posts WHERE id = ?1"))
+        st_ins_like = prep(@cstr("INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING"))
+        st_sql_post = prep(@cstr("SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?1"))
+        st_sql_feed = prep(@cstr("SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20"))
+    }
+    return 0
+}
+
+pub fn set_verify(on: bool) {
+    unsafe { g_verify = on }
+}
+
+/// Frames in the WAL after the last commit (readable from the loop thread).
+pub fn wal_frames() -> u32 {
+    unsafe { return @truncate(u32, sync.atomic_load(&g_wal[0])) }
+}
+
+/// Page-cache misses on the main connection so far (the DEBUG stats).
+pub fn cache_misses() -> u64 {
+    var cur: i32 = 0
+    var hi: i32 = 0
+    unsafe {
+        _ = sq.sqlite3_db_status(g_db, sq.SQLITE_DBSTATUS_CACHE_MISS, &mut cur, &mut hi, 1)    // since the last call
+        g_cache_total = g_cache_total +% (@bitCast(u32, cur) as u64)
+        return g_cache_total
+    }
+}
+
+/// Bumps when a checkpoint fully backfills.
+pub fn ckpt_generation() -> u64 {
+    unsafe { return @bitCast(u64, sync.atomic_load(&g_ckpt_gen)) }
+}
+
+// ------------------------------------------------------------ checkpointer
+
+/// The checkpointer thread: a connection of its own, nice 19, a PASSIVE
+/// checkpoint whenever there is something new and the WAL has reached
+/// g_ckpt_start frames, polled every 5 ms.
+fn ckpt_main(arg: *mut i64) {
+    unsafe {
+        let tid = gettid()
+        // thread.start runs the function on the caller's thread when it
+        // cannot start one; db.c dies when pthread_create fails, and so does this
+        if tid == g_starter_tid { die("checkpointer thread") }
+        _ = res.setpriority(res.PRIO_PROCESS, @truncate(u32, tid), 19)
+        var cdb: *mut sq.sqlite3 = undefined
+        if sq.sqlite3_open_v2(g_path, &mut cdb, sq.SQLITE_OPEN_READWRITE | sq.SQLITE_OPEN_NOMUTEX, @cstr("unix-excl")) != sq.SQLITE_OK {
+            eprintln("checkpointer: open failed", .{})
+            return
+        }
+        exec_or_die(cdb, @cstr("PRAGMA synchronous=NORMAL; PRAGMA cache_size=-1024; PRAGMA wal_autocheckpoint=0;"))
+        var done_at_commit: i64 = -1                       // db.c's (uint64_t)-1
+        var ts = tmh.timespec{ .tv_sec = 0, .tv_nsec = 5 * 1000 * 1000 }
+        let no_rem = (0 as usize) as *mut tmh.timespec
+        let main_db = (0 as usize) as *u8
+        while true {
+            _ = tmh.nanosleep(&ts, no_rem)
+            let commits = sync.atomic_load(&g_wal[1])
+            if commits == done_at_commit { continue }      // nothing new since the last full backfill
+            if @truncate(u32, sync.atomic_load(&g_wal[0])) < g_ckpt_start { continue }
+            var nlog: i32 = 0
+            var nckpt: i32 = 0
+            let rc = sq.sqlite3_wal_checkpoint_v2(cdb, main_db, sq.SQLITE_CHECKPOINT_PASSIVE, &mut nlog, &mut nckpt)
+            if rc == sq.SQLITE_OK and nlog >= 0 and nckpt == nlog {
+                done_at_commit = commits
+                _ = sync.atomic_add(&mut g_ckpt_gen, 1)
+            }
+        }
+    }
+}
+
+pub fn start_checkpointer(start_frames: u32) {
+    unsafe {
+        g_ckpt_start = start_frames
+        g_starter_tid = gettid()
+        // never joined: it runs for the life of the process, as db.c's detached thread
+        _ = thread.start(ckpt_main, &mut g_ckpt_arg)
+    }
+}
+
+// ------------------------------------------------------------ read transactions
+
+fn open_cursor(root: u32, ki: *mut sq.KeyInfo, c: *mut sq.BtCursor) -> i32 {
+    unsafe {
+        sq.shim_cursor_zero(c)
+        return sq.shim_cursor_open(g_bt, root, 0, ki, c)
+    }
+}
+
+/// One read transaction spans many requests of a loop pass: read_begin is
+/// idempotent; read_end must be called before any write or SQL statement.
+pub fn read_begin() -> i32 {
+    unsafe {
+        if g_read_active { return 0 }
+        // A write transaction left open (a ROLLBACK that failed) must never be
+        // committed by read_end's sqlite3BtreeCommit: retry the rollback first.
+        if sq.sqlite3_get_autocommit(g_db) == 0 {
+            _ = sq.sqlite3_step(st_rollback)
+            _ = sq.sqlite3_reset(st_rollback)
+            if sq.sqlite3_get_autocommit(g_db) == 0 { return sq.SQLITE_ERROR }
+        }
+        var rc = sq.shim_begin_trans(g_bt, 0)
+        if rc != sq.SQLITE_OK { return rc }
+        rc = open_cursor(g_root_posts, null_ki(), c_posts)
+        if rc == 0 { rc = open_cursor(g_root_users, null_ki(), c_users) }
+        if rc == 0 { rc = open_cursor(g_root_likes_idx, g_ki_likes, c_likes) }
+        if rc == 0 { rc = open_cursor(g_root_created_idx, g_ki_created, c_created) }
+        if rc != 0 {
+            _ = sq.shim_cursor_close(c_posts)
+            _ = sq.shim_cursor_close(c_users)
+            _ = sq.shim_cursor_close(c_likes)
+            _ = sq.shim_cursor_close(c_created)
+            _ = sq.shim_commit(g_bt)
+            return rc
+        }
+        g_read_active = true
+        return 0
+    }
+}
+
+pub fn read_end() {
+    unsafe {
+        if !g_read_active { return }
+        _ = sq.shim_cursor_close(c_posts)
+        _ = sq.shim_cursor_close(c_users)
+        _ = sq.shim_cursor_close(c_likes)
+        _ = sq.shim_cursor_close(c_created)
+        _ = sq.shim_commit(g_bt)
+        g_read_active = false
+    }
+}
+
+// ------------------------------------------------------------ records
+
+/// The record under cursor c: in the page when it is all there, else copied
+/// into scratch; empty when it is larger than scratch or cannot be read.
+/// db.c returns NULL there, but every caller hands the record to rec_decode,
+/// which refuses an empty one as it refuses no record, so the answers are the
+/// same; a slice comes back in two registers, an optional through memory.
+fn payload(c: *mut sq.BtCursor, scratch: []mut u8) -> []u8 {
+    unsafe {
+        let sz = sq.shim_payload_size(c)
+        var amt: u32 = 0
+        let p = sq.shim_payload_fetch(c, &mut amt)
+        if amt >= sz { return view(p, sz as usize) }
+        if (sz as usize) > scratch.len or sq.shim_payload_copy(c, 0, sz, scratch.ptr) != sq.SQLITE_OK { return scratch[0..0] }
+        return scratch[0..sz as usize]
+    }
+}
+
+/// A posts row: (id, the rowid, stored as NULL; user_id; body; created_at).
+struct PostRow {
+    uid: i64
+    body: []u8
+    created: []u8
+}
+
+fn read_post_row(r: *mut PostRow) -> i32 {
+    unsafe {
+        let d = payload(c_posts, g_scratch[0][..])
+        var f: [4]records.Fld = undefined
+        if records.rec_decode(d, f[..]) != 4 or !records.serial_int(d, f[1], &mut r.uid) or !records.is_text(f[2]) or !records.is_text(f[3]) { return -1 }
+        r.body = col_text(d, f[2].p, f[2].t)
+        r.created = col_text(d, f[3].p, f[3].t)
+        return 0
+    }
+}
+
+/// 1 found (sets name), 0 missing, -1 error.
+fn read_username(uid: i64, name: *mut []u8) -> i32 {
+    unsafe {
+        var res: i32 = 0
+        if sq.shim_table_moveto(c_users, uid, 0, &mut res) != sq.SQLITE_OK { return -1 }
+        if res != 0 or sq.shim_eof(c_users) != 0 { return 0 }
+        let d = payload(c_users, g_scratch[1][..])
+        var f: [2]records.Fld = undefined
+        if records.rec_decode(d, f[..]) != 2 or !records.is_text(f[1]) { return -1 }
+        name.* = col_text(d, f[1].p, f[1].t)
+        return 1
+    }
+}
+
+/// The post_id (first column) of the current likes_post_id_idx entry.
+fn likes_entry_post(pid: *mut i64) -> i32 {
+    unsafe {
+        let d = payload(c_likes, g_scratch[2][..])
+        var f: [1]records.Fld = undefined
+        if records.rec_decode(d, f[..]) != 1 or !records.serial_int(d, f[0], pid) { return -1 }
+        return 0
+    }
+}
+
+/// Positions c_likes on the first entry with post_id >= pid: 0 ok, with eof
+/// set when there is none, or -1 on error.
+fn likes_seek(pid: i64, eof: *mut bool) -> i32 {
+    unsafe {
+        ul_flags.* = sq.SHIM_MEM_INT as u16
+        ul_int.* = pid
+        ul_nfield.* = 1
+        ul_default_rc.* = 1
+        ul_eq_seen.* = 0
+        ul_err_code.* = 0
+        var res: i32 = 0
+        if sq.shim_index_moveto(c_likes, g_ur_likes, &mut res) != sq.SQLITE_OK { return -1 }
+        eof.* = false
+        if sq.shim_eof(c_likes) != 0 {
+            eof.* = true
+            return 0
+        }
+        if res < 0 {
+            let rc = sq.shim_next(c_likes, 0)
+            if rc == sq.SQLITE_DONE { eof.* = true }
+            else if rc != sq.SQLITE_OK { return -1 }
+        }
+        return 0
+    }
+}
+
+fn count_likes_one(pid: i64, cnt: *mut u32) -> i32 {
+    unsafe {
+        var eof = false
+        cnt.* = 0
+        if likes_seek(pid, &mut eof) != 0 { return -1 }
+        while !eof {
+            var p: i64 = 0
+            if likes_entry_post(&mut p) != 0 { return -1 }
+            if p != pid { break }
+            cnt.* = cnt.* +% 1
+            let rc = sq.shim_next(c_likes, 0)
+            if rc == sq.SQLITE_DONE { break }
+            if rc != sq.SQLITE_OK { return -1 }
+        }
+        return 0
+    }
+}
+
+/// Counts likes for the ids with one forward walk over the index when they
+/// are close together (the common case: the newest posts), else per id.
+fn count_likes_many(ids: []i64, cnt: []mut u32) -> i32 {
+    unsafe {
+        let n = ids.len
+        var lo = ids[0]
+        var hi = ids[0]
+        for i in 0..n {
+            cnt[i] = 0
+            if ids[i] < lo { lo = ids[i] }
+            if ids[i] > hi { hi = ids[i] }
+        }
+        if hi -% lo <= 4096 {
+            var eof = false
+            if likes_seek(lo, &mut eof) != 0 { return -1 }
+            var scanned: i64 = 0
+            var pathological = false
+            while !eof {
+                var p: i64 = 0
+                if likes_entry_post(&mut p) != 0 { return -1 }
+                if p > hi { break }
+                for i in 0..n {
+                    if ids[i] == p {
+                        cnt[i] += 1
+                        break
+                    }
+                }
+                scanned += 1
+                if scanned > 100000 {                      // a pathological span; don't walk forever
+                    pathological = true
+                    break
+                }
+                let rc = sq.shim_next(c_likes, 0)
+                if rc == sq.SQLITE_DONE { break }
+                if rc != sq.SQLITE_OK { return -1 }
+            }
+            if !pathological { return 0 }
+        }
+        for i in 0..n {
+            if count_likes_one(ids[i], &mut cnt[i]) != 0 { return -1 }
+        }
+        return 0
+    }
+}
+
+/// One post as JSON at out[o..], within out[..lim]: the end, or -1 when the
+/// worst case does not fit (db.c's emit_post).
+fn emit_post(out: []mut u8, o0: usize, lim: usize, id: i64, r: *PostRow, un: []u8, likes: u32) -> i64 {
+    let need = 96 + 6 * (r.body.len + r.created.len + un.len)
+    if lim -% o0 < need { return -1 }
+    var o = o0
+    out[o..o + 6].copy_from("{\"id\":")
+    o += 6
+    o += json.i64_to_dec(out[o..], id)
+    out[o..o + 9].copy_from(",\"body\":\"")
+    o += 9
+    o += json.escape(out[o..], r.body)
+    out[o..o + 16].copy_from("\",\"created_at\":\"")
+    o += 16
+    o += json.escape(out[o..], r.created)
+    out[o..o + 12].copy_from("\",\"author\":\"")
+    o += 12
+    o += json.escape(out[o..], un)
+    out[o..o + 15].copy_from("\",\"like_count\":")
+    o += 15
+    o += json.u64_to_dec(out[o..], likes as u64)
+    out[o] = '}'
+    return (o + 1) as i64
+}
+
+// ------------------------------------------------------------ reference SQL (fallback and verification)
+
+fn emit_sql_row(out: []mut u8, o: usize, lim: usize, s: *mut sq.sqlite3_stmt) -> i64 {
+    unsafe {
+        let body = sq.sqlite3_column_text(s, 1)
+        let bl = sq.sqlite3_column_bytes(s, 1)
+        let created = sq.sqlite3_column_text(s, 2)
+        let cl = sq.sqlite3_column_bytes(s, 2)
+        let un = sq.sqlite3_column_text(s, 3)
+        let ul = sq.sqlite3_column_bytes(s, 3)
+        if is_null(body) or is_null(created) or is_null(un) { return -1 }
+        let r = PostRow{ .uid = 0, .body = view(body, @bitCast(u32, bl) as usize), .created = view(created, @bitCast(u32, cl) as usize) }
+        return emit_post(out, o, lim, sq.sqlite3_column_int64(s, 0), &r, view(un, @bitCast(u32, ul) as usize), @truncate(u32, sq.sqlite3_column_int64(s, 4)))
+    }
+}
+
+fn sql_feed(out: []mut u8) -> i64 {
+    read_end()
+    unsafe {
+        let s = st_sql_feed
+        let oe = out.len
+        if oe < 16 { return ERR }
+        out[0..10].copy_from("{\"posts\":[")
+        var o: usize = 10
+        var ok = true
+        var first = true
+        var rc = sq.sqlite3_step(s)
+        while rc == sq.SQLITE_ROW {
+            if !first {
+                out[o] = ','
+                o += 1
+            }
+            first = false
+            let e = emit_sql_row(out, o, oe - 2, s)
+            if e < 0 {
+                ok = false
+                break
+            }
+            o = e as usize
+            rc = sq.sqlite3_step(s)
+        }
+        _ = sq.sqlite3_reset(s)
+        if !ok or rc != sq.SQLITE_DONE { return ERR }
+        out[o] = ']'
+        out[o + 1] = '}'
+        return (o + 2) as i64
+    }
+}
+
+fn sql_post(id: i64, out: []mut u8) -> i64 {
+    read_end()
+    unsafe {
+        let s = st_sql_post
+        _ = sq.sqlite3_bind_int64(s, 1, id)
+        let rc = sq.sqlite3_step(s)
+        var r = NOT_FOUND
+        if rc == sq.SQLITE_ROW {
+            if out.len < 16 {
+                r = ERR
+            } else {
+                out[0..8].copy_from("{\"post\":")
+                let e = emit_sql_row(out, 8, out.len - 1, s)
+                if e >= 0 {
+                    out[e as usize] = '}'
+                    r = e + 1
+                } else {
+                    r = ERR
+                }
+            }
+        } else if rc != sq.SQLITE_DONE {
+            r = ERR
+        }
+        _ = sq.sqlite3_reset(s)
+        return r
+    }
+}
+
+// ------------------------------------------------------------ B-tree reads
+
+fn bt_feed(out: []mut u8) -> i64 {
+    unsafe {
+        if read_begin() != 0 { return ERR }
+        var ids: [20]i64 = undefined
+        var likes: [20]u32 = undefined
+        var n: usize = 0
+        var res: i32 = 0
+        if sq.shim_first(c_created, &mut res) != sq.SQLITE_OK { return FALLBACK }
+        while res == 0 and n < FEED_N {
+            let d = payload(c_created, g_scratch[2][..])
+            var f: [3]records.Fld = undefined
+            let k = records.rec_decode(d, f[..])
+            if k < 2 or !records.serial_int(d, f[(k - 1) as usize], &mut ids[n]) { return FALLBACK }
+            n += 1
+            let rc = sq.shim_next(c_created, 0)
+            if rc == sq.SQLITE_DONE { break }
+            if rc != sq.SQLITE_OK { return FALLBACK }
+        }
+        if n > 0 and count_likes_many(ids[0..n], likes[0..n]) != 0 { return FALLBACK }
+
+        let oe = out.len
+        if oe < 16 { return FALLBACK }
+        out[0..10].copy_from("{\"posts\":[")
+        var o: usize = 10
+        var cur: i64 = 0
+        for i in 0..n {
+            // consecutive ids: step back one cell instead of a fresh search
+            var found = false
+            if i > 0 and ids[i] == cur -% 1 {
+                let rc = sq.shim_previous(c_posts, 0)
+                if rc == sq.SQLITE_OK and sq.shim_integer_key(c_posts) == ids[i] { found = true }
+                else if rc != sq.SQLITE_OK and rc != sq.SQLITE_DONE { return FALLBACK }
+            }
+            if !found {
+                if sq.shim_table_moveto(c_posts, ids[i], 0, &mut res) != sq.SQLITE_OK { return FALLBACK }
+                if res != 0 or sq.shim_eof(c_posts) != 0 { return FALLBACK }     // the index points at a missing row
+            }
+            cur = ids[i]
+            var r = PostRow{ .uid = 0, .body = "", .created = "" }
+            var un: []u8 = ""
+            if read_post_row(&mut r) != 0 or read_username(r.uid, &mut un) != 1 { return FALLBACK }
+            if i > 0 {
+                out[o] = ','
+                o += 1
+            }
+            let e = emit_post(out, o, oe - 2, ids[i], &r, un, likes[i])
+            if e < 0 { return FALLBACK }
+            o = e as usize
+        }
+        out[o] = ']'
+        out[o + 1] = '}'
+        return (o + 2) as i64
+    }
+}
+
+/// The end, NOT_FOUND if the post does not exist, or FALLBACK to ask for
+/// the SQL path.
+fn bt_post(id: i64, out: []mut u8) -> i64 {
+    unsafe {
+        if read_begin() != 0 { return ERR }
+        var res: i32 = 0
+        if sq.shim_table_moveto(c_posts, id, 0, &mut res) != sq.SQLITE_OK { return FALLBACK }
+        if res != 0 or sq.shim_eof(c_posts) != 0 { return NOT_FOUND }
+        var r = PostRow{ .uid = 0, .body = "", .created = "" }
+        var un: []u8 = ""
+        var cnt: u32 = 0
+        if read_post_row(&mut r) != 0 { return FALLBACK }
+        let u = read_username(r.uid, &mut un)
+        if u < 0 { return FALLBACK }
+        if u == 0 { return NOT_FOUND }                      // inner join: no author row, no post
+        if count_likes_one(id, &mut cnt) != 0 { return FALLBACK }
+        if out.len < 16 { return FALLBACK }
+        out[0..8].copy_from("{\"post\":")
+        let e = emit_post(out, 8, out.len - 1, id, &r, un, cnt)
+        if e < 0 { return FALLBACK }
+        out[e as usize] = '}'
+        return e + 1
+    }
+}
+
+fn verify_report(what: []u8, a: []u8, b: []u8) {
+    eprintln("VERIFY MISMATCH {}\n btree: {}\n sql:   {}", .{what, a, b})
+}
+
+/// The feed's JSON at the start of out: the length, or ERR.
+pub fn feed_json(out: []mut u8) -> i64 {
+    let e = bt_feed(out)
+    if e == ERR { return ERR }
+    if e == FALLBACK { return sql_feed(out) }
+    unsafe {
+        if g_verify {
+            let v = sql_feed(g_vbuf[..])
+            if v != ERR and (v != e or g_vbuf[0..v as usize] != out[0..e as usize]) {
+                verify_report("feed", out[0..e as usize], g_vbuf[0..v as usize])
+            }
+        }
+    }
+    return e
+}
+
+/// Post id's JSON at the start of out: the length, NOT_FOUND, or ERR.
+pub fn post_json(id: i64, out: []mut u8) -> i64 {
+    let e = bt_post(id, out)
+    if e == FALLBACK { return sql_post(id, out) }
+    unsafe {
+        if g_verify and e != ERR {
+            let v = sql_post(id, g_vbuf[..])
+            let el: usize = if e >= 0 { e as usize } else { 0 }
+            let vl: usize = if v >= 0 { v as usize } else { 0 }
+            if v != ERR and (el != vl or g_vbuf[0..el] != out[0..el]) {
+                verify_report("post", out[0..el], g_vbuf[0..vl])
+            }
+        }
+    }
+    return e
+}
+
+// ------------------------------------------------------------ health and writes
+
+/// No SQL here either: join the pass's read transaction and read the users
+/// table's first page through a cursor, which fails if the file can't be
+/// read. 0 if ok; else the error message in err (as snprintf would write
+/// it: cut to fit, NUL-terminated) and its length, or -1 when err is empty.
+pub fn health(err: []mut u8) -> i64 {
+    var rc = read_begin()
+    var empty: i32 = 0
+    unsafe {
+        if rc == sq.SQLITE_OK { rc = sq.shim_first(c_users, &mut empty) }
+        if rc == sq.SQLITE_OK { return 0 }
+        if err.len == 0 { return -1 }
+        let msg = cstring(sq.shim_err_str(rc))
+        let n = if msg.len < err.len - 1 { msg.len } else { err.len - 1 }
+        err[0..n].copy_from(msg[0..n])
+        err[n] = 0
+        return n as i64
+    }
+}
+
+fn step_once(s: *mut sq.sqlite3_stmt) -> i32 {
+    unsafe {
+        let rc = sq.sqlite3_step(s)
+        _ = sq.sqlite3_reset(s)
+        return rc
+    }
+}
+
+/// Group commit.
+pub fn write_begin() -> i32 {
+    read_end()
+    unsafe {
+        g_wpoison = false
+        return if step_once(st_begin) == sq.SQLITE_DONE { 0 } else { -1 }
+    }
+}
+
+/// A write that failed halfway left the transaction inconsistent: refuse to
+/// commit it, so the caller rolls the whole batch back.
+pub fn write_commit() -> i32 {
+    unsafe {
+        if g_wpoison { return -1 }
+        return if step_once(st_commit) == sq.SQLITE_DONE { 0 } else { -1 }
+    }
+}
+
+pub fn write_rollback() {
+    unsafe {
+        if sq.sqlite3_get_autocommit(g_db) == 0 { _ = step_once(st_rollback) }
+    }
+}
+
+// ------------------------------------------------------------ writes, straight into the B-tree
+//
+// Writes don't run SQL either. Each one puts the row into its table and an
+// entry into every index on that table, which is all INSERT does for this
+// schema (no triggers; foreign keys are off, as SQLite's default):
+//   posts (id INTEGER PRIMARY KEY = rowid, user_id, body, created_at)
+//     posts_created_at_id_idx  (created_at DESC, id DESC) + rowid
+//     posts_user_id_idx        (user_id) + rowid
+//   likes (rowid; user_id, post_id, created_at)
+//     sqlite_autoindex_likes_1 (user_id, post_id) + rowid, unique on the pair
+//     likes_post_id_idx        (post_id) + rowid
+// Records use SQLite's format, smallest integer encodings included, so the
+// file is what INSERT would have written. A new rowid is the largest plus
+// one, as SQLite assigns it without AUTOINCREMENT, and created_at is the
+// column default, strftime('%Y-%m-%dT%H:%M:%fZ', 'now').
+//
+// Every constraint is checked before anything changes: the body's length in
+// the server (which also requires valid UTF-8 without NUL, where its
+// character count equals SQLite's length() in the CHECK), the post's
+// existence and the (user, post) uniqueness here. So a write can only fail
+// halfway on an I/O or memory error, and then g_wpoison makes the batch's
+// commit fail: everything rolls back and every write in it gets a 500.
+// WRITES=sql switches back to the reference INSERT statements.
+
+fn put_row(c: *mut sq.BtCursor, rowid: i64, rec: []u8) -> i32 {
+    unsafe { return sq.shim_insert(c, null_u8(), rowid, rec.ptr, @truncate(i32, rec.len), sq.SHIM_BTREE_APPEND, 0) }
+}
+
+/// Inserts one index entry, opening and closing a cursor on that index.
+fn put_index(root: u32, ki: *mut sq.KeyInfo, v: []records.WVal) -> i32 {
+    unsafe {
+        var rec: [64]u8 = undefined
+        let rl = records.rec_build(rec[..], v, g_file_format)
+        if rl == 0 { return sq.SQLITE_TOOBIG }
+        sq.shim_cursor_zero(c_widx)
+        var rc = sq.shim_cursor_open(g_bt, root, sq.SHIM_BTREE_WRCSR, ki, c_widx)
+        if rc != sq.SQLITE_OK { return rc }
+        rc = sq.shim_insert(c_widx, rec[..].ptr, rl as i64, null_u8(), 0, 0, 0)
+        _ = sq.shim_cursor_close(c_widx)
+        return rc
+    }
+}
+
+/// Opens a write cursor on a table and finds the next rowid (largest + 1).
+fn open_for_append(root: u32, rowid: *mut i64) -> i32 {
+    unsafe {
+        sq.shim_cursor_zero(c_wposts)
+        var rc = sq.shim_cursor_open(g_bt, root, sq.SHIM_BTREE_WRCSR, null_ki(), c_wposts)
+        if rc != sq.SQLITE_OK { return rc }
+        var empty: i32 = 0
+        rc = sq.shim_last(c_wposts, &mut empty)
+        if rc == sq.SQLITE_OK {
+            let last: i64 = if empty != 0 { 0 } else { sq.shim_integer_key(c_wposts) }
+            if last >= LARGEST_INT64 { rc = sq.SQLITE_FULL }     // SQLite would look for a free random rowid
+            else { rowid.* = last + 1 }
+        }
+        if rc != sq.SQLITE_OK { _ = sq.shim_cursor_close(c_wposts) }
+        return rc
+    }
+}
+
+fn bt_insert_post(uid: i64, body: []u8, id: *mut i64, created: *mut [32]u8, clen: *mut usize) -> i32 {
+    unsafe {
+        if g_wpoison { return -1 }                       // the transaction is already lost
+        var ts: [32]u8 = undefined
+        let tl = records.now_text(&mut ts) as usize
+        // The record doesn't depend on the rowid (id is the rowid, stored as
+        // NULL), so build it first: a body that doesn't fit fails before
+        // anything changes.
+        var row: [4]records.WVal = [records.wnull(), records.wint(uid), records.wtext(body), records.wtext(ts[0..tl])]
+        let rl = records.rec_build(g_wrec[..], row[..], g_file_format)
+        var rowid: i64 = 0
+        if rl == 0 or open_for_append(g_root_posts, &mut rowid) != sq.SQLITE_OK { return -1 }    // nothing changed yet
+        var rc = put_row(c_wposts, rowid, g_wrec[0..rl as usize])
+        _ = sq.shim_cursor_close(c_wposts)
+        if rc == sq.SQLITE_OK {
+            var k1: [3]records.WVal = [records.wtext(ts[0..tl]), records.wint(rowid), records.wint(rowid)]
+            rc = put_index(g_root_created_idx, g_ki_created, k1[..])
+        }
+        if rc == sq.SQLITE_OK {
+            var k2: [2]records.WVal = [records.wint(uid), records.wint(rowid)]
+            rc = put_index(g_root_user_idx, g_ki_user, k2[..])
+        }
+        if rc != sq.SQLITE_OK {
+            g_wpoison = true
+            return -1
+        }
+        id.* = rowid
+        created[0..tl].copy_from(ts[0..tl])
+        clen.* = tl
+        return 0
+    }
+}
+
+/// 1 inserted, 0 the user already liked it, -2 error.
+fn bt_insert_like(uid: i64, pid: i64) -> i32 {
+    unsafe {
+        if g_wpoison { return -2 }                       // the transaction is already lost
+        // uniqueness first: an entry with this (user_id, post_id) prefix
+        sq.shim_cursor_zero(c_widx)
+        if sq.shim_cursor_open(g_bt, g_root_likes_pk, sq.SHIM_BTREE_WRCSR, g_ki_likes_pk, c_widx) != sq.SQLITE_OK { return -2 }
+        up_flags0.* = sq.SHIM_MEM_INT as u16
+        up_int0.* = uid
+        up_flags1.* = sq.SHIM_MEM_INT as u16
+        up_int1.* = pid
+        up_nfield.* = 2
+        up_default_rc.* = 0                              // a matching prefix compares equal
+        up_eq_seen.* = 0
+        up_err_code.* = 0
+        var res: i32 = 0
+        let rc = sq.shim_index_moveto(c_widx, g_ur_pk, &mut res)
+        let exists = rc == sq.SQLITE_OK and res == 0 and sq.shim_eof(c_widx) == 0
+        _ = sq.shim_cursor_close(c_widx)
+        if rc != sq.SQLITE_OK { return -2 }
+        if exists { return 0 }
+
+        var ts: [32]u8 = undefined
+        let tl = records.now_text(&mut ts) as usize
+        var rec: [64]u8 = undefined
+        var row: [3]records.WVal = [records.wint(uid), records.wint(pid), records.wtext(ts[0..tl])]
+        let rl = records.rec_build(rec[..], row[..], g_file_format)
+        var rowid: i64 = 0
+        if rl == 0 or open_for_append(g_root_likes, &mut rowid) != sq.SQLITE_OK { return -2 }   // nothing changed yet
+        var rc2 = put_row(c_wposts, rowid, rec[0..rl as usize])
+        _ = sq.shim_cursor_close(c_wposts)
+        if rc2 == sq.SQLITE_OK {
+            var k1: [3]records.WVal = [records.wint(uid), records.wint(pid), records.wint(rowid)]
+            rc2 = put_index(g_root_likes_pk, g_ki_likes_pk, k1[..])
+        }
+        if rc2 == sq.SQLITE_OK {
+            var k2: [2]records.WVal = [records.wint(pid), records.wint(rowid)]
+            rc2 = put_index(g_root_likes_idx, g_ki_likes, k2[..])
+        }
+        if rc2 != sq.SQLITE_OK {
+            g_wpoison = true
+            return -2
+        }
+        return 1
+    }
+}
+
+/// 0 ok, with the new id and created_at (clen bytes); -1 error.
+pub fn insert_post(uid: i64, body: []u8, id: *mut i64, created: *mut [32]u8, clen: *mut usize) -> i32 {
+    unsafe {
+        if !g_sql_writes {
+            var rid: i64 = 0
+            let r = bt_insert_post(uid, body, &mut rid, created, clen)
+            id.* = rid
+            return r
+        }
+        let s = st_ins_post
+        _ = sq.sqlite3_bind_int64(s, 1, uid)
+        _ = sq.shim_bind_text_static(s, 2, body.ptr, @truncate(i32, body.len))
+        var rc = sq.sqlite3_step(s)
+        var ret: i32 = -1
+        if rc == sq.SQLITE_ROW {
+            id.* = sq.sqlite3_column_int64(s, 0)
+            let c = sq.sqlite3_column_text(s, 1)
+            let cl = sq.sqlite3_column_bytes(s, 1)
+            if !is_null(c) and cl > 0 and cl < 32 {
+                created[0..cl as usize].copy_from(view(c, cl as usize))
+                clen.* = cl as usize
+                rc = sq.sqlite3_step(s)
+                if rc == sq.SQLITE_DONE { ret = 0 }
+            }
+        }
+        _ = sq.sqlite3_reset(s)
+        _ = sq.sqlite3_clear_bindings(s)
+        return ret
+    }
+}
+
+/// Inside the write transaction: does post pid exist? A raw cursor sees
+/// rows this same transaction inserted. 1 yes, 0 no, -1 error.
+fn post_exists_bt(pid: i64) -> i32 {
+    unsafe {
+        sq.shim_cursor_zero(c_wposts)
+        if sq.shim_cursor_open(g_bt, g_root_posts, 0, null_ki(), c_wposts) != sq.SQLITE_OK { return -1 }
+        var res: i32 = 0
+        let rc = sq.shim_table_moveto(c_wposts, pid, 0, &mut res)
+        let found = rc == sq.SQLITE_OK and res == 0 and sq.shim_eof(c_wposts) == 0
+        _ = sq.shim_cursor_close(c_wposts)
+        if rc != sq.SQLITE_OK { return -1 }
+        return if found { 1 } else { 0 }
+    }
+}
+
+/// 1 new like, 0 already liked, -1 no such post, -2 error.
+pub fn insert_like(uid: i64, pid: i64) -> i32 {
+    unsafe {
+        var ex = post_exists_bt(pid)
+        if ex < 0 {                                      // fall back to SQL
+            _ = sq.sqlite3_bind_int64(st_post_exists, 1, pid)
+            let r = step_once(st_post_exists)
+            ex = if r == sq.SQLITE_ROW { 1 } else if r == sq.SQLITE_DONE { 0 } else { -1 }
+        }
+        if ex == 0 { return -1 }
+        if ex < 0 { return -2 }
+        if !g_sql_writes { return bt_insert_like(uid, pid) }
+        let s = st_ins_like
+        _ = sq.sqlite3_bind_int64(s, 1, uid)
+        _ = sq.sqlite3_bind_int64(s, 2, pid)
+        let rc = step_once(s)
+        if rc != sq.SQLITE_DONE { return -2 }
+        return if sq.sqlite3_changes(g_db) > 0 { 1 } else { 0 }
+    }
+}

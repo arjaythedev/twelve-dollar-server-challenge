@@ -1,0 +1,247 @@
+// jwt.nx: HS256 JWT verification, the C server's jwt.h: base64url, the
+// header and payload read with json.nx's strict reader, HMAC-SHA256 with
+// precomputed key pads (sha256.nx), then exp, sub and username.
+//
+// Every token is fully verified on every request (signature, alg, exp); only
+// the HMAC key schedule, which depends on JWT_SECRET alone, is computed once
+// (sha256.hmac_key).
+//
+// Where jwt.h has pointers this has indices into the token or into the
+// decoded segment, and null where it has NULL. Its two json_object_each
+// callbacks are header_alg and payload_spans; verify uses them in the same
+// order as jwt_verify, with the same checks in the same order.
+
+import sha256
+import json
+
+const cstr = @cImport("string.h")
+
+pub const JWT_OK: i32 = 0
+pub const JWT_INVALID: i32 = 1
+pub const JWT_BAD_PAYLOAD: i32 = 2
+pub const MAX_USERNAME: usize = 1024
+
+pub struct Claims {
+    uid: i64
+    uname_len: usize
+    uname: [MAX_USERNAME]u8
+}
+
+// ------------------------------------------------------------ base64url
+
+const B64: [256]i8 = comptime b64_table()
+
+fn b64_table() -> [256]i8 {
+    var t: [256]i8 = undefined
+    for i in 0..256 { t[i] = -1 }
+    let a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    for i in 0..64 { t[a[i] as usize] = i as i8 }
+    return t
+}
+
+/// base64url without padding, s into out: the decoded length, or -1. As
+/// jwt.h, the unused low bits of a final partial group are ignored, and out
+/// may hold a partial decoding after a failure.
+pub fn b64url_decode(s: []u8, out: []mut u8) -> i64 !allocates !blocks {
+    let n = s.len
+    if n % 4 == 1 { return -1 }
+    var o: usize = 0
+    var i: usize = 0
+    while i + 4 <= n {
+        let a = B64[s[i] as usize] as i32
+        let b = B64[s[i + 1] as usize] as i32
+        let c = B64[s[i + 2] as usize] as i32
+        let d = B64[s[i + 3] as usize] as i32
+        if (a | b | c | d) < 0 { return -1 }
+        let v = @bitCast(u32, (a << 18) | (b << 12) | (c << 6) | d)
+        out[o] = @truncate(u8, v >> 16)
+        out[o + 1] = @truncate(u8, v >> 8)
+        out[o + 2] = @truncate(u8, v)
+        o += 3
+        i += 4
+    }
+    let rem = n - i
+    if rem >= 2 {
+        let a = B64[s[i] as usize] as i32
+        let b = B64[s[i + 1] as usize] as i32
+        let c = if rem == 3 { B64[s[i + 2] as usize] as i32 } else { 0 }
+        if (a | b | c) < 0 { return -1 }
+        let v = @bitCast(u32, (a << 18) | (b << 12) | (c << 6))
+        out[o] = @truncate(u8, v >> 16)
+        o += 1
+        if rem == 3 {
+            out[o] = @truncate(u8, v >> 8)
+            o += 1
+        }
+    }
+    return o as i64
+}
+
+// ------------------------------------------------------------ the segments
+
+/// json_object_each over the decoded header with jwt_hdr_cb: the walk's
+/// result (0 when h is one JSON object), and in alg_ok whether its last
+/// "alg" member is the string "HS256".
+pub fn header_alg(h: []u8, alg_ok: *mut bool) -> i32 !allocates !blocks {
+    alg_ok.* = false
+    var m = json.members(h)
+    while m.next() {
+        if m.key_is("alg") {
+            var buf: [16]u8 = undefined
+            var n: usize = 0
+            alg_ok.* = m.ve - m.v <= 16 and json.string_decode(h, m.v, m.ve, buf[..], &mut n) != null and n == 5 and buf[0..5] == "HS256"
+        }
+    }
+    return m.status
+}
+
+/// jwt_pl_ctx: the raw value spans of the payload's last "sub", "username"
+/// and "exp" members.
+pub struct PayloadSpans {
+    has_sub: bool
+    sub: usize
+    sube: usize
+    has_name: bool
+    name: usize
+    namee: usize
+    has_exp: bool
+    exp: usize
+    expe: usize
+}
+
+/// json_object_each over the decoded payload with jwt_pl_cb: the walk's
+/// result (0 when p is one JSON object), and the spans in x.
+pub fn payload_spans(p: []u8, x: *mut PayloadSpans) -> i32 !allocates !blocks {
+    x.* = PayloadSpans{ .has_sub = false, .sub = 0, .sube = 0, .has_name = false, .name = 0, .namee = 0,
+                        .has_exp = false, .exp = 0, .expe = 0 }
+    var m = json.members(p)
+    while m.next() {
+        if m.key_is("sub") {
+            x.has_sub = true
+            x.sub = m.v
+            x.sube = m.ve
+        } else if m.key_is("username") {
+            x.has_name = true
+            x.name = m.v
+            x.namee = m.ve
+        } else if m.key_is("exp") {
+            x.has_exp = true
+            x.exp = m.v
+            x.expe = m.ve
+        }
+    }
+    return m.status
+}
+
+// ------------------------------------------------------------ the token
+
+/// memchr(p + from, b, to - from), as an index into p.
+fn index_of(p: []u8, from: usize, to: usize, b: u8) -> ?usize {
+    unsafe {
+        let base = p.ptr as usize
+        let r = cstr.memchr((base + from) as *u8, b as i32, to - from) as usize
+        if r == 0 { return null }
+        return r - base
+    }
+}
+
+/// Verifies tok at time `now` (unix seconds): JWT_OK with the claims in out,
+/// or JWT_INVALID (shape, signature, alg or exp) or JWT_BAD_PAYLOAD (sub or
+/// username). As jwt_verify, out is only written as far as it gets: the
+/// username bytes from the username check on, uname_len and uid on success.
+pub fn verify(key: *sha256.HmacKey, tok: []u8, now: i64, out: *mut Claims) -> i32 {
+    let n = tok.len
+    let d1 = index_of(tok, 0, n, '.') orelse return JWT_INVALID
+    let d2 = index_of(tok, d1 + 1, n, '.') orelse return JWT_INVALID
+    if index_of(tok, d2 + 1, n, '.') != null { return JWT_INVALID }
+    let hl = d1
+    let pl = d2 - d1 - 1
+    let sl = n - d2 - 1
+    if hl == 0 or pl == 0 or sl != 43 or hl > 512 or pl > 4096 { return JWT_INVALID }
+
+    var sig: [33]u8 = undefined
+    var mac: [32]u8 = undefined
+    if b64url_decode(tok[d2 + 1..n], sig[..]) != 32 { return JWT_INVALID }
+
+    // at most 512 base64 bytes decode to 384
+    var hdr: [384]u8 = undefined
+    let hn = b64url_decode(tok[0..hl], hdr[..])
+    if hn <= 0 { return JWT_INVALID }
+    var alg_ok = false
+    if header_alg(hdr[0..hn as usize], &mut alg_ok) != 0 or !alg_ok { return JWT_INVALID }
+
+    sha256.hmac(key, tok[0..d2], &mut mac)
+    var diff: u8 = 0
+    for i in 0..32 { diff = diff | (mac[i] ^ sig[i]) }
+    if diff != 0 { return JWT_INVALID }
+
+    // at most 4096 base64 bytes decode to 3072
+    var pld: [3072]u8 = undefined
+    let pn = b64url_decode(tok[d1 + 1..d2], pld[..])
+    if pn <= 0 { return JWT_INVALID }
+    let ps = pld[0..pn as usize]
+    var pc: PayloadSpans = undefined
+    if payload_spans(ps, &mut pc) != 0 { return JWT_INVALID }
+
+    // exp: required, a JSON number, strictly in the future. jwt.h checks the
+    // span twice (once that it is a number, once that the number fills it)
+    // and reads it with strtod from a 64-byte NUL-terminated copy.
+    // parse_float is that same strtod call on that same kind of copy in nx
+    // 1.5.0's runtime; strtod cannot be called directly, because nx 1.5.0
+    // passes a uint8_t ** for its char ** end pointer, which gcc rejects.
+    // The span is a whole JSON number, so
+    // strtod reads all of it and the `catch` cannot be taken.
+    if !pc.has_exp { return JWT_INVALID }
+    _ = json.number(ps, pc.exp, pc.expe) orelse return JWT_INVALID
+    let ne = json.number(ps, pc.exp, pc.expe) orelse return JWT_INVALID
+    if ne != pc.expe { return JWT_INVALID }
+    if pc.expe - pc.exp >= 64 { return JWT_INVALID }
+    let expv = ps[pc.exp..pc.expe].parse_float() catch return JWT_INVALID
+    if !(expv > (now as f64)) { return JWT_INVALID }
+
+    // sub: a string holding a positive integer
+    if !pc.has_sub or ps[pc.sub] != '"' { return JWT_BAD_PAYLOAD }
+    var subbuf: [32]u8 = undefined
+    var subl: usize = 0
+    if pc.sube - pc.sub > 32 { return JWT_BAD_PAYLOAD }
+    _ = json.string_decode(ps, pc.sub, pc.sube, subbuf[..], &mut subl) orelse return JWT_BAD_PAYLOAD
+    if subl == 0 or subl > 18 { return JWT_BAD_PAYLOAD }
+    var uid: i64 = 0
+    for i in 0..subl {
+        let ch = subbuf[i]
+        if ch < '0' or ch > '9' { return JWT_BAD_PAYLOAD }
+        uid = uid * 10 + (ch - '0') as i64
+    }
+    if uid <= 0 { return JWT_BAD_PAYLOAD }
+
+    // username: a string, used as-is (decoded straight into out, as jwt.h)
+    if !pc.has_name or ps[pc.name] != '"' { return JWT_BAD_PAYLOAD }
+    if pc.namee - pc.name > MAX_USERNAME { return JWT_BAD_PAYLOAD }
+    _ = json.string_decode(ps, pc.name, pc.namee, out.uname[..], &mut out.uname_len) orelse return JWT_BAD_PAYLOAD
+    out.uid = uid
+    return JWT_OK
+}
+
+test "base64url" {
+    var out: [16]u8 = undefined
+    expect(b64url_decode("aGVsbG8", out[..]) == 5 and out[0..5] == "hello")
+    expect(b64url_decode("aGVsbG8=", out[..]) == -1)
+    expect(b64url_decode("a", out[..]) == -1)
+    expect(b64url_decode("", out[..]) == 0)
+    expect(b64url_decode("-_-_", out[..]) == 3 and out[0] == 0xfb and out[1] == 0xff and out[2] == 0xbf)
+}
+
+test "a token signed with the secret verifies, a tampered one does not" {
+    // header {"alg":"HS256","typ":"JWT"}, payload {"sub":"42","username":"ann","exp":2000000000},
+    // signed with "twelve-dollar-challenge"
+    let k = sha256.hmac_key("twelve-dollar-challenge")
+    let t = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsInVzZXJuYW1lIjoiYW5uIiwiZXhwIjoyMDAwMDAwMDAwfQ.pBXXIphbZUt-7i3CMeWvMlFZAT57wNnAmVWSrYEeF3c"
+    var cl: Claims = undefined
+    let r = verify(&k, t, 1763100000, &mut cl)
+    expect(r == JWT_OK and cl.uid == 42 and cl.uname[0..cl.uname_len] == "ann")
+    expect(verify(&k, t, 2000000000, &mut cl) == JWT_INVALID)
+    expect(verify(&k, t[0..t.len - 1], 1763100000, &mut cl) == JWT_INVALID)
+    var h = false
+    expect(header_alg("{\"alg\":\"HS256\",\"alg\":\"none\"}", &mut h) == 0 and !h)
+    expect(header_alg("{\"alg\":\"none\",\"alg\":\"HS256\"}", &mut h) == 0 and h)
+}

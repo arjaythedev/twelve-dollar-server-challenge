@@ -1,0 +1,664 @@
+// uring.nx: io_uring through raw syscalls, as server.c drives it: ring
+// setup with its fallbacks, entering the kernel, the submission helpers,
+// user_data packing, and the pool of provided receive buffers.
+//
+// io_uring_setup, io_uring_enter and io_uring_register go through libc's
+// variadic syscall(); the rings are mmap'ed and read and written through
+// raw pointers. Nothing here comes from liburing.
+//
+// Ordering. Every ring is SINGLE_ISSUER | DEFER_TASKRUN without SQPOLL, so
+// the kernel reads the SQ tail, the CQ head and the buffer ring's tail, and
+// writes the SQ head and the CQ tail, only while this thread is inside
+// io_uring_enter: task work, and with it every completion and every buffer
+// pick, runs there. Plain loads and stores are enough for those indices:
+// syscall() is opaque to the C compiler, which must finish every store to
+// memory the kernel can reach before the call and reload after it. Two
+// words are different, because the kernel touches them from other contexts
+// too: it sets bits in sq_flags with atomic ops (IORING_SQ_TASKRUN, when
+// task work is queued from whatever CPU completed the I/O), and it reads
+// cq_flags (IORING_CQ_EVENTFD_DISABLED) there. Only this thread writes
+// cq_flags, so plain stores do for it. Clearing a bit of sq_flags must be
+// an atomic read-modify-write, and idle_wait needs a full fence; Nexium's
+// atomics are i64 only, so those two are the C11 atomics in ring_atomic.h.
+// Every read of sq_flags is in a pass that also makes a syscall, so the
+// compiler cannot keep an old value of it in a register.
+
+const kio = @cImport("linux/io_uring.h")
+const sysno = @cImport("sys/syscall.h")
+const unistd = @cImport("unistd.h")
+const mman = @cImport("sys/mman.h")
+const errno_h = @cImport("errno.h")
+const cstr = @cImport("string.h")
+const stdio = @cImport("stdio.h")
+const stdlib = @cImport("stdlib.h")
+const sock = @cImport("sys/socket.h")
+const atom = @cImport("ring_atomic.h")
+
+pub const SQ_ENTRIES: u32 = 4096
+pub const CQ_ENTRIES: u32 = 65536
+pub const NBUF: u32 = 2048          // provided recv buffers per ring, at most (power of two)
+pub const NBUF_INIT: u32 = 256      // ...to start with: the pool doubles whenever a receive finds it empty
+pub const BUFSZ: usize = 2048
+
+comptime test "buffer ids and counts travel in 16-bit user_data fields" {
+    expect(NBUF <= 0xffff)
+}
+
+// The bounds of the array views over the mapped rings (the largest sizes
+// they are mapped with).
+const SQ_MAX: usize = 4096
+const CQ_MAX: usize = 65536
+const NBUF_MAX: usize = 2048
+
+// Flags the header spells as expressions (`(1U << 12)`): @cImport takes
+// only literal macros and enums, so these are written out. A test compares
+// every one with linux/io_uring.h.
+pub const SETUP_CQSIZE: u32 = 1 << 3
+pub const SETUP_SUBMIT_ALL: u32 = 1 << 7
+pub const SETUP_TASKRUN_FLAG: u32 = 1 << 9
+pub const SETUP_SINGLE_ISSUER: u32 = 1 << 12
+pub const SETUP_DEFER_TASKRUN: u32 = 1 << 13
+pub const SETUP_NO_SQARRAY: u32 = 1 << 16
+pub const FEAT_SINGLE_MMAP: u32 = 1 << 0
+pub const ENTER_GETEVENTS: u32 = 1 << 0
+pub const ENTER_EXT_ARG: u32 = 1 << 3
+pub const ENTER_REGISTERED_RING: u32 = 1 << 4
+pub const SQ_CQ_OVERFLOW: u32 = 1 << 1
+pub const SQ_TASKRUN: u32 = 1 << 2
+pub const CQ_EVENTFD_DISABLED: u32 = 1 << 0
+pub const SQE_FIXED_FILE: u8 = 1 << 0
+pub const SQE_BUFFER_SELECT: u8 = 1 << 5
+pub const SQE_CQE_SKIP_SUCCESS: u8 = 1 << 6
+pub const ACCEPT_MULTISHOT: u16 = 1 << 0
+pub const RECV_MULTISHOT: u16 = 1 << 1
+pub const FILE_INDEX_ALLOC: u32 = 0xffffffff
+pub const CQE_F_BUFFER: u32 = 1 << 0
+pub const CQE_F_MORE: u32 = 1 << 1
+pub const CQE_BUFFER_SHIFT: u32 = 16
+pub const RSRC_REGISTER_SPARSE: u32 = 1 << 0
+pub const PBUF_RING_MMAP: u16 = kio.IOU_PBUF_RING_MMAP as u16
+pub const OFF_SQ_RING: u64 = kio.IORING_OFF_SQ_RING as u64
+pub const OFF_SQES: u64 = kio.IORING_OFF_SQES as u64
+pub const OFF_PBUF_RING: u64 = kio.IORING_OFF_PBUF_RING as u64
+pub const OFF_PBUF_SHIFT: u64 = kio.IORING_OFF_PBUF_SHIFT as u64
+
+// Opcodes and register operations are enums in the header, which @cImport takes.
+pub const IORING_OP_ACCEPT: u8 = kio.IORING_OP_ACCEPT as u8
+pub const IORING_OP_RECV: u8 = kio.IORING_OP_RECV as u8
+pub const IORING_OP_SEND: u8 = kio.IORING_OP_SEND as u8
+pub const IORING_OP_CLOSE: u8 = kio.IORING_OP_CLOSE as u8
+pub const IORING_OP_SHUTDOWN: u8 = kio.IORING_OP_SHUTDOWN as u8
+pub const IORING_OP_PROVIDE_BUFFERS: u8 = kio.IORING_OP_PROVIDE_BUFFERS as u8
+const REGISTER_RING_FDS: u32 = kio.IORING_REGISTER_RING_FDS as u32
+const REGISTER_FILES2: u32 = kio.IORING_REGISTER_FILES2 as u32
+const REGISTER_PBUF_RING: u32 = kio.IORING_REGISTER_PBUF_RING as u32
+const REGISTER_EVENTFD: u32 = kio.IORING_REGISTER_EVENTFD as u32
+const UNREGISTER_EVENTFD: u32 = kio.IORING_UNREGISTER_EVENTFD as u32
+
+// What each completion is, in the top byte of its user_data (server.c's
+// OP_* enum; not the kernel's opcodes).
+pub const OP_ACCEPT: u32 = 1
+pub const OP_RECV: u32 = 2
+pub const OP_SEND: u32 = 3
+pub const OP_CLOSE: u32 = 4
+pub const OP_SHUT: u32 = 5
+pub const OP_PROVIDE: u32 = 6
+
+const MAP_FAILED: usize = 0xffffffffffffffff
+
+/// struct io_uring_sqe (64 bytes), each union as the member this server uses.
+/// The header's struct has anonymous unions, so @cImport makes it opaque.
+pub struct Sqe layout(c) {
+    opcode: u8
+    flags: u8
+    ioprio: u16
+    fd: i32
+    off: u64            // off / addr2 / cmd_op
+    addr: u64           // addr / splice_off_in
+    len: u32
+    op_flags: u32       // msg_flags, accept_flags, rw_flags ...
+    user_data: u64
+    buf_group: u16      // buf_index / buf_group
+    personality: u16
+    file_index: u32     // file_index / splice_fd_in
+    addr3: u64
+    pad2: u64
+}
+
+/// struct io_uring_cqe (16 bytes; the header's flexible array makes it opaque).
+pub struct Cqe layout(c) {
+    user_data: u64
+    res: i32
+    flags: u32
+}
+
+/// struct io_uring_buf: one entry of the provided-buffer ring. The ring's
+/// tail (a u16) overlays the first entry's `resv`, at byte 14, so an entry
+/// is only ever written field by field, never as a whole.
+pub struct Buf layout(c) {
+    addr: u64
+    len: u32
+    bid: u16
+    resv: u16
+}
+
+/// struct io_uring_buf_reg as 6.8 kernels have it: resv[0] is the field
+/// Ubuntu's 6.8.0-136..147 (LP #2162843) wants nonzero.
+pub struct BufReg layout(c) {
+    ring_addr: u64
+    ring_entries: u32
+    bgid: u16
+    flags: u16
+    resv: [3]u64
+}
+
+/// struct __kernel_timespec
+pub struct KernelTimespec layout(c) {
+    tv_sec: i64
+    tv_nsec: i64
+}
+
+/// struct io_uring_getevents_arg (the field after sigmask_sz is `pad` in
+/// 6.8 and `min_wait_usec` in newer headers; this server leaves it 0).
+pub struct GetEventsArg layout(c) {
+    sigmask: u64
+    sigmask_sz: u32
+    pad: u32
+    ts: u64
+}
+
+/// One io_uring: its queues and its receive buffers (the kernel-facing half
+/// of server.c's struct ring; net.Ring adds the listener and the
+/// connections).
+pub struct Uring {
+    fd: i32
+    reg: i32                      // the ring fd's registered index
+    // SQ
+    sq_head: *mut u32
+    sq_tail: *mut u32
+    sq_flags: *mut u32
+    sq_mask: u32
+    sqes: *mut [SQ_MAX]Sqe
+    sqe_tail: u32
+    submitted: u32
+    // CQ
+    cq_head: *mut u32
+    cq_tail: *mut u32
+    cq_flags: *mut u32
+    cq_mask: u32
+    cqes: *mut [CQ_MAX]Cqe
+    // provided buffers: a registered buffer ring (br), or, on kernels that
+    // refuse to register one, legacy PROVIDE_BUFFERS with freed ids batched
+    br: usize                     // the buffer ring's address, 0 in legacy mode
+    br_bufs: *mut [NBUF_MAX]Buf   // its entries (the same address)
+    br_tail_p: *mut u16           // its tail, over br_bufs[0].resv
+    bufbase: usize
+    br_tail: u32
+    legacy_bufs: bool
+    freed: *mut [NBUF_MAX]u16
+    nfreed: u32
+    nbuf_live: u32                // buffers handed to the kernel so far (ids 0..nbuf_live-1)
+    bufs_short: bool              // a receive hit ENOBUFS this drain: grow the pool
+}
+
+pub fn errno() -> i32 {
+    unsafe { return errno_h.__errno_location().* }
+}
+
+fn nullp() -> *mut u8 {
+    unsafe { return (0 as usize) as *mut u8 }
+}
+
+/// perror(what), then exit(1), as server.c's setup errors do.
+pub fn die(what: *u8) -> never {
+    unsafe { stdio.perror(what) }
+    os.exit(1)
+}
+
+/// abort(), as server.c does where it cannot go on (out of memory, a
+/// failed io_uring_enter).
+pub fn crash() -> never {
+    unsafe { stdlib.abort() }
+    os.exit(134)
+}
+
+/// Anonymous memory, zeroed by the kernel (server.c's xmap).
+pub fn xmap(n: usize) -> usize {
+    unsafe {
+        let p = mman.mmap(nullp(), n, mman.PROT_READ | mman.PROT_WRITE, mman.MAP_PRIVATE | mman.MAP_ANONYMOUS, -1, 0) as usize
+        if p == MAP_FAILED { die(@cstr("mmap")) }
+        return p
+    }
+}
+
+fn sys_setup(n: u32, p: *mut kio.io_uring_params) -> i32 {
+    unsafe { return unistd.syscall(sysno.SYS_io_uring_setup as i64, n as i64, p) as i32 }
+}
+
+fn sys_enter(fd: i32, sub: u32, minc: u32, flags: u32, arg: usize, sz: usize) -> i32 {
+    unsafe {
+        return unistd.syscall(sysno.SYS_io_uring_enter as i64, fd as i64, sub as i64, minc as i64, flags as i64, arg as i64, sz as i64) as i32
+    }
+}
+
+fn sys_register(fd: i32, op: u32, arg: usize, n: u32) -> i32 {
+    unsafe { return unistd.syscall(sysno.SYS_io_uring_register as i64, fd as i64, op as i64, arg as i64, n as i64) as i32 }
+}
+
+// ---------------------------------------------------------------- entering
+
+fn enter_with(u: *mut Uring, minc: u32, flags: u32, argp: usize, argsz: usize) -> i32 {
+    u.sq_tail.* = u.sqe_tail
+    let pending = u.sqe_tail -% u.submitted
+    let ret = sys_enter(u.reg, pending, minc, flags, argp, argsz)
+    if ret < 0 {
+        let e = errno()
+        if e != errno_h.ETIME and e != errno_h.EINTR and e != errno_h.EAGAIN and e != errno_h.EBUSY {
+            unsafe { stdio.perror(@cstr("io_uring_enter")) }
+            crash()
+        }
+        return 0
+    }
+    u.submitted +%= ret as u32
+    return ret
+}
+
+/// Publishes the SQ tail, submits what is queued and, with minc > 0, waits
+/// for that many completions (running the deferred task work). Returns the
+/// SQEs the kernel took.
+pub fn enter(u: *mut Uring, minc: u32) -> i32 {
+    return enter_with(u, minc, ENTER_GETEVENTS | ENTER_REGISTERED_RING, 0, 0)
+}
+
+/// enter, waiting at most ts.
+pub fn enter_timeout(u: *mut Uring, minc: u32, ts: *mut KernelTimespec) -> i32 {
+    var arg = GetEventsArg{ .sigmask = 0, .sigmask_sz = 0, .pad = 0, .ts = 0 }
+    unsafe {
+        arg.ts = (ts as usize) as u64
+        let argp = (&mut arg) as usize
+        return enter_with(u, minc, ENTER_GETEVENTS | ENTER_REGISTERED_RING | ENTER_EXT_ARG, argp, @sizeOf(GetEventsArg))
+    }
+}
+
+/// The next free SQE, zeroed. Submits first when the SQ is full.
+pub fn get_sqe(u: *mut Uring) -> *mut Sqe {
+    if u.sqe_tail -% u.sq_head.* > u.sq_mask {       // full: submit
+        _ = enter(u, 0)
+        while u.sqe_tail -% u.sq_head.* > u.sq_mask { _ = enter(u, 0) }
+    }
+    let s = &mut u.sqes[(u.sqe_tail & u.sq_mask) as usize]
+    unsafe { _ = cstr.memset(s as *mut u8, 0, @sizeOf(Sqe)) }
+    u.sqe_tail +%= 1
+    return s
+}
+
+/// Whether completions are waiting in the CQ.
+pub fn cq_ready(u: *Uring) -> bool {
+    return u.cq_head.* != u.cq_tail.*
+}
+
+/// The SQ flags word as the kernel last left it.
+pub fn sq_flags(u: *Uring) -> u32 {
+    return u.sq_flags.*
+}
+
+/// Clears IORING_SQ_TASKRUN (see the main loop for why).
+pub fn clear_taskrun(u: *mut Uring) {
+    unsafe { atom.ring_fetch_and(u.sq_flags, ~SQ_TASKRUN) }
+}
+
+/// A full memory barrier.
+pub fn fence() {
+    unsafe { atom.ring_fence() }
+}
+
+// ---------------------------------------------------------------- user_data
+
+/// op << 56 | chunk << 40 | gen << 16 | slot
+pub fn ud(op: u32, chunk: u32, gen: u32, slot: u32) -> u64 {
+    return ((op as u64) << 56) | ((chunk as u64) << 40) | ((gen as u64) << 16) | (slot as u64)
+}
+
+pub fn ud_op(u: u64) -> u32 { return @truncate(u32, u >> 56) }
+pub fn ud_chunk(u: u64) -> u32 { return @truncate(u32, u >> 40) & 0xffff }
+pub fn ud_gen(u: u64) -> u32 { return @truncate(u32, u >> 16) & 0xffff }
+pub fn ud_slot(u: u64) -> u32 { return @truncate(u32, u) & 0xffff }
+
+// ---------------------------------------------------------------- submissions
+
+/// A multishot accept into the direct-descriptor table.
+pub fn prep_accept(u: *mut Uring, lfd: i32) {
+    let s = get_sqe(u)
+    s.opcode = IORING_OP_ACCEPT
+    s.fd = lfd
+    s.ioprio = ACCEPT_MULTISHOT
+    s.file_index = FILE_INDEX_ALLOC
+    s.user_data = ud(OP_ACCEPT, 0, 0, 0)
+}
+
+/// A multishot receive on direct descriptor `slot`, from buffer group 0.
+pub fn prep_recv(u: *mut Uring, slot: u32, gen: u16) {
+    let s = get_sqe(u)
+    s.opcode = IORING_OP_RECV
+    s.fd = slot as i32
+    s.flags = SQE_FIXED_FILE | SQE_BUFFER_SELECT
+    s.ioprio = RECV_MULTISHOT
+    s.buf_group = 0
+    s.user_data = ud(OP_RECV, 0, gen as u32, slot)
+}
+
+/// A SEND of p[0..n), which lies in arena chunk `chunk`.
+pub fn prep_send(u: *mut Uring, slot: u32, p: usize, n: u32, chunk: u32, gen: u16) {
+    let s = get_sqe(u)
+    s.opcode = IORING_OP_SEND
+    s.fd = slot as i32
+    s.flags = SQE_FIXED_FILE
+    s.addr = p as u64
+    s.len = n
+    s.op_flags = (sock.MSG_NOSIGNAL | sock.MSG_WAITALL) as u32
+    s.user_data = ud(OP_SEND, chunk, gen as u32, slot)
+}
+
+pub fn prep_shutdown(u: *mut Uring, slot: u32, gen: u16) {
+    let s = get_sqe(u)
+    s.opcode = IORING_OP_SHUTDOWN
+    s.fd = slot as i32
+    s.flags = SQE_FIXED_FILE
+    s.len = sock.SHUT_RDWR as u32
+    s.user_data = ud(OP_SHUT, 0, gen as u32, slot)
+}
+
+pub fn prep_close(u: *mut Uring, slot: u32, gen: u16) {
+    let s = get_sqe(u)
+    s.opcode = IORING_OP_CLOSE
+    s.file_index = slot + 1
+    s.user_data = ud(OP_CLOSE, 0, gen as u32, slot)
+}
+
+/// Legacy mode: hands buffers bid..bid+count-1 to the kernel. Only a failure
+/// completes (IOSQE_CQE_SKIP_SUCCESS), and its user_data carries the range
+/// for a retry.
+pub fn provide_buffers(u: *mut Uring, bid: u32, count: u32) {
+    let s = get_sqe(u)
+    s.opcode = IORING_OP_PROVIDE_BUFFERS
+    s.fd = count as i32
+    s.addr = (u.bufbase + (bid as usize) * BUFSZ) as u64
+    s.len = BUFSZ as u32
+    s.off = bid as u64
+    s.buf_group = 0
+    s.flags = SQE_CQE_SKIP_SUCCESS
+    s.user_data = ud(OP_PROVIDE, count, 0, bid)
+}
+
+// ---------------------------------------------------------------- setup
+
+/// Creates ring `idx`'s queues, maps them and registers the ring fd.
+///
+/// Kernels before 6.10 allocate each ring as one physically contiguous block
+/// (__get_free_pages): a 65,536-entry CQ is 1 MB, and on a machine whose
+/// memory is fragmented that fails with ENOMEM with plenty free. So halve
+/// the queues until the kernel can place them. The loop drains the CQ every
+/// pass, and the kernel keeps a burst beyond it on its overflow list
+/// (IORING_FEAT_NODROP; the loop flushes it when IORING_SQ_CQ_OVERFLOW
+/// shows), so smaller queues cost extra enters, not lost completions.
+pub fn setup_queues(u: *mut Uring, idx: i32) {
+    var p: kio.io_uring_params = undefined
+    var sq = SQ_ENTRIES
+    var cq = CQ_ENTRIES
+    var fd: i32 = -1
+    unsafe {
+        while true {
+            var noarray: i32 = 1
+            while noarray >= 0 {
+                _ = cstr.memset((&mut p) as *mut u8, 0, @sizeOf(kio.io_uring_params))
+                p.flags = SETUP_CQSIZE | SETUP_SINGLE_ISSUER | SETUP_DEFER_TASKRUN | SETUP_TASKRUN_FLAG | SETUP_SUBMIT_ALL
+                if noarray != 0 { p.flags = p.flags | SETUP_NO_SQARRAY }
+                p.cq_entries = cq
+                fd = sys_setup(sq, &mut p)
+                if fd >= 0 or errno() != errno_h.EINVAL { break }    // EINVAL: kernels before 6.6 have no NO_SQARRAY
+                noarray -= 1
+            }
+            if fd >= 0 or errno() != errno_h.ENOMEM or cq <= 1024 { break }
+            cq = cq / 2
+            if sq > cq / 16 { sq = cq / 16 }
+        }
+        if fd < 0 { die(@cstr("io_uring_setup")) }
+        if cq != CQ_ENTRIES {
+            _ = stdio.dprintf(2, @cstr("ring %d: the kernel couldn't allocate full-size queues, using %u SQ / %u CQ entries\n"), idx, p.sq_entries, p.cq_entries)
+        }
+        if (p.features & FEAT_SINGLE_MMAP) == 0 {
+            _ = stdio.dprintf(2, @cstr("kernel too old\n"))
+            os.exit(1)
+        }
+        u.fd = fd
+        let sqsz = (p.sq_off.array as usize) + (p.sq_entries as usize) * 4
+        let cqsz = (p.cq_off.cqes as usize) + (p.cq_entries as usize) * @sizeOf(Cqe)
+        let sz = if sqsz > cqsz { sqsz } else { cqsz }
+        let ring = mman.mmap(nullp(), sz, mman.PROT_READ | mman.PROT_WRITE, mman.MAP_SHARED | mman.MAP_POPULATE, fd, OFF_SQ_RING as i64) as usize
+        if ring == MAP_FAILED { die(@cstr("mmap ring")) }
+        u.sq_head = (ring + (p.sq_off.head as usize)) as *mut u32
+        u.sq_tail = (ring + (p.sq_off.tail as usize)) as *mut u32
+        u.sq_flags = (ring + (p.sq_off.flags as usize)) as *mut u32
+        u.sq_mask = ((ring + (p.sq_off.ring_mask as usize)) as *mut u32).*
+        if (p.flags & SETUP_NO_SQARRAY) == 0 {
+            // kernels before 6.6: the SQ array maps ring slots to SQEs, identity here
+            let arr = (ring + (p.sq_off.array as usize)) as *mut [SQ_MAX]u32
+            var i: u32 = 0
+            while i < p.sq_entries {
+                arr[i as usize] = i
+                i += 1
+            }
+        }
+        u.cq_head = (ring + (p.cq_off.head as usize)) as *mut u32
+        u.cq_tail = (ring + (p.cq_off.tail as usize)) as *mut u32
+        u.cq_mask = ((ring + (p.cq_off.ring_mask as usize)) as *mut u32).*
+        u.cq_flags = (ring + (p.cq_off.flags as usize)) as *mut u32
+        u.cqes = (ring + (p.cq_off.cqes as usize)) as *mut [CQ_MAX]Cqe
+        let sqes = mman.mmap(nullp(), (p.sq_entries as usize) * @sizeOf(Sqe), mman.PROT_READ | mman.PROT_WRITE, mman.MAP_SHARED | mman.MAP_POPULATE, fd, OFF_SQES as i64) as usize
+        if sqes == MAP_FAILED { die(@cstr("mmap sqes")) }
+        u.sqes = sqes as *mut [SQ_MAX]Sqe
+        u.sqe_tail = u.sq_tail.*
+        u.submitted = u.sqe_tail
+
+        // the ring's own fd, registered: io_uring_enter skips the fd lookup
+        var up: kio.io_uring_rsrc_update = undefined
+        _ = cstr.memset((&mut up) as *mut u8, 0, @sizeOf(kio.io_uring_rsrc_update))
+        up.offset = 0xffffffff
+        up.data = fd as u64
+        if sys_register(fd, REGISTER_RING_FDS, (&mut up) as usize, 1) != 1 { die(@cstr("register ring fd")) }
+        u.reg = up.offset as i32
+    }
+}
+
+/// A sparse table of `nfiles` direct descriptors: multishot accept allocates into it.
+pub fn register_files(u: *mut Uring, nfiles: u32) {
+    var rr: kio.io_uring_rsrc_register = undefined
+    unsafe {
+        _ = cstr.memset((&mut rr) as *mut u8, 0, @sizeOf(kio.io_uring_rsrc_register))
+        rr.nr = nfiles
+        rr.flags = RSRC_REGISTER_SPARSE
+        if sys_register(u.fd, REGISTER_FILES2, (&mut rr) as usize, @sizeOf(kio.io_uring_rsrc_register) as u32) != 0 { die(@cstr("register files")) }
+    }
+}
+
+/// Switches the ring's eventfd signal on or off (IORING_CQ_EVENTFD_DISABLED).
+pub fn eventfd_signal(u: *mut Uring, on: bool) {
+    if on {
+        u.cq_flags.* = u.cq_flags.* & ~CQ_EVENTFD_DISABLED
+    } else {
+        u.cq_flags.* = u.cq_flags.* | CQ_EVENTFD_DISABLED
+    }
+}
+
+/// Registers *evfd with the ring; false when the kernel refuses.
+pub fn register_eventfd(u: *mut Uring, evfd: *mut i32) -> bool {
+    unsafe { return sys_register(u.fd, REGISTER_EVENTFD, evfd as usize, 1) == 0 }
+}
+
+pub fn unregister_eventfd(u: *mut Uring) {
+    _ = sys_register(u.fd, UNREGISTER_EVENTFD, 0, 0)
+}
+
+/// The receive buffers. Prefer a registered buffer ring in user memory (what
+/// other entries run on the box), else kernel-allocated. Ubuntu kernels
+/// 6.8.0-136..147 (LP #2162843) invert the reserved-field check: they reject
+/// the correct all-zero struct with EINVAL and accept a nonzero resv[0], so
+/// retry with that; a correct kernel never reaches the retry. Last resort:
+/// legacy PROVIDE_BUFFERS, which every 6.x kernel has. LEGACY_BUFS=1 skips
+/// the buffer ring.
+pub fn setup_bufs(u: *mut Uring, idx: i32) {
+    unsafe {
+        u.bufbase = xmap(NBUF_MAX * BUFSZ)
+        let brsz = NBUF_MAX * @sizeOf(Buf)
+        u.br = 0
+        let lb = stdlib.getenv(@cstr("LEGACY_BUFS"))
+        if (lb as usize) == 0 or stdlib.atoi(lb) == 0 {
+            var attempt: i32 = 0
+            while attempt < 4 and u.br == 0 {
+                let kernel_mem = attempt >= 2
+                let inverted = (attempt & 1) != 0
+                var reg: BufReg = undefined
+                _ = cstr.memset((&mut reg) as *mut u8, 0, @sizeOf(BufReg))
+                reg.ring_entries = NBUF
+                reg.bgid = 0
+                if inverted { reg.resv[0] = 1 }
+                var mem: usize = 0
+                if kernel_mem {
+                    reg.flags = PBUF_RING_MMAP
+                } else {
+                    mem = xmap(brsz)
+                    reg.ring_addr = mem as u64
+                }
+                if sys_register(u.fd, REGISTER_PBUF_RING, (&mut reg) as usize, 1) != 0 {
+                    if mem != 0 { _ = mman.munmap(mem as *mut u8, brsz) }
+                    if errno() != errno_h.EINVAL { break }
+                    attempt += 1
+                    continue
+                }
+                if kernel_mem {
+                    let off = OFF_PBUF_RING | ((reg.bgid as u64) << OFF_PBUF_SHIFT)
+                    let m = mman.mmap(nullp(), brsz, mman.PROT_READ | mman.PROT_WRITE, mman.MAP_SHARED | mman.MAP_POPULATE, u.fd, off as i64) as usize
+                    if m == MAP_FAILED { die(@cstr("mmap pbuf ring")) }
+                    u.br = m
+                } else {
+                    u.br = mem
+                }
+                if idx == 0 and inverted {
+                    _ = stdio.dprintf(2, @cstr("buffer ring registered via the reserved-field workaround (LP #2162843)\n"))
+                }
+                attempt += 1
+            }
+        }
+        u.nbuf_live = NBUF_INIT
+        if u.br != 0 {
+            u.br_bufs = u.br as *mut [NBUF_MAX]Buf
+            u.br_tail_p = (u.br + 14) as *mut u16
+            var i: u32 = 0
+            while i < NBUF_INIT {
+                let b = &mut u.br_bufs[i as usize]
+                b.addr = (u.bufbase + (i as usize) * BUFSZ) as u64
+                b.len = BUFSZ as u32
+                b.bid = i as u16
+                i += 1
+            }
+            u.br_tail = NBUF_INIT
+            u.br_tail_p.* = NBUF_INIT as u16
+        } else {
+            u.legacy_bufs = true
+            u.freed = xmap(NBUF_MAX * 2) as *mut [NBUF_MAX]u16
+            provide_buffers(u, 0, NBUF_INIT)
+            u.sqes[((u.sqe_tail -% 1) & u.sq_mask) as usize].flags = 0     // want this one's completion
+            _ = enter(u, 1)
+            let c = u.cqes[(u.cq_head.* & u.cq_mask) as usize]
+            if c.res < 0 {
+                _ = stdio.dprintf(2, @cstr("PROVIDE_BUFFERS: %s\n"), cstr.strerror(0 - c.res))
+                os.exit(1)
+            }
+            u.cq_head.* = u.cq_head.* +% 1
+        }
+    }
+}
+
+// ---------------------------------------------------------------- receive buffers
+
+/// The bytes of receive buffer `bid`, the first n of them.
+pub fn buffer(u: *Uring, bid: u32, n: usize) -> []u8 {
+    unsafe {
+        let b = (u.bufbase + (bid as usize) * BUFSZ) as *[2048]u8
+        return b[0..n]
+    }
+}
+
+fn put_buf(u: *mut Uring, bid: u32) {
+    let b = &mut u.br_bufs[(u.br_tail & (NBUF - 1)) as usize]
+    b.addr = (u.bufbase + (bid as usize) * BUFSZ) as u64
+    b.len = BUFSZ as u32
+    b.bid = bid as u16
+    u.br_tail +%= 1
+}
+
+/// Hands receive buffer `bid` back: onto the freed list in legacy mode,
+/// else into the buffer ring (published at the end of the drain).
+pub fn recycle(u: *mut Uring, bid: u32) {
+    if u.legacy_bufs {
+        u.freed[u.nfreed as usize] = @truncate(u16, bid)
+        u.nfreed += 1
+    } else {
+        put_buf(u, bid)
+    }
+}
+
+/// The pool starts small and doubles each time a receive finds it empty, so
+/// resident buffer memory follows the largest burst actually seen rather
+/// than the cap: the kernel takes buffers in ring order, so every buffer
+/// handed over ends up touched. `nrearm` is the ring's queue of receives
+/// waiting to be re-armed.
+pub fn grow_bufs(u: *mut Uring, nrearm: u32) {
+    u.bufs_short = false
+    var add = u.nbuf_live
+    // a backlog bigger than the pool (after a stall): go straight to the cap,
+    // since the read rounds are sized by the pool
+    if add > NBUF - u.nbuf_live or nrearm > u.nbuf_live { add = NBUF - u.nbuf_live }
+    var i: u32 = 0
+    while i < add {
+        let bid = u.nbuf_live + i
+        if u.legacy_bufs {
+            u.freed[u.nfreed as usize] = @truncate(u16, bid)      // flush_freed hands them over
+            u.nfreed += 1
+        } else {
+            put_buf(u, bid)
+        }
+        i += 1
+    }
+    u.nbuf_live += add
+}
+
+/// Legacy mode: hand this pass's freed buffers back, one SQE per run of
+/// consecutive ids. They go out ahead of the next enter's task work.
+pub fn flush_freed(u: *mut Uring) {
+    if u.nfreed == 0 { return }
+    let n = u.nfreed as usize
+    if n > 1 { u.freed[0..n].sort() }
+    var start = u.freed[0] as u32
+    var len: u32 = 1
+    var i: usize = 1
+    while i < n {
+        if (u.freed[i] as u32) == start + len {
+            len += 1
+            i += 1
+            continue
+        }
+        provide_buffers(u, start, len)
+        start = u.freed[i] as u32
+        len = 1
+        i += 1
+    }
+    provide_buffers(u, start, len)
+    u.nfreed = 0
+}
+
+/// Publishes the buffer ring's tail: what was recycled this drain becomes
+/// the kernel's to pick.
+pub fn publish_bufs(u: *mut Uring) {
+    u.br_tail_p.* = @truncate(u16, u.br_tail)
+}

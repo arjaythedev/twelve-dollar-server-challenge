@@ -767,6 +767,11 @@ static struct {
 /* ---------- housekeeping ---------- */
 
 static uint64_t T_reqs, T_accepts, T_closes;
+/* cgroup CPU quotas can create latency cliffs below 100% process CPU. Read
+ * these counters once per stats interval, never in the event loop's hot path. */
+static int small_read(const char *path, char *buf, size_t cap);
+static long diag_last_vcsw, diag_last_ivcsw;
+static uint64_t diag_last_nr_throttled, diag_last_throttled_usec;
 static long majflt_prev;
 static int trim_due; /* a backlog freed heap memory: hand it back once the backlog is gone */
 static unsigned long long n_trims;
@@ -831,6 +836,23 @@ static void stats(uint64_t dt_ns) {
               (unsigned long long)D.over_10ms[i],
               (double)D.worst_parts_ns[i] / 1e6);
     fputc('\n', stderr);
+    char cpu_stat[2048];
+    if (small_read("/sys/fs/cgroup/cpu.stat", cpu_stat, sizeof cpu_stat) == 0) {
+      uint64_t nr_throttled = 0, throttled_usec = 0;
+      const char *throttle_n = strstr(cpu_stat, "nr_throttled ");
+      const char *throttle_us = strstr(cpu_stat, "throttled_usec ");
+      if (throttle_n) nr_throttled = strtoull(throttle_n + strlen("nr_throttled "), NULL, 10);
+      if (throttle_us) throttled_usec = strtoull(throttle_us + strlen("throttled_usec "), NULL, 10);
+      fprintf(stderr, " latency_sched cgroup_throttle_events=%llu cgroup_throttled_ms=%.3f"
+                      " voluntary_cs=%ld involuntary_cs=%ld\n",
+              (unsigned long long)(nr_throttled - diag_last_nr_throttled),
+              (double)(throttled_usec - diag_last_throttled_usec) / 1000.0,
+              ru.ru_nvcsw - diag_last_vcsw, ru.ru_nivcsw - diag_last_ivcsw);
+      diag_last_nr_throttled = nr_throttled;
+      diag_last_throttled_usec = throttled_usec;
+    }
+    diag_last_vcsw = ru.ru_nvcsw;
+    diag_last_ivcsw = ru.ru_nivcsw;
     memset(&D, 0, sizeof D);
   }
   majflt_prev = ru.ru_majflt;

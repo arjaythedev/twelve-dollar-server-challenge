@@ -1255,7 +1255,10 @@ at `656946e`. #526 at `635e01a` (accept depth 2,048, 64 answers per pass, 64 MB 
 listeners) held **280,000** (26,698 req/s, p95 47.2 / p99 442.5 ms, 0 errors, 78 % CPU, 26 µs/req, 884 MB,
 2026-11-20); 290,000 failed the 2-minute probe on p99 (1.08 s, 0 errors), 300,000 on p99 (1.95 s, 0 errors) and
 320,000 on p99 11.0 s with 0.37 % timeouts. Still below the merged 290,000, so #526 isn't merged and the row stays
-at `656946e`.
+at `656946e`. #526 at `89861f2` (256 answers per pass instead of 64) held **290,000** (27,550 req/s, p95 45.3 / p99
+493.6 ms, 0 errors, 81 % CPU, 26 µs/req, 853 MB, 2026-11-20); 300,000 failed the 2-minute probe on p99 (2.09 s,
+0 errors) and 320,000 on p99 12.5 s with 0.19 % timeouts. That ties the merged 290,000, so #526 isn't merged and the
+row stays at `656946e`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

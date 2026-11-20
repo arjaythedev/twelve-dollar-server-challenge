@@ -29,6 +29,7 @@ static unsigned answers_per_pass = 2048, wait_min = 256;
 static int uring_wal_writeback, wal_wb_fd = -1, wal_wb_pending;
 static uint64_t wal_wb_last_ns, wal_wb_errors;
 static int64_t wal_wb_offset, wal_wb_target;
+static uint64_t wal_wb_inode;
 static int poll_idle = 0; /* IDLE_POLL=1: idle sockets wait on a multishot poll instead of a multishot receive */
 static int eventfd_wake = 0; /* EVENTFD_WAKE=1: other rings wake ring 0 through an eventfd (more, smaller batches: more CPU) */
 static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
@@ -552,6 +553,13 @@ static void wal_writeback_tick(uint64_t now) {
   if (wal_wb_fd < 0) return;
   struct stat st;
   if (fstat(wal_wb_fd, &st) != 0) return;
+  /* An fd held across WAL replacement points at the wrong inode. Fall back
+   * rather than silently issuing writeback against an obsolete WAL. */
+  if (wal_wb_inode && wal_wb_inode != (uint64_t)st.st_ino) {
+    uring_wal_writeback = 0;
+    wb_kick_ms = 250;
+    return;
+  }
   int64_t end = st.st_size;
   if (end < wal_wb_offset) wal_wb_offset = 0;
   if (end - wal_wb_offset < 8LL * 1024 * 1024) return;
@@ -574,7 +582,11 @@ static unsigned reap(unsigned ri) {
     switch (UD_OP(cqe->user_data)) {
     case UD_WAL_WRITEBACK:
       wal_wb_pending = 0;
-      if (cqe->res < 0) wal_wb_errors++;
+      if (cqe->res < 0) {
+        wal_wb_errors++;
+        uring_wal_writeback = 0;
+        wb_kick_ms = 250; /* restore existing worker writeback */
+      }
       else wal_wb_offset = wal_wb_target;
       break;
     case UD_RECV: on_recv(ri, cqe, 1); break;
@@ -1141,6 +1153,8 @@ int main(int argc, char **argv) {
       fprintf(stderr, "uring WAL writeback disabled: %s\\n", strerror(errno));
       uring_wal_writeback = 0;
     } else {
+      struct stat wal_stat;
+      if (fstat(wal_wb_fd, &wal_stat) == 0) wal_wb_inode = (uint64_t)wal_stat.st_ino;
       /* Disable worker-based writeback to isolate the new mechanism. */
       wb_kick_ms = 0;
     }

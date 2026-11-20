@@ -1092,6 +1092,12 @@ int main(int argc, char **argv) {
   ckpt_tail = (int)env_long("CKPT_TAIL", 64);
   hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
   wb_kick_ms = env_long("WB_KICK_MS", 250);
+  ckpt_sched_idle = env_long("CKPT_SCHED_IDLE", 1) != 0;
+  long kick_kib = env_long("WAL_KICK_KB", 258);
+  if (kick_kib < 4) kick_kib = 4;
+  if (kick_kib > 65536) kick_kib = 65536;
+  wb_kick_bytes = kick_kib * 1024;
+
   ckpt_log = (int)env_long("CKPT_LOG", 0);
   tail_restart_on = (int)env_long("TAIL_RESTART", 0);
   wal_ra_on = (int)env_long("WAL_READAHEAD", 1);

@@ -726,7 +726,8 @@ static struct {
   unsigned high_streak, low_streak;
   double psi_some10, psi_full10;
   unsigned long tcp_mem_pages;
-  int live_enabled, live_unsupported;
+  int live_enabled, live_unsupported, selective_enabled;
+  unsigned selective_pending_bytes;
   unsigned live_budget, live_ring, live_slot;
   uint64_t live_attempts, live_success, live_errors;
 } MG;
@@ -747,6 +748,8 @@ static void on_rcvbuf_install(unsigned ri, struct io_uring_cqe *cqe) {
   }
   if (live && !(c->flags & CF_CLOSING)) {
     int target = MG.current_rcvbuf;
+    if (MG.selective_enabled && target == MG.pressure_rcvbuf &&
+        c->pend_len >= MG.selective_pending_bytes) target = MG.normal_rcvbuf;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &target, sizeof target) == 0) {
       c->rcvbuf_target = (uint32_t)target;
       MG.live_success++;
@@ -768,8 +771,11 @@ static void memgov_update_live(void) {
     }
     visited++;
     struct conn *c = &R[ri].conns[slot];
-    if (!(c->flags & CF_OPEN) || (c->flags & (CF_CLOSING | CF_RCVBUF_UPDATING)) ||
-        c->rcvbuf_target == (uint32_t)MG.current_rcvbuf) continue;
+    if (!(c->flags & CF_OPEN) || (c->flags & (CF_CLOSING | CF_RCVBUF_UPDATING))) continue;
+    int desired = MG.current_rcvbuf;
+    if (MG.selective_enabled && desired == MG.pressure_rcvbuf &&
+        c->pend_len >= MG.selective_pending_bytes) desired = MG.normal_rcvbuf;
+    if (c->rcvbuf_target == (uint32_t)desired) continue;
     struct io_uring_sqe *sqe = ring_sqe(&R[ri].r);
     sqe->opcode = IORING_OP_FIXED_FD_INSTALL;
     sqe->flags = IOSQE_FIXED_FILE;
@@ -884,6 +890,8 @@ static int memgov_start(void) {
   if (!MG.enabled) return 0;
   MG.normal_rcvbuf = (int)env_long("TCP_RCVBUF_NORMAL", 16384);
   MG.pressure_rcvbuf = (int)env_long("TCP_RCVBUF_PRESSURE", 8192);
+  MG.selective_enabled = env_long("TCP_RCVBUF_SELECTIVE", 0) != 0;
+  MG.selective_pending_bytes = (unsigned)env_long("TCP_RCVBUF_SELECTIVE_PEND", 1024);
   if (MG.pressure_rcvbuf < 4096 || MG.normal_rcvbuf > 1048576 || MG.pressure_rcvbuf > MG.normal_rcvbuf) {
     fputs("TCP_RCVBUF_PRESSURE must be >=4096 and <= TCP_RCVBUF_NORMAL <=1048576\n", stderr);
     return -1;

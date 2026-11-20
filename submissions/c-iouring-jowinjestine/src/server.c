@@ -616,6 +616,10 @@ static unsigned issue_reads(unsigned budget) {
  * each round is one non-blocking enter per ring, and the request is answered in this batch. */
 static unsigned read_rounds(void) {
   unsigned n = 0, budget = READS_PER_PASS;
+  if (fairness_read_budget && nready >= 1024 && budget > fairness_read_budget) {
+    budget = fairness_read_budget;
+    fairness_limited_passes++;
+  }
   while (budget && rq_head < nrq) {
     unsigned k = issue_reads(budget < recv_bufs ? budget : recv_bufs);
     if (!k) break;
@@ -636,6 +640,11 @@ static unsigned read_rounds(void) {
  * before they run out. Without it the buffers ran dry mid-pass, requests sat in their sockets, and
  * each socket holding one counted a page against tcp_mem: past ~30k of them TCP went into memory
  * pressure and pruned queues (CPU, drops, retransmits) until the OOM killer ended it at 285k. */
+/* A large read sweep can monopolize the event loop while earlier requests
+ * wait in ready. Keep the normal throughput path unchanged when there is
+ * no accumulated ready backlog. */
+static unsigned fairness_read_budget = 4096;
+static uint64_t fairness_limited_passes;
 static unsigned reap_every = 512;
 static void run_ready(void) {
   unsigned n = nready, i = 0, since = 0;
@@ -1117,6 +1126,8 @@ int main(int argc, char **argv) {
   long pre = env_long("PRE_CONNS", 330000); /* pre-create six rings for a 310k+ run; use 430000 for 400k */
   while (NR < NR_MAX && (long)NR * (long)nslots < pre && ring_create(NR) == 0) NR++;
   prewarm();
+  fairness_read_budget = (unsigned)env_long("FAIRNESS_READ_BUDGET", 4096);
+  fprintf(stderr, "fairness_read_budget=%u\\n", fairness_read_budget);
   fprintf(stderr, "experiment: idle_poll=%d eventfd_wake=%d recv_size=%u backlog_slice_us=%u pre_conns=%ld\n",
           poll_idle, eventfd_wake, recv_buf_size, backlog_slice_us, pre);
   fprintf(stderr, "listening on %s:%s: up to %u rings x %u direct descriptors; cache %d KiB; code locked %zu KiB\n", host, port, NR_MAX,

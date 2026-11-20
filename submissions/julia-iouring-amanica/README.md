@@ -1,6 +1,6 @@
 # julia-iouring-amanica
 
-Julia 1.13.3 · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) ·
+Julia 1.13.3, compiled ahead of time (`juliac --trim`) · no framework · SQLite 3.54.1 (amalgamation compiled from source, called with `ccall`) ·
 JWT HMAC from Ubuntu's OpenSSL 3 (`libssl3t64`) · **direct** (no Nginx: serves `0.0.0.0:80`)
 
 One Julia thread runs an io_uring event loop through raw syscalls; SQLite is the pinned amalgamation,
@@ -22,6 +22,15 @@ roughly 250–290k on the benchmark box. See "Running locally" for how that was 
   a shared output buffer (no intermediate objects, no JSON library). An idle connection holds no buffers;
   0 bytes allocated per request, so the GC does not run under load.
 - No Julia packages: the server uses only Base and `ccall`.
+- **Compiled ahead of time** with `--trim` (`build.sh`): Julia's own juliac build script, which ships in the
+  pinned Julia tarball (`share/julia/test/trimming/juliac-buildscript.jl`; JuliaC.jl is the packaged front
+  end to it), compiles `src/app.jl` and everything reachable from it into a 2.5 MB executable, linked
+  against libjulia. Built for the CPU it is built on (`--cpu-target=native`, as the JIT would; generic
+  x86-64 was ~6% slower). Boot to a healthy `/health` 3.6–4.3 s → 72–91 ms; server RSS at 250k users
+  480 → 234 MB, GC time per minute 66 → 5 ms; req/s the same (blast medians 50.6k JIT, 51.4k AOT).
+  To be trimmable, logging writes straight to fd 1 instead of `println(stdout, …)` (`stdout` is an
+  abstract `IO`). The dev-only `JR_*` switches are constants, so they are fixed when it's built. If the
+  build fails, `start.sh` runs `src/main.jl` on the JIT instead (`JR_AOT=0` forces that).
 - JWT HS256 verified on every request with libcrypto's HMAC: one `HMAC_CTX` keyed once at startup and
   re-initialised per token (the key pads are hashed once), so each token still gets its full HMAC but
   skips OpenSSL 3's per-call setup in one-shot `HMAC()`: 2.0 → 0.66 µs per token (`dev/ct.sh jwtbench`).
@@ -30,6 +39,12 @@ roughly 250–290k on the benchmark box. See "Running locally" for how that was 
 - Group commit (io_uring): all writes of one event-loop pass share one transaction, committed before the
   loop hands any reply to the kernel, so each 201 still waits for its commit (rule 6). Max req/s went up
   ~48% (blast 30k → 45k); at 150k users p95 fell from 4–27 ms to 1.5–3.7 ms.
+- Reads share the pass's transaction too: one WAL snapshot per pass instead of one per statement (~3 per
+  GET /feed). Each request still runs its own queries (rule 5). /feed alone: 18–20 → 12–13 µs; at 200k
+  users, CPU at the same request rate 89–98% → 83–93% (3 alternating pairs, lower in each).
+- No memory map for the database (`mmap_size=0`): SQLite reads pages through its own 64 MB cache. At the
+  same request rate, CPU 79–80% → 74–79% at 200k users (3 alternating pairs, lower in each) and 94.5% →
+  91% at 240k, p95 8.7–9.8 → 5.9–6.2 ms, p99 109–120 → 139–141 ms.
 - GET /feed: when the 20 newest posts have consecutive ids (the usual case), their like counts come from
   one range scan instead of 20 lookups; otherwise the plain query. Same JSON, live data on every request.
   Blast ~+12% req/s; at 200k users p95 fell from 12–43 ms to 4–18 ms.
@@ -45,10 +60,12 @@ The code is our own, in Julia, but most of the design follows what other entries
 - **[fsharp-kestrel-delneg](../fsharp-kestrel-delneg/)**: checkpoints on their own thread and connection,
   holding writes (reads go on) once the WAL reaches 15,000 frames, letting that thread restart the WAL so
   the header `fsync` stays off the loop, and the Ubuntu 6.8.0-147 workaround for
-  `IORING_REGISTER_PBUF_RING` (retry with `resv[0]=1`).
+  `IORING_REGISTER_PBUF_RING` (retry with `resv[0]=1`). Also `mmap_size=0`: SQLite reads pages through
+  its own cache, not a memory map.
 - **[rust-epoll-scooter1337](../rust-epoll-scooter1337/)**: the feed range scan: find the 20 newest ids,
   fetch rows and like counts with range scans when they are close together, and fall back to the plain
   query otherwise. Ours is a narrower variant (only consecutive ids; the counts come from one scan).
+  Also, with crystal-epoll-faustinoaq: one transaction per loop pass for the reads as well as the writes.
 - **[crystal-epoll-faustinoaq](../crystal-epoll-faustinoaq/)**: no garbage collection on the request path,
   multishot receives into a provided-buffer ring (an idle connection holds no buffer), and responses sent
   from arenas that stay pinned until the kernel has finished sending.
@@ -63,8 +80,8 @@ The code is our own, in Julia, but most of the design follows what other entries
 |---|---|
 | `config.sh` | pinned versions (Julia, SQLite) and build switches |
 | `install.sh` | root: build-essential, curl, unzip, openssl; the official Julia tarball (sha256 checked) |
-| `build.sh` | user: downloads the SQLite amalgamation (SHA3-256 checked), compiles `build/libjr.so` |
-| `start.sh` | runs `src/main.jl` |
+| `build.sh` | user: downloads the SQLite amalgamation (SHA3-256 checked), compiles `build/libjr.so`, then the server ahead of time into `build/server` |
+| `start.sh` | runs `build/server` (or `src/main.jl` on the JIT if there is none) |
 | `src/` | the server |
 | `csrc/shim.c` | WAL checkpoints on a background thread (public SQLite API), compiled into `build/libjr.so` |
 | `dev/` | **development only**: local test and benchmark tooling (podman, k6/wrk, `tools.jl`), see below |
@@ -193,8 +210,7 @@ blocked for 1–4 s while the whole host stalled), not steady overload.
 ### Tried and dropped
 
 Measured one at a time, kept only if they helped: SQLite at `-O3`, `-march=x86-64-v3`, extra
-`SQLITE_OMIT_*` options, SQLite PGO (0–7% even as an upper bound), `mmap_size=0` (no throughput change,
-worse p95), a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
+`SQLITE_OMIT_*` options, SQLite PGO (0–7% even as an upper bound), a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
 everywhere), restarting the WAL from the checkpoint thread after every catch-up (more fsyncs, worse
 latency), prefaulting buffers (moves page faults, doesn't remove them). A writer thread (a C pthread with
 its own connection commits the POSTs in batches while the loop keeps serving reads; replies still wait for
@@ -241,4 +257,23 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | calib: ours smooth | – | 275,000 (498 MB) | – |
 | P7.1: hmac ctx | – | 300,000 (506 MB) | 54,773 (+13%), n=3 |
 | P7.1: hmac oneshot | – | 300,000 (497 MB) | 52,991 (-3%), n=3 |
+| P2: aot generic cpu | – | – | 48,639 (-8%), n=3 |
+| P2: jit | – | 250,000 (480 MB) | 51,076 (+5%), n=6 |
+| P2: aot native | – | 250,000 (234 MB) | 51,396 (+1%), n=3 |
+| P8.2: read txn per pass | – | 250,000 (234 MB) | 52,437 (+2%), n=2 |
+| P8.2: read txn off | – | 250,000 (238 MB) | 50,815 (-3%), n=3 |
+| P8.5: batch 32 | – | 200,000 (197 MB) | – |
+| P8.5: batch off | – | 200,000 (196 MB) | – |
+| P8.5: batch 128 | – | 200,000 (211 MB) | – |
+| P8.6: journal_size_limit=0 | – | 225,000 (204 MB) | – |
+| P8.6: journal_size_limit default | – | 225,000 (199 MB) | – |
+| HEAD aot+8.2 | – | 240,000 (209 MB) | – |
+| 8.12 ours | – | 200,000 (198 MB) | – |
+| 8.12 profile 200k | – | 200,000 (590 MB) | – |
+| mmap 256MB (default) | – | 240,000 (221 MB) | – |
+| mmap_size=0 | – | 240,000 (195 MB) | – |
+| cache 64MB (default; mmap 0) | – | 200,000 (182 MB) | – |
+| cache 32MB | – | 200,000 (185 MB) | – |
+| NBUF 16384 (default) | – | 200,000 (177 MB) | – |
+| NBUF 8192 | – | 200,000 (142 MB) | – |
 <!-- results:end -->

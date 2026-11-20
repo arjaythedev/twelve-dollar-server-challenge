@@ -32,6 +32,12 @@ const ST_COMMIT = Ref{Ptr{Cvoid}}(C_NULL)
 const GROUP = get(ENV, "JR_GROUP", "") != "off"
 const GROUP_ON = Ref(false)         # set by the transport that commits before it submits
 const IN_TXN = Ref(false)
+const TXN_WRITES = Ref(false)       # the open transaction has written (else it only reads)
+# Reads share the pass's transaction too (PLAN 8.2; idea from crystal-epoll-faustinoaq and
+# rust-epoll-scooter1337): one WAL read lock and snapshot per pass instead of one per statement, ~3 per
+# GET /feed. dev/feedbench.jl, 64 feeds per transaction: 18-20 -> 12-13 us per feed. Each request still runs
+# its own queries (rule 5). JR_READTXN=off: one autocommit read transaction per statement, for dev A/B.
+const READ_TXN = get(ENV, "JR_READTXN", "") != "off"
 
 const POST_SELECT = """
 SELECT p.id, p.body, p.created_at, u.username,
@@ -64,7 +70,9 @@ function db_open(path::String)
     db_exec("PRAGMA synchronous=NORMAL")
     db_exec("PRAGMA busy_timeout=5000")
     db_exec("PRAGMA cache_size=-65536")
-    db_exec("PRAGMA mmap_size=268435456")
+    # No mmap (fsharp-kestrel-delneg): pages through SQLite's own cache. At 200k users ~4 points less CPU at
+    # the same request rate than a 256 MB map (PLAN 8.15).
+    db_exec("PRAGMA mmap_size=0")
     db_exec("PRAGMA temp_store=MEMORY")
     # dev A/B only (dev/ct.sh PRAGMAS=): extra statements after the defaults, e.g. "PRAGMA mmap_size=0".
     extra = get(ENV, "JR_PRAGMAS", "")
@@ -84,13 +92,41 @@ function db_open(path::String)
     nothing
 end
 
+# Before a read: opens the pass's transaction (deferred: a read lock at the first statement). If BEGIN
+# fails, the reads run in autocommit as before.
+@inline function read_begin!()
+    (READ_TXN && GROUP_ON[] && !IN_TXN[]) || return
+    rc = step(ST_BEGIN[])
+    reset(ST_BEGIN[])
+    rc == SQLITE_DONE && (IN_TXN[] = true; TXN_WRITES[] = false)
+    nothing
+end
+
+# Ends a transaction that has only read. Should COMMIT fail, ROLLBACK, so that no stale snapshot outlives
+# the pass.
+function end_read!()
+    IN_TXN[] = false
+    ccall((:sqlite3_get_autocommit, LIBJR), Cint, (Ptr{Cvoid},), DB[]) == 0 || return
+    rc = step(ST_COMMIT[])
+    reset(ST_COMMIT[])
+    rc == SQLITE_DONE || db_exec("ROLLBACK")
+    nothing
+end
+
 # Before a write: opens the pass's transaction when grouping. false on a database error.
+# A transaction that has only read is ended first and a new one begun: upgrading an old read snapshot to a
+# write fails (SQLITE_BUSY_SNAPSHOT) if the checkpoint thread's connection wrote since (its WAL restart).
 @inline function txn_begin!()
-    (GROUP_ON[] && !IN_TXN[]) || return true
+    GROUP_ON[] || return true
+    if IN_TXN[]
+        TXN_WRITES[] && return true
+        end_read!()
+    end
     rc = step(ST_BEGIN[])
     reset(ST_BEGIN[])
     rc == SQLITE_DONE || return false
     IN_TXN[] = true
+    TXN_WRITES[] = true
     true
 end
 
@@ -99,7 +135,9 @@ end
 # write that isn't committed.
 function txn_commit!()
     @dbg t0 = time_ns()
+    TXN_WRITES[] || return end_read!()     # only reads: nothing for a reply to wait for
     IN_TXN[] = false
+    TXN_WRITES[] = false
     ccall((:sqlite3_get_autocommit, LIBJR), Cint, (Ptr{Cvoid},), DB[]) == 0 ||
         error("group commit: the transaction was rolled back: $(db_errmsg())")
     rc = step(ST_COMMIT[])
@@ -161,6 +199,7 @@ struct SqlBackend <: ReadBackend end
 # 18-20 us per feed, same JSON. Otherwise, or if a row is missing, the plain query. All three statements
 # read the same data: only this thread writes, and not in between.
 function feed!(r::SqlBackend, b::Buf)
+    read_begin!()
     FEED_RANGE || return feed_plain!(b)
     ids = ST_FEED_IDS[]
     hi = -1; k = 0
@@ -206,6 +245,7 @@ function feed!(r::SqlBackend, b::Buf)
 end
 
 function feed_plain!(b::Buf)
+    read_begin!()
     st = ST_FEED[]
     putstr!(b, "{\"posts\":[")
     first = true
@@ -220,6 +260,7 @@ end
 
 # {"post":{...}} -> 1 found, 0 not found, -1 error.
 function post!(::SqlBackend, b::Buf, id::Int)
+    read_begin!()
     st = ST_POST[]
     bind_int(st, 1, id)
     rc = step(st)
@@ -236,6 +277,7 @@ end
 
 # 1 exists, 0 not found, -1 error.
 function post_exists(::SqlBackend, id::Int)
+    read_begin!()
     st = ST_EXISTS[]
     bind_int(st, 1, id)
     rc = step(st)
@@ -314,6 +356,7 @@ struct WJob                         # jr_job in csrc/shim.c
     ts::NTuple{32,UInt8}
 end
 const WJOB_TS = 56                  # byte offset of ts
+const WJOB_TS0 = ntuple(_ -> 0x00, 32)
 
 mutable struct WBatch
     n::Int
@@ -362,7 +405,7 @@ function w_add!(kind::Int, uid::Int, pid::Int, p::Ptr{UInt8}, n::Int, author::Bu
     @inbounds B.aoff[k] = B.bytes.len
     @inbounds B.alen[k] = author.len
     putbuf!(B.bytes, author)
-    @inbounds B.jobs[k] = WJob(kind, uid, pid, off, n, 0, Int32(0), Int32(0), ntuple(_ -> 0x00, 32))
+    @inbounds B.jobs[k] = WJob(kind, uid, pid, off, n, 0, Int32(0), Int32(0), WJOB_TS0)
     DEFER
 end
 w_add_post!(uid::Int, p::Ptr{UInt8}, n::Int, author::Buf) = w_add!(1, uid, 0, p, n, author)

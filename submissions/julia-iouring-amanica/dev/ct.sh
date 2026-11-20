@@ -24,10 +24,13 @@
 # Env: CKPT (auto: SQLite's automatic checkpoint on the event loop, for A/B; default: background thread),
 #      HOLD_PAGES (WAL pages at which writes wait for the checkpoint; 0: never; default in src/db.jl),
 #      RESTART (loop: the event loop's next write restarts the WAL, for A/B; default: the checkpoint thread),
+#      AOT (0: run src/main.jl on the JIT, for A/B; default: the juliac --trim build from build.sh),
 #      HMAC (oneshot: OpenSSL HMAC() per token, for A/B; default: one keyed HMAC_CTX re-initialised per token),
 #      WRITER (on: a writer thread commits the writes in batches, for A/B; default: writes on the event loop),
 #      GROUP (without WRITER=on; off: one commit per write, for A/B; default: one commit per event-loop pass),
 #      FEED (plain: GET /feed as one query, for A/B; default: range scans when the newest ids are contiguous),
+#      NBUF (provided receive buffers per ring, power of two, A/B; default 16384),
+#      READTXN (off: one autocommit read transaction per statement, for A/B; default: reads share the pass's transaction),
 #      PROFILE ("<start s>,<seconds>": sample the event loop then, table in server.log; src/prof.jl),
 #      SQLITE_OPT (C flags for SQLite, A/B), PRAGMAS (extra SQLite statements at open, A/B),
 #      ENTRY (another submission folder, run with this harness to calibrate against the leaderboard; rows go to calibration.csv),
@@ -48,7 +51,7 @@ if [ -n "$ENTRY" ]; then
   [ -f "$ROOT/submissions/$ENTRY/start.sh" ] || { echo "ENTRY: no submissions/$ENTRY/start.sh" >&2; exit 2; }
   CSV="$HERE/calibration.csv"
 fi
-IMAGE=localhost/julia-iouring-amanica-dev
+IMAGE="${IMAGE:-localhost/julia-iouring-amanica-dev}"   # IMAGE=: a derived image with another entry's install.sh run (calibration)
 WRK_IMAGE=localhost/julia-iouring-amanica-wrk
 K6_IMAGE="${K6_IMAGE:-docker.io/grafana/k6:2.3.0@sha256:2dd4756ec6e14e62778916e1eb850108e4b499304c02df56760fa0bdb0fba0b8}"
 DATA="${DATA:-volume}"   # where the server's DB copy lives: volume (host ext4) or overlay (fuse-overlayfs)
@@ -72,7 +75,7 @@ tools() {
 }
 
 image() {
-  podman build -q -f "$HERE/dev/Containerfile" -t "$IMAGE" "$HERE" >/dev/null
+  podman build -q -f "$HERE/dev/Containerfile" -t localhost/julia-iouring-amanica-dev "$HERE" >/dev/null
   [ "$GEN" != k6 ] && podman build -q -f "$HERE/dev/Containerfile.wrk" -t "$WRK_IMAGE" "$HERE/dev" >/dev/null
   true
 }
@@ -84,32 +87,33 @@ box() {
 
 # Samples every 2 s while the server container lives, from the HOST side (cgroup files and /proc of the
 # container's pid 1, which is julia after the execs), so sampling costs the server's 1 CPU nothing:
-# CPU % over the window (cgroup usage_usec deltas), the event loop thread's on-CPU % (main) and run-queue
+# CPU % over the window (cgroup usage_usec deltas; csys: its kernel part, system_usec, for any ENTRY), the event loop thread's on-CPU % (main) and run-queue
 # wait % (runq: runnable but not running, i.e. the host starving it), cgroup memory, julia RSS,
 # the generator container's memory and, with --debug, julia's open fds (~ connections + ~23).
 sampler() { # sampler <server> <generator>
   set +e +o pipefail   # a failed read must not end the sampling
-  local srv="$1" g="$2" pid cg prev="" usec thr now_ns mem rss fds gm run wait stime TICKS
+  local srv="$1" g="$2" pid cg prev="" usec thr csy now_ns mem rss fds gm run wait stime TICKS
   TICKS="$(getconf CLK_TCK)"
   pid="$(podman inspect -f '{{.State.Pid}}' "$srv" 2>/dev/null)" || return 0
   cg="/sys/fs/cgroup$(cut -d: -f3- "/proc/$pid/cgroup" 2>/dev/null)"
   while [ -d "/proc/$pid" ] && podman container exists "$srv"; do
     usec="$(awk '/usage_usec/{print $2}' "$cg/cpu.stat" 2>/dev/null)"; now_ns="$(date +%s%N)"
     thr="$(awk '/throttled_usec/{print $2}' "$cg/cpu.stat" 2>/dev/null)"
+    csy="$(awk '/system_usec/{print $2}' "$cg/cpu.stat" 2>/dev/null)"; csy="${csy:-0}"
     # main thread (the event loop): ns on a CPU, ns runnable but waiting for one (run-queue delay)
     read -r run wait _ < "/proc/$pid/schedstat" 2>/dev/null || { run=0; wait=0; }
     # main thread's kernel time in clock ticks (stime, field 15; "julia" has no spaces, so fields are plain)
     stime="$(awk '{print $15}' "/proc/$pid/task/$pid/stat" 2>/dev/null)"; stime="${stime:-0}"
     if [ -n "$prev" ] && [ -n "$usec" ]; then
-      set -- $prev     # prev_usec prev_ns prev_run prev_wait prev_thr prev_stime
+      set -- $prev     # prev_usec prev_ns prev_run prev_wait prev_thr prev_stime prev_csys
       mem="$(cat "$cg/memory.current" 2>/dev/null || echo 0)"
       rss="$(awk '/^VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null)"
       fds=""   # /proc/<pid>/fd of a rootless container is only readable inside podman's user namespace
       [ "$DEBUG" = 1 ] && fds=" fds=$(podman unshare ls "/proc/$pid/fd" 2>/dev/null | wc -l || true)"
       gm="$(podman stats --no-stream --format '{{.MemUsage}}' "$g" 2>/dev/null | cut -d' ' -f1)"
-      echo "$(date +%T) cpu=$(( (usec - $1) * 100000 / (now_ns - $2) )) main=$(( (run - $3) * 100 / (now_ns - $2) )) sys=$(( (stime - $6) * 100 * 1000000000 / TICKS / (now_ns - $2) )) runq=$(( (wait - $4) * 100 / (now_ns - $2) )) thr=$(( (${thr:-0} - $5) * 100000 / (now_ns - $2) )) cgmem_mb=$(( mem >> 20 )) rss_mb=$(( ${rss:-0} >> 10 ))$fds genmem=${gm:-?}"
+      echo "$(date +%T) cpu=$(( (usec - $1) * 100000 / (now_ns - $2) )) main=$(( (run - $3) * 100 / (now_ns - $2) )) sys=$(( (stime - $6) * 100 * 1000000000 / TICKS / (now_ns - $2) )) csys=$(( (csy - $7) * 100000 / (now_ns - $2) )) runq=$(( (wait - $4) * 100 / (now_ns - $2) )) thr=$(( (${thr:-0} - $5) * 100000 / (now_ns - $2) )) cgmem_mb=$(( mem >> 20 )) rss_mb=$(( ${rss:-0} >> 10 ))$fds genmem=${gm:-?}"
     fi
-    [ -n "$usec" ] && prev="$usec $now_ns $run $wait ${thr:-0} $stime"
+    [ -n "$usec" ] && prev="$usec $now_ns $run $wait ${thr:-0} $stime $csy"
     sleep 2
   done
 }
@@ -168,7 +172,7 @@ stress_run() { # stress_run <n> <duration>
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1 || true" EXIT
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1; exit 130" INT TERM HUP PIPE
   BOX_RM=()    # keep the server container until we have its log, also when it dies at startup
-  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_PROFILE="${PROFILE:-}" -e JR_FEED="${FEED:-}" -e JR_ENTRY="$ENTRY" -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_PRAGMAS="${PRAGMAS:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" -e JR_READTXN="${READTXN:-}" -e JR_NBUF="${NBUF:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" -e JR_PROFILE="${PROFILE:-}" -e JR_FEED="${FEED:-}" -e JR_ENTRY="$ENTRY" -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_PRAGMAS="${PRAGMAS:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
@@ -192,7 +196,7 @@ stress_run() { # stress_run <n> <duration>
   commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
   RUN_PASS=0
-  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}${WRITER:+; WRITER=$WRITER}${HMAC:+; HMAC=$HMAC}${PROFILE:+; PROFILE=$PROFILE}${FEED:+; FEED=$FEED}${ENTRY:+; ENTRY=$ENTRY}${SQLITE_OPT:+; SQLITE_OPT=$SQLITE_OPT}${PRAGMAS:+; PRAGMAS=$PRAGMAS}"
+  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}${WRITER:+; WRITER=$WRITER}${HMAC:+; HMAC=$HMAC}${AOT:+; AOT=$AOT}${PROFILE:+; PROFILE=$PROFILE}${FEED:+; FEED=$FEED}${ENTRY:+; ENTRY=$ENTRY}${SQLITE_OPT:+; SQLITE_OPT=$SQLITE_OPT}${PRAGMAS:+; PRAGMAS=$PRAGMAS}"
   DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${notes//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
     DUR="$dur" COMMIT="$commit" tools record "$out" "$rc" "$CSV" && RUN_PASS=1
   true
@@ -233,7 +237,7 @@ elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur
 else def_n=1000 def_start=2500 def_max=320000 def_dur=1m; fi
 case "$cmd" in
   image) image; echo "$IMAGE" ;;
-  build|test|feedbench|feedbench-pgo|jwtbench) image; box -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_PRAGMAS="${PRAGMAS:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
+  build|test|feedbench|feedbench-pgo|jwtbench) image; box -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_READTXN="${READTXN:-}" -e JR_PRAGMAS="${PRAGMAS:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
   shell) image; box -it "$IMAGE" bash ;;
   stress) only_run; image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
   ladder) only_run; image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;

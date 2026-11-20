@@ -2,13 +2,15 @@
 
 TypeScript, TinyJS (`tinyjs-fullstack` 0.1.2), Bun 1.4.4, and Bun's built-in `bun:sqlite` driver. The entry runs directly on the benchmark VM. `transport.ts` connects Bun's native HTTP server to TinyJS's built application handler. Routing and endpoint handling stay in TinyJS; the Node HTTP conversions are removed. This entry serves this API-only build, not TinyJS browser assets.
 
+The transport retains the proven **120-second idle keep-alive**. On Linux direct deployments, it samples its own open descriptors once a second. At 75% of the process's actual soft FD limit, completed responses advertise `Connection: close`; clients can reconnect before their next write. Normal keep-alive resumes below 50%. Loopback hosts (`127.0.0.1`, `::1`, `localhost`) retain proxy connections. No process/host limits are raised. See [PERFORMANCE.md](PERFORMANCE.md) for evidence, the failed three-second experiment and remaining validation. **The last verified capacity remains 71,000 users; more than 100K and <300 MB at 100K have not been verified.**
+
 File-based routes use prepared statements against the challenge's existing indexes. SQLite uses WAL and synchronous NORMAL. Each like runs as a transaction, and token signatures are checked on every authenticated request.
 
-Build with `bash build.sh` and run with `bash start.sh` using the challenge environment variables.
+Build with `bash build.sh` (including the native smoke regressions) and run with `bash start.sh` using the challenge environment variables.
 
 Run the local production smoke test with `bun run smoke.ts` after building.
 
-Run `bun run smoke.ts transport.ts` to check the native transport. `start.sh` defaults to native Bun; `TINYJS_TRANSPORT=node bash start.sh` selects the original published Node HTTP adapter running under Bun for comparison. Both retain a 120-second idle timeout. The framework's Node transport remains available; the submission itself requires Bun for SQLite.
+Run `bun run smoke.ts transport.ts` to check the native transport, including same-socket POSTs after 8- and 16-second idle gaps, slow uploads, proxy reuse and an active write during graceful shutdown. On Linux it also checks response-signaled retirement under a server-only 128-FD limit, reconnection without POST replay, recovery and exact persisted write counts. `start.sh` defaults to native Bun; `TINYJS_TRANSPORT=node bash start.sh` selects the original published Node HTTP adapter running under Bun for comparison. That adapter retains a 120-second idle timeout. The framework's Node transport remains available; the submission itself requires Bun for SQLite.
 
 On 12 November 2026, both transports passed all 42 official correctness checks on separate fresh copies of a checksum-verified seed under Ubuntu WSL2 and Bun 1.4.4. Both also passed the production smoke test, including HEAD body suppression and method rejection. Authentication, SQL, indexes and durability settings are unchanged; no response, result or JWT verification cache was added.
 
@@ -23,7 +25,7 @@ Local results (12 November 2026):
 | Bun / 3 | 30,789 | 30.40 | 0.943 | 2.034 | 51,580 |
 | Node / 4 | 10,456 | 102.31 | 3.066 | 4.879 | 83,568 |
 
-These short WSL2 probes share the development machine with the client, are not CPU-pinned or constrained to the challenge VM's resources, and establish no user-capacity score. They support testing native transport on the official server. No CPU attribution profile, router optimization or SQLite tuning is included in this experiment.
+These short WSL2 probes share the development machine with the client, are not CPU-pinned or constrained to the challenge VM's resources, and establish no user-capacity score. They support testing native transport on the official server. Later CPU profiling and rejected SQLite experiments are documented in [PERFORMANCE.md](PERFORMANCE.md).
 
 Version 0.1.2 retains idle HTTP keep-alive connections for 120 seconds, prepares routing precedence once per handler, skips browser output for this API-only application, and minifies the server bundle. No POST retries are added. Framework change and validation: https://github.com/ExpressAI-SWE/TinyJS/pull/4.
 

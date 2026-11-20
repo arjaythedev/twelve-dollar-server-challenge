@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Builds as a normal user: the pinned SQLite amalgamation (compiled inside csrc/btree.c, which reads its B-trees)
+# + csrc/shim.c into build/libjr.so.
+set -euo pipefail
+cd "$(dirname "$0")"
+. ./config.sh
+DL="${JR_DL_CACHE:-build/dl}"    # download cache (the dev container mounts a volume here)
+mkdir -p "$DL" build
+
+# JR_SQLITE_OPT: optimization flags for SQLite + shim (dev A/B only; dev/ct.sh SQLITE_OPT=).
+OPT="${JR_SQLITE_OPT:--O2}"
+CFLAGS="$OPT -fPIC -DNDEBUG -DSQLITE_DQS=0 -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0
+  -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_LOAD_EXTENSION
+  -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_USE_ALLOCA -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1"
+stamp="$( { echo "$SQLITE_ID $CFLAGS"; cat csrc/shim.c csrc/btree.c; } | sha256sum | cut -c1-16)"
+
+if [ ! -f build/libjr.so ] || [ "$(cat build/libjr.stamp 2>/dev/null)" != "$stamp" ]; then
+  zip="$DL/sqlite-amalgamation-$SQLITE_ID.zip"
+  [ -f "$zip" ] || { curl -fsSL -o "$zip.part" "$SQLITE_URL"; mv "$zip.part" "$zip"; }
+  got="$(openssl dgst -sha3-256 -r "$zip" | cut -d' ' -f1)"
+  [ "$got" = "$SQLITE_SHA3_256" ] || { echo "sqlite checksum mismatch: $got" >&2; rm -f "$zip"; exit 1; }
+  rm -rf build/sqlite && mkdir -p build/sqlite && unzip -q -j "$zip" -d build/sqlite
+  echo "compiling SQLite $SQLITE_VERSION"
+  # shellcheck disable=SC2086
+  cc $CFLAGS -Ibuild/sqlite -shared -o build/libjr.so.tmp csrc/btree.c csrc/shim.c -lpthread -lm
+  mv build/libjr.so.tmp build/libjr.so
+  echo "$stamp" > build/libjr.stamp
+fi
+"$JULIA_HOME/bin/julia" --version
+
+# Ahead-of-time build (JR_AOT=0: skip it, start.sh then runs src/main.jl on the JIT, for dev A/B).
+# Julia's own juliac build script (shipped in the pinned tarball under share/julia/test/trimming; JuliaC.jl
+# is the packaged front end to the same script) compiles src/app.jl with --trim: only code reachable
+# from main is kept, nothing is compiled at startup. The JR_* dev switches are constants read from ENV,
+# so they are part of the stamp. If the build fails, start.sh falls back to the JIT.
+if [ "${JR_AOT:-1}" != 0 ]; then
+  J="$JULIA_HOME/bin/julia"
+  BS="$JULIA_HOME/share/julia/test/trimming/juliac-buildscript.jl"
+  astamp="$( { echo "$JULIA_VERSION $stamp"; env | grep '^JR_' | grep -v '^JR_DL_CACHE=' | sort; cat src/*.jl; } | sha256sum | cut -c1-16)"
+  if [ ! -x build/server ] || [ "$(cat build/server.stamp 2>/dev/null)" != "$astamp" ]; then
+    rm -f build/server build/server.stamp
+    echo "compiling the server ahead of time (juliac --trim)"
+    # native: built on the box it runs on, like the JIT (the default for an object file is generic x86-64)
+    if "$J" -t 1 -O3 --cpu-target="${JR_AOT_CPU:-native}" -J "$JULIA_HOME/lib/julia/sys.so" --startup-file=no --history-file=no \
+         --output-o build/server-o.a --output-incremental=no --strip-ir --strip-metadata --experimental --trim=safe \
+         "$BS" "$PWD/src/app.jl" --output-exe true > build/aot.log 2>&1; then
+      jc() { "$J" --startup-file=no -e 'include(joinpath(Sys.BINDIR, Base.DATAROOTDIR, "julia", "julia-config.jl"))' -- "$@" | tr '\n' ' '; }
+      # julia-config quotes its paths for a shell: eval
+      eval cc -o build/server.tmp -Wl,--whole-archive build/server-o.a -Wl,--no-whole-archive \
+        "$(jc --cflags)" -lm "$(jc --ldflags --ldlibs)" -ljulia-internal >> build/aot.log 2>&1 &&
+        mv build/server.tmp build/server && echo "$astamp" > build/server.stamp
+    fi
+    rm -f build/server-o.a
+    [ -x build/server ] || { echo "ahead-of-time build failed (build/aot.log): start.sh will use the JIT" >&2; tail -20 build/aot.log >&2; }
+  fi
+fi

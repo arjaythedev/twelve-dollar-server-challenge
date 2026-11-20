@@ -1,0 +1,11 @@
+# Dev-only image: a clean Ubuntu 24.04 with our install.sh already run as root (like the box after
+# install), plus the tools CI and test/run.sh use. The organizer does not use this file.
+ARG BASE=docker.io/library/ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+FROM ${BASE}
+COPY config.sh install.sh /opt/jr-install/
+RUN bash /opt/jr-install/install.sh \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends sqlite3 jq procps \
+ && rm -rf /var/lib/apt/lists/* \
+ && install -d -o ubuntu -g ubuntu /work
+USER ubuntu
+WORKDIR /work

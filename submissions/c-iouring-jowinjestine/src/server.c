@@ -28,7 +28,7 @@
 static unsigned answers_per_pass = 2048, wait_min = 256;
 static int uring_wal_writeback, wal_wb_fd = -1, wal_wb_pending;
 static uint64_t wal_wb_last_ns, wal_wb_errors;
-static int64_t wal_wb_offset;
+static int64_t wal_wb_offset, wal_wb_target;
 static int poll_idle = 0; /* IDLE_POLL=1: idle sockets wait on a multishot poll instead of a multishot receive */
 static int eventfd_wake = 0; /* EVENTFD_WAKE=1: other rings wake ring 0 through an eventfd (more, smaller batches: more CPU) */
 static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
@@ -562,6 +562,7 @@ static void wal_writeback_tick(uint64_t now) {
   sqe->len = (uint32_t)(end - wal_wb_offset > UINT32_MAX ? UINT32_MAX : end - wal_wb_offset);
   sqe->sync_range_flags = SYNC_FILE_RANGE_WRITE;
   sqe->user_data = UD(UD_WAL_WRITEBACK, 0, 0, 0);
+  wal_wb_target = wal_wb_offset + sqe->len;
   wal_wb_pending = 1;
 }
 static unsigned reap(unsigned ri) {
@@ -574,7 +575,7 @@ static unsigned reap(unsigned ri) {
     case UD_WAL_WRITEBACK:
       wal_wb_pending = 0;
       if (cqe->res < 0) wal_wb_errors++;
-      else { struct stat st; if (wal_wb_fd >= 0 && fstat(wal_wb_fd, &st) == 0) wal_wb_offset = st.st_size; }
+      else wal_wb_offset = wal_wb_target;
       break;
     case UD_RECV: on_recv(ri, cqe, 1); break;
     case UD_POLL: on_poll(ri, cqe); break;

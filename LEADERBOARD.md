@@ -721,7 +721,10 @@ held, not merged: below the merged row) held **270,000** (25,862 req/s, p95 28.4
 start at 4,096 WAL frames with a PASSIVE backstop at 65,536, WAL writeback kicked every 8 MB; held, not merged: below
 the merged row) held **270,000** (25,841 req/s, p95 30.7 / p99 315.5 ms, 0 err, 74 % CPU, 26 µs/req, 898 MB,
 2026-11-20); 280,000 failed the 2-minute probe on p99 (7.69 s, 0 errors) and 320,000 on p95/p99 (5.27 / 8.58 s at
-87 % CPU).
+87 % CPU). Its next commit `cae940e` (the WAL writeback kick every 8 MB moved into io_uring, never waited on; held, not
+merged: it tied the merged row) held **280,000** (26,685 req/s, p95 54.2 / p99 764.8 ms, 0 err, 79 % CPU, 27 µs/req,
+1,334 MB, 2026-11-20); 290,000 and 300,000 failed the 2-minute probe on p99 (3.51 s / 3.80 s, 0 errors) and 320,000 on
+p95/p99 (4.72 / 8.17 s at 95 % CPU).
 
 ᴷ **kotlin-nio-3x3xX3N0N** stays on its merged #83 row. Its follow-up **#377** (`9ab23cc`, rejects tokens without a
 numeric `exp`, two-step /feed, checkpointer thread through `PRAGMA wal_checkpoint`, 2 ms group-commit window, 3 workers;

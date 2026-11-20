@@ -57,7 +57,10 @@ constexpr size_t kDrainBudget = 2048;
 // 单个 pass 最多答多少个请求。读不受此限：超过上限的接收数据留在连接上，由后续 pass 按
 // 最老优先回答，所以一个繁忙的 pass 不会把它后面排队的所有请求一起拖慢
 // （rust-iouring-kensac #264 同样限制 2,048，并用就绪队列保序）。
-constexpr uint32_t kAnswersPerPass = 2048;
+/* 每 pass 答多少请求。2,048 是错的：一个请求 27 us，2,048 个就是 55 ms，pass 本身就长，
+ * 排队一叠加 p99 就失控（280k 探针 5.6 s）。fsharp-uring-delneg #437 的 ANSWERS 默认是 64，
+ * 一个 pass 约 1.7 ms，backlog 被摊平成很多短 pass。 */
+constexpr uint32_t kAnswersPerPass = 64;
 constexpr uint32_t kIdleSeconds = 90;
 
 constexpr uint64_t kEvAccept = 1;

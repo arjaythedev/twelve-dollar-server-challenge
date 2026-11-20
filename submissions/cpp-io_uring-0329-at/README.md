@@ -27,7 +27,7 @@
 
 **连接状态机。** 每个连接有两个正交的状态：`ReadState`（`Idle` 表示 multishot receive 已装好，`Queued` 表示等单发读，`Reading` 表示单发读在途）和 `WriteState`（`Idle`/`Sending`），加上 `open`/`closing`（关闭已提交）/`close_after`（待关闭）三个布尔。状态转移集中在 `drain` 的 switch 里，不再用位标志表达。
 
-**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 2,048 个请求**，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
+**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 64 个请求**（fsharp-uring-delneg #437 的 ANSWERS）：2,048 是错的——一个请求 27 µs，2,048 个就是 55 ms，pass 本身就长，排队一叠加 p99 就失控（280k 探针 5.6 s）；64 个让一个 pass 约 1.7 ms，backlog 被摊平成很多短 pass，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
 
 **backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），**等过 16 秒的全部优先**（objc-uring-delneg #326 的第二级），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。
 
@@ -61,7 +61,7 @@
 - 事件循环的等待是有条件的：只要还有待发的读、待写的响应或上一 pass 收到的完成，就 `min_complete=0` 直接 `enter`，**不睡那 1 ms**；只有在完全没事干时才等（1 ms）。这一条是 220k 时 29% CPU 空转的来源。
 - 空闲连接清扫按时间切片（每 50 ms 扫一个 ring 的 1/32），不在 pass 里整表扫 6 M 个槽位——一次整扫在 1 vCPU 上是 25–70 ms，正好是 p99 悬崖。
 - **page cache 外面套一层 `SQLITE_CONFIG_PCACHE2` shim**（来自 #245）：`pcache1` 记住"曾经持有过的最大页号"且从不调低，而 B-tree split 会把一页临时改名到 lock-byte 页号再改回来，于是此后**每次 COMMIT** 的 `xTruncate` 都以为文件尾之外可能有页、把整个 hash 表扫一遍（#245 量到 ~350 µs、~30 次/秒）。shim 记录进入缓存的最大 key（停在 lock-byte 页号的页单独计数），确定不可能有越界页时直接跳过扫描。本地饱和 `/feed`：50.0 → **44.5 µs/请求（−11 %）**。
-- **页缓存 16 MB**（`cache_size=-16384`）：2 GB 机器上要给内核的 socket 内存留位置；16 MB 仍然装得下 feed 的工作集（users 表 + 最新的 posts 页）。64 MB 时的本地 5 分钟保持 p99 是 2.1 ms、16 MB 是 4.2 ms，都远在 1 s 阈值内，换来 RSS 少 14 MB。
+- **页缓存 16 MB**（`cache_size=-65536`）：2 GB 机器上要给内核的 socket 内存留位置；16 MB 仍然装得下 feed 的工作集（users 表 + 最新的 posts 页）。64 MB 时的本地 5 分钟保持 p99 是 2.1 ms、16 MB 是 4.2 ms，都远在 1 s 阈值内，换来 RSS 少 14 MB。
 - No `mmap`: reads go through SQLite's page cache (16 MB).
 
 ## 连接

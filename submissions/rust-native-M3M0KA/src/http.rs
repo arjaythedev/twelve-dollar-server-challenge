@@ -12,6 +12,40 @@ pub struct Request<'a> {
     pub expect_continue: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParsedOffsets {
+    pub method: (u16, u16),
+    pub path: (u16, u16),
+    pub auth: Option<(u16, u16)>,
+    pub body_start: u16,
+    pub used: u32,
+    pub keep_alive: bool,
+    pub expect_continue: bool,
+    pub is_post: bool,
+}
+
+impl ParsedOffsets {
+    #[inline]
+    pub fn to_request<'a>(&self, buf: &'a [u8]) -> Request<'a> {
+        let used = self.used as usize;
+        Request {
+            method: &buf[self.method.0 as usize..self.method.1 as usize],
+            path: &buf[self.path.0 as usize..self.path.1 as usize],
+            auth: self.auth.map(|(a, b)| &buf[a as usize..b as usize]),
+            body: &buf[self.body_start as usize..used],
+            keep_alive: self.keep_alive,
+            expect_continue: self.expect_continue,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ParseOutcome {
+    Complete(ParsedOffsets),
+    Incomplete { continue_needed: bool },
+    Invalid,
+}
+
 fn ci_eq(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len()
         && a.iter()
@@ -19,11 +53,36 @@ fn ci_eq(a: &[u8], b: &[u8]) -> bool {
             .all(|(&x, &y)| x.eq_ignore_ascii_case(&y))
 }
 
+/// Parse one request from `buf` in a single pass, returning reusable byte
+/// offsets when complete so the caller never re-parses during scheduling.
+pub fn parse_outcome(buf: &[u8]) -> ParseOutcome {
+    match parse_head_offsets(buf) {
+        Err(()) => ParseOutcome::Invalid,
+        Ok(None) => ParseOutcome::Incomplete { continue_needed: false },
+        Ok(Some(off)) => {
+            if (off.used as usize) <= buf.len() {
+                ParseOutcome::Complete(off)
+            } else {
+                ParseOutcome::Incomplete { continue_needed: off.expect_continue }
+            }
+        }
+    }
+}
+
 /// Parse one request from the front of `buf`.
 ///
 /// Returns `Ok(None)` when more bytes are needed, `Ok(Some((req, used)))` on a
 /// complete request, and `Err(())` when the input cannot be served.
 pub fn parse(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ()> {
+    match parse_outcome(buf) {
+        ParseOutcome::Complete(off) => Ok(Some((off.to_request(buf), off.used as usize))),
+        ParseOutcome::Incomplete { .. } => Ok(None),
+        ParseOutcome::Invalid => Err(()),
+    }
+}
+
+/// Validate complete headers and extract byte offsets relative to `buf`.
+fn parse_head_offsets(buf: &[u8]) -> Result<Option<ParsedOffsets>, ()> {
     const M01: u64 = 0x0101_0101_0101_0101;
     const M80: u64 = 0x8080_8080_8080_8080;
     const CR: u64 = 0x0d0d_0d0d_0d0d_0d0d;
@@ -64,7 +123,8 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ()> {
     if i >= head_end {
         return Err(());
     }
-    let method = &buf[ms..i];
+    let me = i;
+    let method = &buf[ms..me];
     i += 1;
     let ps = i;
     while i < head_end && buf[i] != b' ' {
@@ -73,17 +133,23 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ()> {
     if i >= head_end {
         return Err(());
     }
-    let path = &buf[ps..i];
+    let pe = i;
+    let path = &buf[ps..pe];
+    let version_start = i + 1;
     while i < head_end && buf[i] != b'\r' && buf[i] != b'\n' {
         i += 1;
     }
     if i + 1 >= head_end {
         return Err(());
     }
+    if method.is_empty() || path.is_empty() || &buf[version_start..i] != b"HTTP/1.1"
+        || buf[i..i + 2] != *b"\r\n" {
+        return Err(());
+    }
     i += 2;
 
     let mut keep_alive = true;
-    let mut auth: Option<&[u8]> = None;
+    let mut auth: Option<(u16, u16)> = None;
     let mut content_length = 0usize;
     let mut have_length = false;
     let mut expect_continue = false;
@@ -116,7 +182,7 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ()> {
             colon += 1;
         }
         if colon == le {
-            continue;
+            return Err(());
         }
         let mut vs = colon + 1;
         while vs < le && (buf[vs] == b' ' || buf[vs] == b'\t') {
@@ -130,7 +196,7 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ()> {
         let value = &buf[vs..ve];
 
         if ci_eq(name, b"authorization") {
-            auth = Some(value);
+            auth = Some((vs as u16, ve as u16));
         } else if ci_eq(name, b"content-length") {
             if value.is_empty() {
                 return Err(());
@@ -145,10 +211,13 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ()> {
                     return Err(());
                 }
             }
+            if have_length && content_length != v {
+                return Err(());
+            }
             content_length = v;
             have_length = true;
         } else if ci_eq(name, b"connection") {
-            if value.len() == 5 && ci_eq(value, b"close") {
+            if value.split(|&b| b == b',').any(|token| ci_eq(token.trim_ascii(), b"close")) {
                 keep_alive = false;
             }
         } else if ci_eq(name, b"expect") {
@@ -162,32 +231,32 @@ pub fn parse(buf: &[u8]) -> Result<Option<(Request<'_>, usize)>, ()> {
     if !have_length {
         content_length = 0;
     }
-    if head_end + content_length > buf.len() {
-        return if head_end + content_length > MAX_HEAD + MAX_BODY {
-            Err(())
-        } else {
-            Ok(None)
-        };
-    }
+    Ok(Some(ParsedOffsets {
+        method: (ms as u16, me as u16),
+        path: (ps as u16, pe as u16),
+        auth,
+        body_start: head_end as u16,
+        used: (head_end + content_length) as u32,
+        keep_alive,
+        expect_continue,
+        is_post: method == b"POST",
+    }))
+}
 
-    Ok(Some((
-        Request {
-            method,
-            path,
-            auth,
-            body: &buf[head_end..head_end + content_length],
-            keep_alive,
-            expect_continue,
-        },
-        head_end + content_length,
-    )))
+pub fn continue_needed(buf: &[u8]) -> Result<bool, ()> {
+    match parse_outcome(buf) {
+        ParseOutcome::Invalid => Err(()),
+        ParseOutcome::Incomplete { continue_needed } => Ok(continue_needed),
+        ParseOutcome::Complete(_) => Ok(false),
+    }
 }
 
 /// Append a JSON string literal, escaping only what JSON requires. The
 /// common case — a run of bytes none of which can need escaping — is checked
 /// eight bytes at a time, then copied in one extend; a detected unsafe byte
 /// falls through to the per-byte loop for that position.
-pub fn put_jstr(out: &mut Vec<u8>, s: &[u8]) {
+pub fn put_jstr(out: &mut impl crate::buffer::Output, s: &[u8]) {
+    if out.failed() { return; }
     out.push(b'"');
     const M01: u64 = 0x0101_0101_0101_0101;
     const M80: u64 = 0x8080_8080_8080_8080;
@@ -208,6 +277,18 @@ pub fn put_jstr(out: &mut Vec<u8>, s: &[u8]) {
     let h = s.len() & !7;
     while i < h && safe_chunk(u64::from_ne_bytes(s[i..i + 8].try_into().unwrap())) {
         i += 8;
+    }
+    if i == h {
+        while i < s.len() && s[i] >= 0x20 && s[i] != b'"' && s[i] != b'\\' {
+            i += 1;
+        }
+        if i == s.len() {
+            out.extend_from_slice(s);
+            out.push(b'"');
+            return;
+        }
+        // Only the 0..7 tail contained an unsafe byte: copy safe prefix once.
+        i = h;
     }
     if i > 0 {
         out.extend_from_slice(&s[..i]);
@@ -234,6 +315,7 @@ pub fn put_jstr(out: &mut Vec<u8>, s: &[u8]) {
                 out.push(HEX[(c & 0xf) as usize]);
             }
         }
+        if out.failed() { return; }
         run = k + 1;
     }
     if s.len() > run {
@@ -242,26 +324,23 @@ pub fn put_jstr(out: &mut Vec<u8>, s: &[u8]) {
     out.push(b'"');
 }
 
-pub fn put_i64(out: &mut Vec<u8>, v: i64) {
-    let mut buf = [0u8; 24];
-    let mut n = 0usize;
-    let neg = v < 0;
-    let mut u = if neg { (v as i128).unsigned_abs() as u128 } else { v as u128 };
+pub fn put_i64(out: &mut impl crate::buffer::Output, v: i64) {
+    let mut buf = [0u8; 20];
+    let mut u: u64 = v.unsigned_abs();
+    let mut pos = 20usize;
     loop {
-        buf[n] = b'0' + (u % 10) as u8;
-        n += 1;
+        pos -= 1;
+        buf[pos] = b'0' + (u % 10) as u8;
         u /= 10;
         if u == 0 {
             break;
         }
     }
-    if neg {
-        out.push(b'-');
+    if v < 0 {
+        pos -= 1;
+        buf[pos] = b'-';
     }
-    while n > 0 {
-        n -= 1;
-        out.push(buf[n]);
-    }
+    out.extend_from_slice(&buf[pos..20]);
 }
 
 fn reason(code: u16) -> &'static str {
@@ -278,7 +357,7 @@ fn reason(code: u16) -> &'static str {
 }
 
 /// Append a complete response (status line, headers, body).
-pub fn respond(out: &mut Vec<u8>, code: u16, body: &[u8]) {
+pub fn respond(out: &mut impl crate::buffer::Output, code: u16, body: &[u8]) {
     // One reservation for the whole response: a fresh buffer would otherwise
     // grow geometrically, copying a multi-KB feed body about a dozen times.
     out.reserve(128 + body.len());
@@ -292,6 +371,90 @@ pub fn respond(out: &mut Vec<u8>, code: u16, body: &[u8]) {
     out.extend_from_slice(body);
 }
 
+/// Write a complete response in one pass without intermediate body scratch by
+/// reserving a fixed 10-byte Content-Length slot and patching it after `f`.
+pub fn respond_stream<O: crate::buffer::Output>(
+    out: &mut O,
+    code: u16,
+    reserve_body: usize,
+    f: impl FnOnce(&mut O) -> bool,
+) -> bool {
+    let mark = out.len();
+    out.reserve(96 + reserve_body);
+    if out.failed() {
+        out.truncate(mark);
+        return false;
+    }
+    out.extend_from_slice(b"HTTP/1.1 ");
+    put_i64(out, code as i64);
+    out.push(b' ');
+    out.extend_from_slice(reason(code).as_bytes());
+    out.extend_from_slice(b"\r\nContent-Type: application/json\r\nContent-Length: ");
+    let len_slot = out.len();
+    out.extend_from_slice(b"          \r\n\r\n");
+    if out.failed() {
+        out.truncate(mark);
+        return false;
+    }
+    let body_start = out.len();
+    if !f(out) || out.failed() {
+        out.truncate(mark);
+        return false;
+    }
+    let body_len = out.len() - body_start;
+    if body_len > 9_999_999_999 {
+        out.truncate(mark);
+        return false;
+    }
+    let mut digits = [b' '; 10];
+    let mut n = body_len;
+    let mut pos = 10;
+    loop {
+        pos -= 1;
+        digits[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    out.write_at(len_slot, &digits);
+    true
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::respond_stream;
+    use crate::buffer::Buffer;
+
+    #[test]
+    fn patches_content_length_and_rolls_back_on_failure() {
+        let mut out = Buffer::new(256);
+        assert!(respond_stream(&mut out, 200, 16, |o| {
+            o.extend_from_slice(b"{\"ok\":true}");
+            true
+        }));
+        let s = std::str::from_utf8(out.as_slice()).unwrap();
+        assert!(s.starts_with("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length:         11\r\n\r\n{\"ok\":true}"));
+
+        // False callback truncates cleanly without marking failure.
+        let prev = out.len();
+        assert!(!respond_stream(&mut out, 200, 16, |o| {
+            o.extend_from_slice(b"partial");
+            false
+        }));
+        assert!(!out.failed());
+        assert_eq!(out.len(), prev);
+
+        // Quota overflow truncates cleanly and preserves sticky failed bit.
+        assert!(!respond_stream(&mut out, 200, 16, |o| {
+            o.extend_from_slice(&[b'a'; 300]);
+            true
+        }));
+        assert!(out.failed());
+        assert_eq!(out.len(), prev);
+    }
+}
+
 /// The eight-byte scan in `put_jstr` must produce byte-for-byte what the
 /// per-byte loop produces; these cases feed literal quotes, backslashes,
 /// control bytes, DEL, and UTF-8 text through both orderings.
@@ -300,7 +463,7 @@ mod jstr_tests {
     use super::put_jstr;
 
     /// Scalar-only reference (no word scan), for comparison.
-    fn put_jstr_scalar(out: &mut Vec<u8>, s: &[u8]) {
+    fn put_jstr_scalar(out: &mut impl crate::buffer::Output, s: &[u8]) {
         out.push(b'"');
         for &c in s {
             if c == b'"' || c == b'\\' || c < 0x20 {
@@ -423,5 +586,45 @@ mod framing_tests {
         // oversized header block is an error
         let big = vec![b'a'; super::MAX_HEAD + 1];
         assert!(parse(&big).is_err());
+    }
+
+    #[test]
+    fn parse_outcome_matches_pipelined_partial_continue_and_invalid() {
+        use super::{parse_outcome, ParseOutcome};
+        let pipe = b"GET /feed HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer tok\r\n\r\nPOST /posts HTTP/1.1\r\nHost: x\r\nContent-Length: 13\r\n\r\n{\"body\":\"hi\"}";
+        match parse_outcome(pipe) {
+            ParseOutcome::Complete(off) => {
+                assert!(!off.is_post);
+                let rq = off.to_request(pipe);
+                assert_eq!(rq.method, b"GET");
+                assert_eq!(rq.path, b"/feed");
+                assert_eq!(rq.auth, Some(b"Bearer tok".as_slice()));
+                assert!(rq.body.is_empty());
+                assert!(rq.keep_alive);
+                let rest = &pipe[off.used as usize..];
+                match parse_outcome(rest) {
+                    ParseOutcome::Complete(off2) => {
+                        assert!(off2.is_post);
+                        let rq2 = off2.to_request(rest);
+                        assert_eq!(rq2.method, b"POST");
+                        assert_eq!(rq2.path, b"/posts");
+                        assert_eq!(rq2.body, b"{\"body\":\"hi\"}");
+                        assert_eq!(off2.used as usize, rest.len());
+                    }
+                    other => panic!("second pipelined request unexpected: {other:?}"),
+                }
+            }
+            other => panic!("first pipelined request unexpected: {other:?}"),
+        }
+
+        let cont = b"POST /posts HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n";
+        assert_eq!(parse_outcome(cont), ParseOutcome::Incomplete { continue_needed: true });
+        let cont_done = b"POST /posts HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\nhello";
+        assert!(matches!(parse_outcome(cont_done), ParseOutcome::Complete(o) if o.is_post && o.expect_continue));
+
+        assert_eq!(
+            parse_outcome(b"POST /posts HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            ParseOutcome::Invalid
+        );
     }
 }

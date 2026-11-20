@@ -11,8 +11,10 @@ set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 PORT=${PORT:-3321}
+POST_MODE=${POST_MODE:-0}
 WORK=$(mktemp -d)
-TOKEN=$(jq -r '.[0].token' "$ROOT/seed/tokens.json")
+SERVER_BIN=${FEED_BIN:-$HERE/bin/feed}
+TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["token"])' "$ROOT/seed/tokens.json")
 SERVER=""
 
 cleanup() {
@@ -21,16 +23,41 @@ cleanup() {
     kill "$SERVER" 2>/dev/null || true
     wait "$SERVER" 2>/dev/null || true
   fi
+  if [[ -n "${PROTOCOL_SERVER_LOG:-}" && -f "$WORK/log" ]]; then
+    cp "$WORK/log" "$PROTOCOL_SERVER_LOG"
+  fi
   rm -rf "$WORK"
 }
 trap cleanup EXIT
 
 start() {
-  SQLITE_PATH="$WORK/feed.db" JWT_SECRET=twelve-dollar-challenge \
-    HOST=127.0.0.1 PORT="$PORT" FEED_WORKERS=1 "$HERE/bin/feed" >>"$WORK/log" 2>&1 &
+  : >>"$WORK/log"
+  local first_line=$(( $(wc -l < "$WORK/log") + 1 ))
+  if [[ "${PROTOCOL_TRANSPORT:-epoll}" == l2 ]]; then
+    SQLITE_PATH="$WORK/feed.db" JWT_SECRET=twelve-dollar-challenge \
+      HOST=127.0.0.1 PORT="$PORT" FEED_L2_URING=1 FEED_WORKERS=1 \
+      FEED_FORCE_SQL_POST="$POST_MODE" "$SERVER_BIN" >>"$WORK/log" 2>&1 &
+  else
+    SQLITE_PATH="$WORK/feed.db" JWT_SECRET=twelve-dollar-challenge \
+      HOST=127.0.0.1 PORT="$PORT" FEED_EPOLL=1 \
+      FEED_EPOLL_INPUT_POOL="${FEED_EPOLL_INPUT_POOL:-0}" \
+      FEED_WORKERS="${FEED_WORKERS:-1}" FEED_FORCE_SQL=0 \
+      FEED_FORCE_SQL_POST="$POST_MODE" "$SERVER_BIN" >>"$WORK/log" 2>&1 &
+  fi
   SERVER=$!
   for _ in $(seq 300); do
-    curl -sf "http://127.0.0.1:$PORT/health" >/dev/null && return 0
+    if curl -sf "http://127.0.0.1:$PORT/health" >/dev/null; then
+      if [[ -n "${PROTOCOL_REQUIRE_TRANSPORT:-}" ]]; then
+        tail -n +"$first_line" "$WORK/log" | grep -Fq "transport: $PROTOCOL_REQUIRE_TRANSPORT" || { cat "$WORK/log"; return 1; }
+      fi
+      return 0
+    fi
+    state=$(ps -o stat= -p "$SERVER" 2>/dev/null || true)
+    if [[ -z "$state" || "$state" == Z* ]]; then
+      wait "$SERVER" 2>/dev/null || true
+      SERVER=""
+      echo "server exited before becoming healthy"; cat "$WORK/log"; return 1
+    fi
     sleep 0.1
   done
   echo "server never became healthy"; cat "$WORK/log"; return 1
@@ -47,6 +74,12 @@ cp "$ROOT/seed/feed.db" "$WORK/feed.db"
 start
 grep -q "read plans: enabled" "$WORK/log" || {
   echo "the plan did not activate; the rest proves nothing"; cat "$WORK/log"; exit 1; }
+if [[ "${PROTOCOL_TRANSPORT:-epoll}" == l2 ]]; then
+  grep -q "transport: l2 io_uring" "$WORK/log" || { cat "$WORK/log"; exit 1; }
+else
+  if [[ "${FEED_EPOLL_INPUT_POOL:-0}" == 1 ]]; then pool_state=enabled; else pool_state=disabled; fi
+  grep -Fq "epoll input buffer pool: $pool_state" "$WORK/log" || { cat "$WORK/log"; exit 1; }
+fi
 
 PORT="$PORT" TOKEN="$TOKEN" python3 - <<'PY'
 import os, socket, sys
@@ -101,6 +134,14 @@ if statuses(r) != [200]:
     fail.append("split request: %r" % (statuses(r),))
 print("request split across two writes:", statuses(r))
 
+# 3b. Drop a partially buffered request, then accept a new connection.
+s = conn(); s.sendall(b"GET /posts/"); time.sleep(0.05); s.close()
+s = conn(); s.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\n\r\n")
+r = drain(s); s.close()
+if statuses(r) != [200]:
+    fail.append("request after abandoned partial input: %r" % (statuses(r),))
+print("request after abandoned partial input:", statuses(r))
+
 # 4. Connection: close closes the socket
 s = conn()
 s.sendall(b"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
@@ -125,8 +166,23 @@ for i in $(seq 40); do
 done
 # Wait for the clients only: a bare `wait` would also wait for the server job.
 wait "${pids[@]}"
-ack=$(grep -h '"id"' "$WORK"/resp.* | jq -r '.post.id' | sort -n)
+ack=$(WORK="$WORK" python3 - <<'PY'
+import glob, json, os
+ids = []
+for path in glob.glob(os.path.join(os.environ["WORK"], "resp.*")):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            ids.append(int(json.load(f)["post"]["id"]))
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+print("\n".join(map(str, sorted(ids))))
+PY
+)
 stop
+if [[ -n "${PROTOCOL_RESTART_PORT:-}" ]]; then
+  PORT="$PROTOCOL_RESTART_PORT"
+  echo "durability restart uses explicit fresh port: $PORT"
+fi
 start
 missing=0
 for id in $ack; do

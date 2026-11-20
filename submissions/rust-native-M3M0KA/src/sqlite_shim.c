@@ -8,6 +8,11 @@
 
 #include "sqlite3.c"
 
+unsigned feed_prepare_persistent(void)
+{
+    return SQLITE_PREPARE_PERSISTENT;
+}
+
 void *feed_btree(sqlite3 *db)
 {
     return (void *)db->aDb[0].pBt;
@@ -47,8 +52,11 @@ void *feed_keyinfo_desc(sqlite3 *db, int nkey, int nextra)
 
 /* Forces the read transaction open. The data version is reported for callers
  * that ask for it; nothing in the read plans depends on it. */
-int feed_begin_read(void *bt, unsigned *version)
+int feed_begin_read(sqlite3 *db, void *bt, unsigned *version)
 {
+    /* A SQL BEGIN must own this snapshot; closing BtCursors alone does not
+     * end a transaction opened directly through the internal B-tree API. */
+    if (sqlite3_get_autocommit(db)) return SQLITE_MISUSE;
     int rc = sqlite3BtreeBeginTrans((Btree *)bt, 0, 0);
     if (rc != SQLITE_OK) return rc;
     if (version) {
@@ -165,4 +173,39 @@ const unsigned char *feed_payload(void *mem, unsigned char *scratch,
     }
     *len = total;
     return scratch;
+}
+
+static int feed_wal_hook_cb(void *arg, sqlite3 *db, const char *db_name, int pages)
+{
+    (void)db;
+    (void)db_name;
+    uint64_t *pages_out = (uint64_t *)arg;
+    if (pages_out && pages > 0) {
+        __atomic_store_n(pages_out, (uint64_t)pages, __ATOMIC_RELEASE);
+    }
+    return SQLITE_OK;
+}
+
+void feed_install_wal_counter(sqlite3 *db, uint64_t *pages_out)
+{
+    if (!db) return;
+    if (pages_out) {
+        sqlite3_wal_hook(db, feed_wal_hook_cb, (void *)pages_out);
+    } else {
+        sqlite3_wal_hook(db, 0, 0);
+    }
+}
+
+/* Sync the main database file descriptor via SQLite's public file-control
+ * API while holding no SQLite locks, shifting dirty-page writeback off the
+ * main event-loop thread. */
+int feed_sync_main_db(sqlite3 *db)
+{
+    if (!db) return SQLITE_MISUSE;
+    sqlite3_file *fd = 0;
+    int rc = sqlite3_file_control(db, "main", SQLITE_FCNTL_FILE_POINTER, &fd);
+    if (rc != SQLITE_OK || !fd || !fd->pMethods || !fd->pMethods->xSync) {
+        return rc == SQLITE_OK ? SQLITE_NOTFOUND : rc;
+    }
+    return fd->pMethods->xSync(fd, SQLITE_SYNC_NORMAL);
 }

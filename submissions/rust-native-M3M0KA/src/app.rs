@@ -3,6 +3,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::buffer::Output;
 use crate::crypto::{ct_eq32, HmacKey};
 use crate::db::{Db, LikeResult};
 use crate::http::{self, Request};
@@ -53,23 +54,69 @@ fn b64val(c: u8) -> Option<u32> {
     })
 }
 
-fn b64url_decode(s: &[u8]) -> Option<Vec<u8>> {
-    let mut out = Vec::with_capacity(s.len() * 3 / 4 + 2);
+enum SmallBytes<'a> {
+    Stack(&'a [u8]),
+    Heap(Vec<u8>),
+}
+
+impl<'a> SmallBytes<'a> {
+    #[inline]
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            SmallBytes::Stack(s) => s,
+            SmallBytes::Heap(v) => v.as_slice(),
+        }
+    }
+}
+
+#[inline]
+fn b64url_decode_into(s: &[u8], out: &mut [u8]) -> Option<usize> {
+    // JWS uses unpadded base64url (RFC 7515 section 2). Reject impossible
+    // lengths and nonzero unused bits instead of accepting aliases/junk.
+    if s.len() % 4 == 1 {
+        return None;
+    }
+    let mut len = 0usize;
     let mut acc: u32 = 0;
     let mut bits = 0u32;
     for &c in s {
-        if c == b'=' {
-            break;
-        }
         let v = b64val(c)?;
         acc = (acc << 6) | v;
         bits += 6;
         if bits >= 8 {
             bits -= 8;
-            out.push((acc >> bits) as u8);
+            out[len] = (acc >> bits) as u8;
+            len += 1;
         }
     }
+    if bits != 0 && acc & ((1 << bits) - 1) != 0 {
+        return None;
+    }
+    Some(len)
+}
+
+fn b64url_decode(s: &[u8]) -> Option<Vec<u8>> {
+    if s.len() % 4 == 1 {
+        return None;
+    }
+    let exact = (s.len() / 4) * 3 + match s.len() % 4 { 2 => 1, 3 => 2, _ => 0 };
+    let mut out = vec![0u8; exact];
+    let n = b64url_decode_into(s, &mut out)?;
+    debug_assert_eq!(n, exact);
     Some(out)
+}
+
+fn b64url_decode_buf<'a>(s: &[u8], stack: &'a mut [u8]) -> Option<SmallBytes<'a>> {
+    if s.len() % 4 == 1 {
+        return None;
+    }
+    let exact = (s.len() / 4) * 3 + match s.len() % 4 { 2 => 1, 3 => 2, _ => 0 };
+    if exact <= stack.len() {
+        let n = b64url_decode_into(s, &mut stack[..exact])?;
+        Some(SmallBytes::Stack(&stack[..n]))
+    } else {
+        b64url_decode(s).map(SmallBytes::Heap)
+    }
 }
 
 fn parse_positive(s: &[u8]) -> Option<i64> {
@@ -91,21 +138,33 @@ fn parse_positive(s: &[u8]) -> Option<i64> {
 }
 
 pub struct App {
-    db: Db,
+    pub(crate) db: Db,
     key: HmacKey,
     started: i64,
-    scratch: Vec<u8>,
+    scratch: crate::buffer::Buffer,
 }
 
 impl App {
     pub fn new(db_path: &str, secret: &str) -> App {
+        Self::new_with_worker_hint(db_path, secret, None)
+    }
+
+    /// Uses the cache sizing intended for one process, independent of the
+    /// epoll worker setting because the L2 candidate has one App/Db owner.
+    pub fn new_single_owner(db_path: &str, secret: &str) -> App {
+        Self::new_with_worker_hint(db_path, secret, Some(1))
+    }
+
+    fn new_with_worker_hint(db_path: &str, secret: &str, worker_hint: Option<i32>) -> App {
         // One process keeps the whole hot set in cache; several consumers of
         // the same 2 GB box each take a quarter of that instead.
-        let workers: i32 = std::env::var("FEED_WORKERS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5)
-            .clamp(1, 16);
+        let workers: i32 = worker_hint.unwrap_or_else(|| {
+            std::env::var("FEED_WORKERS")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(5)
+                .clamp(1, 16)
+        });
         let cache_kb = match std::env::var("FEED_CACHE_KB").ok().and_then(|s| s.parse().ok()) {
             Some(kb) => kb,
             None if workers == 1 => 32768,
@@ -115,11 +174,18 @@ impl App {
             db: Db::open_with_cache(db_path, cache_kb),
             key: HmacKey::new(secret.as_bytes()),
             started: now_s(),
-            scratch: Vec::with_capacity(16 * 1024),
+            scratch: crate::buffer::Buffer::new(0),
         }
     }
 
-    fn jwt(&self, tok: &[u8], now: i64) -> Result<(i64, Vec<u8>), AuthErr> {
+    // Reservation is supplied by the event loop before any request work.
+    pub fn output_budget(&mut self, _bytes: usize) {}
+
+    pub fn output_failed(&self) -> bool { false }
+    pub fn scratch_capacity(&self) -> usize { 0 }
+    pub fn release_scratch(&mut self) {}
+
+    fn jwt_with<R>(key: &HmacKey, tok: &[u8], now: i64, f: impl FnOnce(i64, &[u8]) -> R) -> Result<R, AuthErr> {
         let d1 = tok.iter().position(|&c| c == b'.').ok_or(AuthErr::Bad)?;
         let rest = &tok[d1 + 1..];
         let d2rel = rest.iter().position(|&c| c == b'.').ok_or(AuthErr::Bad)?;
@@ -128,30 +194,44 @@ impl App {
             return Err(AuthErr::Bad);
         }
 
-        let head = b64url_decode(&tok[..d1]).ok_or(AuthErr::Bad)?;
+        let mut head_buf = [0u8; 128];
+        let head = b64url_decode_buf(&tok[..d1], &mut head_buf).ok_or(AuthErr::Bad)?;
         let mut hv = [json::Value { raw: &[], ty: json::ABSENT }; 1];
-        json::scan(&head, &["alg"], &mut hv).map_err(|_| AuthErr::Bad)?;
-        if hv[0].ty != json::STRING || hv[0].raw != b"HS256" {
+        json::scan(head.as_slice(), &["alg"], &mut hv).map_err(|_| AuthErr::Bad)?;
+        if hv[0].ty != json::STRING {
+            return Err(AuthErr::Bad);
+        }
+        let mut alg_heap = Vec::new();
+        let alg = if hv[0].raw.contains(&b'\\') {
+            json::unescape(hv[0].raw, &mut alg_heap).map_err(|_| AuthErr::Bad)?;
+            alg_heap.as_slice()
+        } else {
+            hv[0].raw
+        };
+        if alg != b"HS256" {
             return Err(AuthErr::Bad);
         }
 
-        let sig = b64url_decode(&tok[d2 + 1..]).ok_or(AuthErr::Bad)?;
-        if sig.len() != 32 {
+        let mut sig_buf = [0u8; 64];
+        let sig = b64url_decode_buf(&tok[d2 + 1..], &mut sig_buf).ok_or(AuthErr::Bad)?;
+        let sig_slice = sig.as_slice();
+        if sig_slice.len() != 32 {
             return Err(AuthErr::Bad);
         }
-        let mac = self.key.mac(&tok[..d2]);
-        let sig_arr: [u8; 32] = sig.as_slice().try_into().map_err(|_| AuthErr::Bad)?;
+        let mac = key.mac(&tok[..d2]);
+        let sig_arr: [u8; 32] = sig_slice.try_into().map_err(|_| AuthErr::Bad)?;
         if !ct_eq32(&mac, &sig_arr) {
             return Err(AuthErr::Bad);
         }
 
-        let pay = b64url_decode(&tok[d1 + 1..d2]).ok_or(AuthErr::Bad)?;
+        let mut pay_buf = [0u8; 512];
+        let pay = b64url_decode_buf(&tok[d1 + 1..d2], &mut pay_buf).ok_or(AuthErr::Bad)?;
         let mut pv = [
             json::Value { raw: &[], ty: json::ABSENT },
             json::Value { raw: &[], ty: json::ABSENT },
             json::Value { raw: &[], ty: json::ABSENT },
         ];
-        json::scan(&pay, &["sub", "username", "exp"], &mut pv).map_err(|_| AuthErr::Bad)?;
+        json::scan(pay.as_slice(), &["sub", "username", "exp"], &mut pv).map_err(|_| AuthErr::Bad)?;
 
         let exp = json::as_int(&pv[2]).ok_or(AuthErr::Bad)?;
         if exp <= now {
@@ -160,38 +240,55 @@ impl App {
         if pv[0].ty != json::STRING {
             return Err(AuthErr::Payload);
         }
-        let uid = parse_positive(pv[0].raw).ok_or(AuthErr::Payload)?;
+        let mut sub_heap = Vec::new();
+        let sub = if pv[0].raw.contains(&b'\\') {
+            json::unescape(pv[0].raw, &mut sub_heap).map_err(|_| AuthErr::Payload)?;
+            sub_heap.as_slice()
+        } else {
+            pv[0].raw
+        };
+        let uid = parse_positive(sub).ok_or(AuthErr::Payload)?;
         if pv[1].ty != json::STRING {
             return Err(AuthErr::Payload);
         }
-        let mut name = Vec::new();
-        json::unescape(pv[1].raw, &mut name).map_err(|_| AuthErr::Payload)?;
-        Ok((uid, name))
+        if pv[1].raw.contains(&b'\\') {
+            let mut name_heap = Vec::new();
+            json::unescape(pv[1].raw, &mut name_heap).map_err(|_| AuthErr::Payload)?;
+            Ok(f(uid, &name_heap))
+        } else {
+            Ok(f(uid, pv[1].raw))
+        }
     }
 
-    fn authenticate(&self, rq: &Request, now: i64) -> Result<(i64, Vec<u8>), AuthErr> {
+    fn jwt(&self, tok: &[u8], now: i64) -> Result<(i64, Vec<u8>), AuthErr> {
+        Self::jwt_with(&self.key, tok, now, |uid, name| (uid, name.to_vec()))
+    }
+
+    fn authenticate_with<R>(key: &HmacKey, rq: &Request, now: i64, f: impl FnOnce(i64, &[u8]) -> R) -> Result<R, AuthErr> {
         let auth = rq.auth.ok_or(AuthErr::Missing)?;
         if auth.len() < 7 || &auth[..7] != b"Bearer " {
             return Err(AuthErr::Missing);
         }
-        self.jwt(&auth[7..], now)
+        Self::jwt_with(key, &auth[7..], now, f)
     }
 
     /// Handle one request. Returns `true` when the connection must be closed.
-    pub fn handle(&mut self, rq: &Request, out: &mut Vec<u8>) -> bool {
+    pub fn handle(&mut self, rq: &Request, out: &mut impl Output) -> bool {
         if self.db.batch_failed() {
             http::respond(out, 503, b"{\"error\":\"database busy\"}");
             return !rq.keep_alive;
         }
-        let now = now_s();
         if rq.method == b"GET" {
             if rq.path == b"/health" {
+                let now = now_s();
+                let started = self.started;
                 if self.db.ping() {
-                    let mut body = Vec::with_capacity(64);
-                    body.extend_from_slice(b"{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
-                    http::put_i64(&mut body, now - self.started);
-                    body.push(b'}');
-                    http::respond(out, 200, &body);
+                    http::respond_stream(out, 200, 64, |o| {
+                        o.extend_from_slice(b"{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
+                        http::put_i64(o, now - started);
+                        o.push(b'}');
+                        true
+                    });
                 } else {
                     http::respond(
                         out,
@@ -202,10 +299,8 @@ impl App {
                 return !rq.keep_alive;
             }
             if rq.path == b"/feed" {
-                self.scratch.clear();
-                if self.db.feed_json(&mut self.scratch) {
-                    http::respond(out, 200, &self.scratch);
-                } else {
+                let db = &mut self.db;
+                if !http::respond_stream(out, 200, 5120, |o| db.feed_json(o)) {
                     http::respond(out, 500, R_INTERNAL);
                 }
                 return !rq.keep_alive;
@@ -216,11 +311,17 @@ impl App {
                         IdParse::Invalid => http::respond(out, 400, R_BAD_ID),
                         IdParse::TooBig => http::respond(out, 404, R_NO_POST),
                         IdParse::Ok(id) => {
-                            self.scratch.clear();
-                            match self.db.post_json(id, &mut self.scratch) {
-                                0 => http::respond(out, 200, &self.scratch),
-                                1 => http::respond(out, 404, R_NO_POST),
-                                _ => http::respond(out, 500, R_INTERNAL),
+                            let db = &mut self.db;
+                            let mut status = -1;
+                            if !http::respond_stream(out, 200, 384, |o| {
+                                status = db.post_json(id, o);
+                                status == 0
+                            }) {
+                                if status == 1 && !out.failed() {
+                                    http::respond(out, 404, R_NO_POST);
+                                } else {
+                                    http::respond(out, 500, R_INTERNAL);
+                                }
                             }
                         }
                     }
@@ -232,56 +333,61 @@ impl App {
         }
 
         if rq.method == b"POST" {
+            let now = now_s();
             if rq.path == b"/posts" {
-                let (uid, name) = match self.authenticate(rq, now) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        http::respond(out, 401, e.body());
-                        return !rq.keep_alive;
-                    }
-                };
                 let mut v = [json::Value { raw: &[], ty: json::ABSENT }; 1];
-                if json::scan(rq.body, &["body"], &mut v).is_err() {
-                    http::respond(out, 400, R_BAD_JSON);
-                    return !rq.keep_alive;
-                }
-                if v[0].ty != json::STRING {
-                    http::respond(out, 400, R_NO_BODY);
-                    return !rq.keep_alive;
-                }
-                let mut raw = Vec::with_capacity(v[0].raw.len());
-                if json::unescape(v[0].raw, &mut raw).is_err() {
-                    http::respond(out, 400, R_BAD_JSON);
-                    return !rq.keep_alive;
-                }
-                let text = match trim_body(&raw) {
-                    Ok(t) => t,
-                    Err(body) => {
-                        http::respond(out, 400, body);
-                        return !rq.keep_alive;
+                let res = Self::authenticate_with(&self.key, rq, now, |uid, name| {
+                    if json::scan(rq.body, &["body"], &mut v).is_err() {
+                        http::respond(out, 400, R_BAD_JSON);
+                        return;
                     }
-                };
-                match self.db.create(uid, text) {
-                    Some((id, created)) => {
-                        let mut body = Vec::with_capacity(1024);
-                        body.extend_from_slice(b"{\"post\":{\"id\":");
-                        http::put_i64(&mut body, id);
-                        body.extend_from_slice(b",\"body\":");
-                        http::put_jstr(&mut body, text);
-                        body.extend_from_slice(b",\"created_at\":");
-                        http::put_jstr(&mut body, &created);
-                        body.extend_from_slice(b",\"author\":");
-                        http::put_jstr(&mut body, &name);
-                        body.extend_from_slice(b",\"like_count\":0}}");
-                        http::respond(out, 201, &body);
+                    if v[0].ty != json::STRING {
+                        http::respond(out, 400, R_NO_BODY);
+                        return;
                     }
-                    None => http::respond(out, 500, R_INTERNAL),
+                    let mut escaped = Vec::new();
+                    let raw = if v[0].raw.contains(&b'\\') {
+                        if json::unescape(v[0].raw, &mut escaped).is_err() {
+                            http::respond(out, 400, R_BAD_JSON);
+                            return;
+                        }
+                        escaped.as_slice()
+                    } else {
+                        v[0].raw
+                    };
+                    let text = match trim_body(raw) {
+                        Ok(t) => t,
+                        Err(body) => {
+                            http::respond(out, 400, body);
+                            return;
+                        }
+                    };
+                    match self.db.create(uid, text) {
+                        Some((id, created)) => {
+                            http::respond_stream(out, 201, 256 + text.len() + name.len(), |o| {
+                                o.extend_from_slice(b"{\"post\":{\"id\":");
+                                http::put_i64(o, id);
+                                o.extend_from_slice(b",\"body\":");
+                                http::put_jstr(o, text);
+                                o.extend_from_slice(b",\"created_at\":");
+                                http::put_jstr(o, &created);
+                                o.extend_from_slice(b",\"author\":");
+                                http::put_jstr(o, name);
+                                o.extend_from_slice(b",\"like_count\":0}}");
+                                true
+                            });
+                        }
+                        None => http::respond(out, 500, R_INTERNAL),
+                    }
+                });
+                if let Err(e) = res {
+                    http::respond(out, 401, e.body());
                 }
                 return !rq.keep_alive;
             }
 
             if let Some((id, true)) = post_path(rq.path) {
-                let (uid, _) = match self.authenticate(rq, now) {
+                let uid = match Self::authenticate_with(&self.key, rq, now, |uid, _| uid) {
                     Ok(v) => v,
                     Err(e) => {
                         http::respond(out, 401, e.body());
@@ -293,22 +399,20 @@ impl App {
                     IdParse::TooBig => http::respond(out, 404, R_NO_POST),
                     IdParse::Ok(id) => match self.db.like(uid, id) {
                         LikeResult::Created => {
-                            let mut body = Vec::with_capacity(64);
-                            body.extend_from_slice(
-                                b"{\"liked\":true,\"already_liked\":false,\"post_id\":",
-                            );
-                            http::put_i64(&mut body, id);
-                            body.push(b'}');
-                            http::respond(out, 201, &body);
+                            http::respond_stream(out, 201, 64, |o| {
+                                o.extend_from_slice(b"{\"liked\":true,\"already_liked\":false,\"post_id\":");
+                                http::put_i64(o, id);
+                                o.push(b'}');
+                                true
+                            });
                         }
                         LikeResult::AlreadyLiked => {
-                            let mut body = Vec::with_capacity(64);
-                            body.extend_from_slice(
-                                b"{\"liked\":true,\"already_liked\":true,\"post_id\":",
-                            );
-                            http::put_i64(&mut body, id);
-                            body.push(b'}');
-                            http::respond(out, 200, &body);
+                            http::respond_stream(out, 200, 64, |o| {
+                                o.extend_from_slice(b"{\"liked\":true,\"already_liked\":true,\"post_id\":");
+                                http::put_i64(o, id);
+                                o.push(b'}');
+                                true
+                            });
                         }
                         LikeResult::Missing => http::respond(out, 404, R_NO_POST),
                         LikeResult::Error => http::respond(out, 500, R_INTERNAL),
@@ -388,6 +492,7 @@ fn trim_space(cp: u32) -> bool {
              | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF)
 }
 
+// Called only on decoded strings from a successful, UTF-8-validated JSON scan.
 fn cp_at(p: &[u8], i: usize) -> (u32, usize) {
     let c = p[i];
     if c < 0x80 {
@@ -442,4 +547,35 @@ fn trim_body(s: &[u8]) -> Result<&[u8], &'static [u8]> {
         return Err(R_LONG_BODY);
     }
     Ok(&s[a..b])
+}
+
+#[cfg(test)]
+mod auth_buf_tests {
+    use super::{b64url_decode, b64url_decode_buf, SmallBytes};
+
+    #[test]
+    fn stack_and_heap_decode_match_and_validate() {
+        let mut small = [0u8; 8];
+        for (enc, exp) in [
+            (b"".as_slice(), b"".as_slice()),
+            (b"Zg", b"f"),
+            (b"Zm8", b"fo"),
+            (b"Zm9v", b"foo"),
+            (b"YWJjZGVmZ2g", b"abcdefgh"),
+        ] {
+            let decoded = b64url_decode_buf(enc, &mut small).unwrap();
+            assert!(matches!(decoded, SmallBytes::Stack(_)));
+            assert_eq!(decoded.as_slice(), exp);
+            assert_eq!(b64url_decode(enc).as_deref(), Some(exp));
+        }
+        // Longer than 8 decoded bytes triggers heap fallback transparently.
+        let long_enc = b"YWJjZGVmZ2hpams"; // "abcdefghijk" (11 bytes)
+        let decoded = b64url_decode_buf(long_enc, &mut small).unwrap();
+        assert!(matches!(decoded, SmallBytes::Heap(_)));
+        assert_eq!(decoded.as_slice(), b"abcdefghijk");
+        for bad in [b"A".as_slice(), b"Zg=", b"Zh", b"Zm9", b"YWJjZGVmZ2hpamx"] {
+            assert!(b64url_decode_buf(bad, &mut small).is_none());
+            assert!(b64url_decode(bad).is_none());
+        }
+    }
 }

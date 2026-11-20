@@ -26,9 +26,8 @@ type sqlite3 = c_void;
 extern "C" {
     fn feed_btree(db: *mut sqlite3) -> *mut c_void;
     fn feed_cursor_size() -> c_int;
-    fn feed_keyinfo(db: *mut sqlite3, nkey: c_int, nextra: c_int) -> *mut c_void;
-    fn feed_keyinfo_desc(db: *mut sqlite3, nkey: c_int, nextra: c_int) -> *mut c_void;
-    fn feed_begin_read(bt: *mut c_void, version: *mut u32) -> c_int;
+    fn feed_begin_read(db: *mut sqlite3, bt: *mut c_void, version: *mut u32) -> c_int;
+    fn feed_keyinfo_free(ki: *mut c_void);
     fn feed_cursor_open(bt: *mut c_void, root: u32, mem: *mut c_void, ki: *mut c_void) -> c_int;
     fn feed_cursor_close(mem: *mut c_void) -> c_int;
     fn feed_first(mem: *mut c_void) -> c_int;
@@ -38,8 +37,7 @@ extern "C" {
     fn feed_rowid(mem: *mut c_void) -> i64;
     fn feed_seek(mem: *mut c_void, rowid: i64) -> c_int;
     fn feed_index_ge(mem: *mut c_void, ki: *mut c_void, k: i64) -> c_int;
-    fn feed_payload(mem: *mut c_void, scratch: *mut u8, cap: u32, len: *mut u32)
-        -> *const u8;
+    fn feed_payload(mem: *mut c_void, scratch: *mut u8, cap: u32, len: *mut u32) -> *const u8;
 }
 
 const SCRATCH: usize = 16 * 1024;
@@ -94,7 +92,7 @@ impl Col {
             }
         }
     }
-    fn bytes(&self) -> &'static [u8] {
+    fn bytes(&self) -> &[u8] {
         let n = self.len();
         if n == 0 || self.ptr.is_null() {
             &[]
@@ -152,13 +150,17 @@ fn decode(rec: &[u8], ncol: usize, cols: &mut [Col; 4]) -> Option<()> {
         if body + len > rec.len() {
             return None;
         }
-        *slot = Col { ty: t, ptr: unsafe { rec.as_ptr().add(body) } };
+        *slot = Col {
+            ty: t,
+            ptr: unsafe { rec.as_ptr().add(body) },
+        };
         body += len;
     }
     Some(())
 }
 
 pub struct Cursors {
+    db: *mut sqlite3,
     bt: *mut c_void,
     ki_likes: *mut c_void,
     ki_newest: *mut c_void,
@@ -187,6 +189,7 @@ impl Cursors {
         let sz = unsafe { feed_cursor_size() } as usize;
         let words = sz.div_ceil(8).max(1);
         Cursors {
+            db,
             bt: unsafe { feed_btree(db) },
             ki_likes,
             ki_newest,
@@ -230,7 +233,7 @@ impl Cursors {
         if self.opened {
             return Some(());
         }
-        if unsafe { feed_begin_read(self.bt, std::ptr::null_mut()) } != 0 {
+        if unsafe { feed_begin_read(self.db, self.bt, std::ptr::null_mut()) } != 0 {
             return None;
         }
         unsafe {
@@ -302,7 +305,10 @@ impl Cursors {
             }
             let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
             // (created_at, id): the index's two key columns.
-            let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+            let mut cols = [Col {
+                ty: 0,
+                ptr: std::ptr::null(),
+            }; 4];
             decode(rec, 2, &mut cols).ok_or("index decode")?;
             if !cols[1].is_int() || cols[1].int() <= 0 {
                 return Err("index id type");
@@ -314,15 +320,13 @@ impl Cursors {
         if rc < 0 {
             return Err("index next");
         }
-        for k in 1..count {
-            if ids[k] >= ids[k - 1] {
-                return Err("index order");
-            }
-        }
+        // The index orders (created_at DESC, id DESC), not ids alone. Keep
+        // that order even for backdated rows. The rowid stepping/range-count
+        // optimizations independently check their consecutive-id preconditions.
         Ok(count)
     }
 
-    fn user_name(&mut self, uid: i64) -> Option<&'static [u8]> {
+    fn user_name_json(&mut self, uid: i64, out: &mut impl crate::buffer::Output) -> Option<()> {
         let u = Self::ptr(&mut self.users);
         match unsafe { feed_seek(u, uid) } {
             0 => {}
@@ -336,12 +340,17 @@ impl Cursors {
             return None;
         }
         let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
-        let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+        let mut cols = [Col {
+            ty: 0,
+            ptr: std::ptr::null(),
+        }; 4];
         decode(rec, 3, &mut cols)?;
         if !cols[1].is_text() {
             return None;
         }
-        Some(cols[1].bytes())
+        // Consume the page borrow before any further B-tree operation.
+        put_jstr(out, cols[1].bytes());
+        Some(())
     }
 
     /// Like count for one post id.
@@ -360,7 +369,10 @@ impl Cursors {
                 return Err("index record too large");
             }
             let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
-            let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+            let mut cols = [Col {
+                ty: 0,
+                ptr: std::ptr::null(),
+            }; 4];
             decode(rec, 1, &mut cols).ok_or("index decode")?;
             if !cols[0].is_int() {
                 return Err("index key type");
@@ -378,10 +390,8 @@ impl Cursors {
     }
 
     /// Like counts for post ids in `lo..=hi`, from one scan of the index.
+    /// Caller must supply a zero-initialized `out` slice of length `(hi - lo + 1)`.
     fn range_counts(&mut self, lo: i64, hi: i64, out: &mut [i64]) -> Result<(), &'static str> {
-        for c in out.iter_mut() {
-            *c = 0;
-        }
         let l = Self::ptr(&mut self.likes);
         let mut rc = unsafe { feed_index_ge(l, self.ki_likes, lo) };
         if rc < 0 {
@@ -395,7 +405,10 @@ impl Cursors {
                 return Err("index payload too large");
             }
             let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
-            let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+            let mut cols = [Col {
+                ty: 0,
+                ptr: std::ptr::null(),
+            }; 4];
             decode(rec, 1, &mut cols).ok_or("index decode")?;
             if !cols[0].is_int() {
                 return Err("index key type");
@@ -419,7 +432,7 @@ impl Cursors {
         }
     }
 
-    fn emit(out: &mut Vec<u8>, id: i64, body: &[u8], created: &[u8], author: &[u8], likes: i64) {
+    fn emit_post_fields(out: &mut impl crate::buffer::Output, id: i64, body: &[u8], created: &[u8]) {
         out.extend_from_slice(b"{\"id\":");
         put_i64(out, id);
         out.extend_from_slice(b",\"body\":");
@@ -427,15 +440,11 @@ impl Cursors {
         out.extend_from_slice(b",\"created_at\":");
         put_jstr(out, created);
         out.extend_from_slice(b",\"author\":");
-        put_jstr(out, author);
-        out.extend_from_slice(b",\"like_count\":");
-        put_i64(out, likes);
-        out.push(b'}');
     }
 
     /// Appends `{"posts":[...]}` in feed order. Err(reason) = fall back to
     /// SQL, with nothing appended.
-    pub fn feed_json(&mut self, out: &mut Vec<u8>) -> Result<(), &'static str> {
+    pub fn feed_json(&mut self, out: &mut impl crate::buffer::Output) -> Result<(), &'static str> {
         let mark = out.len();
         let r = self.feed_json_into(out);
         if r.is_err() {
@@ -444,24 +453,42 @@ impl Cursors {
         r
     }
 
-    fn feed_json_into(&mut self, out: &mut Vec<u8>) -> Result<(), &'static str> {
+    fn feed_json_into(&mut self, out: &mut impl crate::buffer::Output) -> Result<(), &'static str> {
         let mut ids = [0i64; 20];
         let n = self.newest_ids(&mut ids)?;
         out.extend_from_slice(b"{\"posts\":[");
         let mut counts = [0i64; 20];
-        // `range_counts` fills one slot per rowid in `lo..=hi`, so a range result
-        // is indexed by (id - lo); a per-id result is indexed by feed position.
+        let mut wide = [std::mem::MaybeUninit::<i64>::uninit(); 257];
+        // `range_counts` fills one slot per rowid in `lo..=hi`, so a bounded-span
+        // range result is indexed by (id - lo) even when IDs have gaps/inversions.
         let mut range_lo: Option<i64> = None;
+        let mut range_wide = false;
         if n > 0 {
-            // Recent posts are almost always consecutive rowids, and then one
-            // forward range scan of likes_post_id_idx counts all of them.
-            let consecutive = ids[..n].windows(2).all(|w| w[0] == w[1] + 1);
-            if consecutive {
-                let lo = ids[n - 1];
-                let hi = ids[0];
-                self.range_counts(lo, hi, &mut counts[..n])?;
-                range_lo = Some(lo);
-            } else {
+            let mut lo = ids[0];
+            let mut hi = ids[0];
+            for &id in &ids[1..n] {
+                if id < lo { lo = id; }
+                if id > hi { hi = id; }
+            }
+            if let Some(diff) = hi.checked_sub(lo) {
+                if diff < 20 {
+                    let span = (diff + 1) as usize;
+                    self.range_counts(lo, hi, &mut counts[..span])?;
+                    range_lo = Some(lo);
+                } else if diff <= 256 {
+                    let span = (diff + 1) as usize;
+                    for slot in &mut wide[..span] {
+                        slot.write(0);
+                    }
+                    let buf = unsafe {
+                        std::slice::from_raw_parts_mut(wide.as_mut_ptr() as *mut i64, span)
+                    };
+                    self.range_counts(lo, hi, buf)?;
+                    range_lo = Some(lo);
+                    range_wide = true;
+                }
+            }
+            if range_lo.is_none() {
                 for k in 0..n {
                     counts[k] = self.like_count(ids[k])?;
                 }
@@ -493,20 +520,30 @@ impl Cursors {
                 return Err("payload too large");
             }
             let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
-            let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+            let mut cols = [Col {
+                ty: 0,
+                ptr: std::ptr::null(),
+            }; 4];
             decode(rec, 4, &mut cols).ok_or("decode")?;
             if !cols[1].is_int() || !cols[2].is_text() || !cols[3].is_text() {
                 return Err("record layout");
             }
-            let author = self.user_name(cols[1].int()).ok_or("author")?;
+            let uid = cols[1].int();
             if k > 0 {
                 out.push(b',');
             }
             let likes = match range_lo {
+                Some(lo) if range_wide => unsafe { wide[(id - lo) as usize].assume_init() },
                 Some(lo) => counts[(id - lo) as usize],
                 None => counts[k],
             };
-            Self::emit(out, id, cols[2].bytes(), cols[3].bytes(), author, likes);
+            // Serialize borrowed post bytes before the author lookup. Output
+            // stays unpublished and the wrapper truncates it on any failure.
+            Self::emit_post_fields(out, id, cols[2].bytes(), cols[3].bytes());
+            self.user_name_json(uid, out).ok_or("author")?;
+            out.extend_from_slice(b",\"like_count\":");
+            put_i64(out, likes);
+            out.push(b'}');
         }
         out.extend_from_slice(b"]}");
         Ok(())
@@ -514,7 +551,7 @@ impl Cursors {
 
     /// Appends `{"post":{...}}`. 0 ok, 1 missing, -1 fall back / error, and
     /// nothing is appended unless the result is 0.
-    pub fn post_json(&mut self, id: i64, out: &mut Vec<u8>) -> i32 {
+    pub fn post_json(&mut self, id: i64, out: &mut impl crate::buffer::Output) -> i32 {
         let mark = out.len();
         let rc = self.post_json_into(id, out);
         if rc != 0 {
@@ -523,7 +560,7 @@ impl Cursors {
         rc
     }
 
-    fn post_json_into(&mut self, id: i64, out: &mut Vec<u8>) -> i32 {
+    fn post_json_into(&mut self, id: i64, out: &mut impl crate::buffer::Output) -> i32 {
         let p = Self::ptr(&mut self.posts);
         match unsafe { feed_seek(p, id) } {
             0 => {}
@@ -537,29 +574,47 @@ impl Cursors {
             return -1;
         }
         let rec = unsafe { std::slice::from_raw_parts(rec, len as usize) };
-        let mut cols = [Col { ty: 0, ptr: std::ptr::null() }; 4];
+        let mut cols = [Col {
+            ty: 0,
+            ptr: std::ptr::null(),
+        }; 4];
         if decode(rec, 4, &mut cols).is_none() {
             return -1;
         }
         if !cols[1].is_int() || !cols[2].is_text() || !cols[3].is_text() {
             return -1;
         }
-        let author = match self.user_name(cols[1].int()) {
-            Some(a) => a,
-            None => return -1,
-        };
+        let uid = cols[1].int();
+        out.extend_from_slice(b"{\"post\":");
+        Self::emit_post_fields(out, id, cols[2].bytes(), cols[3].bytes());
+        if self.user_name_json(uid, out).is_none() {
+            return -1;
+        }
         let likes = match self.like_count(id) {
             Ok(c) => c,
             Err(_) => return -1,
         };
-        out.extend_from_slice(b"{\"post\":");
-        Self::emit(out, id, cols[2].bytes(), cols[3].bytes(), author, likes);
+        out.extend_from_slice(b",\"like_count\":");
+        put_i64(out, likes);
+        out.push(b'}');
         out.push(b'}');
         0
     }
 
     /// True when the stored author still exists (used to validate reads).
     pub fn author_exists(&mut self, uid: i64) -> bool {
-        self.user_name(uid).is_some()
+        self.user_name_json(uid, &mut Vec::new()).is_some()
+    }
+}
+
+// Cursors and both KeyInfos must die before their SQLite handle. Owning them
+// here also covers partial initialization and disabled self-check/reopen paths.
+impl Drop for Cursors {
+    fn drop(&mut self) {
+        self.close();
+        unsafe {
+            feed_keyinfo_free(self.ki_likes);
+            feed_keyinfo_free(self.ki_newest);
+        }
     }
 }

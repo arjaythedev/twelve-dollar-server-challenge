@@ -70,33 +70,90 @@ impl<'a, 'k> Parser<'a, 'k> {
         }
         self.i += 1;
         let start = self.i;
-        loop {
-            let c = self.peek().ok_or(())?;
+        let s = self.s;
+        const M01: u64 = 0x0101_0101_0101_0101;
+        const M80: u64 = 0x8080_8080_8080_8080;
+        const Q: u64 = 0x2222_2222_2222_2222;
+        const BS: u64 = 0x5c5c_5c5c_5c5c_5c5c;
+        while self.i < s.len() {
+            while self.i + 8 <= s.len() {
+                let w = u64::from_ne_bytes(s[self.i..self.i + 8].try_into().unwrap());
+                let has_non_ascii_or_ctl =
+                    (w & M80) | (w.wrapping_sub(0x2020_2020_2020_2020) & M80);
+                let tq = w ^ Q;
+                let has_q = tq.wrapping_sub(M01) & !tq & M80;
+                let tb = w ^ BS;
+                let has_bs = tb.wrapping_sub(M01) & !tb & M80;
+                if (has_non_ascii_or_ctl | has_q | has_bs) != 0 {
+                    break;
+                }
+                self.i += 8;
+            }
+            if self.i >= s.len() {
+                return Err(());
+            }
+            let c = s[self.i];
             if c == b'"' {
                 let end = self.i;
                 self.i += 1;
-                return Ok(&self.s[start..end]);
+                return Ok(&s[start..end]);
             }
-            if c == b'\\' {
-                self.i += 1;
-                match self.peek().ok_or(())? {
-                    b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => self.i += 1,
-                    b'u' => {
-                        self.i += 1;
-                        for _ in 0..4 {
-                            hex(self.peek().ok_or(())?).ok_or(())?;
+            if c < 0x80 {
+                if c == b'\\' {
+                    self.i += 1;
+                    match *s.get(self.i).ok_or(())? {
+                        b'"' | b'\\' | b'/' | b'b' | b'f' | b'n' | b'r' | b't' => self.i += 1,
+                        b'u' => {
                             self.i += 1;
+                            for _ in 0..4 {
+                                hex(*s.get(self.i).ok_or(())?).ok_or(())?;
+                                self.i += 1;
+                            }
                         }
+                        _ => return Err(()),
                     }
-                    _ => return Err(()),
+                    continue;
                 }
+                if c < 0x20 {
+                    return Err(());
+                }
+                self.i += 1;
                 continue;
             }
-            if c < 0x20 {
+            if c < 0xC2 {
+                return Err(());
+            } else if c < 0xE0 {
+                let b1 = *s.get(self.i + 1).ok_or(())?;
+                if (b1 & 0xC0) != 0x80 {
+                    return Err(());
+                }
+                self.i += 2;
+            } else if c < 0xF0 {
+                let b1 = *s.get(self.i + 1).ok_or(())?;
+                let b2 = *s.get(self.i + 2).ok_or(())?;
+                if (b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 {
+                    return Err(());
+                }
+                if (c == 0xE0 && b1 < 0xA0) || (c == 0xED && b1 >= 0xA0) {
+                    return Err(());
+                }
+                self.i += 3;
+            } else if c <= 0xF4 {
+                let b1 = *s.get(self.i + 1).ok_or(())?;
+                let b2 = *s.get(self.i + 2).ok_or(())?;
+                let b3 = *s.get(self.i + 3).ok_or(())?;
+                if (b1 & 0xC0) != 0x80 || (b2 & 0xC0) != 0x80 || (b3 & 0xC0) != 0x80 {
+                    return Err(());
+                }
+                if (c == 0xF0 && b1 < 0x90) || (c == 0xF4 && b1 >= 0x90) {
+                    return Err(());
+                }
+                self.i += 4;
+            } else {
                 return Err(());
             }
-            self.i += 1;
         }
+        Err(())
     }
 
     fn number(&mut self) -> Result<&'a [u8], ()> {
@@ -145,8 +202,15 @@ impl<'a, 'k> Parser<'a, 'k> {
         Ok(Value { raw: lit, ty })
     }
 
-    fn slot(&self, key: &[u8]) -> Option<usize> {
-        self.keys.iter().position(|k| k.as_bytes() == key)
+    fn slot(&self, key: &[u8]) -> Result<Option<usize>, ()> {
+        // Names compare by decoded content. Keep ordinary unescaped names
+        // allocation-free, and retain the existing last-member-wins rule.
+        if !key.contains(&b'\\') {
+            return Ok(self.keys.iter().position(|k| k.as_bytes() == key));
+        }
+        let mut decoded = Vec::with_capacity(key.len());
+        unescape(key, &mut decoded)?;
+        Ok(self.keys.iter().position(|k| k.as_bytes() == decoded))
     }
 
     fn value(&mut self) -> Result<Value<'a>, ()> {
@@ -180,7 +244,7 @@ impl<'a, 'k> Parser<'a, 'k> {
                 return Err(());
             }
             self.i += 1;
-            let slot = if top { self.slot(key) } else { None };
+            let slot = if top { self.slot(key)? } else { None };
             self.depth += 1;
             let v = self.value();
             self.depth -= 1;
@@ -340,4 +404,55 @@ pub fn as_int(v: &Value) -> Option<i64> {
         acc = acc.checked_mul(10)?.checked_add((c - b'0') as i64)?;
     }
     Some(if neg { -acc } else { acc })
+}
+
+#[cfg(test)]
+mod utf8_tests {
+    use super::{scan, Value, ABSENT, STRING};
+
+    #[test]
+    fn inline_utf8_matches_std_validation() {
+        // Valid 1/2/3/4-byte UTF-8 across every 8-byte alignment offset.
+        for pad in 0..16 {
+            let mut doc = Vec::new();
+            doc.extend_from_slice(b"{\"body\":\"");
+            doc.extend_from_slice(&vec![b'a'; pad]);
+            doc.extend_from_slice("é中😀".as_bytes());
+            doc.extend_from_slice(b"\"}");
+            let mut out = [Value { raw: &[], ty: ABSENT }];
+            assert!(scan(&doc, &["body"], &mut out).is_ok(), "pad {pad}");
+            assert_eq!(out[0].ty, STRING);
+        }
+        // Invalid byte values inside strings and ignored members/trailing junk.
+        for bad in [
+            b"\xff".as_slice(),
+            b"\x80",
+            b"\xc0\xaf",
+            b"\xc1\xbf",
+            b"\xc2",
+            b"\xe0\x9f\xbf",
+            b"\xe2\x82",
+            b"\xed\xa0\x80",
+            b"\xf0\x8f\xbf\xbf",
+            b"\xf4\x90\x80\x80",
+            b"\xf5\x80\x80\x80",
+            b"\x01",
+            b"\x1f",
+        ] {
+            for pad in 0..10 {
+                let mut doc = Vec::new();
+                doc.extend_from_slice(b"{\"body\":\"");
+                doc.extend_from_slice(&vec![b'x'; pad]);
+                doc.extend_from_slice(bad);
+                doc.extend_from_slice(b"\"}");
+                let mut out = [Value { raw: &[], ty: ABSENT }];
+                assert!(scan(&doc, &["body"], &mut out).is_err(), "pad {pad} bad {bad:?}");
+            }
+        }
+        let mut out = [Value { raw: &[], ty: ABSENT }];
+        assert!(scan(b"{\"body\":\"ok\",\"ign\":\"\xff\"}", &["body"], &mut out).is_err());
+        assert!(scan(b"{\"body\":\"ok\"}\xff", &["body"], &mut out).is_err());
+        assert!(scan(b"{\"body\":\xff}", &["body"], &mut out).is_err());
+        assert!(scan(b"{\"body\":\"\x7f\"}", &["body"], &mut out).is_ok());
+    }
 }

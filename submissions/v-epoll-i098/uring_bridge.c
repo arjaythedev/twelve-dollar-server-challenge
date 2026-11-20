@@ -22,13 +22,9 @@
 #define ACCEPT_DEPTH 64
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
-#define BATCH_NS 200000 /* Bound completion coalescing before one SQLite transaction. */
+#define BATCH_NS 4000000 /* Bound completion coalescing before one SQLite transaction. */
 #define PENDING_LIMIT (1u << 20) /* Input held while the application is busy; more closes the client. */
 #define TD_CANCEL (UINT64_MAX - 1)
-/* Output of at most OUT_BLOCK bytes lives in a pooled block of that size; larger output is
- * allocated at its exact size. So output_len alone tells which kind a buffer is. */
-#define OUT_BLOCK 8192
-#define POOLED_BLOCKS 1024
 
 enum { FREE, ACCEPT, RECV, SEND, CLOSE, APPLICATION };
 
@@ -50,8 +46,7 @@ struct td_ring {
     unsigned char *memory;
     struct td_client *clients;
     int *free_slots;
-    unsigned char *blocks[POOLED_BLOCKS];
-    int free_count, accepting, block_count;
+    int free_count, accepting;
     int ready_head, ready_tail, retry_head, retry_tail, deliver_head, deliver_tail;
     uint64_t retry_at, accept_at;
 };
@@ -113,18 +108,9 @@ static void td_recycle(struct td_ring *r, int buffer)
     io_uring_buf_ring_advance(r->buffers, 1);
 }
 
-static unsigned char *td_block(struct td_ring *r)
+static void td_drop_output(struct td_client *c)
 {
-    unsigned char *block = r->block_count ? r->blocks[--r->block_count] : malloc(OUT_BLOCK);
-    if (!block) td_fail("allocate committed output", ENOMEM);
-    return block;
-}
-
-static void td_drop_output(struct td_ring *r, struct td_client *c)
-{
-    if (c->output && c->output_len <= OUT_BLOCK && r->block_count < POOLED_BLOCKS)
-        r->blocks[r->block_count++] = c->output;
-    else free(c->output);
+    free(c->output);
     c->output = NULL;
     c->output_len = c->sent = 0;
 }
@@ -252,6 +238,12 @@ struct td_net *td_net_new(int listener, int checkpoint)
     /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
     if (setsockopt(listener, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
         td_fail("listener TCP_NODELAY", errno);
+    /* Bound queued socket data when a checkpoint or a slow peer delays progress. */
+    int receive_buffer = 4096, send_buffer = 8192;
+    if (setsockopt(listener, SOL_SOCKET, SO_RCVBUF, &receive_buffer, sizeof(receive_buffer)))
+        td_fail("listener SO_RCVBUF", errno);
+    if (setsockopt(listener, SOL_SOCKET, SO_SNDBUF, &send_buffer, sizeof(send_buffer)))
+        td_fail("listener SO_SNDBUF", errno);
     for (int i = 0; i < RINGS; ++i) {
         struct td_ring *r = &net->rings[i];
         r->ready_head = r->ready_tail = r->retry_head = r->retry_tail = -1;
@@ -324,7 +316,13 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
     }
     if (buffer >= 0) td_recycle(r, buffer);
     int transient = result == -ENOBUFS || result == -EAGAIN || result == -EINTR || result == -ENOMEM;
-    if (result != -ECANCELED && !transient) c->eof = 1; /* end of stream or a failed socket */
+    if (result != -ECANCELED && !transient) {
+        c->eof = 1;
+        if (result < 0 && c->operation == APPLICATION) {
+            *event = (struct td_event){ .kind = 6, .id = ring_index * SLOTS + slot, .buffer = -1 };
+            return 1;
+        }
+    }
     if (!waiting || c->armed) return 0;
     if (c->eof) td_enqueue(r, slot, CLOSE);
     else if (transient) td_retry(r, slot);
@@ -378,7 +376,7 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
             }
             td_fail("direct close", result);
         }
-        td_drop_output(r, c);
+        td_drop_output(c);
         free(c->pending);
         c->pending = NULL;
         c->pending_len = c->close_after = 0;
@@ -402,7 +400,7 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
     c->sent += result;
     if (c->sent < c->output_len) td_enqueue(r, slot, SEND);
     else {
-        td_drop_output(r, c);
+        td_drop_output(c);
         if (c->close_after) td_enqueue(r, slot, CLOSE);
         else if (c->notify_drain) {
             c->operation = APPLICATION;
@@ -482,7 +480,8 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             if (!flush_at) flush_at = nanos + BATCH_NS;
             if (count == capacity || nanos >= flush_at || td_now() >= deadline) return count;
             struct timespec pause = { .tv_nsec = (long)(flush_at - nanos) };
-            td_sleep(net, &pause);
+            /* Collect until the batch deadline instead of waking for each completion. */
+            if (nanosleep(&pause, NULL) && errno != EINTR) td_fail("batch sleep", errno);
             continue;
         }
         now = td_now();
@@ -511,21 +510,10 @@ void td_net_send(struct td_net *net, int id, const unsigned char *data, int len)
     assert(c->operation == APPLICATION && !c->busy && !c->queued && c->sent == 0);
     if ((unsigned)len > UINT_MAX - c->output_len) td_fail("output size", EOVERFLOW);
     unsigned size = c->output_len + len;
-    if (size <= OUT_BLOCK) {
-        if (!c->output) c->output = td_block(r);
-    } else if (c->output_len > OUT_BLOCK) {
-        unsigned char *output = realloc(c->output, size);
-        if (!output) td_fail("allocate committed output", ENOMEM);
-        c->output = output;
-    } else {
-        unsigned char *output = malloc(size);
-        if (!output) td_fail("allocate committed output", ENOMEM);
-        if (c->output) memcpy(output, c->output, c->output_len);
-        unsigned kept = c->output_len;
-        td_drop_output(r, c);
-        c->output = output;
-        c->output_len = kept;
-    }
+    /* A delayed batch can release thousands of short replies; retain only their actual bytes. */
+    unsigned char *output = realloc(c->output, size);
+    if (!output) td_fail("allocate committed output", ENOMEM);
+    c->output = output;
     memcpy(c->output + c->output_len, data, len);
     c->output_len = size;
 }

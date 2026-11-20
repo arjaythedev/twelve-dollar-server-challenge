@@ -78,10 +78,7 @@ impl FromRequestParts<Arc<AppState>> for AuthUser {
             .unwrap_or("");
 
         let Some(token) = auth.strip_prefix("Bearer ") else {
-            return Err(json_err(
-                StatusCode::UNAUTHORIZED,
-                "missing bearer token",
-            ));
+            return Err(json_err(StatusCode::UNAUTHORIZED, "missing bearer token"));
         };
 
         let mut segments = token.split('.');

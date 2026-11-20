@@ -3,15 +3,25 @@ use std::sync::Arc;
 use axum::{
     body::Bytes,
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde_json::Value;
 
-use crate::{AppState, auth::AuthUser, db, json};
+use crate::{AppState, auth::AuthUser, conn, db, json};
 
 fn json_response(status: StatusCode, body: Vec<u8>) -> Response {
-    (status, [(header::CONTENT_TYPE, "application/json")], body).into_response()
+    let mut response = (status, [(header::CONTENT_TYPE, "application/json")], body).into_response();
+
+    // Near the descriptor budget, let this connection go after the response so
+    // waiting clients can be accepted. The body is still fully written first.
+    if conn::should_retire() {
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("close"));
+    }
+
+    response
 }
 
 pub fn json_err(status: StatusCode, message: &'static str) -> Response {
@@ -45,10 +55,7 @@ pub fn parse_positive_id(s: &str) -> Option<i64> {
     s.parse::<i64>().ok()
 }
 
-pub async fn get_post(
-    Path(post_id): Path<String>,
-    State(state): State<Arc<AppState>>,
-) -> Response {
+pub async fn get_post(Path(post_id): Path<String>, State(state): State<Arc<AppState>>) -> Response {
     let Some(id) = parse_positive_id(&post_id) else {
         return json_err(StatusCode::BAD_REQUEST, "invalid post id");
     };

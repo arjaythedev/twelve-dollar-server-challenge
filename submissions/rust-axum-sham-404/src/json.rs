@@ -149,14 +149,7 @@ mod tests {
     #[test]
     fn formats_post_in_spec_order() {
         assert_eq!(
-            rendered(|out| post(
-                out,
-                7,
-                b"hi",
-                b"2025-12-31T23:59:19.409Z",
-                b"user",
-                3
-            )),
+            rendered(|out| post(out, 7, b"hi", b"2025-12-31T23:59:19.409Z", b"user", 3)),
             r#"{"id":7,"body":"hi","created_at":"2025-12-31T23:59:19.409Z","author":"user","like_count":3}"#
         );
     }

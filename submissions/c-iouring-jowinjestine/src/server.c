@@ -1089,6 +1089,8 @@ int main(int argc, char **argv) {
   ckpt_frames = (int)env_long("CKPT_FRAMES", 16384);
   ckpt_urgent = (int)env_long("CKPT_URGENT", 32768);
   db_drop_ms = env_long("DB_DROP_MS", 2000);
+  db_drop_pressure_only = env_long("DB_DROP_PRESSURE_ONLY", 0) != 0;
+  db_drop_pressure_kb = env_long("DB_DROP_PRESSURE_KB", 65536);
   ckpt_tail = (int)env_long("CKPT_TAIL", 64);
   hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
   wb_kick_ms = env_long("WB_KICK_MS", 250);

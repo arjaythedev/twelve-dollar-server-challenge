@@ -44,6 +44,34 @@ pub const k_listener_count: usize = 8;
 pub const slots_per_ring: u32 = 65472;
 pub const max_pending_size: usize = 65535;
 
+// Retry the entire set: shrinking only the last ring cannot recover memory
+// already charged to the earlier queues. This runs only during startup.
+fn initRingSet(context: anytype, comptime init_worker: anytype, comptime deinit_worker: anytype) !void {
+    const cq_limits = [_]u32{ 65536, 32768, 16384, 8192 };
+    attempts: for (cq_limits, 0..) |cq_limit, attempt| {
+        var initialized: u32 = 0;
+        var complete = false;
+        defer if (!complete) {
+            while (initialized > 0) {
+                initialized -= 1;
+                deinit_worker(context, initialized);
+            }
+        };
+        while (initialized < k_ring_count) : (initialized += 1) {
+            init_worker(context, initialized, cq_limit) catch |err| {
+                if (err != error.SystemResources or attempt + 1 == cq_limits.len) return err;
+                log.warn("ring {d} exhausted kernel resources; retrying all {d} rings with CQ limit {d}", .{
+                    initialized, k_ring_count, cq_limits[attempt + 1],
+                });
+                continue :attempts;
+            };
+        }
+        complete = true;
+        return;
+    }
+    unreachable;
+}
+
 pub const ACCEPT_DEPTH: u32 = 512;
 pub const READS_PER_PASS: usize = 16384;
 pub const ANSWERS_PER_PASS: u32 = 2048;
@@ -377,9 +405,7 @@ pub const Server = struct {
         // Pre-allocate all descriptor tables, but activate rings only as the
         // previous table fills.  A single vCPU should not poll idle rings while
         // the connection ramp is still below one table's capacity.
-        for (0..k_ring_count) |i| {
-            try s.initWorker(@intCast(i));
-        }
+        try initRingSet(s, Server.initWorker, Server.deinitWorker);
         s.active_rings = 1;
 
         return s;
@@ -387,11 +413,7 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         for (0..k_ring_count) |i| {
-            var rw = &self.rings[i];
-            teardownPbufRing(rw);
-            rw.ring.deinit();
-            const cmem: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(rw.conns.ptr)))[0 .. @as(usize, rw.slots) * @sizeOf(Conn)];
-            sys.unmap(cmem);
+            self.deinitWorker(@intCast(i));
         }
         for (self.listeners) |fd| {
             if (fd >= 0) _ = linux.close(fd);
@@ -406,7 +428,15 @@ pub const Server = struct {
         sys.unmap(smem);
     }
 
-    fn initWorker(self: *Server, idx: u32) !void {
+    fn deinitWorker(self: *Server, idx: u32) void {
+        var rw = &self.rings[idx];
+        teardownPbufRing(rw);
+        rw.ring.deinit();
+        const cmem: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(rw.conns.ptr)))[0 .. @as(usize, rw.slots) * @sizeOf(Conn)];
+        sys.unmap(cmem);
+    }
+
+    fn initWorker(self: *Server, idx: u32, cq_limit: u32) !void {
         var rw = &self.rings[idx];
         rw.id = idx;
         rw.slots = slots_per_ring;
@@ -422,14 +452,16 @@ pub const Server = struct {
         // capacity.  The accept depth remains safely below this margin.
         rw.margin = 6144;
 
-        rw.ring = initRing() catch |err| {
+        rw.ring = initRing(cq_limit) catch |err| {
             std.log.err("initRing({d}) failed: {}", .{ idx, err });
             return err;
         };
+        errdefer rw.ring.deinit();
         setupPbufRing(rw) catch |err| {
             std.log.err("setupPbufRing({d}) failed: {}", .{ idx, err });
             return err;
         };
+        errdefer teardownPbufRing(rw);
         rw.ring.register_files_sparse(slots_per_ring) catch |err| {
             std.log.err("register_files_sparse({d}, slots={d}) failed: {}", .{ idx, slots_per_ring, err });
             return err;
@@ -439,9 +471,10 @@ pub const Server = struct {
         sys.madviseHuge(cmem);
         if (idx == 0) sys.prefault(cmem);
         rw.conns = @as([*]Conn, @ptrCast(@alignCast(cmem.ptr)))[0..slots_per_ring];
+        log.info("ring {d}: SQ={d}, CQ={d}, slots={d}", .{ idx, rw.ring.sq.array.len, rw.ring.cq.cqes.len, rw.slots });
     }
 
-    fn initRing() !IoUring {
+    fn initRing(cq_limit: u32) !IoUring {
         const sq_sizes = [_]u16{ 4096, 2048, 1024 };
         const cq_sizes = [_]u32{ 65536, 32768, 16384, 8192 };
         var last: anyerror = error.RingInitFailed;
@@ -454,6 +487,7 @@ pub const Server = struct {
         // 1. Try with DEFER_TASKRUN + SINGLE_ISSUER + SUBMIT_ALL (matching #1 Rust engine)
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
+                if (cq > cq_limit) continue;
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
                     .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL | linux.IORING_SETUP_TASKRUN_FLAG,
                 });
@@ -465,6 +499,7 @@ pub const Server = struct {
         // 2. Try with single-issuer lockless flags + IORING_SETUP_CQSIZE
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
+                if (cq > cq_limit) continue;
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
                     .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN,
                 });
@@ -476,6 +511,7 @@ pub const Server = struct {
         // Try single-issuer without coop-taskrun
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
+                if (cq > cq_limit) continue;
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
                     .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER,
                 });
@@ -487,6 +523,7 @@ pub const Server = struct {
         // Try with standard IORING_SETUP_CQSIZE
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
+                if (cq > cq_limit) continue;
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
                     .flags = linux.IORING_SETUP_CQSIZE,
                 });
@@ -507,6 +544,7 @@ pub const Server = struct {
     fn setupPbufRing(w: *RingWorker) !void {
         const ring_bytes = @as(usize, n_bufs_per_ring) * @sizeOf(linux.io_uring_buf);
         const rmem = try sys.mapAnon(ring_bytes);
+        errdefer sys.unmap(rmem);
         var reg = std.mem.zeroInit(linux.io_uring_buf_reg, .{
             .ring_addr = @intFromPtr(rmem.ptr),
             .ring_entries = n_bufs_per_ring,
@@ -519,6 +557,7 @@ pub const Server = struct {
             reg.resv[0] = 0;
         }
         if (sys.errnoOf(rc) != .SUCCESS) return error.NoBufferRings;
+        errdefer _ = linux.io_uring_register(w.ring.fd, .UNREGISTER_PBUF_RING, &reg, 1);
 
         const bmem = try sys.mapAnon(@as(usize, n_bufs_per_ring) * buf_size);
         sys.madviseHuge(bmem);
@@ -1614,4 +1653,56 @@ test "buffer ring wrap publishes only the completed batch" {
     try std.testing.expectEqual(n_bufs_per_ring, ring.tail);
     Server.publishBufs(&worker);
     try std.testing.expectEqual(n_bufs_per_ring + 1, ring.tail);
+}
+
+// Model a cumulative kernel queue budget, including the CI failure on ring 7.
+const RingSetTest = struct {
+    budget: u32,
+    used: u32 = 0,
+    live: [k_ring_count]u32 = @splat(0),
+    attempts: u32 = 0,
+    fatal: bool = false,
+
+    fn init(self: *RingSetTest, idx: u32, cq_limit: u32) !void {
+        if (idx == 0) self.attempts += 1;
+        std.debug.assert(self.live[idx] == 0);
+        if (self.fatal and idx == 2) return error.PermissionDenied;
+        if (self.used + cq_limit > self.budget) return error.SystemResources;
+        self.used += cq_limit;
+        self.live[idx] = cq_limit;
+    }
+
+    fn deinit(self: *RingSetTest, idx: u32) void {
+        std.debug.assert(self.live[idx] != 0);
+        self.used -= self.live[idx];
+        self.live[idx] = 0;
+    }
+};
+
+test "ring startup preserves full queues when resources permit" {
+    var state = RingSetTest{ .budget = k_ring_count * 65536 };
+    try initRingSet(&state, RingSetTest.init, RingSetTest.deinit);
+    try std.testing.expectEqual(1, state.attempts);
+    for (state.live) |cq| try std.testing.expectEqual(65536, cq);
+}
+
+test "ring startup releases partial set before retrying all eight rings" {
+    var state = RingSetTest{ .budget = 7 * 65536 };
+    try initRingSet(&state, RingSetTest.init, RingSetTest.deinit);
+    try std.testing.expectEqual(2, state.attempts);
+    try std.testing.expectEqual(k_ring_count * 32768, state.used);
+    for (state.live) |cq| try std.testing.expectEqual(32768, cq);
+}
+
+test "ring startup cleans up exhausted and non-resource failures" {
+    var exhausted = RingSetTest{ .budget = 7 * 8192 };
+    try std.testing.expectError(error.SystemResources, initRingSet(&exhausted, RingSetTest.init, RingSetTest.deinit));
+    try std.testing.expectEqual(4, exhausted.attempts);
+    try std.testing.expectEqual(0, exhausted.used);
+    for (exhausted.live) |cq| try std.testing.expectEqual(0, cq);
+
+    var fatal = RingSetTest{ .budget = k_ring_count * 65536, .fatal = true };
+    try std.testing.expectError(error.PermissionDenied, initRingSet(&fatal, RingSetTest.init, RingSetTest.deinit));
+    try std.testing.expectEqual(1, fatal.attempts);
+    try std.testing.expectEqual(0, fatal.used);
 }

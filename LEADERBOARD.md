@@ -916,7 +916,11 @@ merged: 300,000 failed the 2-minute probe on p99 (1.68 s at 84 % CPU) and 320,00
 CPU), all with 0 errors. #527 stays open. **#528** (`826357e`: #527 plus a bulk checkpoint thread under `SCHED_IDLE`
 and a `WAL_KICK_KB` writeback knob) held **270,000** (25,868 req/s, p95 33.0 / p99 248.4 ms, 0 err, 72 % CPU, 25 µs/req,
 985 MB, 2026-11-20), below #486's 300,000, so not merged: 280,000 failed the 2-minute probe on p95/p99 (686 ms / 1.17 s
-at 80 % CPU) and 320,000 on p95/p99 (1.52 / 2.07 s at 90 % CPU), all with 0 errors. #528 stays open.
+at 80 % CPU) and 320,000 on p95/p99 (1.52 / 2.07 s at 90 % CPU), all with 0 errors. #528 stays open. **#529**
+(`7c4456c`: #486 with an adaptive completion-queue wait, `ADAPTIVE_CQ_WAIT`, on by default) held **290,000** (27,520
+req/s, p95 216.1 / p99 685.5 ms, 0 err, 79 % CPU, 26 µs/req, 761 MB, 2026-11-20), below #486's 300,000, so not merged:
+300,000 failed the 2-minute probe on p95/p99 (1.45 / 2.07 s at 84 % CPU) and 320,000 on p95/p99 (1.84 / 2.15 s at 93 %
+CPU), all with 0 errors. #529 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

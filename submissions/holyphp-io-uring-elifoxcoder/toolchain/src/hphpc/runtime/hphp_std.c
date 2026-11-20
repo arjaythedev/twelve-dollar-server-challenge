@@ -2380,16 +2380,23 @@ hval hpbi_stream_set_socket_buffers(hval s, hval recv_bytes, hval send_bytes) {
     hp_sock fd = sock_of(s);
     int64_t rcv64 = hp_val_to_int(recv_bytes);
     int64_t snd64 = hp_val_to_int(send_bytes);
-    if (fd == HP_SOCK_BAD || rcv64 <= 0 || snd64 <= 0 ||
-        rcv64 > INT_MAX || snd64 > INT_MAX)
+    /* A size <= 0 leaves that buffer at the kernel default (autotuned). */
+    if (fd == HP_SOCK_BAD || rcv64 > INT_MAX || snd64 > INT_MAX ||
+        (rcv64 <= 0 && snd64 <= 0))
         return hp_of_bool(false);
-    int rcv = (int)rcv64;
-    int snd = (int)snd64;
-    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
-                   (const char *)&rcv, sizeof rcv) != 0)
-        return hp_of_bool(false);
-    return hp_of_bool(setsockopt(fd, SOL_SOCKET, SO_SNDBUF,
-                                 (const char *)&snd, sizeof snd) == 0);
+    if (rcv64 > 0) {
+        int rcv = (int)rcv64;
+        if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF,
+                       (const char *)&rcv, sizeof rcv) != 0)
+            return hp_of_bool(false);
+    }
+    if (snd64 > 0) {
+        int snd = (int)snd64;
+        if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF,
+                       (const char *)&snd, sizeof snd) != 0)
+            return hp_of_bool(false);
+    }
+    return hp_of_bool(true);
 }
 
 hval hpbi_stream_recv(hval s, hval maxn) {
@@ -2698,6 +2705,7 @@ static _Thread_local int g_epfd = -1;
 #define HP_UR_REGISTER_FILES2       13   /* sparse table registration */
 #define HP_UR_RSRC_REGISTER_SPARSE  (1U << 0)
 #define HP_UR_REGISTER_EVENTFD      4
+#define HP_UR_REGISTER_EVENTFD_ASYNC 7
 #define HP_UR_REGISTER_PBUF_RING    22
 /* Match the Rust leader: a small SQ is enough because submitted multishot
  * receives remain in the kernel; a deep CQ absorbs completion bursts. */
@@ -4041,12 +4049,18 @@ static bool hp_ur_ring_setup(struct hp_uring_ring *r, int defer_taskrun) {
     /* HPHP_RING_EVENTFD=0 skips the registration: the kernel then signals no
      * eventfd on CQ posts (a locked wakeup per flush), and a multi-ring loop
      * relies on ring 0's bounded wait, as the multi-ring Rust loop does. */
+    /* HPHP_RING_EVENTFD=async registers with IORING_REGISTER_EVENTFD_ASYNC:
+     * completions posted inline while this thread is inside io_uring_enter
+     * (most sends) signal nothing, since the loop drains the CQ right after;
+     * completions posted later (receives, deferred sends) still wake it. */
     const char *efd_env = getenv("HPHP_RING_EVENTFD");
     if (!(efd_env && strcmp(efd_env, "0") == 0)) {
+        long reg_op = (efd_env && strcmp(efd_env, "async") == 0)
+            ? HP_UR_REGISTER_EVENTFD_ASYNC : HP_UR_REGISTER_EVENTFD;
         int evfd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
         if (evfd >= 0) {
             if (syscall(SYS_io_uring_register, (long)fd,
-                        HP_UR_REGISTER_EVENTFD, (long)&evfd, 1L) == 0)
+                        reg_op, (long)&evfd, 1L) == 0)
                 r->efd = evfd;
             else
                 close(evfd);

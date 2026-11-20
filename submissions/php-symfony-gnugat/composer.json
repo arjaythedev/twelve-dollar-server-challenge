@@ -1,28 +1,28 @@
 {
     "type": "project",
     "license": "proprietary",
-    "minimum-stability": "stable",
+    "minimum-stability": "beta",
     "prefer-stable": true,
     "require": {
         "php": ">=8.5",
         "ext-ctype": "*",
         "ext-iconv": "*",
         "doctrine/doctrine-bundle": "^3.3.4",
-        "symfony/console": "8.1.*",
-        "symfony/dotenv": "8.1.*",
+        "symfony/console": "8.2.*",
+        "symfony/dotenv": "8.2.*",
         "symfony/flex": "^2.12",
-        "symfony/framework-bundle": "8.1.*",
-        "symfony/json-streamer": "8.1.*",
-        "symfony/runtime": "8.1.*",
-        "symfony/security-bundle": "8.1.*",
-        "symfony/yaml": "8.1.*"
+        "symfony/framework-bundle": "8.2.*",
+        "symfony/json-streamer": "8.2.*",
+        "symfony/runtime": "8.2.*",
+        "symfony/security-bundle": "8.2.*",
+        "symfony/yaml": "8.2.*"
     },
     "require-dev": {
-        "friendsofphp/php-cs-fixer": "^3.95",
-        "phpstan/phpstan": "^2.3.4",
+        "friendsofphp/php-cs-fixer": "^3.95.28",
+        "phpstan/phpstan": "^2.3.5",
         "phpstan/phpstan-doctrine": "^2.1",
         "phpstan/phpstan-symfony": "^2.1.1",
-        "rector/rector": "^2.8.3"
+        "rector/rector": "^2.8.4"
     },
     "config": {
         "allow-plugins": {
@@ -73,7 +73,7 @@
     "extra": {
         "symfony": {
             "allow-contrib": false,
-            "require": "8.1.*"
+            "require": "8.2.*"
         }
     }
 }

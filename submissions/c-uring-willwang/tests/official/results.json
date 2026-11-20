@@ -1,0 +1,3565 @@
+{
+  "machine": "One AMD EPYC Genoa vCPU for the server on Linux 6.8.0-147. Four Go clients on twelve other logical CPUs of the same host, private loopback.",
+  "server_memory_mib": 1750,
+  "swap": false,
+  "server_hard_nofile": 65535,
+  "seed_ordered_rows_sha256": "738d11ab3164c13177e347f75038d1e80b43c64e754544a42d1c32bd8d7bcf1d",
+  "seed_file_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+  "tokens_file_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+  "generator_commit": "ae4e5a74b399d41851b2f188c91122aaa6d9b7a0",
+  "generator_binary_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+  "think_scale": 1,
+  "gzip": false,
+  "request_timeout_s": 60,
+  "scoring": "The organizer's unmodified mload merges every shard's full ramp-and-hold latency histogram. A 75-second hold is an exploratory pilot. The five-minute confirmation uses hold_seconds=300. The named steady sample describes only the stated interval and never determines the score. Reported HTTP counts and latency arrays are separate atomic snapshots in upstream mload.",
+  "runs": [
+    {
+      "implementation": "Kensac, scored Rust #264, independent full reference",
+      "run_tag": "go-kensac-310k",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "target_users": 310000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        19,
+        19,
+        19,
+        19
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 310000.0,
+      "peak_server_cgroup_mib": 1345.4,
+      "whole_ramp_and_hold": {
+        "requests": 10805980,
+        "requests_per_second": 30016.59,
+        "duration_seconds": 360.0,
+        "dials": 310000,
+        "failures": 0,
+        "p50_ms": 69.52,
+        "p95_ms": 114.33,
+        "p99_ms": 4110.2,
+        "passed": false,
+        "histogram_samples": 10805978,
+        "bucket_midpoint_ge_500ms": 200242,
+        "bucket_midpoint_ge_1s": 177242,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5028180,
+            "failed": 0,
+            "p95_ms": 113.2,
+            "p99_ms": 3575.72
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 4951611,
+            "failed": 0,
+            "p95_ms": 113.2,
+            "p99_ms": 4450.75
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 729232,
+            "failed": 0,
+            "p95_ms": 243.55,
+            "p99_ms": 3611.48
+          },
+          {
+            "name": "POST /posts",
+            "successful": 96957,
+            "failed": 0,
+            "p95_ms": 236.39,
+            "p99_ms": 3871.99
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 98.7,
+      "network": {
+        "ActiveOpens": 310000,
+        "PassiveOpens": 310000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 9349501,
+        "rps": 32239.66,
+        "server_cpu_pct": 98.66,
+        "server_cpu_us_per_request": 30.6025,
+        "server_user_us_per_request": 4.1277,
+        "server_kernel_us_per_request": 26.4748
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 9513456,
+        "aggregate_rps_after_reported_cutoffs": 32248.99,
+        "p95_ms_bounds": [
+          109.871,
+          115.475
+        ],
+        "p99_ms_bounds": [
+          3758.116,
+          4406.687
+        ]
+      }
+    },
+    {
+      "implementation": "Kensac, scored Rust #264, full matched reference at 338,750 users",
+      "run_tag": "go-kensac-338750-full",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "target_users": 338750,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        20,
+        20,
+        20,
+        20
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 338750.0,
+      "peak_server_cgroup_mib": 1438.59,
+      "whole_ramp_and_hold": {
+        "requests": 10781051,
+        "requests_per_second": 29947.35,
+        "duration_seconds": 360.0,
+        "dials": 338750,
+        "failures": 0,
+        "p50_ms": 87.4,
+        "p95_ms": 140.9,
+        "p99_ms": 29185.91,
+        "passed": false,
+        "histogram_samples": 10781050,
+        "bucket_midpoint_ge_500ms": 425463,
+        "bucket_midpoint_ge_1s": 396079,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5025666,
+            "failed": 0,
+            "p95_ms": 140.9,
+            "p99_ms": 29477.77
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 4935108,
+            "failed": 0,
+            "p95_ms": 125.04,
+            "p99_ms": 29185.91
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 723524,
+            "failed": 0,
+            "p95_ms": 341.6,
+            "p99_ms": 29185.91
+          },
+          {
+            "name": "POST /posts",
+            "successful": 96753,
+            "failed": 0,
+            "p95_ms": 345.02,
+            "p99_ms": 29477.77
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 98.41,
+      "network": {
+        "ActiveOpens": 338750,
+        "PassiveOpens": 338750,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 9248932,
+        "rps": 31892.87,
+        "server_cpu_pct": 98.37,
+        "server_cpu_us_per_request": 30.8426,
+        "server_user_us_per_request": 4.2515,
+        "server_kernel_us_per_request": 26.5912
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 9413395,
+        "aggregate_rps_after_reported_cutoffs": 31909.81,
+        "p95_ms_bounds": [
+          114.332,
+          218.302
+        ],
+        "p99_ms_bounds": [
+          29185.908,
+          29772.545
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 2.824,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 1438.59,
+        "lifetime_peak_mib_seen_after_cutoff": 1665.72,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Single readiness queue, age-based admission",
+      "run_tag": "go-aged-350k-a",
+      "server_sha256": "9784d5e0611195028dcb429d65ebd83496ba0891bb567afd50179584ee3753dc",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        4,
+        4,
+        4,
+        4
+      ],
+      "first_shared_tick_with_every_client_connection_s": 100,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1265.29,
+      "whole_ramp_and_hold": {
+        "requests": 10309354,
+        "requests_per_second": 28637.06,
+        "duration_seconds": 360.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 1208.74,
+        "p95_ms": 4110.2,
+        "p99_ms": 10266.65,
+        "passed": false,
+        "histogram_samples": 10309354,
+        "bucket_midpoint_ge_500ms": 8847567,
+        "bucket_midpoint_ge_1s": 7517690,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 4809500,
+            "failed": 0,
+            "p95_ms": 4677.79,
+            "p99_ms": 10064.36
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 4714821,
+            "failed": 0,
+            "p95_ms": 3540.32,
+            "p99_ms": 10473.01
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 692884,
+            "failed": 0,
+            "p95_ms": 3436.2,
+            "p99_ms": 10064.36
+          },
+          {
+            "name": "POST /posts",
+            "successful": 92149,
+            "failed": 0,
+            "p95_ms": 3141.85,
+            "p99_ms": 9671.65
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 94.91,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          100,
+          355
+        ],
+        "requests": 8394003,
+        "rps": 32917.69,
+        "server_cpu_pct": 99.68,
+        "server_cpu_us_per_request": 30.2808,
+        "server_user_us_per_request": 3.6336,
+        "server_kernel_us_per_request": 26.6472
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          105,
+          105,
+          105,
+          105
+        ],
+        "requests_in_remaining_histograms": 8407355,
+        "aggregate_rps_after_reported_cutoffs": 32969.99,
+        "p95_ms_bounds": [
+          1431.518,
+          1629.202
+        ],
+        "p99_ms_bounds": [
+          1489.644,
+          10473.015
+        ]
+      }
+    },
+    {
+      "implementation": "Central multishot receive",
+      "run_tag": "go-central-rx-350k",
+      "server_sha256": "2bc3ca0d01c81373f2716ef17accbf534caa97e92bf84b6bd8585a8c7970f6f9",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1048.78,
+      "whole_ramp_and_hold": {
+        "requests": 11333269,
+        "requests_per_second": 31481.22,
+        "duration_seconds": 360.001,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 1094.26,
+        "p95_ms": 1403.31,
+        "p99_ms": 2027.89,
+        "passed": false,
+        "histogram_samples": 11333269,
+        "bucket_midpoint_ge_500ms": 7779586,
+        "bucket_midpoint_ge_1s": 6811685,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5282433,
+            "failed": 0,
+            "p95_ms": 1403.31,
+            "p99_ms": 1891.45
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5186027,
+            "failed": 0,
+            "p95_ms": 1403.31,
+            "p99_ms": 2425.66
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 763253,
+            "failed": 0,
+            "p95_ms": 1403.31,
+            "p99_ms": 2174.18
+          },
+          {
+            "name": "POST /posts",
+            "successful": 101556,
+            "failed": 0,
+            "p95_ms": 1389.42,
+            "p99_ms": 2377.86
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.77,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 9771069,
+        "rps": 33693.34,
+        "server_cpu_pct": 99.77,
+        "server_cpu_us_per_request": 29.6105,
+        "server_user_us_per_request": 3.6745,
+        "server_kernel_us_per_request": 25.936
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 9940481,
+        "aggregate_rps_after_reported_cutoffs": 33696.47,
+        "p95_ms_bounds": [
+          1403.312,
+          1417.345
+        ],
+        "p99_ms_bounds": [
+          1910.367,
+          2574.886
+        ]
+      }
+    },
+    {
+      "implementation": "Single readiness queue, receive and transmit by bank",
+      "run_tag": "go-ring-local-350k-pilot",
+      "server_sha256": "ccda1aea52558dd201a3259ed01516d82b5378e97753e65acd244a4838c77de2",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1120.94,
+      "whole_ramp_and_hold": {
+        "requests": 3792329,
+        "requests_per_second": 28091.21,
+        "duration_seconds": 135.001,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 742.31,
+        "p95_ms": 2089.34,
+        "p99_ms": 2425.66,
+        "passed": false,
+        "histogram_samples": 3792327,
+        "bucket_midpoint_ge_500ms": 2131968,
+        "bucket_midpoint_ge_1s": 1085246,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1803877,
+            "failed": 0,
+            "p95_ms": 2089.34,
+            "p99_ms": 2449.92
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1714110,
+            "failed": 0,
+            "p95_ms": 2089.34,
+            "p99_ms": 2425.66
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 242236,
+            "failed": 0,
+            "p95_ms": 2007.81,
+            "p99_ms": 2449.92
+          },
+          {
+            "name": "POST /posts",
+            "successful": 32106,
+            "failed": 0,
+            "p95_ms": 1968.25,
+            "p99_ms": 2449.92
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.56,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2238460,
+        "rps": 34437.86,
+        "server_cpu_pct": 99.55,
+        "server_cpu_us_per_request": 28.906,
+        "server_user_us_per_request": 3.3407,
+        "server_kernel_us_per_request": 25.5653
+      }
+    },
+    {
+      "implementation": "One kernel readiness queue per socket bank",
+      "run_tag": "go-banks-epoll-350k-pilot",
+      "server_sha256": "ad99780c0ef7fc34ac01fb5741f652ab9c5362e5d953fb05c58163ce8d2a3c28",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1096.05,
+      "whole_ramp_and_hold": {
+        "requests": 3947104,
+        "requests_per_second": 29237.79,
+        "duration_seconds": 135.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 114.33,
+        "p95_ms": 1445.83,
+        "p99_ms": 2549.39,
+        "passed": false,
+        "histogram_samples": 3947103,
+        "bucket_midpoint_ge_500ms": 587021,
+        "bucket_midpoint_ge_1s": 301948,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1873261,
+            "failed": 0,
+            "p95_ms": 1173.19,
+            "p99_ms": 2174.18
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1785973,
+            "failed": 0,
+            "p95_ms": 1678.57,
+            "p99_ms": 3110.74
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 254165,
+            "failed": 0,
+            "p95_ms": 1362.04,
+            "p99_ms": 2959.77
+          },
+          {
+            "name": "POST /posts",
+            "successful": 33705,
+            "failed": 0,
+            "p95_ms": 1295.93,
+            "p99_ms": 2733.29
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.83,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2345601,
+        "rps": 36086.18,
+        "server_cpu_pct": 99.82,
+        "server_cpu_us_per_request": 27.6625,
+        "server_user_us_per_request": 3.0204,
+        "server_kernel_us_per_request": 24.6421
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 2529190,
+        "aggregate_rps_after_reported_cutoffs": 36131.27,
+        "p95_ms_bounds": [
+          455.868,
+          1764.192
+        ],
+        "p99_ms_bounds": [
+          1010.529,
+          2816.115
+        ]
+      }
+    },
+    {
+      "implementation": "Favor consecutive interactive TCP exchanges",
+      "run_tag": "go-affinity-350k-pilot",
+      "server_sha256": "4db64ea35014a2124422a1cbb82d91ad81304a6018b7371d995bb1baf6bc4686",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1128.19,
+      "whole_ramp_and_hold": {
+        "requests": 3731810,
+        "requests_per_second": 27642.93,
+        "duration_seconds": 135.001,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 16.75,
+        "p95_ms": 2901.45,
+        "p99_ms": 3647.59,
+        "passed": false,
+        "histogram_samples": 3731809,
+        "bucket_midpoint_ge_500ms": 1389770,
+        "bucket_midpoint_ge_1s": 1348134,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1778038,
+            "failed": 0,
+            "p95_ms": 2652.91,
+            "p99_ms": 3611.48
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1684652,
+            "failed": 0,
+            "p95_ms": 2959.77,
+            "p99_ms": 3684.07
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 237654,
+            "failed": 0,
+            "p95_ms": 2959.77,
+            "p99_ms": 3647.59
+          },
+          {
+            "name": "POST /posts",
+            "successful": 31466,
+            "failed": 0,
+            "p95_ms": 2959.77,
+            "p99_ms": 3684.07
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.71,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2176843,
+        "rps": 33489.88,
+        "server_cpu_pct": 99.69,
+        "server_cpu_us_per_request": 29.7682,
+        "server_user_us_per_request": 3.3842,
+        "server_kernel_us_per_request": 26.384
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 2344416,
+        "aggregate_rps_after_reported_cutoffs": 33491.56,
+        "p95_ms_bounds": [
+          2131.336,
+          3173.269
+        ],
+        "p99_ms_bounds": [
+          2788.233,
+          3684.067
+        ]
+      }
+    },
+    {
+      "implementation": "Serve first request before installing the idle watch",
+      "run_tag": "go-first-recv-350k-pilot",
+      "server_sha256": "bf70dac9e3e829f7576a262d8aa1b60a929edbf4931743664dff6f2477ee59af",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1083.98,
+      "whole_ramp_and_hold": {
+        "requests": 3885259,
+        "requests_per_second": 28779.58,
+        "duration_seconds": 135.001,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 369.9,
+        "p95_ms": 1613.07,
+        "p99_ms": 2152.65,
+        "passed": false,
+        "histogram_samples": 3885258,
+        "bucket_midpoint_ge_500ms": 1561327,
+        "bucket_midpoint_ge_1s": 412233,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1845146,
+            "failed": 0,
+            "p95_ms": 1504.54,
+            "p99_ms": 2048.17
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1757105,
+            "failed": 0,
+            "p95_ms": 1678.57,
+            "p99_ms": 2377.86
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 249640,
+            "failed": 0,
+            "p95_ms": 1565.63,
+            "p99_ms": 2354.32
+          },
+          {
+            "name": "POST /posts",
+            "successful": 33368,
+            "failed": 0,
+            "p95_ms": 1565.63,
+            "p99_ms": 2331.01
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.57,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2285733,
+        "rps": 35165.12,
+        "server_cpu_pct": 99.53,
+        "server_cpu_us_per_request": 28.3023,
+        "server_user_us_per_request": 3.0767,
+        "server_kernel_us_per_request": 25.2257
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 2462708,
+        "aggregate_rps_after_reported_cutoffs": 35181.42,
+        "p95_ms_bounds": [
+          905.761,
+          1746.725
+        ],
+        "p99_ms_bounds": [
+          1910.367,
+          2262.456
+        ]
+      }
+    },
+    {
+      "implementation": "Per-bank kernel readiness queues, fixed write window, full run",
+      "run_tag": "go-banks-340k-full",
+      "server_sha256": "ad99780c0ef7fc34ac01fb5741f652ab9c5362e5d953fb05c58163ce8d2a3c28",
+      "target_users": 340000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 340000.0,
+      "peak_server_cgroup_mib": 1073.2,
+      "whole_ramp_and_hold": {
+        "requests": 11836792,
+        "requests_per_second": 32879.91,
+        "duration_seconds": 360.001,
+        "dials": 340000,
+        "failures": 0,
+        "p50_ms": 127.56,
+        "p95_ms": 451.35,
+        "p99_ms": 1051.56,
+        "passed": false,
+        "histogram_samples": 11836792,
+        "bucket_midpoint_ge_500ms": 451216,
+        "bucket_midpoint_ge_1s": 139399,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5506415,
+            "failed": 0,
+            "p95_ms": 438.08,
+            "p99_ms": 961.48
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5423392,
+            "failed": 0,
+            "p95_ms": 465.03,
+            "p99_ms": 1150.08
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 800814,
+            "failed": 0,
+            "p95_ms": 438.08,
+            "p99_ms": 1010.53
+          },
+          {
+            "name": "POST /posts",
+            "successful": 106171,
+            "failed": 0,
+            "p95_ms": 438.08,
+            "p99_ms": 1020.63
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.77,
+      "network": {
+        "ActiveOpens": 340000,
+        "PassiveOpens": 340000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10258958,
+        "rps": 35375.72,
+        "server_cpu_pct": 99.77,
+        "server_cpu_us_per_request": 28.2026,
+        "server_user_us_per_request": 3.3089,
+        "server_kernel_us_per_request": 24.8938
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10439262,
+        "aggregate_rps_after_reported_cutoffs": 35387.3,
+        "p95_ms_bounds": [
+          369.905,
+          465.031
+        ],
+        "p99_ms_bounds": [
+          442.461,
+          1051.561
+        ]
+      }
+    },
+    {
+      "implementation": "Import accepted sockets into fixed-file banks in batches",
+      "run_tag": "go-bulk-accept-350k-pilot",
+      "server_sha256": "a24c1334466c7bd25ba931abdf41a1faa7ed1c2446dd797d9e1d55a0c678f66f",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1081.24,
+      "whole_ramp_and_hold": {
+        "requests": 3935591,
+        "requests_per_second": 29152.46,
+        "duration_seconds": 135.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 163.58,
+        "p95_ms": 1375.66,
+        "p99_ms": 2449.92,
+        "passed": false,
+        "histogram_samples": 3935590,
+        "bucket_midpoint_ge_500ms": 644089,
+        "bucket_midpoint_ge_1s": 274916,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1868369,
+            "failed": 0,
+            "p95_ms": 1116.25,
+            "p99_ms": 2068.65
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1781356,
+            "failed": 0,
+            "p95_ms": 1581.29,
+            "p99_ms": 2930.46
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 252260,
+            "failed": 0,
+            "p95_ms": 1295.93,
+            "p99_ms": 2733.29
+          },
+          {
+            "name": "POST /posts",
+            "successful": 33606,
+            "failed": 0,
+            "p95_ms": 1233.04,
+            "p99_ms": 2652.91
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.73,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2333446,
+        "rps": 35899.12,
+        "server_cpu_pct": 99.71,
+        "server_cpu_us_per_request": 27.7742,
+        "server_user_us_per_request": 3.0609,
+        "server_kernel_us_per_request": 24.7134
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 2514143,
+        "aggregate_rps_after_reported_cutoffs": 35916.25,
+        "p95_ms_bounds": [
+          503.562,
+          1645.494
+        ],
+        "p99_ms_bounds": [
+          942.539,
+          2679.437
+        ]
+      }
+    },
+    {
+      "implementation": "Eight readiness banks assigned by accept listener",
+      "run_tag": "go-striped-350k-pilot",
+      "server_sha256": "3525108297188c84263333bd981600cdc15407561484ec16829d622982ed14ba",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1101.99,
+      "whole_ramp_and_hold": {
+        "requests": 3896171,
+        "requests_per_second": 28860.49,
+        "duration_seconds": 135.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 291.32,
+        "p95_ms": 1127.42,
+        "p99_ms": 1474.89,
+        "passed": false,
+        "histogram_samples": 3896169,
+        "bucket_midpoint_ge_500ms": 1379828,
+        "bucket_midpoint_ge_1s": 375920,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1852985,
+            "failed": 0,
+            "p95_ms": 1127.42,
+            "p99_ms": 1474.89
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1760618,
+            "failed": 0,
+            "p95_ms": 1127.42,
+            "p99_ms": 1474.89
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 249442,
+            "failed": 0,
+            "p95_ms": 1138.69,
+            "p99_ms": 1489.64
+          },
+          {
+            "name": "POST /posts",
+            "successful": 33126,
+            "failed": 0,
+            "p95_ms": 1127.42,
+            "p99_ms": 1474.89
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.71,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2305692,
+        "rps": 35472.2,
+        "server_cpu_pct": 99.68,
+        "server_cpu_us_per_request": 28.102,
+        "server_user_us_per_request": 3.0087,
+        "server_kernel_us_per_request": 25.0932
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 2483280,
+        "aggregate_rps_after_reported_cutoffs": 35475.39,
+        "p95_ms_bounds": [
+          933.207,
+          1173.193
+        ],
+        "p99_ms_bounds": [
+          1072.697,
+          1504.54
+        ]
+      }
+    },
+    {
+      "implementation": "Per-bank kernel readiness, reusable receive buffers and adaptive group commit",
+      "run_tag": "go-receive-credits-350k-pilot",
+      "server_sha256": "50e607858336e3dad7c45f068873be34895a256a4e005d5ee91f3628ad56e76f",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1058.84,
+      "whole_ramp_and_hold": {
+        "requests": 3987488,
+        "requests_per_second": 29536.83,
+        "duration_seconds": 135.001,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 28.39,
+        "p95_ms": 1233.04,
+        "p99_ms": 2262.46,
+        "passed": false,
+        "histogram_samples": 3987484,
+        "bucket_midpoint_ge_500ms": 400325,
+        "bucket_midpoint_ge_1s": 242754,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1890929,
+            "failed": 0,
+            "p95_ms": 990.62,
+            "p99_ms": 1948.77
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1804649,
+            "failed": 0,
+            "p95_ms": 1445.83,
+            "p99_ms": 2872.72
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 257705,
+            "failed": 0,
+            "p95_ms": 1116.25,
+            "p99_ms": 2549.39
+          },
+          {
+            "name": "POST /posts",
+            "successful": 34205,
+            "failed": 0,
+            "p95_ms": 1127.42,
+            "p99_ms": 2401.64
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.78,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2374355,
+        "rps": 36528.54,
+        "server_cpu_pct": 99.76,
+        "server_cpu_us_per_request": 27.3114,
+        "server_user_us_per_request": 2.7806,
+        "server_kernel_us_per_request": 24.5308
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 2561112,
+        "aggregate_rps_after_reported_cutoffs": 36587.16,
+        "p95_ms_bounds": [
+          297.18,
+          1504.54
+        ],
+        "p99_ms_bounds": [
+          699.291,
+          2499.159
+        ]
+      }
+    },
+    {
+      "implementation": "Submission built with its normal scripts, per-bank readiness, pooled reads and adaptive commits",
+      "run_tag": "go-release-335k-full",
+      "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+      "target_users": 335000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        20,
+        20,
+        20,
+        20
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 335000.0,
+      "peak_server_cgroup_mib": 1022.82,
+      "whole_ramp_and_hold": {
+        "requests": 11795953,
+        "requests_per_second": 32766.48,
+        "duration_seconds": 360.001,
+        "dials": 335000,
+        "failures": 0,
+        "p50_ms": 20.44,
+        "p95_ms": 199.6,
+        "p99_ms": 811.86,
+        "passed": true,
+        "histogram_samples": 11795953,
+        "bucket_midpoint_ge_500ms": 225249,
+        "bucket_midpoint_ge_1s": 63764,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5487140,
+            "failed": 0,
+            "p95_ms": 191.81,
+            "p99_ms": 692.37
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5405674,
+            "failed": 0,
+            "p95_ms": 205.65,
+            "p99_ms": 914.82
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 796989,
+            "failed": 0,
+            "p95_ms": 203.61,
+            "p99_ms": 734.96
+          },
+          {
+            "name": "POST /posts",
+            "successful": 106150,
+            "failed": 0,
+            "p95_ms": 205.65,
+            "p99_ms": 720.48
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.84,
+      "network": {
+        "ActiveOpens": 335000,
+        "PassiveOpens": 335000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10235398,
+        "rps": 35294.47,
+        "server_cpu_pct": 99.84,
+        "server_cpu_us_per_request": 28.2864,
+        "server_user_us_per_request": 3.095,
+        "server_kernel_us_per_request": 25.1914
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10412985,
+        "aggregate_rps_after_reported_cutoffs": 35298.22,
+        "p95_ms_bounds": [
+          139.507,
+          207.707
+        ],
+        "p99_ms_bounds": [
+          193.732,
+          795.859
+        ]
+      }
+    },
+    {
+      "implementation": "Temporarily defer idle-watch registration under simultaneous accept and response load",
+      "run_tag": "go-pressure-only-350k-pilot",
+      "server_sha256": "4ae367cba70ee07785845b58f725b69020e81166e3b1599ec9cb12c62dc5ca49",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 75,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1158.54,
+      "whole_ramp_and_hold": {
+        "requests": 3747866,
+        "requests_per_second": 27761.94,
+        "duration_seconds": 135.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 22.81,
+        "p95_ms": 3949.82,
+        "p99_ms": 5822.52,
+        "passed": false,
+        "histogram_samples": 3747865,
+        "bucket_midpoint_ge_500ms": 1355889,
+        "bucket_midpoint_ge_1s": 996337,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 1785340,
+            "failed": 0,
+            "p95_ms": 3871.99,
+            "p99_ms": 5651.28
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 1692484,
+            "failed": 0,
+            "p95_ms": 4029.21,
+            "p99_ms": 5880.74
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 238292,
+            "failed": 0,
+            "p95_ms": 3910.71,
+            "p99_ms": 5822.52
+          },
+          {
+            "name": "POST /posts",
+            "successful": 31750,
+            "failed": 0,
+            "p95_ms": 3871.99,
+            "p99_ms": 5323.76
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.87,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          130
+        ],
+        "requests": 2196787,
+        "rps": 33796.72,
+        "server_cpu_pct": 99.88,
+        "server_cpu_us_per_request": 29.5518,
+        "server_user_us_per_request": 3.1236,
+        "server_kernel_us_per_request": 26.4282
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 2366145,
+        "aggregate_rps_after_reported_cutoffs": 33802.03,
+        "p95_ms_bounds": [
+          1968.253,
+          4585.616
+        ],
+        "p99_ms_bounds": [
+          5116.027,
+          6368.0
+        ]
+      }
+    },
+    {
+      "implementation": "Unmodified release built with GCC, 342,500 users",
+      "run_tag": "go-release-342500-full",
+      "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+      "target_users": 342500,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 342500.0,
+      "peak_server_cgroup_mib": 1080.88,
+      "whole_ramp_and_hold": {
+        "requests": 11939129,
+        "requests_per_second": 33164.24,
+        "duration_seconds": 360.0,
+        "dials": 342500,
+        "failures": 0,
+        "p50_ms": 76.03,
+        "p95_ms": 425.2,
+        "p99_ms": 1597.1,
+        "passed": false,
+        "histogram_samples": 11939129,
+        "bucket_midpoint_ge_500ms": 529849,
+        "bucket_midpoint_ge_1s": 321561,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5554208,
+            "failed": 0,
+            "p95_ms": 396.59,
+            "p99_ms": 1403.31
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5470697,
+            "failed": 0,
+            "p95_ms": 479.12,
+            "p99_ms": 1968.25
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 806709,
+            "failed": 0,
+            "p95_ms": 400.55,
+            "p99_ms": 1460.29
+          },
+          {
+            "name": "POST /posts",
+            "successful": 107515,
+            "failed": 0,
+            "p95_ms": 404.56,
+            "p99_ms": 1431.52
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.87,
+      "network": {
+        "ActiveOpens": 342500,
+        "PassiveOpens": 342500,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10375687,
+        "rps": 35778.22,
+        "server_cpu_pct": 99.87,
+        "server_cpu_us_per_request": 27.9138,
+        "server_user_us_per_request": 3.072,
+        "server_kernel_us_per_request": 24.8417
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10556155,
+        "aggregate_rps_after_reported_cutoffs": 35783.57,
+        "p95_ms_bounds": [
+          338.219,
+          455.868
+        ],
+        "p99_ms_bounds": [
+          420.986,
+          1565.631
+        ]
+      }
+    },
+    {
+      "implementation": "Unmodified release built with GCC, 400,000 users",
+      "run_tag": "go-release-400k-full",
+      "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+      "target_users": 400000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        24,
+        24,
+        24,
+        24
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 400000.0,
+      "peak_server_cgroup_mib": 1393.52,
+      "whole_ramp_and_hold": {
+        "requests": 12219896,
+        "requests_per_second": 33944.15,
+        "duration_seconds": 360.0,
+        "dials": 400000,
+        "failures": 0,
+        "p50_ms": 1613.07,
+        "p95_ms": 1987.94,
+        "p99_ms": 3795.7,
+        "passed": false,
+        "histogram_samples": 12219895,
+        "bucket_midpoint_ge_500ms": 10815608,
+        "bucket_midpoint_ge_1s": 10512302,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5698893,
+            "failed": 0,
+            "p95_ms": 1948.77,
+            "p99_ms": 3019.26
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5591262,
+            "failed": 0,
+            "p95_ms": 2048.17,
+            "p99_ms": 4151.3
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 820156,
+            "failed": 0,
+            "p95_ms": 2007.81,
+            "p99_ms": 3436.2
+          },
+          {
+            "name": "POST /posts",
+            "successful": 109585,
+            "failed": 0,
+            "p95_ms": 1987.94,
+            "p99_ms": 3335.14
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.87,
+      "network": {
+        "ActiveOpens": 400000,
+        "PassiveOpens": 400000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10516218,
+        "rps": 36262.82,
+        "server_cpu_pct": 99.87,
+        "server_cpu_us_per_request": 27.5415,
+        "server_user_us_per_request": 2.9139,
+        "server_kernel_us_per_request": 24.6276
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10696716,
+        "aggregate_rps_after_reported_cutoffs": 36260.05,
+        "p95_ms_bounds": [
+          1910.367,
+          1987.935
+        ],
+        "p99_ms_bounds": [
+          1968.253,
+          3795.697
+        ]
+      }
+    },
+    {
+      "implementation": "Unmodified release built with GCC, 350,000 users",
+      "run_tag": "go-release-350k-full",
+      "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1193.66,
+      "whole_ramp_and_hold": {
+        "requests": 12040278,
+        "requests_per_second": 33445.17,
+        "duration_seconds": 360.001,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 224.92,
+        "p95_ms": 567.43,
+        "p99_ms": 2733.29,
+        "passed": false,
+        "histogram_samples": 12040276,
+        "bucket_midpoint_ge_500ms": 746728,
+        "bucket_midpoint_ge_1s": 411084,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5604170,
+            "failed": 0,
+            "p95_ms": 539.89,
+            "p99_ms": 2549.39
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5514540,
+            "failed": 0,
+            "p95_ms": 590.47,
+            "p99_ms": 2844.28
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 813414,
+            "failed": 0,
+            "p95_ms": 567.43,
+            "p99_ms": 2679.44
+          },
+          {
+            "name": "POST /posts",
+            "successful": 108154,
+            "failed": 0,
+            "p95_ms": 561.81,
+            "p99_ms": 2652.91
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.33,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10471567,
+        "rps": 36108.85,
+        "server_cpu_pct": 99.61,
+        "server_cpu_us_per_request": 27.5856,
+        "server_user_us_per_request": 2.9845,
+        "server_kernel_us_per_request": 24.6012
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10654309,
+        "aggregate_rps_after_reported_cutoffs": 36116.28,
+        "p95_ms_bounds": [
+          451.354,
+          608.357
+        ],
+        "p99_ms_bounds": [
+          971.099,
+          2788.233
+        ]
+      }
+    },
+    {
+      "implementation": "Unmodified release built with GCC, 338,750 users",
+      "run_tag": "go-release-338750-full",
+      "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+      "target_users": 338750,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        20,
+        20,
+        20,
+        20
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 338750.0,
+      "peak_server_cgroup_mib": 1034.69,
+      "whole_ramp_and_hold": {
+        "requests": 11884001,
+        "requests_per_second": 33011.05,
+        "duration_seconds": 360.001,
+        "dials": 338750,
+        "failures": 0,
+        "p50_ms": 49.07,
+        "p95_ms": 271.72,
+        "p99_ms": 905.76,
+        "passed": true,
+        "histogram_samples": 11884001,
+        "bucket_midpoint_ge_500ms": 331788,
+        "bucket_midpoint_ge_1s": 90622,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5528405,
+            "failed": 0,
+            "p95_ms": 261.12,
+            "p99_ms": 861.8
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5446086,
+            "failed": 0,
+            "p95_ms": 288.44,
+            "p99_ms": 980.81
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 802297,
+            "failed": 0,
+            "p95_ms": 274.44,
+            "p99_ms": 905.76
+          },
+          {
+            "name": "POST /posts",
+            "successful": 107213,
+            "failed": 0,
+            "p95_ms": 271.72,
+            "p99_ms": 887.91
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.86,
+      "network": {
+        "ActiveOpens": 338750,
+        "PassiveOpens": 338750,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10310098,
+        "rps": 35552.08,
+        "server_cpu_pct": 99.86,
+        "server_cpu_us_per_request": 28.0897,
+        "server_user_us_per_request": 3.0978,
+        "server_kernel_us_per_request": 24.992
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10488371,
+        "aggregate_rps_after_reported_cutoffs": 35553.77,
+        "p95_ms_bounds": [
+          203.614,
+          288.44
+        ],
+        "p99_ms_bounds": [
+          266.37,
+          905.761
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 2.8142,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 1034.69,
+        "lifetime_peak_mib_seen_after_cutoff": 1852.12,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 42724,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Full Clang LTO, batched descriptor imports, pooled reads, adaptive commits and TCP Reno",
+      "run_tag": "go-clang-bulk-credits-reno-350k-full",
+      "server_sha256": "5dd5803c0e0f1d516438000efc12eb7da3babc7a5497bd7e03f1d9ea0486f62d",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 1078.3,
+      "whole_ramp_and_hold": {
+        "requests": 12111907,
+        "requests_per_second": 33644.16,
+        "duration_seconds": 360.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 191.81,
+        "p95_ms": 524.01,
+        "p99_ms": 1534.78,
+        "passed": false,
+        "histogram_samples": 12111904,
+        "bucket_midpoint_ge_500ms": 712776,
+        "bucket_midpoint_ge_1s": 223467,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5636334,
+            "failed": 0,
+            "p95_ms": 508.6,
+            "p99_ms": 1362.04
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5548120,
+            "failed": 0,
+            "p95_ms": 539.89,
+            "p99_ms": 1712.31
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 818228,
+            "failed": 0,
+            "p95_ms": 539.89,
+            "p99_ms": 1460.29
+          },
+          {
+            "name": "POST /posts",
+            "successful": 109225,
+            "failed": 0,
+            "p95_ms": 534.54,
+            "p99_ms": 1431.52
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.84,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10493410,
+        "rps": 36184.17,
+        "server_cpu_pct": 99.84,
+        "server_cpu_us_per_request": 27.592,
+        "server_user_us_per_request": 2.9526,
+        "server_kernel_us_per_request": 24.6394
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10676450,
+        "aggregate_rps_after_reported_cutoffs": 36191.34,
+        "p95_ms_bounds": [
+          451.354,
+          539.886
+        ],
+        "p99_ms_bounds": [
+          518.82,
+          1519.586
+        ]
+      }
+    },
+    {
+      "implementation": "Same Clang LTO and socket registration build, 345,000 users",
+      "run_tag": "go-clang-bulk-credits-reno-345k-full",
+      "server_sha256": "5dd5803c0e0f1d516438000efc12eb7da3babc7a5497bd7e03f1d9ea0486f62d",
+      "target_users": 345000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 345000.0,
+      "peak_server_cgroup_mib": 1061.3,
+      "whole_ramp_and_hold": {
+        "requests": 12067677,
+        "requests_per_second": 33521.29,
+        "duration_seconds": 360.0,
+        "dials": 345000,
+        "failures": 0,
+        "p50_ms": 76.79,
+        "p95_ms": 315.46,
+        "p99_ms": 1208.74,
+        "passed": false,
+        "histogram_samples": 12067673,
+        "bucket_midpoint_ge_500ms": 452318,
+        "bucket_midpoint_ge_1s": 227752,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5612756,
+            "failed": 0,
+            "p95_ms": 300.15,
+            "p99_ms": 1150.08
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5529788,
+            "failed": 0,
+            "p95_ms": 355.47,
+            "p99_ms": 1335.2
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 816258,
+            "failed": 0,
+            "p95_ms": 318.62,
+            "p99_ms": 1208.74
+          },
+          {
+            "name": "POST /posts",
+            "successful": 108875,
+            "failed": 0,
+            "p95_ms": 318.62,
+            "p99_ms": 1208.74
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.89,
+      "network": {
+        "ActiveOpens": 345000,
+        "PassiveOpens": 345000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10472162,
+        "rps": 36110.9,
+        "server_cpu_pct": 99.89,
+        "server_cpu_us_per_request": 27.6612,
+        "server_user_us_per_request": 2.9974,
+        "server_kernel_us_per_request": 24.6638
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10652569,
+        "aggregate_rps_after_reported_cutoffs": 36110.37,
+        "p95_ms_bounds": [
+          255.976,
+          331.555
+        ],
+        "p99_ms_bounds": [
+          309.247,
+          1208.742
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 2.7292,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 1061.3,
+        "lifetime_peak_mib_seen_after_cutoff": 1918.42,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 69469,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Clean release-script Clang LTO, batched socket registration, Reno and one-time database file-cache advice, 342,500 users",
+      "run_tag": "go-public-hinted-clang-342500-full",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "target_users": 342500,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 342500.0,
+      "peak_server_cgroup_mib": 870.18,
+      "whole_ramp_and_hold": {
+        "requests": 12003645,
+        "requests_per_second": 33343.42,
+        "duration_seconds": 360.0,
+        "dials": 342500,
+        "failures": 0,
+        "p50_ms": 51.07,
+        "p95_ms": 369.9,
+        "p99_ms": 933.21,
+        "passed": true,
+        "histogram_samples": 12003645,
+        "bucket_midpoint_ge_500ms": 271882,
+        "bucket_midpoint_ge_1s": 100690,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5584910,
+            "failed": 0,
+            "p95_ms": 355.47,
+            "p99_ms": 844.82
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5500378,
+            "failed": 0,
+            "p95_ms": 381.11,
+            "p99_ms": 1030.84
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 810044,
+            "failed": 0,
+            "p95_ms": 373.6,
+            "p99_ms": 896.79
+          },
+          {
+            "name": "POST /posts",
+            "successful": 108313,
+            "failed": 0,
+            "p95_ms": 366.24,
+            "p99_ms": 879.12
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.86,
+      "network": {
+        "ActiveOpens": 342500,
+        "PassiveOpens": 342500,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "post_score_health": {
+        "accepted_connections_remaining_before_health": 0,
+        "seconds_after_scored_cutoff": 8.252133797861461,
+        "original_process_alive": true,
+        "database_health_ok": true,
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "lifetime_cgroup_peak_bytes": 1746501632,
+        "passed": true
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10412236,
+        "rps": 35904.29,
+        "server_cpu_pct": 99.86,
+        "server_cpu_us_per_request": 27.8133,
+        "server_user_us_per_request": 3.0305,
+        "server_kernel_us_per_request": 24.7828
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10590801,
+        "aggregate_rps_after_reported_cutoffs": 35901.0,
+        "p95_ms_bounds": [
+          277.185,
+          384.925
+        ],
+        "p99_ms_bounds": [
+          412.691,
+          923.967
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 8.235154628753662,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 870.18,
+        "lifetime_peak_mib_seen_after_cutoff": 1665.59,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Identical public Clang release, 350,000 users",
+      "run_tag": "go-public-hinted-clang-350k-full",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 855.38,
+      "whole_ramp_and_hold": {
+        "requests": 12117252,
+        "requests_per_second": 33658.99,
+        "duration_seconds": 360.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 184.33,
+        "p95_ms": 483.91,
+        "p99_ms": 1362.04,
+        "passed": false,
+        "histogram_samples": 12117250,
+        "bucket_midpoint_ge_500ms": 468237,
+        "bucket_midpoint_ge_1s": 206848,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5638578,
+            "failed": 0,
+            "p95_ms": 479.12,
+            "p99_ms": 1245.37
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5551240,
+            "failed": 0,
+            "p95_ms": 488.75,
+            "p99_ms": 1445.83
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 818116,
+            "failed": 0,
+            "p95_ms": 503.56,
+            "p99_ms": 1270.4
+          },
+          {
+            "name": "POST /posts",
+            "successful": 109318,
+            "failed": 0,
+            "p95_ms": 503.56,
+            "p99_ms": 1245.37
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.87,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "post_score_health": {
+        "accepted_connections_remaining_before_health": 0,
+        "seconds_after_scored_cutoff": 8.173500723692996,
+        "original_process_alive": true,
+        "database_health_ok": true,
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "lifetime_cgroup_peak_bytes": 1724428288,
+        "passed": true
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10502281,
+        "rps": 36214.76,
+        "server_cpu_pct": 99.87,
+        "server_cpu_us_per_request": 27.5762,
+        "server_user_us_per_request": 3.0116,
+        "server_kernel_us_per_request": 24.5647
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10682823,
+        "aggregate_rps_after_reported_cutoffs": 36212.93,
+        "p95_ms_bounds": [
+          460.427,
+          493.64
+        ],
+        "p99_ms_bounds": [
+          503.562,
+          1348.555
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 8.131850957870483,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 855.38,
+        "lifetime_peak_mib_seen_after_cutoff": 1644.54,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Clang LTO with a reproducible, build-time application/SQLite profile and the same network code, 350,000 users",
+      "run_tag": "go-public-deterministic-pgo-350k-full",
+      "server_sha256": "4957051a1618092aa222d04defc73d4c7beb5f33701163c12e76bf9113da78cb",
+      "target_users": 350000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 350000.0,
+      "peak_server_cgroup_mib": 852.7,
+      "whole_ramp_and_hold": {
+        "requests": 12193647,
+        "requests_per_second": 33871.19,
+        "duration_seconds": 360.0,
+        "dials": 350000,
+        "failures": 0,
+        "p50_ms": 117.8,
+        "p95_ms": 433.74,
+        "p99_ms": 1375.66,
+        "passed": false,
+        "histogram_samples": 12193646,
+        "bucket_midpoint_ge_500ms": 445251,
+        "bucket_midpoint_ge_1s": 211351,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5673002,
+            "failed": 0,
+            "p95_ms": 416.82,
+            "p99_ms": 1257.82
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5587027,
+            "failed": 0,
+            "p95_ms": 455.87,
+            "p99_ms": 1489.64
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 823418,
+            "failed": 0,
+            "p95_ms": 442.46,
+            "p99_ms": 1283.1
+          },
+          {
+            "name": "POST /posts",
+            "successful": 110200,
+            "failed": 0,
+            "p95_ms": 438.08,
+            "p99_ms": 1283.1
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.86,
+      "network": {
+        "ActiveOpens": 350000,
+        "PassiveOpens": 350000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "post_score_health": {
+        "accepted_connections_remaining_before_health": 0,
+        "seconds_after_scored_cutoff": 8.372376434799662,
+        "original_process_alive": true,
+        "database_health_ok": true,
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "lifetime_cgroup_peak_bytes": 1747275776,
+        "passed": true
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10576431,
+        "rps": 36470.45,
+        "server_cpu_pct": 99.86,
+        "server_cpu_us_per_request": 27.3808,
+        "server_user_us_per_request": 2.8137,
+        "server_kernel_us_per_request": 24.5671
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10759976,
+        "aggregate_rps_after_reported_cutoffs": 36474.47,
+        "p95_ms_bounds": [
+          355.471,
+          446.885
+        ],
+        "p99_ms_bounds": [
+          429.448,
+          1362.041
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 8.340105295181274,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 852.7,
+        "lifetime_peak_mib_seen_after_cutoff": 1666.33,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Clang LTO release with the one-time file-cache hint, 342,500 users",
+      "run_tag": "go-public-hinted-clang-342500-repeat-full",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "target_users": 342500,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 342500.0,
+      "peak_server_cgroup_mib": 826.08,
+      "whole_ramp_and_hold": {
+        "requests": 11965464,
+        "requests_per_second": 33237.33,
+        "duration_seconds": 360.001,
+        "dials": 342500,
+        "failures": 0,
+        "p50_ms": 83.99,
+        "p95_ms": 388.77,
+        "p99_ms": 861.8,
+        "passed": true,
+        "histogram_samples": 11965464,
+        "bucket_midpoint_ge_500ms": 288908,
+        "bucket_midpoint_ge_1s": 85584,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5567437,
+            "failed": 0,
+            "p95_ms": 377.34,
+            "p99_ms": 811.86
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5481596,
+            "failed": 0,
+            "p95_ms": 392.66,
+            "p99_ms": 933.21
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 808317,
+            "failed": 0,
+            "p95_ms": 404.56,
+            "p99_ms": 828.17
+          },
+          {
+            "name": "POST /posts",
+            "successful": 108114,
+            "failed": 0,
+            "p95_ms": 400.55,
+            "p99_ms": 828.17
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.87,
+      "network": {
+        "ActiveOpens": 342500,
+        "PassiveOpens": 342500,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "post_score_health": {
+        "accepted_connections_remaining_before_health": 0,
+        "seconds_after_scored_cutoff": 8.042877354091615,
+        "original_process_alive": true,
+        "database_health_ok": true,
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "lifetime_cgroup_peak_bytes": 1691394048,
+        "passed": true
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10368430,
+        "rps": 35753.2,
+        "server_cpu_pct": 99.87,
+        "server_cpu_us_per_request": 27.9333,
+        "server_user_us_per_request": 2.9641,
+        "server_kernel_us_per_request": 24.9692
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10549355,
+        "aggregate_rps_after_reported_cutoffs": 35760.45,
+        "p95_ms_bounds": [
+          355.471,
+          396.588
+        ],
+        "p99_ms_bounds": [
+          412.691,
+          853.268
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 8.043780326843262,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 826.08,
+        "lifetime_peak_mib_seen_after_cutoff": 1613.04,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Clang LTO release with the one-time file-cache hint, 345,000 users",
+      "run_tag": "go-public-hinted-clang-345k-full",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "target_users": 345000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 345000.0,
+      "peak_server_cgroup_mib": 824.92,
+      "whole_ramp_and_hold": {
+        "requests": 12090555,
+        "requests_per_second": 33584.85,
+        "duration_seconds": 360.0,
+        "dials": 345000,
+        "failures": 0,
+        "p50_ms": 66.81,
+        "p95_ms": 315.46,
+        "p99_ms": 1041.15,
+        "passed": false,
+        "histogram_samples": 12090554,
+        "bucket_midpoint_ge_500ms": 403809,
+        "bucket_midpoint_ge_1s": 132212,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5624806,
+            "failed": 0,
+            "p95_ms": 294.24,
+            "p99_ms": 951.96
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5540677,
+            "failed": 0,
+            "p95_ms": 381.11,
+            "p99_ms": 1083.42
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 816016,
+            "failed": 0,
+            "p95_ms": 306.19,
+            "p99_ms": 951.96
+          },
+          {
+            "name": "POST /posts",
+            "successful": 109056,
+            "failed": 0,
+            "p95_ms": 306.19,
+            "p99_ms": 942.54
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.88,
+      "network": {
+        "ActiveOpens": 345000,
+        "PassiveOpens": 345000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "post_score_health": {
+        "accepted_connections_remaining_before_health": 0,
+        "seconds_after_scored_cutoff": 8.086771963266074,
+        "original_process_alive": true,
+        "database_health_ok": true,
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "lifetime_cgroup_peak_bytes": 1725739008,
+        "passed": true
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10487952,
+        "rps": 36165.35,
+        "server_cpu_pct": 99.89,
+        "server_cpu_us_per_request": 27.6196,
+        "server_user_us_per_request": 2.9775,
+        "server_kernel_us_per_request": 24.6421
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10668643,
+        "aggregate_rps_after_reported_cutoffs": 36164.88,
+        "p95_ms_bounds": [
+          216.14,
+          355.471
+        ],
+        "p99_ms_bounds": [
+          303.154,
+          1030.841
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 8.02994704246521,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 824.92,
+        "lifetime_peak_mib_seen_after_cutoff": 1645.79,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Clang LTO release with the one-time file-cache hint, 400,000 users",
+      "run_tag": "go-public-hinted-clang-400k-full",
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "target_users": 400000,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        24,
+        24,
+        24,
+        24
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 400000.0,
+      "peak_server_cgroup_mib": 1141.6,
+      "whole_ramp_and_hold": {
+        "requests": 12220158,
+        "requests_per_second": 33944.86,
+        "duration_seconds": 360.0,
+        "dials": 400000,
+        "failures": 0,
+        "p50_ms": 1613.07,
+        "p95_ms": 2152.65,
+        "p99_ms": 3505.26,
+        "passed": false,
+        "histogram_samples": 12220158,
+        "bucket_midpoint_ge_500ms": 10757732,
+        "bucket_midpoint_ge_1s": 10460102,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 5699058,
+            "failed": 0,
+            "p95_ms": 2110.23,
+            "p99_ms": 2959.77
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 5590488,
+            "failed": 0,
+            "p95_ms": 2174.18,
+            "p99_ms": 3795.7
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 820964,
+            "failed": 0,
+            "p95_ms": 2152.65,
+            "p99_ms": 3205.0
+          },
+          {
+            "name": "POST /posts",
+            "successful": 109648,
+            "failed": 0,
+            "p95_ms": 2152.65,
+            "p99_ms": 3110.74
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 99.86,
+      "network": {
+        "ActiveOpens": 400000,
+        "PassiveOpens": 400000,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "post_score_health": {
+        "accepted_connections_remaining_before_health": 0,
+        "seconds_after_scored_cutoff": 9.96310104784061,
+        "original_process_alive": true,
+        "database_health_ok": true,
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 53446,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "lifetime_cgroup_peak_bytes": 1968394240,
+        "passed": true
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 10494305,
+        "rps": 36187.24,
+        "server_cpu_pct": 99.86,
+        "server_cpu_us_per_request": 27.5945,
+        "server_user_us_per_request": 3.0033,
+        "server_kernel_us_per_request": 24.5912
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 10678133,
+        "aggregate_rps_after_reported_cutoffs": 36197.04,
+        "p95_ms_bounds": [
+          1987.935,
+          2152.649
+        ],
+        "p99_ms_bounds": [
+          2131.336,
+          3505.263
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 9.933563232421875,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 1141.6,
+        "lifetime_peak_mib_seen_after_cutoff": 1877.21,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 53446,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    },
+    {
+      "implementation": "Kensac, scored Rust #264, built with rustc 1.94.0, 342,500 users",
+      "run_tag": "go-public-kensac-342500-full",
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "target_users": 342500,
+      "ramp_seconds": 60,
+      "hold_seconds": 300,
+      "target_addresses_per_client_shard": [
+        21,
+        21,
+        21,
+        21
+      ],
+      "first_shared_tick_with_every_client_connection_s": 65,
+      "max_established_pairs": 342500.0,
+      "peak_server_cgroup_mib": 1431.94,
+      "whole_ramp_and_hold": {
+        "requests": 10639220,
+        "requests_per_second": 29553.36,
+        "duration_seconds": 360.0,
+        "dials": 342500,
+        "failures": 0,
+        "p50_ms": 89.15,
+        "p95_ms": 136.76,
+        "p99_ms": 38948.71,
+        "passed": false,
+        "histogram_samples": 10639220,
+        "bucket_midpoint_ge_500ms": 404210,
+        "bucket_midpoint_ge_1s": 378394,
+        "endpoints": [
+          {
+            "name": "GET /feed",
+            "successful": 4959781,
+            "failed": 0,
+            "p95_ms": 136.76,
+            "p99_ms": 38563.08
+          },
+          {
+            "name": "GET /posts/:id",
+            "successful": 4868253,
+            "failed": 0,
+            "p95_ms": 125.04,
+            "p99_ms": 38948.71
+          },
+          {
+            "name": "POST /posts/:id/like",
+            "successful": 715403,
+            "failed": 0,
+            "p95_ms": 345.02,
+            "p99_ms": 38948.71
+          },
+          {
+            "name": "POST /posts",
+            "successful": 95783,
+            "failed": 0,
+            "p95_ms": 351.95,
+            "p99_ms": 39731.58
+          }
+        ]
+      },
+      "server_cpu_pct_during_hold": 98.43,
+      "network": {
+        "ActiveOpens": 342500,
+        "PassiveOpens": 342500,
+        "AttemptFails": 0,
+        "ListenDrops": 0,
+        "RetransSegs": 0
+      },
+      "post_score_health": {
+        "accepted_connections_remaining_before_health": 0,
+        "seconds_after_scored_cutoff": 8.552273174729635,
+        "original_process_alive": true,
+        "database_health_ok": true,
+        "memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 105783,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        },
+        "lifetime_cgroup_peak_bytes": 1944375296,
+        "passed": true
+      },
+      "steady_sample": {
+        "window_s": [
+          65,
+          355
+        ],
+        "requests": 9102044,
+        "rps": 31386.35,
+        "server_cpu_pct": 98.38,
+        "server_cpu_us_per_request": 31.3458,
+        "server_user_us_per_request": 4.3911,
+        "server_kernel_us_per_request": 26.9547
+      },
+      "after_all_connections_open": {
+        "ramp_boundary_reported_s_per_shard": [
+          65,
+          65,
+          65,
+          65
+        ],
+        "requests_in_remaining_histograms": 9261604,
+        "aggregate_rps_after_reported_cutoffs": 31395.25,
+        "p95_ms_bounds": [
+          116.63,
+          186.172
+        ],
+        "p99_ms_bounds": [
+          38948.707,
+          39731.576
+        ]
+      },
+      "teardown_sampled": {
+        "sampling_interval_seconds": 0.1,
+        "last_sampled_offset_after_cutoff_s": 8.627829551696777,
+        "cgroup_gone_after_observation": true,
+        "hard_limit_mib": 1750.0,
+        "scored_peak_mib_tail_observer": 1431.94,
+        "lifetime_peak_mib_seen_after_cutoff": 1854.3,
+        "final_observed_memory_events": {
+          "low": 0,
+          "high": 0,
+          "max": 105783,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      }
+    }
+  ],
+  "matched_kensac_338750": {
+    "candidate_run": "go-release-338750-full",
+    "baseline_run": "go-kensac-338750-full",
+    "matched_plan_fields": [
+      "generator_sha256",
+      "generator_commit",
+      "generator_go",
+      "seed_bytes",
+      "topology",
+      "mtu",
+      "port",
+      "users",
+      "ramp_s",
+      "hold_s",
+      "think_scale",
+      "gzip",
+      "timeout_s",
+      "server_cpu",
+      "server_memory_mib",
+      "server_nofile",
+      "groups",
+      "tcp_ehash_entries"
+    ],
+    "relative_percent": {
+      "whole_req_per_s": 10.23,
+      "whole_p95_ms": 92.846,
+      "whole_p99_ms": -96.897,
+      "all_open_req_per_s": 11.473,
+      "all_open_server_cpu_us_per_req": -8.926,
+      "scored_max_cgroup_memory": -28.076
+    },
+    "baseline_source_commit": "4298101",
+    "baseline_compiler": "rustc 1.94.0"
+  },
+  "matched_release_gcc_342500": {
+    "candidate_run": "go-public-hinted-clang-342500-full",
+    "baseline_run": "go-release-342500-full",
+    "matched_plan_fields": [
+      "generator_sha256",
+      "generator_commit",
+      "generator_go",
+      "seed_bytes",
+      "topology",
+      "mtu",
+      "port",
+      "users",
+      "ramp_s",
+      "hold_s",
+      "think_scale",
+      "gzip",
+      "timeout_s",
+      "server_cpu",
+      "server_memory_mib",
+      "server_nofile",
+      "groups",
+      "tcp_ehash_entries"
+    ],
+    "relative_percent": {
+      "whole_req_per_s": 0.54,
+      "whole_p95_ms": -13.004,
+      "whole_p99_ms": -41.569,
+      "all_open_req_per_s": 0.352,
+      "all_open_server_cpu_us_per_req": -0.36,
+      "scored_max_cgroup_memory": -19.493
+    }
+  },
+  "same_host_paired_comparisons": [
+    {
+      "candidate": "go-clang-bulk-credits-reno-350k-full",
+      "baseline": "go-release-350k-full",
+      "users": 350000,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 0.595,
+        "whole_p95_ms": -7.652,
+        "whole_p99_ms": -43.849,
+        "all_open_req_per_s": 0.209,
+        "all_open_server_cpu_us_per_req": 0.023,
+        "scored_max_cgroup_memory": -9.664
+      }
+    },
+    {
+      "candidate": "go-public-deterministic-pgo-350k-full",
+      "baseline": "go-public-hinted-clang-350k-full",
+      "users": 350000,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries",
+        "seed_sha256",
+        "tokens_sha256",
+        "kernel_release"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 0.63,
+        "whole_p95_ms": -10.368,
+        "whole_p99_ms": 1.0,
+        "all_open_req_per_s": 0.706,
+        "all_open_server_cpu_us_per_req": -0.709,
+        "scored_max_cgroup_memory": -0.313
+      }
+    },
+    {
+      "candidate": "go-public-hinted-clang-342500-full",
+      "baseline": "go-release-342500-full",
+      "users": 342500,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 0.54,
+        "whole_p95_ms": -13.004,
+        "whole_p99_ms": -41.569,
+        "all_open_req_per_s": 0.352,
+        "all_open_server_cpu_us_per_req": -0.36,
+        "scored_max_cgroup_memory": -19.493
+      }
+    },
+    {
+      "candidate": "go-public-hinted-clang-350k-full",
+      "baseline": "go-release-350k-full",
+      "users": 350000,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 0.639,
+        "whole_p95_ms": -14.718,
+        "whole_p99_ms": -50.169,
+        "all_open_req_per_s": 0.293,
+        "all_open_server_cpu_us_per_req": -0.034,
+        "scored_max_cgroup_memory": -28.34
+      }
+    },
+    {
+      "candidate": "go-public-hinted-clang-350k-full",
+      "baseline": "go-clang-bulk-credits-reno-350k-full",
+      "users": 350000,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 0.044,
+        "whole_p95_ms": -7.652,
+        "whole_p99_ms": -11.255,
+        "all_open_req_per_s": 0.085,
+        "all_open_server_cpu_us_per_req": -0.057,
+        "scored_max_cgroup_memory": -20.674
+      }
+    },
+    {
+      "candidate": "go-release-338750-full",
+      "baseline": "go-kensac-338750-full",
+      "users": 338750,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 10.23,
+        "whole_p95_ms": 92.846,
+        "whole_p99_ms": -96.897,
+        "all_open_req_per_s": 11.473,
+        "all_open_server_cpu_us_per_req": -8.926,
+        "scored_max_cgroup_memory": -28.076
+      }
+    },
+    {
+      "candidate": "go-public-hinted-clang-400k-full",
+      "baseline": "go-release-400k-full",
+      "users": 400000,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 0.002,
+        "whole_p95_ms": 8.286,
+        "whole_p99_ms": -7.652,
+        "all_open_req_per_s": -0.208,
+        "all_open_server_cpu_us_per_req": 0.192,
+        "scored_max_cgroup_memory": -18.078
+      }
+    },
+    {
+      "candidate": "go-public-hinted-clang-342500-full",
+      "baseline": "go-public-kensac-342500-full",
+      "users": 342500,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries",
+        "seed_sha256",
+        "tokens_sha256",
+        "kernel_release"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 12.824,
+        "whole_p95_ms": 170.481,
+        "whole_p99_ms": -97.604,
+        "all_open_req_per_s": 14.395,
+        "all_open_server_cpu_us_per_req": -11.269,
+        "scored_max_cgroup_memory": -39.23
+      }
+    },
+    {
+      "candidate": "go-public-hinted-clang-342500-repeat-full",
+      "baseline": "go-public-kensac-342500-full",
+      "users": 342500,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries",
+        "seed_sha256",
+        "tokens_sha256",
+        "kernel_release"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": 12.465,
+        "whole_p95_ms": 184.279,
+        "whole_p99_ms": -97.787,
+        "all_open_req_per_s": 13.913,
+        "all_open_server_cpu_us_per_req": -10.887,
+        "scored_max_cgroup_memory": -42.31
+      }
+    },
+    {
+      "candidate": "go-public-hinted-clang-342500-repeat-full",
+      "baseline": "go-public-hinted-clang-342500-full",
+      "users": 342500,
+      "matched_plan_fields": [
+        "generator_sha256",
+        "generator_commit",
+        "generator_go",
+        "seed_bytes",
+        "topology",
+        "mtu",
+        "port",
+        "users",
+        "ramp_s",
+        "hold_s",
+        "think_scale",
+        "gzip",
+        "timeout_s",
+        "server_cpu",
+        "server_memory_mib",
+        "server_nofile",
+        "groups",
+        "tcp_ehash_entries",
+        "seed_sha256",
+        "tokens_sha256",
+        "kernel_release"
+      ],
+      "relative_percent": {
+        "whole_req_per_s": -0.318,
+        "whole_p95_ms": 5.101,
+        "whole_p99_ms": -7.652,
+        "all_open_req_per_s": -0.421,
+        "all_open_server_cpu_us_per_req": 0.431,
+        "scored_max_cgroup_memory": -5.069
+      }
+    }
+  ],
+  "independent_342500_user_comparison": {
+    "users": 342500,
+    "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "candidate_passed_runs": 2,
+    "candidate_run_count": 2,
+    "reported_in_time_order": [
+      {
+        "case": "go-public-hinted-clang-342500-full",
+        "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+        "users": 342500,
+        "actual_peak_simultaneous_pairs": 342500.0,
+        "full_score": {
+          "reqs": 12003645,
+          "req_per_s": 33343.42405592292,
+          "fails": 0,
+          "p95_ms": 369.90492950021905,
+          "p99_ms": 933.2067699447765,
+          "max_ms": 3368.4887301212216,
+          "pass": true
+        },
+        "complete_hold_p95_ms_bounds": [
+          309.247,
+          384.925
+        ],
+        "complete_hold_p99_ms_bounds": [
+          493.64,
+          951.964
+        ],
+        "all_peers_connected": {
+          "window_s": [
+            65,
+            355
+          ],
+          "rps": 35904.29,
+          "server_cpu_us_per_request": 27.8133
+        },
+        "scored_cgroup_peak_bytes": 912453632,
+        "natural_close": {
+          "accepted_connections_remaining_before_health": 0,
+          "seconds_after_scored_cutoff": 8.252133797861461,
+          "original_process_alive": true,
+          "database_health_ok": true,
+          "memory_events": {
+            "low": 0,
+            "high": 0,
+            "max": 0,
+            "oom": 0,
+            "oom_kill": 0,
+            "oom_group_kill": 0
+          },
+          "lifetime_cgroup_peak_bytes": 1746501632,
+          "passed": true
+        }
+      },
+      {
+        "case": "go-public-kensac-342500-full",
+        "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+        "users": 342500,
+        "actual_peak_simultaneous_pairs": 342500.0,
+        "full_score": {
+          "reqs": 10639220,
+          "req_per_s": 29553.363088064078,
+          "fails": 0,
+          "p95_ms": 136.75799993204322,
+          "p99_ms": 38948.70739982358,
+          "max_ms": 47524.82483811241,
+          "pass": false
+        },
+        "complete_hold_p95_ms_bounds": [
+          118.974,
+          166.871
+        ],
+        "complete_hold_p99_ms_bounds": [
+          38948.707,
+          39338.194
+        ],
+        "all_peers_connected": {
+          "window_s": [
+            65,
+            355
+          ],
+          "rps": 31386.35,
+          "server_cpu_us_per_request": 31.3458
+        },
+        "scored_cgroup_peak_bytes": 1501495296,
+        "natural_close": {
+          "accepted_connections_remaining_before_health": 0,
+          "seconds_after_scored_cutoff": 8.552273174729635,
+          "original_process_alive": true,
+          "database_health_ok": true,
+          "memory_events": {
+            "low": 0,
+            "high": 0,
+            "max": 105783,
+            "oom": 0,
+            "oom_kill": 0,
+            "oom_group_kill": 0
+          },
+          "lifetime_cgroup_peak_bytes": 1944375296,
+          "passed": true
+        }
+      },
+      {
+        "case": "go-public-hinted-clang-342500-repeat-full",
+        "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+        "users": 342500,
+        "actual_peak_simultaneous_pairs": 342500.0,
+        "full_score": {
+          "reqs": 11965464,
+          "req_per_s": 33237.32730424098,
+          "fails": 0,
+          "p95_ms": 388.7737984862623,
+          "p99_ms": 861.8007951509119,
+          "max_ms": 3302.116194609569,
+          "pass": true
+        },
+        "complete_hold_p95_ms_bounds": [
+          373.604,
+          396.588
+        ],
+        "complete_hold_p99_ms_bounds": [
+          518.82,
+          870.419
+        ],
+        "all_peers_connected": {
+          "window_s": [
+            65,
+            355
+          ],
+          "rps": 35753.2,
+          "server_cpu_us_per_request": 27.9333
+        },
+        "scored_cgroup_peak_bytes": 866205696,
+        "natural_close": {
+          "accepted_connections_remaining_before_health": 0,
+          "seconds_after_scored_cutoff": 8.042877354091615,
+          "original_process_alive": true,
+          "database_health_ok": true,
+          "memory_events": {
+            "low": 0,
+            "high": 0,
+            "max": 0,
+            "oom": 0,
+            "oom_kill": 0,
+            "oom_group_kill": 0
+          },
+          "lifetime_cgroup_peak_bytes": 1691394048,
+          "passed": true
+        }
+      }
+    ],
+    "candidate_vs_rust_relative_percent_in_run_order": [
+      {
+        "whole_req_per_s": 12.824,
+        "whole_p95_ms": 170.481,
+        "whole_p99_ms": -97.604,
+        "all_open_req_per_s": 14.395,
+        "all_open_server_cpu_us_per_req": -11.269,
+        "scored_max_cgroup_memory": -39.23
+      },
+      {
+        "whole_req_per_s": 12.465,
+        "whole_p95_ms": 184.279,
+        "whole_p99_ms": -97.787,
+        "all_open_req_per_s": 13.913,
+        "all_open_server_cpu_us_per_req": -10.887,
+        "scored_max_cgroup_memory": -42.31
+      }
+    ],
+    "baseline_source_commit": "4298101",
+    "baseline_compiler": "rustc 1.94.0",
+    "conditions": "Each run used a new disk-backed copy of the same seed, the same four generator CPU groups, one server CPU, the same binary for the C runs, and independent natural disconnect verification."
+  },
+  "k6_validation": {
+    "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+    "k6_version": "2.3.0",
+    "k6_binary_sha256": "e001bbf39ba67424a85c9c8516440ba5c73ecf7a6021be96c76194380c15f260",
+    "unchanged_script": "bench/load.js",
+    "script_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "topology": "Private local TCP loopback, server CPU 10, client CPUs 3-5, fresh disk-backed seed, hard server descriptor limit 65535",
+    "vus": 1000,
+    "ramp_s": 10,
+    "hold_s": 120,
+    "rampdown_s": 30,
+    "graceful_ramp_down_s": 10,
+    "requests": 15688,
+    "failed_requests": 0,
+    "successful_status_checks": 15688,
+    "failed_status_checks": 0,
+    "p95_ms": 0.5639391499999998,
+    "p99_ms": 2.7046919799999944
+  },
+  "earlier_k6_validation": {
+    "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+    "k6_version": "2.3.0",
+    "k6_binary_sha256": "e001bbf39ba67424a85c9c8516440ba5c73ecf7a6021be96c76194380c15f260",
+    "unchanged_script": "bench/load.js",
+    "script_sha256": "14fbbe36a7bef2cc803c8c2309b8b93d6e6ec9c2b6aba78ebe3b9a95ebf85972",
+    "topology": "Private local TCP loopback, server CPU 10, client CPUs 3-5, fresh disk-backed seed, hard server descriptor limit 65535",
+    "vus": 1000,
+    "ramp_s": 10,
+    "hold_s": 120,
+    "rampdown_s": 30,
+    "graceful_ramp_down_s": 10,
+    "requests": 15684,
+    "failed_requests": 0,
+    "successful_status_checks": 15684,
+    "failed_status_checks": 0,
+    "p95_ms": 0.52830725,
+    "p99_ms": 1.7477427700000003
+  }
+}

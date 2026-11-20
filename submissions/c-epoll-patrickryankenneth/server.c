@@ -20,7 +20,9 @@
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
-#include "sqlite3.h"
+#include <sys/prctl.h>
+#include <sys/stat.h>
+#include "build/sqlite3.c"   /* one translation unit with the amalgamation */
 
 /* ---------------------------------------------------------------- SHA-256 / HMAC */
 typedef struct { uint32_t h[8]; uint8_t b[64]; uint64_t len; size_t bl; } sha_ctx;
@@ -317,6 +319,9 @@ static void besc(buf *b, const char *s, size_t n) {
 
 /* ---------------------------------------------------------------- DB */
 static sqlite3 *db;
+static int g_bt;
+static int g_ckpt_child;
+static int bt_init(void);
 static int g_group, g_tx;                      /* group commit: io_uring mode only */
 static sqlite3_stmt *st_feed, *st_one, *st_ins, *st_exists, *st_like, *st_health;
 static time_t t_start;
@@ -336,13 +341,15 @@ static void db_open(const char *path) {
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL;PRAGMA synchronous=NORMAL;PRAGMA temp_store=MEMORY;"
                        "PRAGMA mmap_size=0;PRAGMA cache_size=-16384;PRAGMA busy_timeout=5000;",
                    NULL, NULL, &em) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", em); exit(1); }
-  sqlite3_exec(db, "PRAGMA wal_autocheckpoint=10000;", NULL, NULL, NULL);   /* keep checkpoints out of the commit path */
+  sqlite3_exec(db, g_ckpt_child ? "PRAGMA wal_autocheckpoint=50000;" : "PRAGMA wal_autocheckpoint=10000;", NULL, NULL, NULL);   /* small, frequent checkpoints: big inline ones stall the loop on slow disks */
   st_feed = prep(POST_SQL "ORDER BY p.created_at DESC, p.id DESC LIMIT 20");
   st_one = prep(POST_SQL "WHERE p.id=?");
   st_ins = prep("INSERT INTO posts(user_id,body) VALUES(?,?) RETURNING id,created_at");
   st_exists = prep("SELECT 1 FROM posts WHERE id=?");
   st_like = prep("INSERT INTO likes(user_id,post_id) VALUES(?,?) ON CONFLICT(user_id,post_id) DO NOTHING");
   st_health = prep("SELECT 1");
+  g_bt = !getenv("NO_BT_FEED") && bt_init();
+  fprintf(stderr, "feed path: %s\n", g_bt ? "btree cursors" : "sql");
 }
 static void put_post_row(buf *b, sqlite3_stmt *s) {
   bstr(b, "{\"id\":"); bint(b, sqlite3_column_int64(s, 0));
@@ -471,7 +478,159 @@ static int h_health(void) {
   bstr(&body, "{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":\""); besc(&body, m, strlen(m)); bstr(&body, "\"}");
   return 503;
 }
+/* ---- /feed on SQLite's own B-tree cursors: same tables, read from the database on every request ---- */
+typedef struct { const unsigned char *col[4]; i64 val[4]; int len[4]; } BtRec;
+static struct {
+  int posts_root, users_root, top_root, likes_root;
+  KeyInfo *likes_ki, *top_ki;
+  UnpackedRecord *likes_key;
+  BtCursor *cur[4];
+} BTF;
+
+static int bt_root(const char *name) {
+  sqlite3_stmt *st; int root = 0;
+  if (sqlite3_prepare_v2(db, "SELECT rootpage FROM sqlite_schema WHERE name = ?", -1, &st, 0)) return 0;
+  sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+  if (sqlite3_step(st) == SQLITE_ROW) root = sqlite3_column_int(st, 0);
+  sqlite3_finalize(st);
+  return root;
+}
+static int bt_init(void) {
+  memset(&BTF, 0, sizeof BTF);
+  BTF.posts_root = bt_root("posts");
+  BTF.users_root = bt_root("users");
+  BTF.top_root = bt_root("posts_created_at_id_idx");
+  BTF.likes_root = bt_root("likes_post_id_idx");
+  if (!BTF.posts_root || !BTF.users_root || !BTF.top_root || !BTF.likes_root) return 0;
+  BTF.top_ki = sqlite3KeyInfoAlloc(db, 2, 0);
+  BTF.likes_ki = sqlite3KeyInfoAlloc(db, 2, 0);
+  if (!BTF.top_ki || !BTF.likes_ki) return 0;
+  BTF.likes_key = sqlite3VdbeAllocUnpackedRecord(BTF.likes_ki);
+  if (!BTF.likes_key) return 0;
+  for (int i = 0; i < 4; i++) {
+    BTF.cur[i] = (BtCursor *)sqlite3_malloc(sqlite3BtreeCursorSize());
+    if (!BTF.cur[i]) return 0;
+  }
+  return 1;
+}
+
+/* Decode the first n columns of a record held entirely in the page. 0 on overflow/corruption. */
+static int bt_rec(BtCursor *c, int n, BtRec *r) {
+  u32 amt, size = sqlite3BtreePayloadSize(c);   /* size first: it parses the cell for Fetch */
+  const unsigned char *p = sqlite3BtreePayloadFetch(c, &amt);
+  if (amt != size || amt < 2) return 0;
+  u32 hdr; int h = getVarint32(p, hdr);
+  if (hdr > amt) return 0;
+  const unsigned char *data = p + hdr;
+  const unsigned char *end = p + amt;
+  for (int i = 0; i < n; i++) {
+    u32 t;
+    if (h >= (int)hdr) return 0;
+    h += getVarint32(p + h, t);
+    int len; i64 v = 0;
+    if (t < 12) {
+      static const unsigned char sz[] = {0, 1, 2, 3, 4, 6, 8, 0, 0, 0, 0, 0};
+      len = sz[t];
+      if (t == 8) v = 0; else if (t == 9) v = 1;
+      else if (t >= 10) return 0;
+      else if (len) {
+        if (data + len > end) return 0;
+        v = (signed char)data[0];
+        for (int k = 1; k < len; k++) v = (v << 8) | data[k];
+      }
+    } else {
+      len = (int)((t - 12) / 2);
+    }
+    if (data + len > end) return 0;
+    r->col[i] = data; r->val[i] = v; r->len[i] = len;
+    data += len;
+  }
+  return 1;
+}
+
+/* likes per post_id in [lo, hi] into cnt[post_id - lo], one pass over likes_post_id_idx. 0 = ok. */
+static int bt_likes(Btree *bt, i64 lo, i64 hi, i64 *cnt) {
+  BtCursor *c = BTF.cur[3];
+  UnpackedRecord *key = BTF.likes_key;
+  int res, rc, bad = 0;
+  sqlite3BtreeCursorZero(c);
+  if (sqlite3BtreeCursor(bt, BTF.likes_root, 0, BTF.likes_ki, c)) return 1;
+  sqlite3VdbeMemInit(&key->aMem[0], db, MEM_Null);
+  sqlite3VdbeMemSetInt64(&key->aMem[0], lo);
+  key->nField = 1; key->default_rc = 1; key->errCode = 0; key->r1 = 0; key->r2 = 0; key->eqSeen = 0;
+  if (sqlite3BtreeIndexMoveto(c, key, &res)) bad = 1;
+  else if (res < 0 && (rc = sqlite3BtreeNext(c, 0)) && rc != SQLITE_DONE) bad = 1;
+  while (!bad && !sqlite3BtreeEof(c)) {
+    BtRec r;
+    if (!bt_rec(c, 1, &r)) { bad = 1; break; }
+    if (r.val[0] > hi) break;
+    if (r.val[0] >= lo) cnt[r.val[0] - lo]++;
+    rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) break;
+    if (rc) bad = 1;
+  }
+  sqlite3BtreeCloseCursor(c);
+  return bad;
+}
+
+/* Writes the feed JSON into body. Returns 1, or 0 when the SQL path must answer. */
+static int bt_feed(void) {
+  Btree *bt = db->aDb[0].pBt;
+  int started = 0, res = 1, rc, n = 0, ok = 0;
+  i64 ids[20], lo, hi, cnt[256];
+  BtCursor *top = BTF.cur[0], *posts = BTF.cur[1], *users = BTF.cur[2];
+  if (sqlite3BtreeTxnState(bt) == TRANS_NONE) {
+    if (sqlite3BtreeBeginTrans(bt, 0, 0)) return 0;
+    started = 1;
+  }
+  sqlite3BtreeCursorZero(top);
+  if (sqlite3BtreeCursor(bt, BTF.top_root, 0, BTF.top_ki, top)) goto out;
+  rc = sqlite3BtreeFirst(top, &res);
+  while (rc == SQLITE_OK && !res && n < 20) {
+    BtRec r;
+    if (!bt_rec(top, 2, &r)) { n = 0; break; }       /* created_at, id */
+    ids[n++] = r.val[1];
+    rc = sqlite3BtreeNext(top, 0);
+  }
+  sqlite3BtreeCloseCursor(top);
+  if (rc != SQLITE_OK && rc != SQLITE_DONE) n = 0;
+  if (n == 0) goto out;
+  lo = hi = ids[0];
+  for (int k = 1; k < n; k++) { if (ids[k] < lo) lo = ids[k]; if (ids[k] > hi) hi = ids[k]; }
+  if (hi - lo >= 256) goto out;
+  memset(cnt, 0, sizeof(i64) * (size_t)(hi - lo + 1));
+  if (bt_likes(bt, lo, hi, cnt)) goto out;
+  sqlite3BtreeCursorZero(posts);
+  if (sqlite3BtreeCursor(bt, BTF.posts_root, 0, 0, posts)) goto out;
+  sqlite3BtreeCursorZero(users);
+  if (sqlite3BtreeCursor(bt, BTF.users_root, 0, 0, users)) { sqlite3BtreeCloseCursor(posts); goto out; }
+  body.n = 0; bstr(&body, "{\"posts\":[");
+  ok = 1;
+  for (int k = 0; k < n; k++) {
+    BtRec r, u;
+    if (!(k > 0 && ids[k] == ids[k - 1] - 1 && sqlite3BtreePrevious(posts, 0) == SQLITE_OK
+          && sqlite3BtreeIntegerKey(posts) == ids[k])) {
+      if (sqlite3BtreeTableMoveto(posts, ids[k], 0, &res) || res != 0) { ok = 0; break; }
+    }
+    if (!bt_rec(posts, 4, &r) || sqlite3BtreeTableMoveto(users, r.val[1], 0, &res) || res != 0
+        || !bt_rec(users, 2, &u)) { ok = 0; break; }
+    if (k) bstr(&body, ",");
+    bstr(&body, "{\"id\":"); bint(&body, ids[k]);
+    bstr(&body, ",\"body\":\""); besc(&body, (const char *)r.col[2], (size_t)r.len[2]);
+    bstr(&body, "\",\"created_at\":\""); besc(&body, (const char *)r.col[3], (size_t)r.len[3]);
+    bstr(&body, "\",\"author\":\""); besc(&body, (const char *)u.col[1], (size_t)u.len[1]);
+    bstr(&body, "\",\"like_count\":"); bint(&body, cnt[ids[k] - lo]); bstr(&body, "}");
+  }
+  sqlite3BtreeCloseCursor(users);
+  sqlite3BtreeCloseCursor(posts);
+  if (ok) bstr(&body, "]}");
+out:
+  if (started) sqlite3BtreeCommit(bt);
+  return ok;
+}
+
 static int h_feed(void) {
+  if (g_bt && bt_feed()) return 200;
   body.n = 0; bstr(&body, "{\"posts\":[");
   int first = 1, rc;
   while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW) {
@@ -484,9 +643,42 @@ static int h_feed(void) {
   bstr(&body, "]}"); return 200;
 }
 static int id_error(int rc) { return rc == -1 ? err(400, "invalid post id") : err(404, "post not found"); }
+/* Writes {"post":{...}} into body. Returns 1, or 0 when the SQL path must answer (404, odd rows, errors). */
+static int bt_post(long long id) {
+  Btree *bt = db->aDb[0].pBt;
+  int started = 0, res = 1, ok = 0;
+  i64 cnt[1] = {0};
+  BtCursor *posts = BTF.cur[1], *users = BTF.cur[2];
+  BtRec r, u;
+  if (sqlite3BtreeTxnState(bt) == TRANS_NONE) {
+    if (sqlite3BtreeBeginTrans(bt, 0, 0)) return 0;
+    started = 1;
+  }
+  if (bt_likes(bt, id, id, cnt)) goto out;
+  sqlite3BtreeCursorZero(posts);
+  if (sqlite3BtreeCursor(bt, BTF.posts_root, 0, 0, posts)) goto out;
+  sqlite3BtreeCursorZero(users);
+  if (sqlite3BtreeCursor(bt, BTF.users_root, 0, 0, users)) { sqlite3BtreeCloseCursor(posts); goto out; }
+  if (!sqlite3BtreeTableMoveto(posts, id, 0, &res) && res == 0 && bt_rec(posts, 4, &r)
+      && !sqlite3BtreeTableMoveto(users, r.val[1], 0, &res) && res == 0 && bt_rec(users, 2, &u)) {
+    body.n = 0; bstr(&body, "{\"post\":{\"id\":"); bint(&body, id);
+    bstr(&body, ",\"body\":\""); besc(&body, (const char *)r.col[2], (size_t)r.len[2]);
+    bstr(&body, "\",\"created_at\":\""); besc(&body, (const char *)r.col[3], (size_t)r.len[3]);
+    bstr(&body, "\",\"author\":\""); besc(&body, (const char *)u.col[1], (size_t)u.len[1]);
+    bstr(&body, "\",\"like_count\":"); bint(&body, cnt[0]); bstr(&body, "}}");
+    ok = 1;
+  }
+  sqlite3BtreeCloseCursor(users);
+  sqlite3BtreeCloseCursor(posts);
+out:
+  if (started) sqlite3BtreeCommit(bt);
+  return ok;
+}
+
 static int h_get(const char *s, size_t n) {
   long long id; int rc = parse_id(s, n, &id);
   if (rc) return id_error(rc);
+  if (g_bt && bt_post(id)) return 200;
   sqlite3_bind_int64(st_one, 1, id);
   rc = sqlite3_step(st_one);
   int st;
@@ -956,6 +1148,36 @@ static int uring_serve(int lfd, unsigned nofile, const char *host, const char *p
   }
 }
 
+/* Checkpoints run in a helper process so their fsyncs never block the serving loop.
+** Forked before db_open so the child starts with no SQLite state of its own to inherit. */
+static void ckpt_spawn(const char *path) {
+  if (getenv("NO_CKPT_CHILD") || getenv("NO_URING")) return;
+  pid_t parent = getpid();
+  pid_t pid = fork();
+  if (pid < 0) return;
+  if (pid > 0) { g_ckpt_child = 1; fprintf(stderr, "checkpoint helper pid %d\n", (int)pid); return; }
+  prctl(PR_SET_PDEATHSIG, SIGKILL);
+  if (getppid() != parent) _exit(0);
+  if (nice(10) < 0) { /* best effort */ }
+  sqlite3 *c = NULL;
+  char wp[1024]; snprintf(wp, sizeof wp, "%s-wal", path);
+  for (;;) {
+    usleep(1000000);
+    if (getppid() != parent) _exit(0);
+    if (!c) {
+      if (sqlite3_open_v2(path, &c, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX, NULL) != SQLITE_OK) { sqlite3_close(c); c = NULL; continue; }
+      sqlite3_busy_timeout(c, 5000);
+      sqlite3_exec(c, "SELECT 1 FROM sqlite_schema LIMIT 1;", NULL, NULL, NULL);   /* first read attaches the WAL; without it the checkpoint is a no-op */
+    }
+    int nlog = -1, nckpt = -1;
+    int rc = sqlite3_wal_checkpoint_v2(c, NULL, SQLITE_CHECKPOINT_PASSIVE, &nlog, &nckpt);
+    if (rc != SQLITE_OK) {
+      struct stat st; long wal = stat(wp, &st) == 0 ? (long)st.st_size : -1;
+      fprintf(stderr, "ckpt rc=%d log=%d ckpt=%d wal_bytes=%ld\n", rc, nlog, nckpt, wal);
+    }
+  }
+}
+
 int main(void) {
   signal(SIGPIPE, SIG_IGN);
   const char *path = getenv("SQLITE_PATH"), *secret = getenv("JWT_SECRET");
@@ -965,6 +1187,7 @@ int main(void) {
   if (!port) port = "3000";
   b64_init(); hmac_init((const uint8_t *)secret, strlen(secret));
   t_start = time(NULL);
+  ckpt_spawn(path);
   db_open(path);
 
   struct rlimit rl;

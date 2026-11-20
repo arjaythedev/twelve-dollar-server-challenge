@@ -1,0 +1,14 @@
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+allow-print-in-tests = true
+disallowed-methods = [
+    { path = "std::sync::mpsc::channel", reason = "use sync_channel with a named capacity" },
+    { path = "std::env::args", reason = "use args_os; args panics on a non-Unicode argument" },
+    { path = "std::env::vars", reason = "use vars_os; vars panics on a non-Unicode entry" },
+    { path = "std::env::set_var", reason = "pass configuration as a value; a child gets Command::env" },
+    { path = "std::env::remove_var", reason = "pass configuration as a value; a child gets Command::env" },
+]
+disallowed-macros = [
+    { path = "std::thread_local", reason = "pass context explicitly" },
+]

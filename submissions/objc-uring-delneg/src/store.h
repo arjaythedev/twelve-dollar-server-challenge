@@ -14,6 +14,7 @@ void td_ckpt_child(const char *path, int req, int done);
     pthread_mutex_t lock;
     int walFrames;            // frames in the WAL after the last commit (wal hook; checkpointer mode)
 }
+- (int)cacheStat:(int)which TD_DIRECT;   // 0: page cache KB, 1: cache misses so far
 - (void)useInlineCheckpoints TD_DIRECT;   // checkpointer process gone: SQLite's own autocheckpoint
 - (instancetype)initWithPath:(const char *)path TD_DIRECT;
 - (bool)begin TD_DIRECT;

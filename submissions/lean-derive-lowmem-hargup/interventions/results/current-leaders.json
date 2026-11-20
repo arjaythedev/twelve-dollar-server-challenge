@@ -1,0 +1,618 @@
+{
+ "intervention": "10-current-leaders",
+ "date": "2026-11-14",
+ "upstream_read": {
+  "commit": "f4485ff56545d0c12e2283aad651fce16497ec48",
+  "entries": [
+   "rust-iouring-kensac #264",
+   "mojo-iouring-oh-meh #257",
+   "rust-iouring-rkkautsar #355",
+   "fsharp-uring-delneg #398",
+   "fsharp-kestrel-delneg #201 (README note on 6.8.0-147)"
+  ]
+ },
+ "commits": {
+  "baseline": "d7db35576e71e660984eae576db7a506e5e46762",
+  "bounded_accepts_and_registration_retry": "747564d1012df51dbacd1d5291594349f83f0850",
+  "tests_and_cancel_removal": "dc6bab89f2937ac8b4ea26beb311f3dce63bd6fe",
+  "accept_live_client_limit_fix": "d04e091c8b4f2b0eeba5364a6a977ffb964cf42b",
+  "note": "runtime/, gen/ and spec/ are identical at dc6bab8 and d04e091; later commits change documentation and evidence only"
+ },
+ "host": {
+  "name": "bigmachine (shared)",
+  "cpu": "Intel Xeon E-2176G @ 3.70GHz",
+  "kernel": "6.8.0-100-generic (not affected by Launchpad #2162843)",
+  "compiler": "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "flags": "-O2 -march=native -fno-plt -pthread -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_USE_ALLOCA -DSQLITE_DQS=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1 (SQLite 3.54.1 amalgamation)"
+ },
+ "artifacts_sha256": {
+  "d7db355/server": "97534e8f87e6a879b8a3d7945d398150f2317fc258f263b071b8190a4386974c",
+  "dc6bab8/server": "7053e1f7ae25fac5a8e853296200b65b7882a9f1e4caf8cd171314a509274ce1",
+  "dc6bab8-small/server (SQ_ENTRIES=4)": "57beb8fec03335ae230ba0715e0a9e2938d195b18a711c918660f054e5ee67cd",
+  "dc6bab8-batch/server (batch_cases.c, ASan/UBSan)": "a3890fee3be1e9491c5fba6bc254702dfb1b449b05e0b50e4f1084c8cca011d0",
+  "dc6bab8-cache64/server (-DDB_CACHE_KIB=64)": "b04420b2d312d660d2b7783669193e3821626cf379793bec7da54660a6ad81ab"
+ },
+ "validation": [
+  {
+   "test": "spec: lake build && lake exe derive ../gen",
+   "result": "26/26 jobs; only gen/sqe_gen.h changed (cancel constructor removed)"
+  },
+  {
+   "test": "tests/metal/accept_cases.c",
+   "compiler": "gcc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Iruntime -Igen",
+   "result": "passed; each of 7 deliberately broken transport variants fails it: no free-slot bound, off-by-one bound, no reservation release, no final scan at 16 rings, switching to a full ring, eager ring opening (caught after the drained-ring scenario was added), no registration retry"
+  },
+  {
+   "test": "tests/metal/{sqe,transport,output}_cases.c, record_projection.c, framing_cases.c",
+   "compiler": "same",
+   "result": "passed"
+  },
+  {
+   "test": "tests/metal/batch_cases.c via build.sh batch + batch_run.py (UID 65534)",
+   "result": "passed: read snapshot, exact queues, ordered create/like, error holes, COMMIT rollback and reuse"
+  },
+  {
+   "test": "unshare -n python3 tests/metal/accept_live.py <dc6bab8 server> seed/feed.db",
+   "result": "passed: 4096 persistent connections, 16 rings x 256 slots, full-table backpressure, noncurrent-ring reuse, all connections healthy",
+   "note": "first attempt failed in the test client (EMFILE: shell soft limit 1024); fixed in d04e091 by raising the client's own limit"
+  },
+  {
+   "test": "bench.py dc6bab8 check --unprivileged",
+   "result": "42/42 official; SQL oracle 20,000 random posts + feed exact bytes/key order; edge cases; claim cases",
+   "directory": "dc6bab8-check-1794625072707505140"
+  },
+  {
+   "test": "bench.py dc6bab8-small check --unprivileged (4-entry SQ)",
+   "result": "42/42 and the same oracle/edge/claim cases",
+   "directory": "dc6bab8-small-check-1794625081255714371"
+  },
+  {
+   "test": "bench.py dc6bab8 overflow --unprivileged (512-byte pages, overflow records, foreign write)",
+   "result": "passed",
+   "directory": "dc6bab8-overflow-1794625089804754079"
+  },
+  {
+   "test": "tests/crash_durability.py, -DDB_CACHE_KIB=64 build, 60 rounds",
+   "result": "60/60: integrity ok, 0 acknowledged posts or likes missing"
+  },
+  {
+   "test": "tests/crash_durability.py, production build, 20 rounds",
+   "result": "20/20: integrity ok, 0 acknowledged posts or likes missing"
+  },
+  {
+   "test": "tests/metal/ci.sh d04e091 (fresh ubuntu:24.04 image sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac; install.sh as root; build/start/test as UID 10001; cpuset 0, 2 GiB, nofile 65535)",
+   "result": "passed=42 failed=0",
+   "log": "ci-d04e091.log"
+  }
+ ],
+ "performance": {
+  "harness": "tests/metal/bench.py: server in a systemd scope on CPU 0, MemoryMax=2G, MemorySwapMax=0, nofile 65535, UID 65534, fresh seed copy; client on CPUs 1-5,7-11 over loopback in a private network namespace; performance_valid = no other loadgen/blast/cc1 observed. Local smoke comparison, not an official score or capacity search.",
+  "order": "blast A B B A, then load A B B A (300k users, 60 s ramp, 90 s hold, 5 s ramp-down), then one B 300k 5-minute hold",
+  "A": "d7db355",
+  "B": "dc6bab8",
+  "runs": [
+   {
+    "variant": "d7db355",
+    "mode": "blast",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 5507139,
+    "errors": 0,
+    "cpu_us_per_request": 5.581815530713861,
+    "hold_cpu_us_per_request": null,
+    "hold_p95_ms": null,
+    "hold_p99_ms": null,
+    "memory_peak_bytes": 32059392,
+    "directory": "d7db355-blast-1794625872661693390",
+    "output": "mixed: 178386 req/s  (2xx 5507139, 4xx 0, 5xx 0, other 0)",
+    "rps": null,
+    "rps_line": "mixed: 178386 req/s  (2xx 5507139, 4xx 0, 5xx 0, other 0)"
+   },
+   {
+    "variant": "dc6bab8",
+    "mode": "blast",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 5528140,
+    "errors": 0,
+    "cpu_us_per_request": 5.586838792071113,
+    "hold_cpu_us_per_request": null,
+    "hold_p95_ms": null,
+    "hold_p99_ms": null,
+    "memory_peak_bytes": 31916032,
+    "directory": "dc6bab8-blast-1794625914460232550",
+    "output": "mixed: 179194 req/s  (2xx 5528140, 4xx 0, 5xx 0, other 0)",
+    "rps": null,
+    "rps_line": "mixed: 179194 req/s  (2xx 5528140, 4xx 0, 5xx 0, other 0)"
+   },
+   {
+    "variant": "dc6bab8",
+    "mode": "blast",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 5425900,
+    "errors": 0,
+    "cpu_us_per_request": 5.684907020033543,
+    "hold_cpu_us_per_request": null,
+    "hold_p95_ms": null,
+    "hold_p99_ms": null,
+    "memory_peak_bytes": 31281152,
+    "directory": "dc6bab8-blast-1794625956276492003",
+    "output": "mixed: 175864 req/s  (2xx 5425900, 4xx 0, 5xx 0, other 0)",
+    "rps": null,
+    "rps_line": "mixed: 175864 req/s  (2xx 5425900, 4xx 0, 5xx 0, other 0)"
+   },
+   {
+    "variant": "d7db355",
+    "mode": "blast",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 5288481,
+    "errors": 0,
+    "cpu_us_per_request": 5.817302926870684,
+    "hold_cpu_us_per_request": null,
+    "hold_p95_ms": null,
+    "hold_p99_ms": null,
+    "memory_peak_bytes": 31272960,
+    "directory": "d7db355-blast-1794625998200941076",
+    "output": "mixed: 171370 req/s  (2xx 5288481, 4xx 0, 5xx 0, other 0)",
+    "rps": null,
+    "rps_line": "mixed: 171370 req/s  (2xx 5288481, 4xx 0, 5xx 0, other 0)"
+   },
+   {
+    "variant": "d7db355",
+    "mode": "load",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 4143367,
+    "errors": 0,
+    "cpu_us_per_request": 16.358768122640356,
+    "hold_cpu_us_per_request": 14.014795107172723,
+    "hold_p95_ms": 1.762,
+    "hold_p99_ms": 9.008,
+    "memory_peak_bytes": 557772800,
+    "directory": "d7db355-load-1794626040056688760",
+    "whole_p95_ms": 2.075,
+    "whole_p99_ms": 10.063,
+    "whole_max_ms": 162.66,
+    "errors_by_kind": {
+     "connect": 0,
+     "timeout": 0,
+     "reset_eof": 0,
+     "bad_status": 0,
+     "protocol": 0
+    },
+    "conns_opened": 300000,
+    "connect_errors": {
+     "refused": 0,
+     "dial_timeout": 0,
+     "addr_not_avail": 0,
+     "emfile": 0,
+     "reset": 0,
+     "unreachable": 0,
+     "other": 0
+    },
+    "aborted_at_stop": 13,
+    "idle_server_closes": 0,
+    "verdict": {
+     "whole": {
+      "total": {
+       "p95_ms": 2.075,
+       "p99_ms": 10.063,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 2.042,
+       "p99_ms": 9.999,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "hold": {
+      "total": {
+       "p95_ms": 1.762,
+       "p99_ms": 9.008,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 1.758,
+       "p99_ms": 8.976,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "pass": true,
+     "basis": "whole run, total latency incl. connect"
+    },
+    "config": {
+     "vus": 300000,
+     "ramp_s": 60.0,
+     "duration_s": 90.0,
+     "rampdown_s": 5.0
+    },
+    "ramp_max_connecting": 10,
+    "ramp_max_second_p99_ms": 81.791,
+    "ramp_peak_new_conns_per_s": 5125,
+    "seconds_to_all_connected": 65,
+    "max_conns": 300000,
+    "hold_worst_second_p99_ms": 65.663,
+    "hold_mean_rps": 31751.71111111111,
+    "memory_at_end": {
+     "anon": 24170496,
+     "file": 44236800,
+     "kernel": 94515200,
+     "sock": 0
+    },
+    "rings_opened": 5,
+    "server_log_errors": []
+   },
+   {
+    "variant": "dc6bab8",
+    "mode": "load",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 4143400,
+    "errors": 0,
+    "cpu_us_per_request": 16.385194767582178,
+    "hold_cpu_us_per_request": 14.284062425407882,
+    "hold_p95_ms": 2.075,
+    "hold_p99_ms": 9.839,
+    "memory_peak_bytes": 557637632,
+    "directory": "dc6bab8-load-1794626216904559365",
+    "whole_p95_ms": 2.067,
+    "whole_p99_ms": 10.607,
+    "whole_max_ms": 233.441,
+    "errors_by_kind": {
+     "connect": 0,
+     "timeout": 0,
+     "reset_eof": 0,
+     "bad_status": 0,
+     "protocol": 0
+    },
+    "conns_opened": 300000,
+    "connect_errors": {
+     "refused": 0,
+     "dial_timeout": 0,
+     "addr_not_avail": 0,
+     "emfile": 0,
+     "reset": 0,
+     "unreachable": 0,
+     "other": 0
+    },
+    "aborted_at_stop": 17,
+    "idle_server_closes": 0,
+    "verdict": {
+     "whole": {
+      "total": {
+       "p95_ms": 2.067,
+       "p99_ms": 10.607,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 2.051,
+       "p99_ms": 10.607,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "hold": {
+      "total": {
+       "p95_ms": 2.075,
+       "p99_ms": 9.839,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 2.075,
+       "p99_ms": 9.839,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "pass": true,
+     "basis": "whole run, total latency incl. connect"
+    },
+    "config": {
+     "vus": 300000,
+     "ramp_s": 60.0,
+     "duration_s": 90.0,
+     "rampdown_s": 5.0
+    },
+    "ramp_max_connecting": 3,
+    "ramp_max_second_p99_ms": 114.303,
+    "ramp_peak_new_conns_per_s": 5122,
+    "seconds_to_all_connected": 65,
+    "max_conns": 300000,
+    "hold_worst_second_p99_ms": 72.576,
+    "hold_mean_rps": 31751.411111111112,
+    "memory_at_end": {
+     "anon": 23158784,
+     "file": 44638208,
+     "kernel": 94593024,
+     "sock": 0
+    },
+    "rings_opened": 5,
+    "server_log_errors": []
+   },
+   {
+    "variant": "dc6bab8",
+    "mode": "load",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 4143439,
+    "errors": 0,
+    "cpu_us_per_request": 16.187343894769537,
+    "hold_cpu_us_per_request": 14.612824727589063,
+    "hold_p95_ms": 1.861,
+    "hold_p99_ms": 7.144,
+    "memory_peak_bytes": 560812032,
+    "directory": "dc6bab8-load-1794626393822155562",
+    "whole_p95_ms": 1.938,
+    "whole_p99_ms": 8.088,
+    "whole_max_ms": 164.575,
+    "errors_by_kind": {
+     "connect": 0,
+     "timeout": 0,
+     "reset_eof": 0,
+     "bad_status": 0,
+     "protocol": 0
+    },
+    "conns_opened": 300000,
+    "connect_errors": {
+     "refused": 0,
+     "dial_timeout": 0,
+     "addr_not_avail": 0,
+     "emfile": 0,
+     "reset": 0,
+     "unreachable": 0,
+     "other": 0
+    },
+    "aborted_at_stop": 13,
+    "idle_server_closes": 0,
+    "verdict": {
+     "whole": {
+      "total": {
+       "p95_ms": 1.938,
+       "p99_ms": 8.088,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 1.909,
+       "p99_ms": 8.072,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "hold": {
+      "total": {
+       "p95_ms": 1.861,
+       "p99_ms": 7.144,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 1.857,
+       "p99_ms": 7.144,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "pass": true,
+     "basis": "whole run, total latency incl. connect"
+    },
+    "config": {
+     "vus": 300000,
+     "ramp_s": 60.0,
+     "duration_s": 90.0,
+     "rampdown_s": 5.0
+    },
+    "ramp_max_connecting": 2,
+    "ramp_max_second_p99_ms": 37.824,
+    "ramp_peak_new_conns_per_s": 5123,
+    "seconds_to_all_connected": 65,
+    "max_conns": 300000,
+    "hold_worst_second_p99_ms": 59.84,
+    "hold_mean_rps": 31751.277777777777,
+    "memory_at_end": {
+     "anon": 26484736,
+     "file": 45395968,
+     "kernel": 94707712,
+     "sock": 0
+    },
+    "rings_opened": 5,
+    "server_log_errors": []
+   },
+   {
+    "variant": "d7db355",
+    "mode": "load",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 4143467,
+    "errors": 0,
+    "cpu_us_per_request": 17.122170636329432,
+    "hold_cpu_us_per_request": 15.08779790158421,
+    "hold_p95_ms": 2.083,
+    "hold_p99_ms": 7.351,
+    "memory_peak_bytes": 556101632,
+    "directory": "d7db355-load-1794626570629986362",
+    "whole_p95_ms": 2.22,
+    "whole_p99_ms": 8.623,
+    "whole_max_ms": 166.532,
+    "errors_by_kind": {
+     "connect": 0,
+     "timeout": 0,
+     "reset_eof": 0,
+     "bad_status": 0,
+     "protocol": 0
+    },
+    "conns_opened": 300000,
+    "connect_errors": {
+     "refused": 0,
+     "dial_timeout": 0,
+     "addr_not_avail": 0,
+     "emfile": 0,
+     "reset": 0,
+     "unreachable": 0,
+     "other": 0
+    },
+    "aborted_at_stop": 14,
+    "idle_server_closes": 0,
+    "verdict": {
+     "whole": {
+      "total": {
+       "p95_ms": 2.22,
+       "p99_ms": 8.623,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 2.204,
+       "p99_ms": 8.591,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "hold": {
+      "total": {
+       "p95_ms": 2.083,
+       "p99_ms": 7.351,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 2.083,
+       "p99_ms": 7.351,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "pass": true,
+     "basis": "whole run, total latency incl. connect"
+    },
+    "config": {
+     "vus": 300000,
+     "ramp_s": 60.0,
+     "duration_s": 90.0,
+     "rampdown_s": 5.0
+    },
+    "ramp_max_connecting": 4,
+    "ramp_max_second_p99_ms": 54.208,
+    "ramp_peak_new_conns_per_s": 5124,
+    "seconds_to_all_connected": 65,
+    "max_conns": 300000,
+    "hold_worst_second_p99_ms": 36.288,
+    "hold_mean_rps": 31751.8,
+    "memory_at_end": {
+     "anon": 23511040,
+     "file": 43995136,
+     "kernel": 94277632,
+     "sock": 0
+    },
+    "rings_opened": 5,
+    "server_log_errors": []
+   },
+   {
+    "variant": "dc6bab8",
+    "mode": "load",
+    "performance_valid": true,
+    "external_loadgen_pids": [],
+    "exit_code": 0,
+    "requests": 10809960,
+    "errors": 0,
+    "cpu_us_per_request": 16.187753331187164,
+    "hold_cpu_us_per_request": 15.248458195722472,
+    "hold_p95_ms": 2.171,
+    "hold_p99_ms": 9.04,
+    "memory_peak_bytes": 608256000,
+    "directory": "dc6bab8-load-1794626747432132021",
+    "whole_p95_ms": 2.26,
+    "whole_p99_ms": 9.136,
+    "whole_max_ms": 169.062,
+    "errors_by_kind": {
+     "connect": 0,
+     "timeout": 0,
+     "reset_eof": 0,
+     "bad_status": 0,
+     "protocol": 0
+    },
+    "conns_opened": 300000,
+    "connect_errors": {
+     "refused": 0,
+     "dial_timeout": 0,
+     "addr_not_avail": 0,
+     "emfile": 0,
+     "reset": 0,
+     "unreachable": 0,
+     "other": 0
+    },
+    "aborted_at_stop": 8,
+    "idle_server_closes": 0,
+    "verdict": {
+     "whole": {
+      "total": {
+       "p95_ms": 2.26,
+       "p99_ms": 9.136,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 2.252,
+       "p99_ms": 9.104,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "hold": {
+      "total": {
+       "p95_ms": 2.171,
+       "p99_ms": 9.04,
+       "error_rate": 0.0,
+       "pass": true
+      },
+      "k6": {
+       "p95_ms": 2.171,
+       "p99_ms": 9.04,
+       "error_rate": 0.0,
+       "pass": true
+      }
+     },
+     "pass": true,
+     "basis": "whole run, total latency incl. connect"
+    },
+    "config": {
+     "vus": 300000,
+     "ramp_s": 60.0,
+     "duration_s": 300.0,
+     "rampdown_s": 5.0
+    },
+    "ramp_max_connecting": 4,
+    "ramp_max_second_p99_ms": 26.527,
+    "ramp_peak_new_conns_per_s": 5125,
+    "seconds_to_all_connected": 65,
+    "max_conns": 300000,
+    "hold_worst_second_p99_ms": 107.391,
+    "hold_mean_rps": 31749.29,
+    "memory_at_end": {
+     "anon": 28618752,
+     "file": 89468928,
+     "kernel": 95965184,
+     "sock": 0
+    },
+    "rings_opened": 5,
+    "server_log_errors": []
+   }
+  ]
+ }
+}

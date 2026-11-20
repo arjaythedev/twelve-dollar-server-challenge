@@ -3,7 +3,8 @@
 
 Type *ty_int, *ty_i8, *ty_i16, *ty_i32, *ty_i64,
     *ty_float, *ty_f32, *ty_f64, *ty_bool, *ty_string, *ty_void, *ty_mixed,
-    *ty_null;
+    *ty_null, *ty_false;
+static Type *ty_int_false;
 
 static Builtin *tbl = NULL;
 static size_t tbl_len = 0, tbl_cap = 0;
@@ -34,6 +35,13 @@ void builtins_init(void) {
     ty_void = type_new(TY_VOID);
     ty_mixed = type_new(TY_MIXED);
     ty_null = type_new(TY_NULL);
+    ty_false = type_new(TY_BOOL);
+    ty_false->bool_const = 1;
+    ty_int_false = type_new(TY_UNION);
+    ty_int_false->nmembers = 2;
+    ty_int_false->members = xmalloc(sizeof(Type *) * 2);
+    ((Type **)ty_int_false->members)[0] = ty_int;
+    ((Type **)ty_int_false->members)[1] = ty_false;
 
     /* PHP string functions */
     add("strlen",        B_LEN,     ty_int,    false, false);
@@ -54,10 +62,13 @@ void builtins_init(void) {
     add("substr",        B_MISC,    ty_string, false, false);
     add("strstr",        B_STR2,    ty_mixed,  false, false);   /* string|false, PHP-style */
     add("strchr",        B_STR2,    ty_mixed,  false, false);   /* alias, string|false */
-    add("strpos",        B_MISC,    ty_mixed,  false, false);   /* (hay, needle[, offset]) -> int|false, PHP-style */
+    add("strpos",        B_MISC,    ty_int_false, false, false); /* (hay, needle[, offset]) -> int|false */
     add("str_contains",  B_STR2,    ty_bool,   false, false);
     add("str_at_eq",      B_MISC,    ty_bool,   false, false);
     add("str_to_int",      B_MISC,    ty_int,    false, false);
+    add("str_to_int_range", B_MISC,   ty_int,    false, false);
+    add("http_request_bounds", B_MISC, ty_int, false, false);
+    add("str_find_range", B_MISC, ty_int, false, false);
     add("str_starts_with", B_STR2,  ty_bool,   false, false);
     add("str_ends_with", B_STR2,    ty_bool,   false, false);
     add("strcmp",        B_CMP,     ty_int,    false, false);
@@ -85,6 +96,15 @@ void builtins_init(void) {
     /* crypto */
     add("sha256",           B_STR1, ty_string, false, false);
     add("hash_hmac",        B_MISC, ty_mixed,  false, false);  /* (algo, data, key[, raw]) */
+    add("jwt_verify",       B_MISC, ty_string, false, false);  /* (token, secret, now) -> payload|"" */
+    add("jwt_verifier_new", B_MISC, ty_string, false, false);  /* (secret) -> reusable HMAC key state */
+    add("jwt_verify_prepared", B_MISC, ty_string, false, false); /* (token, key_state, now) -> payload|"" */
+    add("json_str_field",   B_MISC, ty_string, false, false);  /* (json, key) -> value|"" */
+    add("json_num_field",   B_MISC, ty_int,    false, false);  /* (json, key) -> int|-1 */
+    add("str_pos_ci",       B_MISC, ty_int_false, false, false); /* (hay, needle[, off]) -> int|false */
+    add("str_prefix_ci",    B_MISC, ty_bool,   false, false);  /* (s, prefix) -> bool */
+    add("str_int_range",    B_MISC, ty_int,    false, false);  /* (s, start, end) -> int */
+    add("str_trim_range",   B_MISC, ty_string, false, false);  /* (s, start, end) -> trimmed slice */
     add("password_hash",    B_STR1, ty_string, false, false);
     add("password_verify",  B_STR2, ty_bool,   false, false);
     add("random_bytes",     B_INT_INT, ty_string, false, false);
@@ -277,26 +297,34 @@ void builtins_init(void) {
     add("http_request",  B_MISC,    ty_mixed,  false, false);
     /* sockets — the transport layer for library code (lib/websocket.hphp) */
     add("stream_socket_server", B_MISC, ty_mixed,  false, false);
+    add("stream_socket_server_reuseport", B_MISC, ty_mixed, false, false);
     add("stream_socket_client", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept2", B_MISC, ty_mixed, false, false);   /* (srv, timeoutMs): false on timeout */
     add("accept_emfile",     B_ZERO,    ty_bool,   false, false);   /* last accept failed with EMFILE/ENFILE */
     add("stream_set_blocking",  B_MISC, ty_bool,   false, false);
     add("stream_set_nodelay",   B_MISC, ty_bool,   false, false);
+    add("stream_set_socket_buffers", B_MISC, ty_bool, false, false); /* listener values are inherited by accepted TCP sockets on Linux */
     add("stream_ready",         B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_ready_into",    B_MISC, type_array_of(ty_mixed), false, false);
     add("epoll_add",            B_MISC, ty_bool,   false, false);
     add("epoll_del",            B_MISC, ty_bool,   false, false);
     add("epoll_mod",            B_MISC, ty_bool,   false, false);
     add("epoll_wait2",          B_MISC, ty_bool,   false, false);
+    add("epoll_wait_iarr2",     B_MISC, ty_bool,   false, false);
     add("epoll_wait_into",      B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_recv",          B_MISC, ty_string, false, false);
+    add("stream_recv_release",  B_MISC, ty_bool,   false, false);
     add("stream_send",          B_MISC, ty_int,    false, false);
     add("stream_send2",         B_MISC, ty_int,    false, false);
     add("stream_send_nb",       B_MISC, ty_int,    false, false);
     add("stream_send2_nb",      B_MISC, ty_int,    false, false);
     add("nofile_limit",         B_ZERO, ty_int,    false, false);
+    add("runtime_stats",        B_ZERO, ty_string, false, false);
+    add("runtime_diag_write",   B_STR1, ty_bool,   false, false);
     add("uring_active",         B_ZERO, ty_bool,   false, false);
+    add("uring_direct",         B_ZERO, ty_bool,   false, false);
+    add("uring_direct_slots",   B_ZERO, ty_int,    false, false);
     add("stream_eof",           B_MISC, ty_bool,   false, false);
     add("stream_peer",          B_MISC, ty_string, false, false);
     add("stream_close",         B_MISC, ty_bool,   false, false);
@@ -863,6 +891,7 @@ void builtins_init(void) {
     add("live_allocs",          B_MISC, ty_int,    false, false);
     add("arr_clear",            B_MISC, ty_bool,   false, false);
     add("arr_free",             B_MISC, ty_bool,   false, false);
+    add("object_free",          B_MISC, ty_bool,   false, false);
     add("bt_root",              B_MISC, ty_int,    false, false);
     add("bt_open",              B_MISC, ty_int,    false, false);
     add("bt_close",             B_MISC, ty_bool,   false, false);
@@ -874,22 +903,54 @@ void builtins_init(void) {
     add("bt_rowid",             B_MISC, ty_int,    false, false);
     add("bt_payload_ptr",       B_MISC, ty_int,    false, false);
     add("bt_payload_size",      B_MISC, ty_int,    false, false);
+    add("bt_payload_pin",       B_MISC, ty_int,    false, false);
+    add("bt_page_release",      B_MISC, ty_bool,   false, false);
+    add("bt_cols",              B_MISC, ty_int,    false, false);
+    add("bt_col_off",           B_MISC, ty_int,    false, false);
+    add("bt_col_len",           B_MISC, ty_int,    false, false);
+    add("bt_col_int",           B_MISC, ty_int,    false, false);
+    add("bt_col_int_at",        B_MISC, ty_int,    false, false);
+    add("bt_read",              B_MISC, ty_int,    false, false);
     add("bt_count_key",        B_MISC, ty_int,    false, false);
+    add("bt_count_range",      B_MISC, ty_int,    false, false);
+    add("bt_multi_seek",       B_MISC, ty_int,    false, false);
+    add("bt_tail",             B_MISC, ty_int,    false, false);
+    add("bt_multi_payloads",   B_MISC, ty_bool,   false, false);
+    add("bt_multi_keys",       B_MISC, ty_int,    false, false);
+    add("bt_multi_release",    B_MISC, ty_bool,   false, false);
     add("iarr_new",            B_MISC, ty_int,    false, false);
+    add("iarr_new_uninit",     B_MISC, ty_int,    false, false);
+    add("iarr_release",        B_MISC, ty_bool,   false, false);
     add("iarr_get",            B_MISC, ty_int,    false, false);
     add("iarr_set",            B_MISC, ty_bool,   false, false);
+    add("iarr_get_fast",       B_MISC, ty_int,    false, false);
+    add("iarr_set_fast",       B_MISC, ty_bool,   false, false);
+    add("iarr_data_ptr",       B_MISC, ty_int,    false, false);
+    add("iarr_len",            B_MISC, ty_int,    false, false);
     add("sb_new",               B_MISC, ty_int,    false, false);
     add("sb_put",               B_MISC, ty_bool,   false, false);
     add("sb_bytes",             B_MISC, ty_bool,   false, false);
+    add("sb_data_ptr",          B_MISC, ty_int,    false, false);
+    add("sb_discard",           B_MISC, ty_bool,   false, false);
     add("sb_int",               B_MISC, ty_bool,   false, false);
     add("sb_json",              B_MISC, ty_bool,   false, false);
     add("sb_json_str",          B_MISC, ty_bool,   false, false);
     add("str_from_bytes",       B_MISC, ty_string, false, false);
     add("sb_reserve",           B_MISC, ty_bool,   false, false);
+    add("sb_len",               B_MISC, ty_int,    false, false);
+    add("sb_prepend",           B_MISC, ty_bool,   false, false);
     add("sb_take",              B_MISC, ty_string, false, false);
+    add("stream_send_sb",       B_MISC, ty_int,    false, false);
+    add("int_digits",           B_MISC, ty_int,    false, false);
     add("sqlite_open",          B_MISC, ty_int,    false, false);  /* (path) -> handle|0 */
+    add("sqlite_open_vfs",      B_MISC, ty_int,    false, false);  /* (path, vfs) -> handle|0 */
+    add("sqlite_bg_checkpoint_start", B_MISC, ty_bool, false, false); /* (db, path, frames, hold_ms) */
+    add("sqlite_bg_checkpoint_hold", B_MISC, ty_bool, false, false); /* (db) */
+    add("sqlite_bg_checkpoint_tick", B_MISC, ty_bool, false, false); /* (db), generic forced WAL catch-up */
+    add("sqlite_bg_checkpoint_active", B_MISC, ty_bool, false, false); /* (db) */
     add("sqlite_close",         B_MISC, ty_bool,   false, false);
     add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */
+    add("sqlite_status",        B_MISC, ty_string, false, false);  /* (db) -> interval cache/timing counters */
     add("sqlite_prepare",       B_MISC, ty_int,    false, false);  /* (db, sql) -> stmt|0 */
     add("sqlite_finalize",      B_MISC, ty_bool,   false, false);
     add("sqlite_bind_int",      B_MISC, ty_bool,   false, false);  /* (stmt, 1-based idx, value) */
@@ -902,6 +963,8 @@ void builtins_init(void) {
     add("sqlite_changes",       B_MISC, ty_int,    false, false);
     add("sqlite_last_insert_rowid", B_MISC, ty_int, false, false);
     add("sqlite_errmsg",        B_MISC, ty_string, false, false);
+    add("sqlite_extended_errcode", B_MISC, ty_int, false, false);
+    add("sqlite_is_lock_error", B_MISC, ty_bool,   false, false);
     add("sqlite_busy_timeout",  B_MISC, ty_bool,   false, false);
 }
 

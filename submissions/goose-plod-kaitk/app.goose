@@ -1,0 +1,522 @@
+// The $12 Server Challenge's feed API (SPEC.md), written as an application on
+// Plod writes it: five routes, a bearer check, and SQL through goose-sqlite.
+//
+//   GET  /health              {"status":"ok","db":"ok","uptime_s":n}
+//   GET  /feed                the 20 newest posts
+//   GET  /posts/:id           one post
+//   POST /posts               a post by the token's user
+//   POST /posts/:id/like      the token's user likes the post
+//
+// Every query runs in the route, on the worker: SQLite answers from its page
+// cache, so a query is CPU work, which a lane would only move to another
+// thread on the same core. Writes commit together, once a pass of the
+// worker's events (plod::after_pass): a write begins a transaction if none is
+// open, and is answered after the pass's COMMIT, in WAL with
+// synchronous=NORMAL. Reads in the pass see its writes before the COMMIT.
+// Copying the WAL back into the database waits on fsyncs, so that runs on the
+// checkpoint lane.
+import std;
+import os;
+import json;
+import http;
+import plod;
+import plod.jwt;
+import sqlite;
+
+enum Use { None, Written, Held }
+
+// A write's transaction, and its answer, kept in App's answers until the
+// COMMIT. A parked write: whether it began the hold, its user, and the post
+// it likes, or for a new post its text and author name, kept in App's held.
+struct St {
+    use: Use = Use.None, gen: i64 = 0, status: i32 = 0, at: i64 = 0, len: i64 = 0,
+    asker: bool = false, user: i64 = 0, post: i64 = 0, name_len: i64 = 0,
+}
+
+// The worker state: its connection, the key tokens are signed with, and the
+// checkpoint lane with the writes since it was last asked. The open
+// transaction: its generation, the writes that joined it, and the answers
+// of the writes not yet answered; failed is the last generation whose COMMIT
+// failed. A hold: the writes since the WAL last started over, whether a
+// hold is on and until when, and the writes parked in it.
+struct App {
+    db: sqlite::Conn&,
+    keys: const plod::JwtKey[:],
+    started_ns: i64,
+    checkpoints: http::Lane,
+    answers: u8[..262144] = "",
+    writes: i64 = 0,
+    open: bool = false,
+    gen: i64 = 0,
+    joined: i64 = 0,
+    unanswered: i64 = 0,
+    failed: i64 = -1,
+    since: i64 = 0,
+    holding: bool = false,
+    hold_until_ns: i64 = 0,
+    parked: http::MailAddress[..4096] = [],
+    held: u8[..65536] = "",
+}
+
+// A write adds about 4 pages to the WAL: the lane is asked to copy it back
+// at about 4,096.
+let CHECKPOINT_WRITES = 1024;
+
+// Past HOLD_WRITES writes since the WAL last started over, the open
+// transaction commits, and writes park, at most HOLD_MS, before they write,
+// while the lane runs a checkpoint that completes with no commits arriving.
+// The first transaction after it then starts the WAL over: SQLite restarts
+// the WAL only for a writer whose transaction began once the WAL had been
+// copied back whole. HOLD is the lane's tag for that checkpoint.
+let HOLD_WRITES = 4096;
+let HOLD_MS = 250;
+let HOLD: i32 = 1;
+
+// Counts a write that changed the database, and asks the lane for a
+// checkpoint once enough have; while its box is full, the next write asks.
+fn wrote(cx) {
+    cx.app.since++;
+    cx.app.writes++;
+    if cx.app.writes >= CHECKPOINT_WRITES && http::lane_send(cx.app.checkpoints, 0, "") == http::SENT {
+        cx.app.writes = 0;
+    }
+}
+
+// Runs F's writes in the open transaction, beginning one if none is open,
+// and answers 500 when SQLite fails one. A failed write that is the
+// transaction's only one rolls it back.
+inline fn write<F>(cx) {
+    let failed = sqlite::run() {
+        if !cx.app.open {
+            sqlite::exec(cx.app.db, "BEGIN");
+            cx.app.open = true;
+            cx.app.gen++;
+            cx.app.joined = 0;
+        }
+        F();
+    };
+    guard failed.len == 0 else {
+        unjoined(cx, "ROLLBACK");
+        plod::fail(cx, 500, "internal server error");
+    }
+}
+
+// Ends the open transaction with sql when no write has joined it.
+fn unjoined(cx, sql: const u8[:]) {
+    guard cx.app.open && cx.app.joined == 0 else { return; }
+    cx.app.open = false;
+    sqlite::run() { sqlite::exec(cx.app.db, sql); };
+}
+
+// A write that changed the database: keeps its answer and waits for the
+// pass's COMMIT. One whose answer won't fit commits now and is answered.
+fn join(cx, status: i32, out: const u8[:]) {
+    if cx.app.unanswered == 0 { cx.app.answers.clear(); }
+    wrote(cx);
+    if cx.app.answers.len + out.len > cx.app.answers.cap {
+        cx.app.joined++;
+        settle(cx, cx.app.gen);
+        guard cx.app.failed != cx.app.gen else { plod::fail(cx, 500, "internal server error"); }
+        plod::json_bytes(cx, status, out);
+        return;
+    }
+    cx.state.gen = cx.app.gen;
+    cx.state.status = status;
+    cx.state.at = cx.app.answers.len;
+    cx.state.len = out.len;
+    cx.app.answers.append(out);
+    cx.app.joined++;
+    cx.app.unanswered++;
+    plod::after_pass(cx, Use.Written);
+}
+
+// COMMITs gen's transaction if it's still open: the pass's first WAKE does,
+// and the rest find it done.
+fn settle(cx, gen: i64) {
+    guard cx.app.open && cx.app.gen == gen else { return; }
+    cx.app.open = false;
+    let failed = sqlite::run() { sqlite::exec(cx.app.db, "COMMIT"); };
+    guard failed.len > 0 else { return; }
+    for e in failed { write_stderr(str("SQLite COMMIT: ", e.message, "\n")); }
+    sqlite::run() { sqlite::exec(cx.app.db, "ROLLBACK"); };
+    cx.app.failed = gen;
+}
+
+fn resume(u: Use.None, cx) { plod::fail(cx, 500, "internal server error"); }
+
+// At the pass's end, the write's transaction commits. Every event settles
+// it, so that a client that goes leaves none open.
+fn resume(u: Use.Written, cx) { finish(cx); }
+
+// A parked write: the lane's reply to the asker, or a TIMEOUT, ends the
+// hold and wakes the rest; then the write runs.
+fn resume(u: Use.Held, cx) {
+    if cx.state.asker || cx.kind == http::TIMEOUT { release(cx); }
+    guard cx.kind != http::CLOSED else { return; }
+    if cx.state.post > 0 {
+        liked(cx, cx.state.user, cx.state.post);
+        return;
+    }
+    let end = cx.state.at + cx.state.len;
+    var text: u8[>..] = [];
+    var name: u8[>..] = [];
+    text.append(cx.app.held[cx.state.at..end]);
+    name.append(cx.app.held[end..end + cx.state.name_len]);
+    posted(cx, cx.state.user, text, name);
+}
+
+// Parks a write, a like of post or a new post's text and author's name,
+// until the hold ends: the first past HOLD_WRITES commits the open
+// transaction and asks the lane for a checkpoint, with its own address for
+// the reply, and the rest park behind it. False, and the write runs now,
+// when the lane's box, the parked writes, or held are full.
+fn parks(cx, user: i64, post: i64, text: const u8[:], name: const u8[:]) -> bool {
+    let now = time_ns();
+    if !cx.app.holding {
+        guard cx.app.since >= HOLD_WRITES else { return false; }
+        settle(cx, cx.app.gen);
+        plod::own_waits(cx, Use.Held);
+        // A write that runs after this later doesn't wait for it.
+        let to = http::later(cx.out, HOLD_MS);
+        guard http::lane_send_value(cx.app.checkpoints, HOLD, to) == http::SENT else { return false; }
+        cx.app.holding = true;
+        cx.app.hold_until_ns = now + HOLD_MS * 1000000;
+        cx.app.held.clear();
+        cx.state.asker = true;
+    } else {
+        guard cx.app.parked.len < cx.app.parked.cap && now < cx.app.hold_until_ns else { return false; }
+        guard cx.app.held.len + text.len + name.len <= cx.app.held.cap else { return false; }
+        plod::own_waits(cx, Use.Held);
+        cx.app.parked.push(http::later(cx.out, max((cx.app.hold_until_ns - now) / 1000000, 1)));
+    }
+    cx.state.user = user;
+    cx.state.post = post;
+    cx.state.at = cx.app.held.len;
+    cx.state.len = text.len;
+    cx.state.name_len = name.len;
+    cx.app.held.append(text);
+    cx.app.held.append(name);
+    return true;
+}
+
+// Ends the hold, and wakes the writes parked in it. When the checkpoint
+// didn't complete in time, the worker's own at 65,536 pages bounds the WAL.
+fn release(cx) {
+    guard cx.app.holding else { return; }
+    cx.app.holding = false;
+    cx.app.since = 0;
+    for to in cx.app.parked { http::wake(to, 0); }
+    cx.app.parked.clear();
+}
+
+// Settles the write's transaction, and answers it, unless its client went.
+fn finish(cx) {
+    settle(cx, cx.state.gen);
+    cx.app.unanswered--;
+    guard cx.kind != http::CLOSED else { return; }
+    guard cx.app.failed != cx.state.gen else { plod::fail(cx, 500, "internal server error"); }
+    plod::json_bytes(cx, cx.state.status, cx.app.answers[cx.state.at..cx.state.at + cx.state.len]);
+}
+
+// The post object's columns, in the order post writes them.
+let FEED = """
+    SELECT p.id, p.body, p.created_at, u.username,
+           (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
+      FROM posts p JOIN users u ON u.id = p.user_id
+     ORDER BY p.created_at DESC, p.id DESC LIMIT 20
+    """;
+// The feed in three range reads, where FEED takes twenty seeks into posts and
+// twenty into likes: the newest ids from the index alone, then, when they are
+// one run of consecutive ids, as posts created in id order are, the posts and
+// their like counts as two scans of that range.
+let FEED_IDS = "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 20";
+let FEED_ROWS = """
+    SELECT p.id, p.body, p.created_at, u.username
+      FROM posts p JOIN users u ON u.id = p.user_id
+     WHERE p.id BETWEEN ? AND ?
+     ORDER BY p.id DESC
+    """;
+let FEED_LIKES = "SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ? AND ? GROUP BY post_id";
+// The author by a subquery, not a join: with the join, SQLite's constant
+// propagation reads the bound id while planning, and re-prepares the
+// statement at every new id.
+let ONE_POST = """
+    SELECT p.id, p.body, p.created_at,
+           (SELECT u.username FROM users u WHERE u.id = p.user_id),
+           (SELECT count(*) FROM likes l WHERE l.post_id = p.id)
+      FROM posts p
+     WHERE p.id = ?
+    """;
+let INSERT_POST = "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at";
+// Inserts the like only where the post exists; a like that changes nothing
+// is a repeat, or a post that isn't there.
+let INSERT_LIKE = """
+    INSERT INTO likes (user_id, post_id) SELECT ?, id FROM posts WHERE id = ?
+        ON CONFLICT (user_id, post_id) DO NOTHING
+    """;
+let POST_EXISTS = "SELECT 1 FROM posts WHERE id = ?";
+
+fn handle(cx) {
+    if plod::resumed(cx) {
+        plod::on_reply(cx) { resume(cx.state.use, cx); };
+        return;
+    }
+    plod::routes(cx) { cx =>
+        plod::get(cx, "/health") { health(cx); };
+        plod::get(cx, "/feed") { feed(cx); };
+        plod::get(cx, "/posts/:id") { show(cx, post_id(cx)); };
+        plod::post(cx, "/posts") {
+            author(cx) { user, name => create(cx, user, name); };
+        };
+        plod::post(cx, "/posts/:id/like") {
+            author(cx) { user, name => like(cx, user, post_id(cx)); };
+        };
+    };
+}
+
+fn health(cx) {
+    var ok = false;
+    let failed = sqlite::run() { sqlite::query(cx.app.db, "SELECT 1") { r => ok = sqlite::int(r, 0) == 1; }; };
+    var out: u8[>..] = [];
+    for e in failed {
+        out.append("{\"status\":\"degraded\",\"db\":\"unreachable\",\"error\":");
+        http::json_string(out,e.message);
+        out.push('}');
+        plod::json_bytes(cx, 503, out);
+        return;
+    }
+    guard ok else { plod::fail(cx, 500, "internal server error"); }
+    out.append("{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
+    format(out, (time_ns() - cx.app.started_ns) / 1000000000);
+    out.push('}');
+    plod::json_bytes(cx, 200, out);
+}
+
+fn feed(cx) {
+    var out: u8[>..] = [];
+    out.append("{\"posts\":[");
+    var ids: i64[>..] = [];
+    var counts: i64[>..] = [];
+    var whole = false;
+    db(cx) {
+        sqlite::query(cx.app.db, FEED_IDS) { r => ids.push(sqlite::int(r, 0)); };
+        var run = ids.len > 0;
+        for i in 1..ids.len { run = run && ids[i] == ids[i - 1] - 1; }
+        if run {
+            let hi = ids[0];
+            let lo = ids[ids.len - 1];
+            counts.resize(ids.len, 0);
+            sqlite::query(cx.app.db, FEED_LIKES, lo, hi) { r =>
+                counts[hi - sqlite::int(r, 0)] = sqlite::int(r, 1);
+            };
+            // A post whose author has no row drops out of the join: then
+            // the rows don't match the ids, and the plain query answers.
+            var k = 0;
+            whole = true;
+            sqlite::query(cx.app.db, FEED_ROWS, lo, hi) { r =>
+                whole = whole && k < ids.len && sqlite::int(r, 0) == ids[k];
+                if whole {
+                    if k > 0 { out.push(','); }
+                    post_counted(out, r, counts[k]);
+                    k++;
+                }
+            };
+            whole = whole && k == ids.len;
+        }
+        if !whole {
+            out.resize(10);
+            sqlite::query(cx.app.db, FEED) { r =>
+                if out.len > 10 { out.push(','); }
+                post(out, r);
+            };
+        }
+    };
+    out.append("]}");
+    plod::json_bytes(cx, 200, out);
+}
+
+fn show(cx, id: i64) {
+    var out: u8[>..] = [];
+    out.append("{\"post\":");
+    var found = 0;
+    db(cx) { found = sqlite::query(cx.app.db, ONE_POST, id) { r => post(out, r); }; };
+    guard found > 0 else { plod::fail(cx, 404, "post not found"); }
+    out.push('}');
+    plod::json_bytes(cx, 200, out);
+}
+
+fn create(cx, user: i64, name: const u8[:]) {
+    var text: u8[>..] = [];
+    post_body(cx, text);
+    guard !parks(cx, user, 0, text, name) else { return; }
+    posted(cx, user, text, name);
+}
+
+fn like(cx, user: i64, id: i64) {
+    guard !parks(cx, user, id, "", "") else { return; }
+    liked(cx, user, id);
+}
+
+fn posted(cx, user: i64, text: const u8[:], name: const u8[:]) {
+    var out: u8[>..] = [];
+    write(cx) {
+        sqlite::query(cx.app.db, INSERT_POST, user, text) { r =>
+            out.append("{\"post\":{\"id\":");
+            format(out, sqlite::int(r, 0));
+            out.append(",\"body\":");
+            http::json_string(out,text);
+            out.append(",\"created_at\":");
+            http::json_string(out,sqlite::text(r, 1));
+            out.append(",\"author\":");
+            http::json_string(out,name);
+            out.append(",\"like_count\":0}}");
+        };
+    };
+    join(cx, 201, out);
+}
+
+// A like that changes nothing, a repeat or a post that isn't there, ends a
+// transaction it began itself, and is answered at once.
+fn liked(cx, user: i64, id: i64) {
+    var added = 0;
+    var exists = 0;
+    write(cx) {
+        added = sqlite::exec(cx.app.db, INSERT_LIKE, user, id);
+        if added == 0 { exists = sqlite::query(cx.app.db, POST_EXISTS, id) { r => }; }
+    };
+    if added == 0 { unjoined(cx, "COMMIT"); }
+    guard added > 0 || exists > 0 else { plod::fail(cx, 404, "post not found"); }
+    var out: u8[>..] = [];
+    out.append("{\"liked\":true,\"already_liked\":");
+    out.append(if added > 0 { "false" } else { "true" });
+    out.append(",\"post_id\":");
+    format(out, id);
+    out.push('}');
+    guard added > 0 else { plod::json_bytes(cx, 200, out); }
+    join(cx, 201, out);
+}
+
+// A row of FEED's or ONE_POST's columns as a post object.
+fn post(out: u8[>..]&, r) { post_counted(out, r, sqlite::int(r, 4)); }
+
+// A row's id, body, created_at, and author, with its like count, as a post
+// object.
+fn post_counted(out: u8[>..]&, r, likes: i64) {
+    out.append("{\"id\":");
+    format(out, sqlite::int(r, 0));
+    out.append(",\"body\":");
+    http::json_string(out,sqlite::text(r, 1));
+    out.append(",\"created_at\":");
+    http::json_string(out,sqlite::text(r, 2));
+    out.append(",\"author\":");
+    http::json_string(out,sqlite::text(r, 3));
+    out.append(",\"like_count\":");
+    format(out, likes);
+    out.push('}');
+}
+
+// Runs F's queries, and answers 500 when SQLite fails one.
+inline fn db<F>(cx) {
+    let failed = sqlite::run() { F(); };
+    guard failed.len == 0 else { plod::fail(cx, 500, "internal server error"); }
+}
+
+// The path's :id: a positive integer, or the route fails with 400.
+fn post_id(cx) -> i64 {
+    let s = plod::param(cx, "id");
+    var id = 0;
+    var ok = s.len > 0 && s.len <= 18;
+    for c in s {
+        ok = ok && c >= '0' && c <= '9';
+        id = id * 10 + (c - '0');
+    }
+    guard ok && id > 0 else { plod::fail(cx, 400, "invalid post id"); }
+    return id;
+}
+
+// Runs F with the bearer token's user id and username, or fails the route
+// with 401.
+inline fn author<F>(cx) {
+    let auth, has = plod::header(cx, "Authorization");
+    guard has && auth.len > 7 && auth[..7] == "Bearer " else { plod::fail(cx, 401, "missing bearer token"); }
+    let e = plod::jwt_verify(auth[7..], cx.app.keys, plod::JwtCheck { leeway: 0 }) { t =>
+        let user = positive(t.sub);
+        var scratch: u8[>..] = [];
+        var r = json::reader(t.payload);
+        var name = r.text[..0];
+        var named = false;
+        json::each_member(r) { key =>
+            if key == "username" && json::peek(r) == '"' {
+                name = json::read_string(r, scratch);
+                named = true;
+            } else {
+                if key == "username" { named = false; }
+                json::skip(r);
+            }
+        };
+        guard user > 0 && named else { plod::fail(cx, 401, "invalid token payload"); }
+        // jwt_verify checks exp when a token has one; SPEC.md requires it.
+        guard t.exp >= 0 else { plod::fail(cx, 401, "invalid or expired token"); }
+        F(user, name);
+    };
+    guard e == plod::JwtError.None else { plod::fail(cx, 401, "invalid or expired token"); }
+}
+
+// s as a positive integer, or 0.
+fn positive(s: const u8[:]) -> i64 {
+    guard s.len > 0 && s.len <= 18 else { return 0; }
+    var n = 0;
+    for c in s {
+        guard c >= '0' && c <= '9' else { return 0; }
+        n = n * 10 + (c - '0');
+    }
+    return n;
+}
+
+// Appends the request's body member, trimmed, to out, or fails the route
+// with 400.
+fn post_body(cx, out: u8[>..]&) {
+    var scratch: u8[>..] = [];
+    var r = json::reader(plod::body(cx));
+    var text = nothing(r);
+    var given = false;
+    if json::peek(r) == '{' {
+        json::each_member(r) { key =>
+            if key == "body" && json::peek(r) == '"' {
+                text = json::read_string(r, scratch);
+                given = true;
+            } else {
+                if key == "body" { given = false; }
+                json::skip(r);
+            }
+        };
+    } else {
+        json::skip(r);
+    }
+    guard json::finish(r) else { plod::fail(cx, 400, "malformed JSON body"); }
+    let t = trim(text);
+    guard given && t.len > 0 else { plod::fail(cx, 400, "body is required"); }
+    guard characters(t) <= 500 else { plod::fail(cx, 400, "body must be at most 500 characters"); }
+    out.append(t);
+}
+
+// An empty slice rooted at r, which a string r reads may replace.
+fn nothing(r: json::Reader&) -> const u8[:] { return r.text[..0]; }
+
+// The characters of UTF-8 text: its bytes that don't continue one.
+fn characters(s: const u8[:]) -> i64 {
+    var n = 0;
+    for c in s { if (c & 0xC0) != 0x80 { n++; } }
+    return n;
+}
+
+// Every error as SPEC.md writes it, {"error":"<message>"}: the routes fail
+// with the message itself; the router's own answers have codes.
+fn plod::error_body(body: u8[>..]&, st: const St&, status: i32, code: const u8[:],
+                    detail: const u8[:], at: i64) {
+    body.append("{\"error\":");
+    if code == "not_found" { http::json_string(body,"not found"); }
+    else if status >= 500 { http::json_string(body,"internal server error"); }
+    else { http::json_string(body,code); }
+    body.push('}');
+}

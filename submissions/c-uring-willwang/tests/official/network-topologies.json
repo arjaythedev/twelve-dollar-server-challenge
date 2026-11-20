@@ -1,0 +1,751 @@
+{
+  "purpose": "Separate client and server TCP receive execution on a single physical machine using private veth links. This is an alternative test fixture, not a published challenge score or an application deployment requirement.",
+  "kernel": "Linux 6.8.0-147, AMD EPYC Genoa on the local host",
+  "server": "The application uses its normal fixed-file io_uring, TCP, HTTP and SQLite paths. A test-only listener shim supplies eight real, unbound TCP sockets through SCM_RIGHTS. The server then sets its usual options, binds and listens.",
+  "placement_control": {
+    "transfers": 24,
+    "mtu": 1500,
+    "send_mss": 1448,
+    "server_receive_cpu": 1,
+    "server_samples_on_receiver_cpu": 24,
+    "client_receive_cpu": 2,
+    "client_samples_on_receiver_cpu": 24,
+    "client_echo_median_us": 55.314,
+    "smoothed_rtt_us": {
+      "server": 31,
+      "client": 44
+    },
+    "original_destination_lookup_errno": {
+      "server": 2,
+      "client": 2
+    }
+  },
+  "load_shape": {
+    "server_cpu": 10,
+    "client_cpu_groups": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        3,
+        4,
+        5
+      ],
+      [
+        6,
+        7,
+        8
+      ],
+      [
+        11,
+        12,
+        13
+      ]
+    ],
+    "server_memory_limit_mib": 1750,
+    "helper_memory_limit_mib_total": 64,
+    "hard_nofile": 65535,
+    "tcp_ehash": "Private namespaces share the host 524,288-bucket established hash table. At 350k there were approximately 700,000 local endpoints."
+  },
+  "control_60000": {
+    "topology": "eight private native veth endpoints and four unmodified Go generators",
+    "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+    "generator_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "users": 60000,
+    "ramp_s": 10,
+    "hold_s": 20,
+    "server_cpu": 10,
+    "native_memory_limit_mib": 1750,
+    "server_helpers_hard_memory_total_mib": 64,
+    "complete_organizer_score": {
+      "users": 60000,
+      "dials": 60000,
+      "reqs": 186549,
+      "req_per_s": 6218.136690174309,
+      "fails": 0,
+      "p95_ms": 13.327579307550897,
+      "p99_ms": 110.96956694920223,
+      "max_ms": 285.58434745753567,
+      "pass": true
+    },
+    "peak_same_tick_go_connections": 60000,
+    "peak_kernel_established_pairs": 60000,
+    "first_full_go_tick_s": 15,
+    "first_full_kernel_sample_s": 15.667,
+    "peak_native_cgroup_mib": 552.41,
+    "peak_native_plus_helpers_sampled_mib": 555.477,
+    "server_conntrack_peak_per_private_namespace": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "host_conntrack_min_max": [
+      212,
+      413
+    ],
+    "network_helper_cpu": "Non-scoring namespace holders run on the native CPU and are included in the whole-core numbers.",
+    "all_open_aligned": {
+      "begin_s": 15,
+      "end_s": 25,
+      "seconds": 10,
+      "requests": 42103,
+      "rps": 4210.3,
+      "native_cgroup_us_per_request": {
+        "usage": 49.699,
+        "user": 8.872,
+        "system": 40.827
+      },
+      "physical_server_cpu_busy": 0.30916,
+      "physical_server_busy_us_per_request": 73.4292,
+      "physical_server_cpu_by_state": {
+        "user": 0.04179,
+        "nice": 0.001,
+        "sys": 0.09248,
+        "irq": 0.0,
+        "softirq": 0.1739,
+        "iowait": 0.71366,
+        "idle": 0.00087,
+        "steal": 0.0
+      },
+      "gen_group_cpu_cores": [
+        0.2525,
+        0.2471,
+        0.2379,
+        0.2518
+      ],
+      "helper_cpu_cores": 0.00755,
+      "all_common_go_ticks_report_full": true,
+      "all_kernel_samples_report_full": true,
+      "server_tcp_deltas_interpolated": {
+        "InSegs": 90899,
+        "OutSegs": 81655,
+        "RetransSegs": 0,
+        "SyncookiesSent": 0,
+        "ListenOverflows": 0,
+        "ListenDrops": 0,
+        "TCPTimeouts": 0,
+        "TCPBacklogDrop": 0,
+        "TCPSynRetrans": 0,
+        "TCPKeepAlive": 0
+      }
+    },
+    "after_drain": {
+      "native_inuse": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "host_conntrack": 217,
+      "global": {
+        "inuse": 30,
+        "orphan": 0,
+        "tw": 12,
+        "alloc": 43,
+        "mem": 1467
+      }
+    },
+    "peak_native_cgroup_during_score_mib": 433.395,
+    "last_sample_before_score_end_s": 29.421,
+    "last_before_end_established": 60000,
+    "last_before_end_interface_rx_drops": 0
+  },
+  "full_350000": {
+    "topology": "eight private native veth endpoints and four unmodified Go generators",
+    "server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+    "generator_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "users": 350000,
+    "ramp_s": 60,
+    "hold_s": 300,
+    "server_cpu": 10,
+    "native_memory_limit_mib": 1750,
+    "server_helpers_hard_memory_total_mib": 64,
+    "complete_organizer_score": {
+      "users": 350000,
+      "dials": 350000,
+      "reqs": 7485848,
+      "req_per_s": 20794.012751011505,
+      "fails": 0,
+      "p95_ms": 8668.932233916841,
+      "p99_ms": 12038.460243520145,
+      "max_ms": 15285.65008617148,
+      "pass": false
+    },
+    "peak_same_tick_go_connections": 350000,
+    "peak_kernel_established_pairs": 350000,
+    "first_full_go_tick_s": 65,
+    "first_full_kernel_sample_s": 66.678,
+    "peak_native_cgroup_mib": 1910.703,
+    "peak_native_plus_helpers_sampled_mib": 1913.758,
+    "server_conntrack_peak_per_private_namespace": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "host_conntrack_min_max": [
+      115,
+      963
+    ],
+    "network_helper_cpu": "Non-scoring namespace holders run on the native CPU and are included in the whole-core numbers.",
+    "all_open_aligned": {
+      "begin_s": 65,
+      "end_s": 355,
+      "seconds": 290,
+      "requests": 6467781,
+      "rps": 22302.693,
+      "native_cgroup_us_per_request": {
+        "usage": 44.048,
+        "user": 3.243,
+        "system": 40.806
+      },
+      "physical_server_cpu_busy": 0.9995,
+      "physical_server_busy_us_per_request": 44.8153,
+      "physical_server_cpu_by_state": {
+        "user": 0.07171,
+        "nice": 0.00093,
+        "sys": 0.2451,
+        "irq": 0.0,
+        "softirq": 0.68175,
+        "iowait": 0.00028,
+        "idle": 0.0,
+        "steal": 3e-05
+      },
+      "gen_group_cpu_cores": [
+        0.6701,
+        0.6679,
+        0.6777,
+        0.6783
+      ],
+      "helper_cpu_cores": 0.00414,
+      "all_common_go_ticks_report_full": true,
+      "all_kernel_samples_report_full": true,
+      "server_tcp_deltas_interpolated": {
+        "InSegs": 14130376,
+        "OutSegs": 19485654,
+        "RetransSegs": 14209,
+        "SyncookiesSent": 0,
+        "ListenOverflows": 0,
+        "ListenDrops": 0,
+        "TCPTimeouts": 75,
+        "TCPBacklogDrop": 0,
+        "TCPSynRetrans": 0,
+        "TCPKeepAlive": 0
+      }
+    },
+    "after_drain": {
+      "native_inuse": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "host_conntrack": 234,
+      "global": {
+        "inuse": 28,
+        "orphan": 0,
+        "tw": 13,
+        "alloc": 39,
+        "mem": 1675
+      }
+    },
+    "peak_native_cgroup_during_score_mib": 1691.125,
+    "last_sample_before_score_end_s": 359.225,
+    "last_before_end_established": 350000,
+    "last_before_end_interface_rx_drops": 446232,
+    "shutdown": {
+      "scope": "twelve-veth-587fdc42b.scope",
+      "native_process_pid": 583290,
+      "scheduled_utc": "2026-11-12T02:04:14.908000+00:00",
+      "scorer_cutoff": "2026-11-12T02:10:14.908000+00:00",
+      "service_oom_journal_utc": "2026-11-12T02:10:17.460455+00:00",
+      "seconds_after_cutoff": 2.552455,
+      "during_score": {
+        "first_elapsed_s": -2.85810923576355,
+        "last_elapsed_s": 359.2250711917877,
+        "max_cgroup_peak_bytes": 1773273088,
+        "max_sampled_current_bytes": 1761431552,
+        "last_tcp_socket_bytes": 572899328,
+        "last_kernel_slab_bytes": 556092080,
+        "last_tcp_established": 350000
+      },
+      "after_score": {
+        "first_elapsed_s": 361.25937151908875,
+        "last_elapsed_s": 361.25937151908875,
+        "max_cgroup_peak_bytes": 2003517440,
+        "max_sampled_current_bytes": 2003484672,
+        "last_tcp_socket_bytes": 986218496,
+        "last_kernel_slab_bytes": 555891328,
+        "last_tcp_established": 346626
+      },
+      "journal": "service-journal.log",
+      "memory_events": "scope vanished before terminal poll; event was recorded by systemd",
+      "shutdown_journal_excerpt": [
+        "2026-11-12T02:10:17.460455+00:00 willwang-codex-2 systemd[2034]: twelve-veth-587fdc42b.scope: A process of this unit has been killed by the OOM killer.",
+        "2026-11-12T02:10:18.078543+00:00 willwang-codex-2 systemd[2034]: twelve-veth-587fdc42b.scope: Failed with result 'oom-kill'.",
+        "2026-11-12T02:10:18.081852+00:00 willwang-codex-2 systemd[2034]: twelve-veth-587fdc42b.scope: Consumed 5min 49.402s CPU time."
+      ]
+    }
+  },
+  "full_350000_one_time_file_cache_advice": {
+    "server_sha256": "50e33141891cd7593a5023823d2a6c026cf9f0425c02cc1f842df379720fdc4c",
+    "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "whole_score": {
+      "users": 350000,
+      "reqs": 7561898,
+      "req_per_s": 21005.218314546633,
+      "dials": 350000,
+      "fails": 0,
+      "p95_ms": 8330.673484447596,
+      "p99_ms": 11801.255017665075,
+      "max_ms": 15134.307016011364,
+      "pass": false
+    },
+    "kernel_peak_established": 350000,
+    "all_open_median_mib": {
+      "memory.current": 1263.967,
+      "memory.peak": 1479.496,
+      "anon": 60.77,
+      "sock": 540.494,
+      "file": 121.217,
+      "slab": 523.276,
+      "kernel": 531.023
+    },
+    "peak_cgroup_mib_through_scoring": 1479.496,
+    "mincore": [
+      {
+        "mincore_phase": "startup",
+        "relative_to_cutoff_s": -362.84210681915283,
+        "mincore": {
+          "feed.db": {
+            "bytes": 249192448,
+            "pages": 60838,
+            "resident_pages": 5
+          },
+          "feed.db-wal": {
+            "bytes": 0,
+            "resident_pages": 0
+          }
+        }
+      },
+      {
+        "mincore_phase": "t359",
+        "relative_to_cutoff_s": -0.9729156494140625,
+        "mincore": {
+          "feed.db": {
+            "bytes": 297926656,
+            "pages": 72736,
+            "resident_pages": 16307
+          },
+          "feed.db-wal": {
+            "bytes": 81608992,
+            "pages": 19925,
+            "resident_pages": 19925
+          }
+        }
+      }
+    ],
+    "control_all_open_median_mib": {
+      "memory.current": 1498.855,
+      "memory.peak": 1691.125,
+      "anon": 60.576,
+      "sock": 548.607,
+      "file": 338.09,
+      "slab": 529.729,
+      "kernel": 537.477
+    },
+    "control_peak_cgroup_mib_through_scoring": 1691.125,
+    "observer_difference": "The original unhinted launcher also hashed the freshly copied, already-resident database after opening. The enhanced runner verifies the copied seed within the native scope before starting the binary and omits the external full-file scan, which would artificially repopulate pages deliberately discarded by the hint. It additionally checks health and SQLite after all scored connections close.",
+    "native_rx_drops_steady": 467345,
+    "steady_physical_cpu": {
+      "busy_fraction": 1.0,
+      "softirq_cpu_fraction": 0.6814425746880332,
+      "softnet_backlog_drops": 467921,
+      "sample_s": 298.953691443
+    },
+    "scored_peak_bytes": 1551364096,
+    "lifetime_sampled_peak_bytes": 2019577856,
+    "first_journal_oom_s_after_cutoff": 2.269,
+    "first_oom_kill_counter_s_after_cutoff": 2.2806098461151123,
+    "first_pidfd_dead_s_after_cutoff": 3.0976247787475586,
+    "original_process_alive_for_health": false,
+    "closure_sampling_interval_s": 0.1,
+    "before_cutoff": {
+      "offset_s": -0.03776216506958008,
+      "socket_bytes": 565174272,
+      "file_bytes": 148418560
+    },
+    "at_first_oom_kill_observation": {
+      "socket_bytes": 1343504384,
+      "file_bytes": 155648
+    },
+    "final_db_integrity_check": [
+      "ok"
+    ],
+    "final_db_foreign_key_check": [],
+    "final_db_rows": {
+      "users": 50000,
+      "posts": 566327,
+      "likes": 2514317
+    },
+    "consistent_checks_on_same_inode": true,
+    "post_creations": {
+      "acknowledged_post_creates": 66239,
+      "durable_rows_added": 66327,
+      "durable_minus_ack": 88
+    },
+    "normal_tcp_drain": true,
+    "peak_oom_kill_events": 1
+  },
+  "matched_clang_fin_retirement_350000": {
+    "method": "Eight same private Ethernet links, independent full 60s ramp plus 300s stock hold on fresh byte-identical seeds. Both use the pre-open database file-cache hint. The sole source difference between control and treatment is the treatment of already-read clean peer EOFs during readiness bursts. The server CPU includes its own receive softirq. A 100ms observer tracks the complete disconnect; a process pidfd identifies the original service. SQLite integrity scans run after the lifecycle check.",
+    "shared_parameters": {
+      "ramp": 60,
+      "hold": 300,
+      "users": 350000,
+      "groups": [
+        [
+          0,
+          1,
+          2
+        ],
+        [
+          3,
+          4,
+          5
+        ],
+        [
+          6,
+          7,
+          8
+        ],
+        [
+          11,
+          12,
+          13
+        ]
+      ],
+      "listeners": 8,
+      "server_memory_mib": 1750,
+      "server_cpu": 10,
+      "source_tuples": 2710272,
+      "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+      "target_ips_per_source": 24,
+      "native_preexec_seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a"
+    },
+    "control": {
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "actual_users": 350000,
+      "official_whole_score": {
+        "reqs": 7623648,
+        "dials": 350350,
+        "fails": 46,
+        "errors": {
+          "timeout": 46
+        },
+        "req_per_s": 21176.764596920242,
+        "p95_ms": 7847.8712624824175,
+        "p99_ms": 10683.522216497304,
+        "pass": false
+      },
+      "actual_peak_established": 350000,
+      "startup_and_last_second_residency": [
+        {
+          "phase": "startup",
+          "files": {
+            "feed.db": {
+              "bytes": 249192448,
+              "pages": 60838,
+              "resident_pages": 5
+            },
+            "feed.db-wal": {
+              "bytes": 0,
+              "pages": 0,
+              "resident_pages": 0
+            }
+          }
+        },
+        {
+          "phase": "one_second_before_cutoff",
+          "files": {
+            "feed.db": {
+              "bytes": 298971136,
+              "pages": 72991,
+              "resident_pages": 16583
+            },
+            "feed.db-wal": {
+              "bytes": 77744432,
+              "pages": 18981,
+              "resident_pages": 18981
+            }
+          }
+        }
+      ],
+      "scored_peak_bytes": 1432657920,
+      "peak_bytes_through_natural_close_and_before_independent_integrity": 2002604032,
+      "last_pre_cutoff_file_bytes": 145682432,
+      "last_pre_cutoff_socket_bytes": 572092416,
+      "first_oom_kill_observed_s": 2.306,
+      "first_journal_oom_s": 2.288,
+      "first_oom_file_bytes": 98304,
+      "first_oom_socket_bytes": 1347981312,
+      "original_pid_observed_dead_s_before_health": 3.032,
+      "original_pid_alive_at_health": false,
+      "successful_postclose_health_checks": 0,
+      "lifecycle_verifier_passed": false,
+      "native_established_plus_close_wait_before_health": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "client_established_plus_close_wait_before_health": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "final_db_integrity": [
+        "ok"
+      ],
+      "final_db_foreign_key_check": [],
+      "final_db_rows": {
+        "users": 50000,
+        "posts": 566922,
+        "likes": 2517608
+      },
+      "same_db_inode": true,
+      "tcp_drain": true,
+      "steady_interval": {
+        "begin_s": 85,
+        "end_s": 355,
+        "seconds": 270,
+        "requests": 6110949,
+        "rps": 22633.144,
+        "native_cgroup_us_per_request": {
+          "usage": 43.389,
+          "user": 3.274,
+          "system": 40.116
+        },
+        "physical_server_cpu_busy": 0.99945,
+        "physical_server_busy_us_per_request": 44.1589,
+        "physical_server_cpu_by_state": {
+          "user": 0.0736,
+          "nice": 0.00078,
+          "sys": 0.24539,
+          "irq": 0.0,
+          "softirq": 0.67969,
+          "iowait": 0.0003,
+          "idle": 0.0,
+          "steal": 4e-05
+        },
+        "gen_group_cpu_cores": [
+          0.6593,
+          0.661,
+          0.6629,
+          0.6734
+        ],
+        "helper_cpu_cores": 0.00388,
+        "all_common_go_ticks_report_full": true,
+        "all_kernel_samples_report_full": true,
+        "server_tcp_deltas_interpolated": {
+          "InSegs": 13438388,
+          "OutSegs": 18491808,
+          "RetransSegs": 15644,
+          "SyncookiesSent": 0,
+          "ListenOverflows": 0,
+          "ListenDrops": 0,
+          "TCPTimeouts": 92,
+          "TCPBacklogDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPKeepAlive": 0
+        }
+      },
+      "peak_postcutoff_socket_bytes": 1379016704,
+      "two_seconds_after_cutoff": {
+        "actual_s": 2.002997398376465,
+        "server_established_plus_close_wait": 344117,
+        "client_established_plus_close_wait": 0,
+        "sock_bytes": 1264676864,
+        "file_bytes": 89321472,
+        "memory_bytes": 1994797056,
+        "slab": 547688272,
+        "native_alive": true
+      },
+      "acknowledged_post_creates": 66793,
+      "durable_post_creates": 66922
+    },
+    "deferred_clean_closes": {
+      "server_sha256": "0862463f14ca5895ba2d9b3928dbe2747b747e738890c6afc88e278dd27a0ab5",
+      "actual_users": 350000,
+      "official_whole_score": {
+        "reqs": 7626052,
+        "dials": 350445,
+        "fails": 0,
+        "errors": {},
+        "req_per_s": 21183.465279592103,
+        "p95_ms": 7693.23719486562,
+        "p99_ms": 10683.522216497304,
+        "pass": false
+      },
+      "actual_peak_established": 350000,
+      "startup_and_last_second_residency": [
+        {
+          "phase": "startup",
+          "files": {
+            "feed.db": {
+              "bytes": 249192448,
+              "pages": 60838,
+              "resident_pages": 1451
+            },
+            "feed.db-wal": {
+              "bytes": 0,
+              "pages": 0,
+              "resident_pages": 0
+            }
+          }
+        },
+        {
+          "phase": "one_second_before_cutoff",
+          "files": {
+            "feed.db": {
+              "bytes": 298950656,
+              "pages": 72986,
+              "resident_pages": 18039
+            },
+            "feed.db-wal": {
+              "bytes": 76718552,
+              "pages": 18731,
+              "resident_pages": 18731
+            }
+          }
+        }
+      ],
+      "scored_peak_bytes": 1447505920,
+      "peak_bytes_through_natural_close_and_before_independent_integrity": 2003783680,
+      "last_pre_cutoff_file_bytes": 150622208,
+      "last_pre_cutoff_socket_bytes": 568397824,
+      "first_oom_kill_observed_s": 2.199,
+      "first_journal_oom_s": 2.169,
+      "first_oom_file_bytes": 57344,
+      "first_oom_socket_bytes": 1316999168,
+      "original_pid_observed_dead_s_before_health": 3.024,
+      "original_pid_alive_at_health": false,
+      "successful_postclose_health_checks": 0,
+      "lifecycle_verifier_passed": false,
+      "native_established_plus_close_wait_before_health": [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "client_established_plus_close_wait_before_health": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "final_db_integrity": [
+        "ok"
+      ],
+      "final_db_foreign_key_check": [],
+      "final_db_rows": {
+        "users": 50000,
+        "posts": 566916,
+        "likes": 2518931
+      },
+      "same_db_inode": true,
+      "tcp_drain": true,
+      "steady_interval": {
+        "begin_s": 85,
+        "end_s": 355,
+        "seconds": 270,
+        "requests": 6085342,
+        "rps": 22538.304,
+        "native_cgroup_us_per_request": {
+          "usage": 43.583,
+          "user": 3.268,
+          "system": 40.314
+        },
+        "physical_server_cpu_busy": 0.99943,
+        "physical_server_busy_us_per_request": 44.3438,
+        "physical_server_cpu_by_state": {
+          "user": 0.07297,
+          "nice": 0.001,
+          "sys": 0.2458,
+          "irq": 0.0,
+          "softirq": 0.67967,
+          "iowait": 0.00037,
+          "idle": 4e-05,
+          "steal": 0.0
+        },
+        "gen_group_cpu_cores": [
+          0.6673,
+          0.6641,
+          0.6582,
+          0.689
+        ],
+        "helper_cpu_cores": 0.00395,
+        "all_common_go_ticks_report_full": true,
+        "all_kernel_samples_report_full": true,
+        "server_tcp_deltas_interpolated": {
+          "InSegs": 13398976,
+          "OutSegs": 18437021,
+          "RetransSegs": 14712,
+          "SyncookiesSent": 0,
+          "ListenOverflows": 0,
+          "ListenDrops": 0,
+          "TCPTimeouts": 116,
+          "TCPBacklogDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPKeepAlive": 0
+        }
+      },
+      "peak_postcutoff_socket_bytes": 1357869056,
+      "two_seconds_after_cutoff": {
+        "actual_s": 1.9960992336273193,
+        "server_established_plus_close_wait": 344132,
+        "client_established_plus_close_wait": 0,
+        "sock_bytes": 1260138496,
+        "file_bytes": 62459904,
+        "memory_bytes": 1963368448,
+        "slab": 546975472,
+        "native_alive": true
+      },
+      "acknowledged_post_creates": 66804,
+      "durable_post_creates": 66916
+    }
+  }
+}

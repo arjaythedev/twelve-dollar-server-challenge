@@ -1,0 +1,7 @@
+bin/
+vendor/
+pgo/
+*.o
+*.gcda
+*.gcno
+train.db*

@@ -1,0 +1,11 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+use Pype\Console\Console;
+
+/** @var \Pype\Application $app */
+$app = require __DIR__ . '/../bootstrap/app.php';
+
+exit((new Console($app))->run($argv));

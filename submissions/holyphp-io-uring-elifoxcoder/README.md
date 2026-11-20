@@ -20,12 +20,15 @@ the app itself.
 ## Server-side optimizations
 
 - **The feed and a single post are read from SQLite's B-tree cursors.** `/feed`
-  walks the `posts` rowid index backwards twenty rows while a second cursor
-  walks `likes_post_id_idx` in the same order, so each post's likes are the
-  next index entries; the authors are twenty rowid seeks in `users`. Records
-  are decoded in place (serial types, payload offsets) and escaped straight
-  into the response buffer, so a feed row allocates no strings and no arrays.
-  `/posts/:id` uses the same cursors and one index range scan for its count.
+  reads the newest twenty `(created_at, id)` keys into an integer vector, walks
+  `likes_post_id_idx` once for a dense like-count histogram, then seeks each
+  post and author and escapes their payload bytes straight into the response
+  buffer. `/posts/:id` uses the same cursors and an index range scan for its
+  count. Records are decoded in place without row objects or per-field strings.
+  The feed's `posts` table record is decoded inline in typed HolyPHP, matching
+  the fixed `schema.sql` layout; invalid or overflow records fall back to the
+  generic B-tree decoder. Set `HPHP_FEED_RAW=0` to use the generic decoder for
+  every row.
   This is a generic driver binding (`bt_root` / `bt_open` / `bt_last` / …),
   not challenge logic, and it falls back to the SQL path when the pinned
   SQLite could not be built (the binding is a weak reference).
@@ -35,8 +38,9 @@ the app itself.
 - **Group commit.** Writes collected during one poll cycle are applied in a single
   `BEGIN IMMEDIATE … COMMIT`; responses are only sent after `COMMIT` succeeds
   (all flipped to 500 on rollback).
-- **WAL + `synchronous=NORMAL`**, `temp_store=MEMORY`, 64 MB page cache, 256 MB
-  mmap, prepared statements.
+- **WAL + `synchronous=NORMAL`**, `temp_store=MEMORY`, 64 MB page cache and
+  prepared statements. SQLite mmap is disabled by default; set `HPHP_MMAP=1`
+  to enable the tested 256 MB mmap path.
 - **One write for small bodies**, header + body written separately for the feed
   (avoids one multi-KB copy).
 - **`Content-Encoding: identity`** — compression is optional per SPEC.md, and the
@@ -47,9 +51,10 @@ the app itself.
   benchmark's spread-out request rate the loop runs ~10k cycles/s, so a per-cycle
   slice walked ~20M entries/s for nothing. A full pass still finishes far inside
   the 90 s window.
-- **Connection shedding** above 58,000 open fds (the box sets
-  `LimitNOFILE=65535`): such responses carry `Connection: close`, so new users
-  are never refused.
+- **Connection shedding** just below the usable descriptor table: 61,439 real
+  fds in the classic path (the box sets `LimitNOFILE=65535`), or
+  `uring_direct_slots() - 1024` with ring-owned descriptors. Shed responses
+  carry `Connection: close`, so new users are never refused.
 - A strict RFC 8259 parser for POST bodies (the runtime's `json_decode` is lenient).
 
 ## Runtime/compiler work (generic, no challenge logic)
@@ -94,6 +99,48 @@ allocation-stable for a long-running server. All of this is generic:
   per request instead of waiting for an armed-recv slot. If the kernel
   refuses the ring, every primitive falls back to the plain epoll path;
   `HPHP_URING=0` forces it.
+- **Ring-owned descriptors, multishot recv, several rings.** With
+  `HPHP_DIRECT=1` (default in `start.sh`), each ring registers a sparse
+  65535-slot file table (`IORING_REGISTER_FILES2` +
+  `IORING_RSRC_REGISTER_SPARSE`, clamped to `RLIMIT_NOFILE`) and accepts
+  straight into it from eight `SO_REUSEPORT` listeners. Their independent
+  kernel accept queues spread connection bursts; the generic runtime keeps an
+  accept armed on the listener that completed and fills a bounded queue of 512
+  single-shot accepts per active ring. If reuseport is unavailable, the server
+  falls back to one ordinary listener. Connections then use multishot recv over
+  a provided-buffer ring (one SQE for the connection's lifetime). By default,
+  receive data is copied into per-connection state and the provided buffer is
+  returned immediately. With opt-in `HPHP_RECV_ZEROCOPY=1`, a complete request
+  that fits in one selected buffer is parsed in place; partial or multi-buffer
+  requests are promoted to an owned string before the buffer is returned. Both
+  modes use fixed-file sends and ring CLOSE.
+  Direct handles live above every real fd, so the 65535 fd limit no longer caps
+  held connections. `HPHP_RINGS`
+  (default 6) creates six rings, each with its own sparse table and buffer
+  ring: ~393k direct slots at the default. A registered eventfd per ring keeps CQ wakeups
+  reliable with `DEFER_TASKRUN`; wait/retry/close paths are ring-aware, and a
+  full ring disables only its own accept. Locally: 42/42 with five rings,
+  80,000 concurrent connections from eight parallel clients with
+  `arm_fail=0`/`parked=0`, and 42/42 on the classic real-fd path.
+  `HPHP_DIRECT=0` forces that path; a failed registration falls back
+  automatically.
+  On the tested Ubuntu 6.8.0-147 kernel, the standard provided-buffer
+  registration returns `EINVAL`. The runtime first tries the standard ABI,
+  then retries that specific failure with the reserved-word compatibility
+  value used by the Rust reference. `HPHP_PBUF_COMPAT=0` disables this retry
+  for comparison. Startup logs show whether buffers or the one-shot fallback
+  are active; a successful `/health` response alone does not identify the path.
+  `HPHP_CQ_BUDGET` limits completions consumed from each ring per pass so
+  other rings and application-ready sockets receive service. Zero retains
+  the previous unbounded drain. Unconsumed entries remain in the kernel CQ
+  for the next pass; the limit does not discard completions.
+  Queued POST/LIKE replies carry a connection generation alongside the socket
+  handle. A disconnected client's write still commits, while its response is
+  suppressed if that handle has since been assigned to another connection.
+  The forced SQLite checkpoint can claim an idle worker even when a bulk
+  checkpoint is queued or a tail/restart is pending. A running worker remains
+  exclusive. This keeps the configured force limit reachable under sustained
+  writes instead of requiring an idle state that the WAL hook immediately exits.
 
 There is no challenge-specific C code: the backend is generic runtime code the
 same way epoll and the SQLite binding are.
@@ -101,10 +148,15 @@ same way epoll and the SQLite binding are.
 ## Requirements
 
 - `build-essential`, `curl`, `unzip`, `libsqlite3-dev`.
-- `build.sh` builds the pinned SQLite amalgamation (3.46.1, sha256-checked) with
-  `-DSQLITE_THREADSAFE=0`: the server is single-threaded, so the serialized
-  build only pays mutex overhead on every step/column call. If the download or
-  the build fails, it falls back to the system library, so an offline box still
+- `build.sh` builds the pinned SQLite amalgamation (3.46.1 by default,
+  sha256-checked) with
+  `-DSQLITE_THREADSAFE=2` with memory-status tracking disabled and SQLite C APIs
+  that the runtime does not expose omitted. Both request and checkpoint
+  connections use NOMUTEX and are owned by separate threads; `sqlite3_initialize`
+  is called explicitly. SQL syntax and default pragmas are unchanged. Set
+  `HPHP_SQLITE_DEFINES` to replace the default define list or
+  `HPHP_SQLITE_THREADSAFE` to choose another thread mode. If the download or
+  build fails, it falls back to the system library, so an offline box still
   produces a working server. JSON1 and `INSERT … RETURNING` need SQLite ≥ 3.38.
 
 ## Run
@@ -112,8 +164,13 @@ same way epoll and the SQLite binding are.
 ```bash
 bash install.sh   # as root, once
 bash build.sh     # as the build user
-SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 ./bin/server
+SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 ./start.sh
 ```
+
+For an optional PGO build, set `HPHP_PGO_DIR` to a GCC profile directory
+collected from a representative run of this server. `build.sh` then uses
+`-fprofile-use` for the generated runtime; unset it for the normal native
+build. PGO data should be refreshed after substantial source changes.
 
 ## Measurements
 
@@ -122,14 +179,228 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 | commit | users held 5 min | req/s | app CPU | µs/req | errors |
 |---|---:|---:|---:|---:|---:|
 | `96aa4f5` (B-tree feed) | 110,000 | 10,637 | 83 % | 73 | 0 |
-| `8ee9c5a` (send-path fix) | **130,000** | 12,618 | 93 % | 69 | 0 |
+| `8ee9c5a` (send-path fix) | 130,000 | 12,618 | 93 % | 69 | 0 |
+| `7a3f61e` (sweep rate-limit, `str_to_int`) | 135,000 | 13,117 | 92 % | 65 | 0 |
+| `1569472` (io_uring backend + ring-scale fixes) | **145,000** | 14,093 | 91 % | 60 | 0 |
+| `d75dd29` (allocation-free request path) | box run requested | — | — | — | — |
+
+### Event-loop round after the 260k box run (`dbe2947`)
+
+The box held 260,000 at 79 % CPU and 29 µs/request; 270,000 failed on the
+tail at 82 %. A same-load comparison with the 310k Rust leader showed the gap
+is small at 8k connections (37.7 vs 36.5 µs/request) but grows to ~25 % at
+130k connections, in both user and kernel time. Changes in this round, all
+generic runtime or launcher defaults:
+
+- **Every ring is `DEFER_TASKRUN` and entered with `GETEVENTS` each pass**
+  (`HPHP_DEFER_ALL=1`, `HPHP_FORCE_ENTER=1`); ring 0 waits for 256
+  completions or 1 ms (`HPHP_BATCH_N=256`). Completions are posted only when
+  the loop asks for them instead of by signal-driven task work.
+- **Ring 0 does not sleep over completions it just produced**: after the
+  other rings are flushed, their newly posted CQEs are counted and ring 0's
+  bounded wait is skipped when there are any.
+- **Larger response-buffer and send-chunk pools** (32 MB / 8,192 buffers,
+  4,096 chunks): with 2,048 answers per pass, the old 4 MB pool missed for
+  most feed responses, which then went through `malloc`/`free`.
+- **Circular answer/read FIFOs by default** (no compaction `memmove` under a
+  sustained backlog).
+- Responses no longer carry the redundant `Content-Encoding: identity` and
+  `Connection: keep-alive` headers (HTTP/1.1 keep-alive is the default;
+  `Connection: close` is still sent when closing).
+
+Same-binary mirrored A/B/B/A on one pinned CPU, 130k connections (kernel
+6.18): 48.9 → 44.4 µs/request (−9 %), p95 ~2 ms in both. On an Ubuntu 6.8
+1-vCPU/2 GB VM at 80k users: ~44.5 % → 40.5 % CPU for the same requests.
+42/42 Direct and 42/42 Classic pass with the new defaults and with
+`HPHP_DEFER_ALL=0 HPHP_FORCE_ENTER=0 HPHP_BATCH_N=64` (the previous loop).
+Local numbers are not box results.
+
+On the box (#481 at `4f268f4`) this round held 257,000 at 85 % CPU and
+31 µs/request, so the all-deferred loop cost more there than the mixed-ring
+loop (29 µs at `4c0adfb`). The follow-up keeps the pools, FIFOs and headers
+from this round and changes two defaults in `start.sh`:
+
+- **Mixed-ring loop again** (`HPHP_DEFER_ALL=0`, `HPHP_FORCE_ENTER=0`,
+  `HPHP_BATCH_N=64`); the deferred loop stays available through those knobs.
+- **SQLite opens through `unix-excl`** (`HPHP_SQLITE_VFS=unix-excl`): the
+  process holds the database lock, so transactions take no `fcntl()` locks,
+  and the WAL index lives in process memory shared by both connections (the
+  checkpoint connection uses the same VFS). Sync calls are unchanged.
+  Mirrored A/B/B/A with the mixed-ring loop: 43.0 → 40.2 µs/request at 130k
+  connections (WSL), and about −10 % CPU for the same requests on the Ubuntu
+  6.8 VM at 80k users. 42/42 Direct and 42/42 Classic pass.
+
+### The allocation round (`2f8507b` … `d75dd29`)
+
+Instrumentation first: `runtime_stats()` exposes generic runtime counters
+(ring enters, SQEs/CQEs per op kind, send copies, hstr allocations, poll
+cycles); `server.hphp` mirrors them at `/stats` when the operator sets
+`HPHP_STATS=1` — bench requests pay nothing for it (the run scripts never set
+the env).
+
+Then three measured fixes on the request path, each one attributing its cost
+with the counters (or gdb sampling under load) before touching it:
+
+| counter per `/health` request | before | after |
+|---|---:|---:|
+| hstr allocations (`str_new`) | 7.01 | **0.02** |
+| send-payload copies (`send_chunk`) | 1.00 | **0.00** |
+| ring `io_uring_enter` | 1.11 | **0.97** |
+
+- `c10afad`: `strpos` scanned by *copying the tail into a throwaway string*
+  first (gdb sampling: 3 of 5 allocations per request); it now scans in place
+  from the offset. The hot `/health` response is built straight into one
+  buffer and handed to the ring send chunk (`stream_send_sb(self-fd, sb)` —
+  the builder buffer *becomes* the send chunk, zero payload copies; generics:
+  `int_digits`, the SB flow). The parse loop skips the pipelining-`substr`
+  for single-request packets.
+- `d75dd29`: the recv handout is a pointer, not a copy — with the ring active
+  each connection owns one long-lived hstr block the kernel writes into;
+  `stream_recv` returns it directly (`HP_F_SCOPED` so retain paths copy and
+  close frees it; a caller asking for fewer bytes than arrived still gets the
+  classic copy).
+
+Local (WSL microbenchmarks — my machine, not box numbers): a minimal C epoll
+server on the same stack costs 54.1 µs/req; this build is at 57.4 µs/req.
+Attribution of the remaining gap, measured by removing one piece at a time:
+SQLite health check 0.7 µs, response builder 0.2 µs, the rest is the
+interpreter/parse and the ring's two completions per request. `/health` is at
+0 strings and 0 payload copies per request; p95 1.11 ms → 691 µs, median
+436 µs → 359 µs. The box run for `d75dd29` (or later) is requested upstream
+with `HPHP_STATS=1` so the same counter split can be read from the $12 box.
+
+#### Leak fixes found by the counters (`06c6b17`)
+
+`runtime_stats()` now also reports `live_allocs`, which turned two silent
+leaks into measurements:
+
+- `stream_send_sb` consumed the builder's payload buffer but never freed the
+  builder handle: **~55 B leaked per `/health` request** (+14.8 MB RSS over
+  270k requests). The handle is freed now; the buffer still becomes the ring
+  send chunk (zero copies unchanged).
+- the io_uring EOF path set the ring's own EOF flag but not the app-side
+  socket record, and `stream_eof()` consults the latter — a client disconnect
+  was never noticed. Measured: 21 closed clients left 21 fds open and the
+  close counter at 0. The EOF completion now mirrors into the socket record:
+  fds return to baseline and `close` equals `accept`.
+
+After both: RSS flat at 14.6 MB over 810k requests (three 30 s windows at
+9k rps), `live_allocs` flat, `str_new` 0.02/req, `send_chunk` 0.00/req,
+`enter` 0.95/req, 42/42 tests green.
+
+#### Shed-path crash and stall found by ASAN + load (`524fa14`)
+
+The shed regime (above the ring's 28k connection cap) is the churn regime:
+every response says `Connection: close`, so the server accepts and closes a
+connection per request. Two runtime bugs only showed up there:
+
+- **heap corruption**: `unset()` on an empty map computed `len - 1` and
+  touched one element before `keys[]`. The index could hold a duplicate
+  entry (inserted twice when a rebuild ran during the add) that survived a
+  delete and pointed past the live range. Fixed, plus index maintenance in
+  `array_pop`/`array_shift`.
+- **infinite loop**: the open-addressing probe loops had no termination
+  condition. Once churn left the table without a single empty slot, a lookup
+  spun at 100 % CPU and the server stopped answering (measured: 137 of
+  26,855 requests, then dead). Probe loops are bounded now and deletes count
+  their tombstones against the rebuild budget.
+- **the enter timeout never applied**: `IORING_ENTER_EXT_ARG` expects a
+  `struct io_uring_getevents_arg`, not a bare `timespec`; the kernel answered
+  EINVAL and the fallback ran an unbounded enter (blocks forever when nothing
+  is pending). Fixed, with a poll-based fallback for old kernels.
+
+Also: the zero-copy recv re-arm is deferred to the next wait cycle so the
+kernel cannot overwrite the buffer while the handler parses it.
+
+Evidence: ASAN build under churn (3 × 20 s at 3000 req/s, shed threshold 32):
+before, 3/3 runs died; after, 3/3 alive with zero ASAN reports. 9k rps
+keep-alive: 26,855 requests, 0 % errors, server healthy after the run.
+42/42 tests green.
+
+#### This round: 60k connections, native auth, one-buffer feed
+
+- **28,000 → 60,000 held connections.** The kernel caps the io_uring SQ ring
+  at 32768 entries and the server parks one armed recv per connection, so it
+  used to shed everything above 28k; those users paid a TCP handshake plus
+  accept/close for every request. Connections beyond the ring cap now
+  register in an epoll set (the ring still carries the sends), so the server
+  holds up to the descriptor limit. Verified with `HPHP_RING_MAX=10` and 1500
+  connections: 45,000 requests, 0 % errors, and the ring counters show only
+  the 10 ring connections produced recv completions.
+- **native HS256 `jwt_verify`**: split, alg, constant-time signature compare
+  and exp in C. The PHP version allocated ~20 strings per authenticated
+  request; the like path now allocates 13 per request, down from 29.
+- **in-place header parsing** (`str_pos_ci`, `str_int_range`,
+  `str_trim_range`): no `strtolower($head)`, no header copy, no
+  Content-Length substring.
+- **SQLite record decoder** (`bt_cols`): the feed decodes a row's header once
+  in C instead of walking varints byte by byte in the application loop.
+- **feed response from one buffer**: header prepended into the builder and the
+  buffer becomes the ring send chunk (no body copy, no header concatenations).
+- **1 KB recv buffer** (was 4 KB): 60 MB instead of 240 MB at 60k connections.
+  A controlled alternating A/B on one binary measured 77.3 vs 74.6 µs/req
+  (about 3 %) -- a noisy back-to-back comparison had suggested much more, so
+  the number here is the conservative one.
+
+Local numbers (WSL, my machine, not box numbers): like 151 → 136 µs cold and
+61.5 µs at 4k rps; the user-model mix 76.1 → 74.9 µs at 200 VUs. The box run
+is what counts.
+
+#### The wakeup round (`abf7a6d`): one `io_uring_enter` serves many requests
+
+Measured on one machine against the C submission (`c-iouring-public`, #2),
+same seed, same user model, alternating runs:
+
+| | C submission | HolyPHP before | HolyPHP after |
+|---|---:|---:|---:|
+| `/health` µs/req | 40.8 / 39.8 | 98.8 / 100.8 | **40.5 / 41.0** |
+| user-model mix µs/req | 40.5 / 40.3 | 129.6 / 194.5 | **47.6 / 45.3** |
+| `io_uring_enter` per request | — | 1.63 | **0.14** |
+
+The gap was not the generated code: the C submission's loop waits for up to
+128 completions or 2 ms while it has work, so one wakeup serves a batch of
+requests. Ours waited for exactly one completion per cycle. `hp_uring_wait`
+now does the same (64 completions / 2 ms while busy, block for the first
+completion when idle), and `hp_uring_enter` takes microseconds.
+
+That took the trivial path to parity with C and the mix from 1.8× to
+1.12–1.18×. The batching costs latency: median 2.5 ms, p95 4.6 ms, p99
+6.3 ms locally — far inside the box's p95 < 500 ms.
+
+#### The box said no to the epoll-hold round: back to park-and-retry
+
+The box scored the branch at `56b5187` at **100,000 users** — below the
+merged 145,000, and with CPU per request up from 60 to 76 µs. That branch's
+connection-cap round had replaced the proven overflow behavior: connections
+beyond the ring cap had been parked in the retry ring and re-armed after the
+next drain (`1569472`, which scored 145k at 60 µs/req); the hold round routed
+them into an epoll set instead. Its first box-scale run carried up to ~32k
+epoll-held connections and those requests paid a recv syscall plus epoll
+add/del per request. Local tests at 2500 connections pinned to one core
+showed the epoll-hold path at 57 µs/req vs 31 µs/req for arm-retry, and the
+box confirmed the direction: 76 µs/req where park-and-retry scored 60.
+
+The runtime is back on park-and-retry by default (`HPHP_OVERFLOW=1` opts
+into the epoll set for measurement), and the server sheds again at the
+ring's armed-recv capacity (28000 under uring), which is exactly the regime
+the merged 145k run used: keep-alive up to the ring cap, accept/close churn
+beyond it. Batched wakeups, the taskrun flags, the native auth/feed work and
+the 1 KB buffers stay.
+
+Rest of the story continues below.
+
+
+
+
 
 The 64,000 at `c935dfe` was a bug (EAGAIN treated as fatal in the non-blocking
 send path), fixed in `8ee9c5a`. `30d155b` rate-limits the idle sweep to one
-slice per second — on the box that sweep was ~52 of the 69 µs/req (the
-endpoints are ~17 µs/req), so it should lift the CPU-bound ceiling further.
-That head is awaiting a box run. The numbers above are what count; the local
-figures below are a proxy.
+slice per second. `1569472` puts the network primitives on io_uring and fixes
+the scale-time paths (deferred close for shed responses, bounded retry drain,
+keep-alive table sized to the ring, `accept4`, listener `TCP_NODELAY`); the
+ring is worth about 5 µs/req. Above 145k the search fails on CPU: 150k ran at
+93 % CPU with p95 567 ms. The numbers above are what count; the local figures
+below are a proxy.
 
 On a VPS shaped like the box (1 vCPU, 2 GB), fresh seed, `wrk`, measuring the
 server's own CPU from `/proc`:
@@ -148,3 +419,506 @@ golden seed.
 
 `bash test/test.sh` → `passed=42 failed=0`, also on the box and in a 1 vCPU /
 2 GB KVM VM (Ubuntu 24.04).
+
+#### Native LTO and receive-buffer sizing (local WSL measurements, 2026-11-02)
+
+The build now defaults to native `-O3 -march=native -flto` for the generated
+server and bundled SQLite amalgamation; set `HPHP_OPT` explicitly to override
+the flags (for example, for a portable or diagnostic build). On a valid-feed
+800-VU mix, alternating the previous O2 binary and this build produced
+38.82/38.47 versus 37.77/38.01 CPU µs/request (means 38.645 versus 37.890,
+about 2.0% lower CPU/request). Each run completed without k6 failures or
+receive recovery. These are WSL comparisons, not box results and not a claim
+of reaching the user target.
+
+The default provided-buffer ring size is 4096 per ring. An 80k connection ramp
+completed with 79,999 successful responses and no receive-recovery events at
+4096; 2048 caused 15,866 bounded recoveries, while 1024 caused 43,937. A
+thread-local pool of reusable receive scratch buffers reduced WSL RSS from
+about 52.5 MiB to 34.5 MiB in a 3×6k connection hold test, with effectively
+unchanged CPU/request in the separate mix A/B. This pool retains buffer
+capacity only; request contents are returned after parsing and are never
+reused as application data.
+
+#### Feed temporary-array lifetime fix (local WSL measurements, 2026-11-02)
+
+`on_feed_bt` created five to six `iarr_new` arrays for each feed and never
+released them. The runtime now has a generic `iarr_release` builtin and a
+bounded thread-local pool for small integer-array capacities. Release returns
+the array storage to the pool; acquisition clears every element, so no
+request values survive for reuse. Arrays too large for the pool are freed.
+Existing PHP syntax and builtins are unchanged.
+
+Direct (five rings) and classic test suites both pass 42/42, and the 20-row
+feed output is byte-for-byte equal to the reference. In an alternating
+800-VU WSL mix at about 168k requests/run, the no-pool version rose from 162
+to 943,333 live allocations and 205,472 KiB RSS; the pool version rose from
+162 to 16,696 and used 47,572 KiB. CPU/request over two alternating pairs was
+46.15/45.99 µs without the pool and 43.90/43.85 µs with it (means 46.07 vs.
+43.875, about 4.8% lower). A separate 60-second WSL soak completed 1.405M
+requests at 21,584 req/s with 0% failures, p95 10.4 ms, p99 19.8 ms, and no
+ring arm failures, parked SQEs, or receive recovery. These are local results,
+not a box score or a claim of reaching the user target. The same build also
+survived 20 repeated 12-second, 800-VU direct-mode stress runs without a crash.
+
+SQLite 3.54.1 was also built from the official amalgamation and tested against
+3.46.1 using alternating WSL runs. Both versions pass 42/42 in direct and
+classic mode with identical feed output. In the latest four-run A/B, mean
+CPU/request was 46.25 us on 3.54.1 and 46.19 us on 3.46.1, so the newer
+version showed no measurable gain and the default remains 3.46.1. A separate
+four-run mmap A/B measured 46.54 us with mmap disabled and 47.39 us with the
+256 MB mapping enabled (about 1.8% lower CPU/request). These are WSL results,
+not box scores. Callgrind places much of the feed work in B-tree seeks and
+record decoding, range counting, and JSON escaping; those remain the next
+optimization targets.
+
+#### Direct-5 bounded ring-0 wait tuning (local WSL, 2026-11-03)
+
+On the same binary, with the server pinned to one CPU and the exact seed/mix
+at 800 VUs for 20 s, disabling the bounded ring-0 wait measured 37.6/37.1 us
+server CPU per request. Enabling it at the 1 ms ceiling measured 18.2/18.7 us.
+Raising the ceiling to 4 ms measured 14.3/14.3 us; the 2 ms control measured
+16.0/16.4 us. All runs had 0% HTTP failures. The 4 ms runs had p95 137–139 ms and p99 165–167 ms.
+The later exact 100k hold favored 64 CQEs / 2 ms: p95 8.9–9.0 ms and p99 11.9–12.1 ms, versus about 42 ms / 210 ms for 256 / 4 ms. `start.sh` now selects 64 / 2 ms for multi-ring Direct mode; `HPHP_BATCH_N` and `HPHP_BATCH_US` can override them, and `HPHP_RING0_WAIT=0` keeps the prior path.
+
+A 60 s run at 1,600 VUs with the 4 ms setting completed 551,435 requests at
+15.8 us CPU/request, 0% failures, p95 265.8 ms and p99 346.6 ms. These results
+show a large same-host CPU reduction and a stable local soak, but they are WSL
+measurements: they do not establish a box score or 300k simultaneous live
+connections. That earlier extrapolation was superseded by exact challenge-hold
+runs: 160k passed the local latency gates only with the background checkpoint
+worker; 200k failed them badly. These are WSL results, not box scores.
+
+#### B-tree batched column decode experiment (local WSL, 2026-11-03)
+
+The generic `bt_read` runtime builtin was enabled experimentally for feed and
+single-post column extraction, then compared against the existing typed
+`bt_col_*` path in an A/B/B/A sequence on the same binary (800 VUs, 30 s each).
+The runs reported 17.8 and 20.3 us CPU/request with the feature off, and 19.5
+and 19.5 us with it on; all runs had zero HTTP failures. The sequence drifted,
+so it establishes neither a gain nor a reliable regression. The candidate's
+per-request integer-array allocation was removed; the existing typed path
+remains in use. These are WSL microbenchmarks, not box results.
+
+#### Typed response-builder pool experiment (local WSL, 2026-11-03)
+
+Generated code uses the typed `sb_new()` fast path, which does not acquire
+from the reusable response-buffer pool used by the hval ABI. Enabling pool
+acquisition for the typed path and measuring the same binary in an A/B/B/A
+800-VU, 30-second mix yielded 18.2/19.1/19.3/18.7 us CPU/request and
+3.60/3.74/3.72/3.63 ms p95; all runs had zero HTTP failures. The candidate was
+slower in both pairs, likely because the shared pool can supply a small buffer
+that a 12 KB feed builder immediately has to grow. The change was reverted.
+These are WSL measurements, not box results.
+
+#### B-tree range-count app-path experiment (local WSL, 2026-11-03)
+
+The existing generic `bt_count_range` builtin was wired into an optional pure
+HolyPHP feed path to replace per-post like-cursor iteration. It produced the
+exact golden feed and passed all 42 tests in Classic and Direct-5. On the same
+binary at 800 VUs for 30 seconds in A/B/B/A order, CPU/request was
+18.0/23.5/26.5/20.8 us, with zero HTTP failures. The drift prevents a clean
+causal estimate, and both candidate runs were slower; the app path was removed.
+This partial port adds a post pre-scan and arrays but does not include the
+leader's generic range scan over post rows. It is not a performance result or
+a box score.
+
+At 280k configured users, a current-build WSL hold accepted all 280,002
+connections but failed latency gates (p95 2.82–2.85 s, p99 4.19–4.23 s). The
+same-host C leader also failed (p95 about 1.65 s, p99 about 5.0 s), so this
+overloaded co-located harness cannot determine target-box capacity.
+
+#### Generic B-tree batched-seek prefetch test (local WSL, 2026-11-03)
+
+Copied the C leader's page-boundary prefetch into the generic multi-rowid
+cursor path behind `HPHP_BT_MULTI_PREFETCH=1`, with the same optional
+batched-author HolyPHP feed path enabled in every run. Classic and Direct-5
+functional suites both passed 42/42. The 800-VU, 30-second A/B/B/A run measured
+21.6/23.5/25.3/22.3 us CPU/request and p95 4.48/4.87/5.43/4.54 ms; every run
+had zero HTTP failures. The candidate did not improve the results and the
+sequence drifted, so the prefetch change was removed. This WSL test does not
+justify a speed claim or box estimate.
+
+#### Listener-group accept rearm (local WSL, 2026-11-04)
+
+The direct runtime now rearms an accept on the same `SO_REUSEPORT` listener
+after each completion. Without that, the bounded ring-wide accept pool could
+temporarily leave a busy listener with no outstanding accept while the ring
+waited on other listeners. The challenge suite passed 42/42 in both Direct
+and Classic modes. A staged synthetic run then held 280,000 concurrent
+connections for over five minutes; all 280,000 `/health` requests returned
+HTTP 200, and all connections later closed cleanly. Five direct rings were
+active, with no parked SQEs or accept-arm failures. WSL's original
+`nf_conntrack_max` of 262,144 blocked the fourth 70,000-connection batch, so
+the local limit was temporarily raised to 1,048,576 for this run and restored
+afterward. This is a local idle-connection capacity and stability check, not
+the challenge's box benchmark or a throughput result.
+
+#### Typed HolyPHP feed record decoder A/B (WSL, 2026-11-07)
+
+The fixed `posts` SQLite record can be decoded inline in typed HolyPHP, matching the top submission's single-pass record decoder. `start.sh` enables this path; `HPHP_FEED_RAW=0` retains the generic `bt_cols` decoder. The inline path checks header and payload bounds and falls back to the generic decoder if a record does not fit.
+
+On the real seed database, same-binary A/B/B/A at 800 VUs (30% likes, 5% posts; 5 s ramp + 15 s active) had zero HTTP failures. Generic decode averaged 17,523 req/s, p95 41.64 ms, p99 57.43 ms, and 16.72 µs process CPU/request. Inline decode averaged 17,824 req/s, p95 39.73 ms, p99 52.16 ms, and 16.48 µs CPU/request. These are WSL diagnostics, not box results; run-to-run warm-up drift remains visible.
+
+#### Cache, warm-up, and author-batch experiments (WSL, 2026-11-12)
+
+These are local diagnostics, not challenge scores or user-count estimates.
+`bench/sqlite-cache-mix.js` preserves the endpoint order and 15% like / 2%
+post-write probabilities in `bench/load.js`, but removes think time to expose
+request-service cost. All runs used the real seed database, one server CPU,
+Direct-6, the same binary (`3333e4f…`), GCC 13.3, `-O3 -march=native -flto`,
+and bundled SQLite 3.46.1. k6 ran on separate CPUs; its CPU consumption was
+recorded to catch generator saturation. The earlier cache/warm numbers in
+this subsection were collected with only three client CPUs and are superseded:
+the generator was CPU-saturated, so those measurements are invalid.
+
+With 800 VUs for 15 s in A/B/B/A order, a 64 MiB cache averaged 21.91 µs
+server CPU/request; 256 MiB averaged 21.90 µs. There were zero HTTP errors.
+The SQLite status showed roughly 5.4 million cache hits, 287 misses, no spills,
+and about 5.2 MiB cache use after the 64 MiB run. The larger cache did not
+change CPU/request meaningfully. Warming the pages at startup (64 MiB fixed)
+averaged 21.82 µs/request versus 22.07 µs without warm-up, a 1.1% difference
+below the promotion threshold. Warm-up increased startup from about 150 to
+379 ms and RSS from about 46.5 to 85.5 MiB; p99 did not improve consistently.
+Keep the defaults at 64 MiB and warm-up off.
+
+The measured feed hotspot was resolving the 20 authors after collecting feed
+posts. The generic `bt_multi_seek` implementation is already enabled through
+`HPHP_FEED_BATCH_USERS=1`; turning it off restores one `bt_seek` per author.
+At 1,000 VUs for 30 s in A/B/B/A order, batched lookup averaged 22.36 µs
+CPU/request versus 23.76 µs with individual seeks (5.9% lower). Both paired
+comparisons favored batching by 4.1% and 7.8%. Mean request rate rose from
+39.8k/s to 42.4k/s, mean p95 fell 4.2%, mean p99 fell 4.1%, and all runs had
+zero HTTP failures. The server remained at one CPU; k6 used about 9.6 of its
+15 allocated CPUs. Direct and Classic challenge suites each passed 42/42
+afterward. This is a repeatable WSL signal for the already-enabled generic
+batch path, not evidence that 280k users are achieved on the challenge box.
+
+#### Five versus six rings; 280k async-client attempt (WSL, 2026-11-12)
+
+The 1,000-VU, 30-second no-think-time micro-mix compared five and six rings
+in two reversed A/B/B/A sequences. Five rings averaged 24.77 µs CPU/request
+and six averaged 24.23 µs across all eight samples (about 2.2% favoring six),
+below the promotion threshold. Same-configuration samples varied by 4–6%,
+and the reversed sequence did not reproduce a clear advantage. Keep six rings;
+five has enough theoretical slots for 280k, but this test does not establish
+that reducing the ring count improves request cost.
+
+A separate 280k-user diagnostic used 16 Python asyncio shards, 45 s ramp and
+90 s hold. It was invalid as a server-capacity result: at hold time the summed
+minimum active client tasks were only 28,529, the server reported 138,534 live
+connections, and the client run recorded 94.5% failures with p95 around 93.8 s.
+The WSL VM reached its 4 GiB memory cap and used swap while the generator was
+creating hundreds of thousands of per-user Python tasks. The temporary local
+conntrack limit was restored afterward. Do not interpret these figures as
+HolyPHP's 280k capacity or latency; a lower-overhead multi-connection generator
+or the challenge box is required for that measurement.
+
+#### Multi-ring wait and answer-batch diagnostics (WSL, 2026-11-12)
+
+Compared the current 64-CQE wait to the Rust leader's 256-CQE wait using the
+same binary, 280,000 configured clients, 16 C-generator shards, 45 s ramp,
+90 s run, Direct-6, a fresh seed DB, one pinned server CPU, and
+`HPHP_DIAG=1`. The answer budget remained 2,048. At 64 CQEs, clients completed
+662,738 requests and the server reported 251,909 accepts; at 256 CQEs, clients
+completed 798,794 requests (+20.5%) and the server reported 264,708 accepts.
+The measured server CPU time was 66.8 s and 64.4 s respectively. Per-shard p95
+ranges were 27.290–27.401 s at 64 and 27.499–28.147 s at 256; per-shard p99
+ranges were 45.148–45.925 s and 38.938–41.687 s. All shards reported zero
+HTTP errors. A reverse-order repeat completed 689,335 requests at 256 versus
+657,006 at 64, but p95 worsened from 28.563–28.816 s to 31.844–33.281 s and
+p99 worsened from 44.572–46.302 s to 48.498–49.116 s. Server accepts were
+239,109 at 256 versus 250,886 at 64. The first throughput gain did not repeat
+with acceptable tail latency, so `start.sh` retains 64; the 256-CQE value stays
+an explicit experiment. Neither run accepted all 280,000 clients within 90 s.
+
+The 4,096 answer-budget run completed 666,188 client requests and had 10,881
+receive-recovery enqueues; 8,192 completed 593,714 requests and had 134,472
+enqueues. Both were worse than the default 2,048 run, so keep that budget.
+These WSL measurements identify a promising runtime setting; they are not a
+challenge-box result or proof of 280k capacity. The large remaining p95 points
+to a deeper high-load scheduling or service-cost bottleneck.
+
+#### Busy-aware ring-0 wait (WSL, 2026-11-12)
+
+The Rust loop only performs its bounded ring-0 wait when its read and ready
+queues are empty. HolyPHP previously waited for the configured CQE count even
+when it had CQEs or deferred ready sockets to process. Added generic
+`HPHP_RING0_BUSY` (default `1`) to skip that wait while such work is pending;
+set it to `0` to retain the prior behavior.
+
+The candidate and control used the same server binary, Direct-6, 280,000
+configured clients (16 C-generator shards), a 45 s ramp, and a 90 s run in
+A/B/B/A order. Server requests / accepted connections were: old 608,486 /
+240,134; new 670,977 / 257,542; new 636,302 / 249,862; old 686,634 / 256,006.
+All runs had zero client HTTP errors. The pair means were nearly flat for
+requests (+0.9% for busy-aware) and modestly higher for accepts (+2.3%); the
+candidate used about 2.6% more server CPU. Generator 0's p95/p99 were 32.566 /
+49.588 s, 29.684 / 44.306 s, 30.355 / 44.502 s, and 27.801 / 48.355 s. These
+are one shard's values, not global percentiles; every run remained far outside
+the p95/p99 gates. This is a small, noisy scheduling signal, not evidence of
+280k capacity. No box score is claimed.
+
+#### Per-ring timing and Rust-style SQ-full flush (WSL, 2026-11-12)
+
+Added `HPHP_DIAG=1` measurements for application read/flush time, per-ring
+`io_uring_enter` and submit-only time, CQE drain time/counts, receive-CQE to
+application handoff, and response enqueue to SEND completion. The receive-age
+buffers are allocated only in diagnostic mode; ordinary response chunks keep
+their original size when diagnostics are off. The external load harness also
+samples process user/system ticks, RSS/swap, TCP socket memory, WAL size, and
+listen-backlog counters.
+
+The high-load trace showed the 250k bottleneck is real: `answerq` grew above
+100k, with several seconds of receive-to-application delay in the later rings.
+At 280k, the diagnostic run accepted all 280,000 connections by the end of its
+90-second generator run, but `answerq` reached 228,889. The final ring live
+counts were 64,511 / 64,511 / 64,511 / 64,511 / 21,956 / 0. Per-shard p95/p99
+averaged 27.0/41.0 seconds; this was not a stable 280k hold. Linux `ListenDrops`
+and `ListenOverflows` each rose by about 265k during the ramp, so connection
+setup itself also experienced substantial backlog pressure. This was WSL with
+diagnostics enabled, not a box result.
+
+Compared SQ-full `IORING_ENTER_GETEVENTS` flushing (old) against submit-only
+flushing (Rust-style) in the same binary, A/B/B/A, Direct-6, 250k configured
+clients, 16 C-generator shards, 45-second ramp and 90-second run. Every run
+reported 250,000 successful client connections and zero HTTP errors. Request
+totals were 793,693 / 931,117 / 926,628 / 857,490. The paired means were
+825,592 old versus 928,873 submit-only (+12.5%); server CPU/request was 83.5
+versus 79.0 microseconds (-5.4%). Shard-averaged p99 improved about 4.9%, while
+p95 was about 3.2% worse on average and varied widely between same-mode runs.
+All p95/p99 values remained far beyond the challenge gates, so this is a
+throughput signal rather than a capacity pass. `start.sh` now defaults to the
+submit-only flush; set `HPHP_SQ_FLUSH_GETEVENTS=1` for the previous behavior.
+
+#### Background checkpoint: restart the WAL (WSL, 2026-11-13)
+
+Under sustained write load the background PASSIVE checkpoint was almost always
+overtaken by new commits. It reported completion, but SQLite could never
+restart the WAL from frame 0, so the WAL grew until the 65,536-frame forced
+in-loop checkpoint ran on the event loop. The runtime now checks whether the
+WAL generation changed during the checkpoint. If it did not, the next commit
+restarts the log. If it did, writes are held briefly while the remaining tail
+is copied, the same approach the current leader uses. `HPHP_CKPT_RESTART=0`
+restores the previous behaviour. The runtime also drains each ring's eventfd
+with a single `read()` only when that ring produced completions, and string
+builders reuse capacity from the existing response-buffer pool (capacity only,
+never contents). All changes are generic runtime code; `server.hphp` is
+unchanged.
+
+Same-binary A/B/B/A in a Box-like harness (1 pinned server CPU, 1,800 MiB
+cgroup without swap, tcp_mem at twice the Box values, 120,000 connections,
+60 s ramp + 4 min hold, 16 load generators on separate CPUs):
+
+| | restart off | restart on |
+|---|---|---|
+| Peak WAL size | 211–260 MB | 18–19 MB |
+| Peak page cache | 254–299 MB | 54 MB |
+| Disk writes | 1.5–2.5 GB | 1.05 GB |
+| Checkpoints | ~2,100 | ~90 |
+| CPU per request | 70.96 / 70.81 µs | 70.24 / 70.00 µs |
+
+`PRAGMA integrity_check` returned `ok`. Direct and Classic suites each passed
+42/42. These are WSL diagnostics, not Box results. Above about 244k
+connections the WSL host is limited by Hyper-V interrupt overhead, and even
+the Rust leader fails there, so local runs cannot confirm 280k. The Box
+pattern so far was 257k/270k passing the 2-minute probe but failing the
+5-minute hold, and 280k failing at 76% CPU. That pattern is consistent with
+WAL growth followed by a blocking checkpoint, but it is not proven. A Box run
+is required.
+
+#### SQLite file locking and WAL write calls (WSL, 2026-11-13)
+
+The `unix-excl` VFS remains **off by default**. The box run at `f1f8d45`, with
+both `unix-excl` and WAL coalescing enabled, held 230,000 users (30 µs/req,
+653 MB peak); 240,000 failed on p95/p99 at 77 % CPU. `start.sh` therefore
+keeps SQLite's default VFS and measures WAL coalescing independently. The
+coalescing wrapper is now on by default; set `HPHP_SQLITE_WAL_COALESCE=0` to
+compare the original write path. Set `HPHP_SQLITE_VFS=unix-excl` separately
+to opt into the alternate VFS.
+
+With `HPHP_SQLITE_VFS=unix-excl`, SQLite opens through the `unix-excl` VFS. The process holds the
+database lock, so transactions take no `fcntl()` locks, and the WAL index
+lives in heap memory shared by the request and checkpoint connections. The
+checkpoint connection uses the same VFS as the request connection. A thin
+wrapper over that VFS (`HPHP_SQLITE_WAL_COALESCE=1`) buffers a commit's
+sequential WAL frame writes and writes them with one call when the commit
+frame arrives. This happens inside SQLite's own write call, before the WAL
+index is updated and before `COMMIT` returns. Reads, syncs, truncates,
+unlocks and file controls flush first, so SQLite sees the same bytes in the
+same order. `HPHP_SQLITE_VFS=` and `HPHP_SQLITE_WAL_COALESCE=0` (the defaults) keep the
+previous behaviour.
+
+The runtime also changed in smaller ways:
+- String builders keep headroom in front of the body, so the response header
+  is prepended without moving the body.
+- The response-buffer pool has separate small and large classes.
+- Integer formatting no longer goes through `snprintf`.
+- The small builder appends are inline.
+- The JWT check uses the CPU's SHA-256 instructions when present
+  (`HPHP_SHA_NI=0` disables them), and base64url decoding is table-driven.
+All of these are generic runtime changes; `server.hphp` only reads the VFS
+name from the environment.
+
+Syscalls per request at 8,000 connections (same load, perf tracepoints):
+
+| | before | after |
+|---|---|---|
+| `fcntl` | 0.28 | 0 |
+| `pwrite64` | 0.41 | 0.085 |
+| CPU per request | 42.5–43.6 µs | 38.7 µs |
+
+At 120,000 connections in the Box-like harness the CPU difference is smaller
+(68.2 → 67.2 µs per request in the same A/B sequence). Network processing
+dominates there.
+
+Checks:
+- Direct and Classic suites pass 42/42 with every VFS combination.
+- Three `kill -9` rounds under write load, with checkpoints forced every 64
+  frames, left `PRAGMA integrity_check` at `ok`.
+- No sampled acknowledged post was missing.
+
+These are WSL diagnostics, not Box results.
+
+#### WAL coalescing with SQLite's default VFS (WSL, 2026-11-14)
+
+An alternating A/B/B/A run at 1,000 VUs (20 s per run) measured 18.90 µs of
+server CPU per request with coalescing off and 17.95 µs with it on, about 5%
+less. A second A/B/B/A run at 4,096 VUs measured 20.22 vs. 19.33 µs, about
+4.4% less. Both settings had zero HTTP failures. At 4,096 VUs, p95 was
+176/175 ms off and 170/175 ms on; p99 was 287/310 ms off and 229/254 ms on.
+The wrapper's flushes remain inside SQLite's commit path before the commit
+returns. Three SIGKILL-under-write rounds preserved all 716 acknowledged
+posts, and each pre/post-restart `PRAGMA integrity_check` returned `ok`.
+The challenge suite passed 42/42 with coalescing on. These WSL results justify
+the default as a CPU improvement, but do not predict a Box user count.
+
+#### Multi-ring completion-drain order experiment (WSL, 2026-11-14)
+
+Added generic `HPHP_DRAIN_RR=1` to rotate the first ring drained each event-loop
+pass. This can change the arrival order in the shared ready FIFO when multiple
+rings complete together; it is off by default. On the same binary in A/B/B/A
+order, with Direct-6 and the hot no-think-time feed mix, the 800-VU pair means
+were 19.76 vs. 19.45 us CPU/request (about 1.6% lower with rotation), 35.5k vs.
+36.5k requests/s, p95 42.26 vs. 42.16 ms, and p99 62.46 vs. 59.88 ms. At
+1,600 VUs, CPU/request was 20.47 vs. 20.29 us, request rate was effectively
+flat (34.7k vs. 34.7k/s), p95 was 88.70 vs. 88.03 ms, and p99 regressed from
+108.22 to 113.45 ms. All runs had zero HTTP errors. The higher-load pair does
+not reproduce a tail-latency gain, so rotation remains opt-in and is not a
+280k capacity result.
+
+At 280,000 configured users, four C epoll client shards (70k each, 45 s ramp
+and 45 s hold) all connected successfully with zero HTTP errors. Same-build
+Direct-6 A/B runs with and without rotation both peaked at 280,002 server
+connections. Rotation completed 826,876 requests versus 829,988 without it
+(-0.4%); mean shard p95 was 3.47 s versus 3.33 s, and the answer FIFO peaked
+at 53,963 versus 50,859 entries. The per-shard p99 values were about 46 s in
+both runs. This rejects the ring-order hypothesis for the current queue; it
+does not meet the challenge latency gate.
+
+The same four-shard 280k diagnostic compared `HPHP_BATCH_N=256` with the
+64-CQE baseline. The single candidate run completed 834,480 requests versus
+829,988 in the baseline (+0.5%); per-shard p95 averaged 3.25 s versus 3.33 s
+and p99 averaged 44.16 s versus 45.99 s. This is a small, unreplicated WSL
+signal and does not justify changing the 64-CQE launcher default. Raising the
+answer budget from 2,048 to 4,096 was worse in a separate run: 788,945 requests,
+p95 about 4.64 s, and an 80k answer-queue peak. Keep the answer budget at
+2,048. All these client percentiles are per shard, not a combined global
+percentile, and none is a Box score or a 280k pass.
+
+#### Ubuntu 6.8 receive path and bounded dispatch (local validation, 2026-11-14)
+
+The runtime now retries the specific provided-buffer registration `EINVAL`
+seen on the tested Ubuntu 6.8 kernel. `HPHP_PBUF_COMPAT=0` restores the old
+one-shot fallback for comparison. Standard registration is still tried first.
+The launcher dispatches at most 2,048 application-ready sockets per pass;
+`HPHP_ANSWER_BUDGET=8192` selects the previous experimental budget.
+
+Two correctness fixes accompany this work: pending POST/LIKE replies carry
+connection generations, and forced checkpoints may reserve a worker that is
+queued or waiting rather than requiring the transient idle state. The SQL
+commit still precedes every successful write reply. PHP syntax and existing
+builtins are unchanged; additional range/array/B-tree helpers are generic.
+
+A private Ubuntu 6.8.0-147 VM (one vCPU, 2 GiB, no swap, `LimitNOFILE=65535`)
+ran a native-client diagnostic across a virtual NIC: 60 s ramp and 300 s hold,
+150,000 configured clients, 5,312,271 requests. All clients had successful
+requests; the 45 failures include unfinished requests at strict cutoff.
+Per-shard p95 was 22.3-22.5 ms and p99 196.3-198.3 ms. The same server PID
+survived with no OOM. All 47,784 acknowledged posts and 359,609 acknowledged
+new likes were present afterward; four additional unacknowledged likes had
+committed. `PRAGMA quick_check` returned `ok`; foreign-key violations: zero.
+These are local diagnostics, not a Box score or a 280k capacity claim.
+
+The unchanged Rust reference also fails the larger 176k diagnostic on this
+nested VM, so its absolute client counts do not translate directly to the Box.
+CQ limiting, all-ring deferred task work, unconditional ring enters and
+rotating drain order remain experimental; none is enabled by this launcher.
+
+Two optional regressions require Python 3 and a private test database:
+
+- `checks/stale_write_response.py --database PATH --tokens TOKENS --pid PID
+  --port PORT --kind post` (repeat with `--kind like`): start the server with
+  `HPHP_DIRECT=0 HPHP_STATS=1`. The test holds a write lock, disconnects its
+  client, verifies actual server-FD reuse and checks that the abandoned write
+  commits without replying on the replacement connection. Run as the server
+  user, or with permission to inspect its `/proc/PID/fd` entries.
+- `checks/checkpoint_reader.py --database PATH --tokens TOKENS --port PORT`:
+  start with `HPHP_STATS=1 HPHP_CKPT_FRAMES=32
+  HPHP_CKPT_FORCE_FRAMES=128`. A reader delays the checkpoint while 136 POSTs
+  commit. Inspect the server log for `mode=forced`; after releasing the reader,
+  all 136 acknowledged posts must be present. The old runtime recorded zero
+  forced checkpoints in this probe; the corrected runtime reaches that path.
+
+#### Typed feed-array access (local WSL, 2026-11-14)
+
+The hot feed renderer keeps fixed-capacity, leased `iarr` buffers for its
+per-post fields. The generic runtime now exposes their storage address, and
+HolyPHP uses typed pointer reads and writes inside `unsafe` for that fixed
+buffer lifetime. This keeps the feed logic in `server.hphp`; `iarr_data_ptr`
+is a generic builtin and `HPHP_FEED_IARR_PTR=0` restores checked builtin
+accesses for comparison.
+
+Same-binary A/B/B/A on the valid seed (800 VUs, 5 s ramp, 20 s hot mix) averaged
+19.25 µs CPU/request with builtin array access and 18.82 µs with typed direct
+access (2.2% less CPU/request). Mean throughput was 46.1k versus 46.7k requests/s;
+all four runs had zero HTTP failures. Exact challenge suites passed 42/42 in
+both Direct-6 and Classic modes. These are WSL diagnostics, not Box measurements
+or evidence that 280k users are reached.
+
+#### Receive-recovery queue per ring and small runtime costs (2026-11-16)
+
+Generic runtime changes only; `server.hphp`, `start.sh` and defaults are unchanged.
+
+- **Receive recovery per ring.** When a multishot receive runs out of provided
+  buffers, the connection waits in a recovery FIFO for a bounded single-shot
+  read. That FIFO was shared by all rings. Each round rotated every entry of a
+  ring without free buffers to the back, and the non-circular queue compacted
+  itself with `memmove`. Under a burst this was O(queue²) work, exactly when
+  the loop was already behind: a failed 176k local run recorded 316 million
+  moved entries. Each ring now has its own power-of-two circular FIFO. A ring
+  without free buffers is skipped as a whole, so a round costs O(reads issued).
+- **`hbuf_reserve(b, n)`** now reserves a total of `n` bytes, which is how all
+  callers use it. It used to treat `n` as bytes beyond the current length, so
+  half-full builders (for example during JSON escaping) asked for twice their
+  size.
+- **Multi-seek results** (~1.3 KiB, just above glibc's tcache limit) are kept
+  in a small per-thread free list instead of going through `malloc`'s slower
+  bins on every feed. Only storage is reused.
+- **Short appends** (JSON keys, numbers) copy with fixed-size inline moves
+  instead of calling libc `memcpy` for 1–16 bytes.
+
+Checks:
+- Direct and Classic suites pass 42/42.
+- `hbuf_copy` matches `memcpy` for every length 0–40 at eight offsets.
+
+Measurements (WSL, mirrored A/B/B/A, 8,000 connections):
+- Pool: 35.0 → 34.1 µs per request; better in all four pairs.
+- Small copies: 33.1 → 32.4 µs per request; better in all four pairs.
+- Against `aa6f126` directly, the bundle measured within noise (34.45 vs
+  34.25 µs).
+
+In the Ubuntu 6.8 VM at 176k (overloaded for that VM) the per-ring queue
+served 1.57M versus 1.54M requests on average over two mirrored series. That
+is within the VM's run-order effect. These are local diagnostics, not Box
+results.

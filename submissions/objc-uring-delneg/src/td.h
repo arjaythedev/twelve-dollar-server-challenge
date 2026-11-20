@@ -30,6 +30,10 @@ __attribute__((objc_root_class))
 - (instancetype)init;
 @end
 
+// Zeroed anonymous memory on 2 MB pages where the kernel has them (--huge). Each is one TLB entry, and a TLB miss
+// under a hypervisor walks two page tables.
+void *td_huge(size_t n);
+
 // ---------------------------------------------------------------- byte buffer
 typedef struct {
     char *p;

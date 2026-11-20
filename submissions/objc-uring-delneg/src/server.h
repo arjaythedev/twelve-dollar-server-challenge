@@ -8,6 +8,7 @@ enum { R_ERR = 0, R_HEALTH, R_FEED, R_POST, R_CREATE, R_LIKE, R_COUNT };
 typedef struct {
     uint32_t slot, gen;
     uint8_t route, close, held;   // held: deferred by a write hold (counted in the connection)
+    uint32_t ms;              // loop clock when it was read
     int16_t status;           // R_ERR
     const char *msg;          // R_ERR: static error message
     int64_t id, uid;

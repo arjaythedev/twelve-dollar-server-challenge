@@ -1,0 +1,126 @@
+--- a/unix/tclEpollNotfy.c
++++ b/unix/tclEpollNotfy.c
+@@ -90,7 +90,11 @@
+ typedef struct ThreadSpecificData {
+     FileHandler *triggerFilePtr;
+     FileHandler *firstFileHandlerPtr;
+-				/* Pointer to head of file handler list. */
++				/* Unused here: handlers are found in byFd. */
++    FileHandler **byFd;		/* The handler of each fd, NULL if none. A
++				 * list search per lookup made every event
++				 * cost time for each open socket. */
++    int byFdLen;		/* Number of slots in byFd. */
+     struct PlatformReadyFileHandlerList firstReadyFileHandlerPtr;
+ 				/* Pointer to head of list of FileHandlers
+ 				 * associated with regular files (S_IFREG)
+@@ -292,6 +296,11 @@
+     if (tsdPtr->eventsFd > 0) {
+ 	close(tsdPtr->eventsFd);
+ 	tsdPtr->eventsFd = 0;
++    }
++    if (tsdPtr->byFd) {
++	ckfree(tsdPtr->byFd);
++	tsdPtr->byFd = NULL;
++	tsdPtr->byFdLen = 0;
+     }
+     if (tsdPtr->readyEvents) {
+ 	ckfree(tsdPtr->readyEvents);
+@@ -511,8 +520,20 @@
+ 	filePtr = (FileHandler *) ckalloc(sizeof(FileHandler));
+ 	filePtr->fd = fd;
+ 	filePtr->readyMask = 0;
+-	filePtr->nextPtr = tsdPtr->firstFileHandlerPtr;
+-	tsdPtr->firstFileHandlerPtr = filePtr;
++	filePtr->nextPtr = NULL;
++	if (fd >= tsdPtr->byFdLen) {
++	    int n = tsdPtr->byFdLen ? tsdPtr->byFdLen : 1024;
++
++	    while (n <= fd) {
++		n *= 2;
++	    }
++	    tsdPtr->byFd = (FileHandler **) ckrealloc(tsdPtr->byFd,
++		    n * sizeof(FileHandler *));
++	    memset(tsdPtr->byFd + tsdPtr->byFdLen, 0,
++		    (n - tsdPtr->byFdLen) * sizeof(FileHandler *));
++	    tsdPtr->byFdLen = n;
++	}
++	tsdPtr->byFd[fd] = filePtr;
+     }
+     filePtr->proc = proc;
+     filePtr->clientData = clientData;
+@@ -547,14 +568,14 @@
+     int fd)			/* Stream id for which to remove callback
+ 				 * function. */
+ {
+-    FileHandler *filePtr, *prevPtr;
++    FileHandler *filePtr;
+     ThreadSpecificData *tsdPtr = TCL_TSD_INIT(&dataKey);
+ 
+     /*
+      * Find the entry for the given file (and return if there isn't one).
+      */
+ 
+-    filePtr = LookUpFileHandler(tsdPtr, fd, &prevPtr);
++    filePtr = LookUpFileHandler(tsdPtr, fd, NULL);
+     if (filePtr == NULL) {
+ 	return;
+     }
+@@ -564,19 +585,11 @@
+      */
+ 
+     PlatformEventsControl(filePtr, tsdPtr, EPOLL_CTL_DEL, 0);
++    tsdPtr->byFd[fd] = NULL;
+     if (filePtr->pedPtr) {
+ 	ckfree(filePtr->pedPtr);
+     }
+ 
+-    /*
+-     * Clean up information in the callback record.
+-     */
+-
+-    if (prevPtr == NULL) {
+-	tsdPtr->firstFileHandlerPtr = filePtr->nextPtr;
+-    } else {
+-	prevPtr->nextPtr = filePtr->nextPtr;
+-    }
+     ckfree(filePtr);
+ }
+ 
+--- a/unix/tclUnixNotfy.c
++++ b/unix/tclUnixNotfy.c
+@@ -167,6 +167,13 @@
+ {
+     FileHandler *filePtr, *prevPtr;
+ 
++#ifdef NOTIFIER_EPOLL
++    if (prevPtrPtr) {
++	*prevPtrPtr = NULL;
++    }
++    return (fd >= 0 && fd < tsdPtr->byFdLen) ? tsdPtr->byFd[fd] : NULL;
++#endif
++
+     /*
+      * Find the entry for the given file (and return if there isn't one).
+      */
+@@ -296,11 +303,8 @@
+ 
+     tsdPtr = TCL_TSD_INIT(&dataKey);
+ 
+-    for (filePtr = tsdPtr->firstFileHandlerPtr; filePtr != NULL;
+-	    filePtr = filePtr->nextPtr) {
+-	if (filePtr->fd != fileEvPtr->fd) {
+-	    continue;
+-	}
++    filePtr = LookUpFileHandler(tsdPtr, fileEvPtr->fd, NULL);
++    if (filePtr != NULL) {
+ 
+ 	/*
+ 	 * The code is tricky for two reasons:
+@@ -319,7 +323,6 @@
+ 	if (mask != 0) {
+ 	    filePtr->proc(filePtr->clientData, mask);
+ 	}
+-	break;
+     }
+     return 1;
+ }

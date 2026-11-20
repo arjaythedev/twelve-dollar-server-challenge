@@ -3,19 +3,19 @@
 // submitted after COMMIT.
 #include "server.h"
 #include <errno.h>
+#include <unistd.h>
 #include <poll.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define BUF_SIZE 2048u
-#define BUF_COUNT 2048u        // per ring, power of two
+#define BUF_SIZE 1024u
+uint32_t td_opt_bufs = 1024;   // --bufs=N: receive buffers per ring, a power of two
+#define BUF_COUNT td_opt_bufs
 #define BUF_GROUP 0
 #define MAX_REQ 16384u         // bytes of one request (headers + body)
-#define POOL_CAP 16384u        // pooled output buffer size
-#define POOL_MAX 1024u
 
-enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT };
+enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT, UD_RPOLL };
 #define MAX_RINGS 16
 #define UD(t, slot, gen) ((uint64_t)(t) << 56 | (uint64_t)((gen) & 0xFFFFFFu) << 32 | (uint64_t)(slot))
 #define UD_T(u) ((uint32_t)((u) >> 56))
@@ -29,7 +29,8 @@ enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT };
 @public
     uint32_t gen;
     uint32_t held;  // requests deferred by a write hold (they stay at the front of the batch)
-    bool live, recvArmed, sending, closeAfter, inBatch, needRearm;
+    uint32_t queued;   // requests read and not answered yet
+    bool live, recvArmed, sending, closeAfter, inDirty, needRearm, pollArmed;
     TDBuf in;      // partial request bytes
     TDBuf out;     // responses built, not yet submitted
     TDBuf wire;    // bytes owned by the kernel (in-flight send)
@@ -90,6 +91,22 @@ enum { UD_ACCEPT = 1, UD_RECV, UD_SEND, UD_CLOSE, UD_POLL, UD_CKPT };
 
 typedef int (*TDHandleIMP)(id, SEL, TDReq *, TDWorker *, TDBuf *);
 
+// Output buffers: most responses fit one (a /feed is ~4 KB), a larger one grows and is freed after its send.
+uint32_t td_opt_poolcap = 6144, td_opt_poolmax = 4096;   // --poolcap=N --poolmax=N
+extern int td_opt_lock;
+void td_lock_code(void);
+int td_opt_onewrite = 1;   // --onewrite=0|1
+int td_opt_rearm = 2048;   // --rearm=N: receives re-armed per ring per pass (0: all at once)
+uint32_t td_opt_answers = 128;    // --answers=N: requests answered per pass; the rest stay parked in the batch (0: all)
+int td_opt_lifo = 1;              // --lifo=0|1: past one pass of backlog, answer the newest first
+uint32_t td_opt_lifocap = 4;      // --lifocap=N: eighths of a pass the old end gets at --lifoage
+uint32_t td_opt_lifomin = 0;      // --lifomin=N: eighths of a pass the old end gets before --lifoage
+uint32_t td_opt_lifoage = 8000;   // --lifoage=MS: from this age the old end gets --lifocap eighths of a pass, from twice this age all of it
+int td_opt_ready = 1;              // --ready=0: completions waiting on other rings don't cut ring 0's pause short
+int td_opt_rpoll = 0;              // --rpoll=1: multishot poll plus one read per wake-up instead of multishot recv
+uint32_t td_opt_gate = 0;         // --gate=N: no new connections are accepted while more than N passes of requests wait; 0: always accept
+uint32_t td_opt_wwin = 0;         // --wwin=MS: writes commit at most once per this many ms (group commit window)
+
 // ---------------------------------------------------------------- helpers
 TD_INLINE bool ieq(const char *a, const char *lower, uint32_t n) {
     for (uint32_t i = 0; i < n; i++) {
@@ -133,6 +150,8 @@ typedef struct {
     struct io_uring_buf_ring *br;
     char *bufs;
     uint32_t brMask, live;
+    uint32_t *rq;                // connections whose multishot recv ended, waiting to be re-armed (FIFO)
+    uint32_t rqHead, rqLen;
     bool acceptArmed, full, active, pollArmed, high; // high: above the high-water mark
 } TDRingState;
 
@@ -144,21 +163,31 @@ typedef struct {
     Class connClass;
     uint32_t slots, highWater, lowGap;
     int ckReq, ckDone, ckFrom, ckBackfilled;   // checkpointer process state
-    bool ckBusy, ckHold;
+    bool ckBusy, ckHold, ckRewind;   // ckRewind: the WAL is copied, and the next commit rewinds it
     double ckHoldT;
     int ckRes[3];             // rc, frames in WAL, frames backfilled
     int listenFd;
     uint64_t nobufs;          // receives that ended with ENOBUFS (TD_CKLOG reports them)
+    uint64_t accErr, cqOvf, waitErrs;   // accept CQEs with an error, loop passes that saw a CQ overflow (TD_STATS)
+    int lastAccErr;
+    bool statsOn;
+    int64_t lastStats;
     TDAuth *auth;
     int64_t started, now;
+    uint32_t passMs, lastWriteMs, nHeldNow;
+    uint64_t gates, nLoop, nWork, nReady, nTimed, nEtime; double tTimed;
+    int gateRing;     // the ring whose accept the gate cancelled, or -1
     // batch
-    TDReq *reqs;
-    uint32_t nreq, reqCap;
-    uint32_t *dirty, ndirty;
-    uint32_t *rearm, nrearm;
+    TDReq *reqs;              // parsed requests waiting for an answer: reqs[reqHead..nreq), oldest first
+    uint32_t reqHead, nreq, reqCap;
+    uint32_t *dirty, ndirty;  // connections with an answer built in this flush
+    uint32_t nrearm;
+    uint64_t maxBatch;
+    double tEnter, tReap, tFlush, tRest;   // TD_STATS: seconds per loop phase
+    uint64_t nPass, nAns, nWalCommit;
     TDBuf body, scratch, harena;
-    TDReq *hreqs;
-    uint32_t hcap;
+    TDReq *hreqs, *treqs;
+    uint32_t hcap, tcap;
     char **pool;
     uint32_t npool;
     id handlers[R_COUNT];
@@ -191,18 +220,18 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
     ckDone = cfg->ckptDone;
     uint32_t margin = slots / 4 < 4096 ? slots / 4 : 4096;   // > a listen backlog's burst (somaxconn 4096)
     highWater = slots - margin;
+    gateRing = -1;
     lowGap = margin / 2;
     listenFd = cfg->listenFd;
     nrings = cfg->rings < 1 ? 1 : cfg->rings > MAX_RINGS ? MAX_RINGS : cfg->rings;
     connClass = objc_getClass("TDConn");
     stride = (class_getInstanceSize(connClass) + 15) & ~(size_t)15;
-    slab = mmap(NULL, stride * slots * (size_t)nrings, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
-    if (slab == MAP_FAILED) { perror("mmap slab"); exit(1); }
+    slab = td_huge(stride * slots * (size_t)nrings);
+    if (!slab) { perror("mmap slab"); exit(1); }
     reqCap = 1024;
     reqs = malloc(sizeof(TDReq) * reqCap);
     dirty = malloc(sizeof(uint32_t) * slots * (size_t)nrings);
-    rearm = malloc(sizeof(uint32_t) * slots * (size_t)nrings);
-    pool = malloc(sizeof(char *) * POOL_MAX);
+    pool = malloc(sizeof(char *) * td_opt_poolmax);
     handleSel = sel_registerName("handle:worker:body:");
     const char *names[R_COUNT] = {
         [R_ERR] = "TDErrorHandler", [R_HEALTH] = "TDHealthHandler", [R_FEED] = "TDFeedHandler",
@@ -223,7 +252,7 @@ static struct io_uring_sqe *sqe_get(struct io_uring *r) {
 static struct io_uring_buf_ring *setup_buf_ring(struct io_uring *ring, int k) {
     size_t sz = (size_t)BUF_COUNT * sizeof(struct io_uring_buf);
     struct io_uring_buf_ring *br = mmap(NULL, sz, PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (br == MAP_FAILED) { perror("mmap buf ring"); exit(1); }
+    if (br == MAP_FAILED) return NULL;
     struct io_uring_buf_reg reg;
     memset(&reg, 0, sizeof reg);
     reg.ring_addr = (unsigned long)br;
@@ -235,39 +264,48 @@ static struct io_uring_buf_ring *setup_buf_ring(struct io_uring *ring, int k) {
         reg.resv[0] = 1;
         ret = io_uring_register_buf_ring(ring, &reg, 0);
         if (ret == 0 && k == 0) fprintf(stderr, "io_uring buffer ring registered with resv[0]=1 (inverted kernel check)\n");
-        if (ret < 0) { fprintf(stderr, "register_buf_ring: %s\n", strerror(-first)); exit(1); }
+        if (ret < 0) { fprintf(stderr, "register_buf_ring: %s\n", strerror(-first)); munmap(br, sz); return NULL; }
     }
     io_uring_buf_ring_init(br);
     return br;
 }
 
-- (void)setupRing:(int)k TD_DIRECT {
+int td_opt_rdefer = 1;   // --rdefer=0|1: every ring runs its completions as deferred task work, entered in turn by the loop
+int td_opt_cq = 65536;   // --cq=N: completions per ring; more than a ring's connections, so a burst never takes the kernel's overflow list
+// Returns false if the ring can't be made. Kernels newer than 6.8 charge ring memory to RLIMIT_MEMLOCK (8 MB under
+// systemd), so the completion queue halves until it fits, and a ring that doesn't fit at all is one ring less.
+- (bool)setupRing:(int)k TD_DIRECT {
     TDRingState *rs = &R[k];
+    rs->rq = malloc(sizeof(uint32_t) * slots);
     struct io_uring_params p;
-    memset(&p, 0, sizeof p);
-    // Ring 0 is the one we wait on: completions run as deferred task work in
-    // batches. The other rings post completions directly so that ring 0's poll
-    // on their fds sees them.
-    p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
-    if (k == 0) p.flags |= IORING_SETUP_DEFER_TASKRUN;
-    p.cq_entries = 16384;
-    int ret = io_uring_queue_init_params(4096, &rs->ring, &p);
-    if (ret < 0) {
+    int ret = -ENOMEM;
+    for (unsigned cq = (unsigned)td_opt_cq; cq >= 4096 && ret == -ENOMEM; cq /= 2) {
         memset(&p, 0, sizeof p);
-        p.flags = IORING_SETUP_CQSIZE;
-        p.cq_entries = 16384;
+        // Completions run as deferred task work, in batches, when the loop enters the ring. Task work that isn't deferred
+        // runs on every return to user space, an interrupt's included, so a few completions at a time.
+        p.flags = IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_COOP_TASKRUN | IORING_SETUP_SUBMIT_ALL | IORING_SETUP_CQSIZE;
+        if (k == 0 || td_opt_rdefer) p.flags |= IORING_SETUP_DEFER_TASKRUN;
+        p.cq_entries = cq;
         ret = io_uring_queue_init_params(4096, &rs->ring, &p);
     }
-    if (ret < 0) { fprintf(stderr, "io_uring_queue_init: %s\n", strerror(-ret)); exit(1); }
+    if (ret < 0 && k == 0) {
+        memset(&p, 0, sizeof p);
+        p.flags = IORING_SETUP_CQSIZE;
+        p.cq_entries = 4096;
+        ret = io_uring_queue_init_params(4096, &rs->ring, &p);
+    }
+    if (ret < 0) { fprintf(stderr, "io_uring_queue_init(ring %d): %s\n", k, strerror(-ret)); return false; }
     ret = io_uring_register_files_sparse(&rs->ring, slots);
-    if (ret < 0) { fprintf(stderr, "register_files_sparse(%u): %s\n", slots, strerror(-ret)); exit(1); }
+    if (ret < 0) { fprintf(stderr, "register_files_sparse(%u): %s\n", slots, strerror(-ret)); io_uring_queue_exit(&rs->ring); return false; }
     rs->br = setup_buf_ring(&rs->ring, k);
-    rs->bufs = mmap(NULL, (size_t)BUF_SIZE * BUF_COUNT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (rs->bufs == MAP_FAILED) { perror("mmap bufs"); exit(1); }
+    if (!rs->br) { io_uring_queue_exit(&rs->ring); return false; }
+    rs->bufs = td_huge((size_t)BUF_SIZE * BUF_COUNT);
+    if (!rs->bufs) { io_uring_queue_exit(&rs->ring); return false; }
     rs->brMask = io_uring_buf_ring_mask(BUF_COUNT);
     for (uint32_t i = 0; i < BUF_COUNT; i++)
         io_uring_buf_ring_add(rs->br, rs->bufs + (size_t)i * BUF_SIZE, BUF_SIZE, (unsigned short)i, rs->brMask, (int)i);
     io_uring_buf_ring_advance(rs->br, BUF_COUNT);
+    return true;
 }
 
 TD_INLINE void buf_recycle(TDRingState *rs, uint32_t bid) {
@@ -303,6 +341,21 @@ TD_INLINE void buf_recycle(TDRingState *rs, uint32_t bid) {
 
 TD_INLINE void arm_recv(TDWorker *w, TDConn *c, uint32_t slot) {
     struct io_uring_sqe *s = sqe_get(ring_of(w, slot));
+    if (td_opt_rpoll) {
+        if (!c->pollArmed) {
+            io_uring_prep_poll_multishot(s, fslot(w, slot), POLLIN);
+            s->flags |= IOSQE_FIXED_FILE;
+            io_uring_sqe_set_data64(s, UD(UD_RPOLL, slot, c->gen));
+            c->pollArmed = true;
+        } else {
+            io_uring_prep_recv(s, fslot(w, slot), NULL, 0, MSG_DONTWAIT);
+            s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
+            s->buf_group = BUF_GROUP;
+            io_uring_sqe_set_data64(s, UD(UD_RECV, slot, c->gen));
+        }
+        c->recvArmed = true;
+        return;
+    }
     io_uring_prep_recv_multishot(s, fslot(w, slot), NULL, 0, 0);
     s->flags |= IOSQE_FIXED_FILE | IOSQE_BUFFER_SELECT;
     s->buf_group = BUF_GROUP;
@@ -313,14 +366,14 @@ TD_INLINE void arm_recv(TDWorker *w, TDConn *c, uint32_t slot) {
 TD_INLINE void pool_take(TDWorker *w, TDBuf *b) {
     if (b->p) return;
     if (w->npool) b->p = w->pool[--w->npool];
-    else b->p = malloc(POOL_CAP);
-    b->cap = POOL_CAP;
+    else b->p = malloc(td_opt_poolcap);
+    b->cap = td_opt_poolcap;
     b->len = 0;
 }
 
 TD_INLINE void pool_give(TDWorker *w, TDBuf *b) {
     if (!b->p) return;
-    if (b->cap == POOL_CAP && w->npool < POOL_MAX) w->pool[w->npool++] = b->p;
+    if (b->cap == td_opt_poolcap && w->npool < td_opt_poolmax) w->pool[w->npool++] = b->p;
     else free(b->p);
     b->p = NULL;
     b->len = b->cap = 0;
@@ -338,6 +391,13 @@ TD_INLINE void pool_give(TDWorker *w, TDBuf *b) {
         io_uring_prep_shutdown(s, fslot(self, slot), SHUT_RDWR);
         s->flags |= IOSQE_FIXED_FILE | IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
         io_uring_sqe_set_data64(s, UD(UD_CLOSE, slot, 0xFFFFFF));
+    }
+    if (c->pollArmed) {
+        s = sqe_get(ring_of(self, slot));
+        io_uring_prep_poll_remove(s, UD(UD_RPOLL, slot, c->gen));
+        s->flags |= IOSQE_CQE_SKIP_SUCCESS;
+        io_uring_sqe_set_data64(s, UD(UD_CLOSE, slot, 0xFFFFFF));
+        c->pollArmed = false;
     }
     s = sqe_get(ring_of(self, slot));
     io_uring_prep_close_direct(s, (unsigned)fslot(self, slot));
@@ -357,7 +417,7 @@ TD_INLINE void pool_give(TDWorker *w, TDBuf *b) {
     c->wire = c->out;
     c->out = t;
     c->out.len = 0;
-    if (c->out.p && c->out.cap != POOL_CAP) pool_give(self, &c->out);
+    if (c->out.p && c->out.cap != td_opt_poolcap) pool_give(self, &c->out);
     c->wireOff = 0;
     c->sending = true;
     struct io_uring_sqe *s = sqe_get(ring_of(self, slot));
@@ -369,8 +429,14 @@ TD_INLINE void pool_give(TDWorker *w, TDBuf *b) {
 // ---------------------------------------------------------------- HTTP parsing
 TD_INLINE TDReq *new_req(TDWorker *w, uint32_t slot, TDConn *c, bool close) {
     if (TD_UNLIKELY(w->nreq == w->reqCap)) {
-        w->reqCap *= 2;
-        w->reqs = realloc(w->reqs, sizeof(TDReq) * w->reqCap);
+        if (w->reqHead > w->reqCap / 2) {    // room at the front: move down instead of growing
+            memmove(w->reqs, w->reqs + w->reqHead, sizeof(TDReq) * (w->nreq - w->reqHead));
+            w->nreq -= w->reqHead;
+            w->reqHead = 0;
+        } else {
+            w->reqCap *= 2;
+            w->reqs = realloc(w->reqs, sizeof(TDReq) * w->reqCap);
+        }
     }
     TDReq *r = &w->reqs[w->nreq++];
     r->slot = slot;
@@ -378,11 +444,9 @@ TD_INLINE TDReq *new_req(TDWorker *w, uint32_t slot, TDConn *c, bool close) {
     r->close = close;
     r->route = R_ERR;
     r->held = 0;
+    r->ms = w->passMs;
     r->msg = NULL;
-    if (!c->inBatch) {
-        c->inBatch = true;
-        w->dirty[w->ndirty++] = slot;
-    }
+    c->queued++;
     return r;
 }
 
@@ -429,13 +493,24 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
     arena.len += (uint32_t)len;
 }
 
+// First "\r\n\r\n" in p[0..n), like memmem, but stepping by memchr (SIMD) from one '\r' to the next.
+static const char *find_crlf2(const char *p, uint32_t n) {
+    if (n < 4) return NULL;
+    const char *q = p, *last = p + n - 3;    // a match starts before last
+    while (q < last && (q = memchr(q, '\r', (size_t)(last - q)))) {
+        if (q[1] == '\n' && q[2] == '\r' && q[3] == '\n') return q;
+        q++;
+    }
+    return NULL;
+}
+
 // Parses complete requests from d[0..n). Returns bytes consumed, or -1 to drop the connection.
 - (int)parse:(TDConn *)c slot:(uint32_t)slot data:(const char *)d length:(uint32_t)n TD_DIRECT {
     uint32_t off = 0;
     while (off < n) {
         const char *p = d + off;
         uint32_t avail = n - off;
-        const char *he = memmem(p, avail, "\r\n\r\n", 4);
+        const char *he = find_crlf2(p, avail);
         if (!he) {
             if (avail > MAX_REQ) return -1;
             break;
@@ -552,82 +627,143 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
 // Runs the batch in one transaction. During a WAL hold (see the checkpointer
 // below) writes wait: a write, and every later request on its connection, stays
 // at the front of the batch for the next flush, while reads are answered.
+- (void)answer:(TDReq *)r conn:(TDConn *)c TD_DIRECT {
+    if (r->held) c->held--;
+    c->queued--;
+    body.len = 0;
+    int st2 = imps[r->route](handlers[r->route], handleSel, r, self, &body);
+    uint32_t sl;
+    const char *line = status_line(st2, &sl);
+    pool_take(self, &c->out);
+    TDBuf *o = &c->out;
+    td_buf_reserve(o, sl + 96 + body.len);
+    memcpy(o->p + o->len, line, sl);
+    o->len += sl;
+    td_buf_lit(o, "Content-Type: application/json\r\nContent-Length: ");
+    o->len += td_utoa(o->p + o->len, body.len);
+    if (r->close) td_buf_lit(o, "\r\nConnection: close\r\n\r\n");
+    else td_buf_lit(o, "\r\n\r\n");
+    memcpy(o->p + o->len, body.p, body.len);
+    o->len += body.len;
+    if (!c->inDirty) { c->inDirty = true; dirty[ndirty++] = r->slot; }
+}
+
 - (void)flush TD_DIRECT {
     TDStore *st = store;
     uptime = now - started;
-    bool hold = ckHold;
+    // Group commit window: a commit's WAL frames are the pages its writes dirtied, and the hot ones (the table's last leaf,
+    // the feed index's first leaf) are in every commit. So more writes per commit means fewer frames per write, fewer
+    // pwrites, and less for the checkpointer to copy. Reads don't wait for this.
+    bool wwin = td_opt_wwin && (uint32_t)(passMs - lastWriteMs) < td_opt_wwin;
+    bool hold = ckHold || wwin, oneWrite = ckRewind && td_opt_onewrite && !hold;
     bool db = false;
-    for (uint32_t i = 0; i < nreq; i++) if (reqs[i].route != R_ERR) { db = true; break; }
+    uint32_t first = reqHead, budget = td_opt_answers ? td_opt_answers : UINT32_MAX, last = nreq;
+    if (last - first > budget) last = first + budget;   // only a first look: routes only
+    // A request answered more than 40 ms after it arrived has cost the kernel a delayed-ACK timer and a bare ACK, about
+    // a fifth more CPU per request. In a backlog, oldest-first makes every newcomer wait that long too, and the extra
+    // CPU keeps the backlog alive. So past one pass of backlog the newest go first. The requests at the old end wait
+    // for spare capacity, and from --lifoage on they get a share of the pass (half, then all of it at twice that age),
+    // so waiting has a bound however long a backlog lasts. A connection's own requests keep their order.
+    bool lifo = td_opt_lifo && nreq - first > budget;
+    uint32_t oldShare = budget;
+    if (lifo) {
+        uint32_t age = passMs - reqs[first].ms, a = td_opt_lifoage;
+        oldShare = budget * (age >= a * 2 ? 8 : age >= a ? td_opt_lifocap : td_opt_lifomin) / 8;
+    }
+    if (hold || lifo) db = true;
+    else for (uint32_t i = first; i < last; i++) if (reqs[i].route != R_ERR) { db = true; break; }
     bool wrote = false;
-    uint32_t nheld = 0;
-    harena.len = 0;
+    uint32_t nheld = 0, ntail = 0, answered = 0, i = first;
     pthread_mutex_lock(&st->lock);
     bool txn = db && [st begin];
-    for (uint32_t i = 0; i < nreq; i++) {
+    // Answers are capped per pass: a request already read costs its record here, one left unread in its socket costs a
+    // 3-4 KB network buffer, so reading goes on while a pass stays short.
+    for (; i < nreq && answered < budget; i++) {
         TDReq *r = &reqs[i];
+        if (lifo && answered >= oldShare) break;
         TDConn *c = conn_at(self, r->slot);
-        if (c->gen != r->gen || (!c->live && !c->closeAfter)) continue;
-        if (TD_UNLIKELY(hold) && (r->held || c->held || r->route == R_CREATE || r->route == R_LIKE)) {
+        if (c->gen != r->gen) continue;
+        if (!c->live && !c->closeAfter) { c->queued--; continue; }
+        // SQLite truncates the WAL at the end of the first commit after a rewind, so that commit's frames still overwrite
+        // old file pages, and each one reclaim has evicted is read from disk first. So it carries one write, not a batch.
+        bool isWrite = r->route == R_CREATE || r->route == R_LIKE;
+        if (TD_UNLIKELY(oneWrite) && isWrite) { oneWrite = false; hold = true; }   // this one goes, later writes wait
+        else if (TD_UNLIKELY(hold) && (r->held || c->held || isWrite)) {
             if (!r->held) { r->held = 1; c->held++; }
             if (nheld == hcap) { hcap = hcap ? hcap * 2 : 256; hreqs = realloc(hreqs, sizeof(TDReq) * hcap); }
-            TDReq *h = &hreqs[nheld++];
-            *h = *r;
-            if (r->route == R_CREATE) {    // its strings move to the next batch's arena
-                h->nameOff = harena.len;
-                td_buf_put(&harena, arena.p + r->nameOff, r->nameLen);
-                h->bodyOff = harena.len;
-                td_buf_put(&harena, arena.p + r->bodyOff, r->bodyLen);
-            }
+            hreqs[nheld++] = *r;
             continue;
         }
-        if (r->held) c->held--;
-        body.len = 0;
-        int st2 = imps[r->route](handlers[r->route], handleSel, r, self, &body);
-        if (r->route == R_CREATE || r->route == R_LIKE) wrote = true;
-        uint32_t sl;
-        const char *line = status_line(st2, &sl);
-        pool_take(self, &c->out);
-        TDBuf *o = &c->out;
-        td_buf_reserve(o, sl + 96 + body.len);
-        memcpy(o->p + o->len, line, sl);
-        o->len += sl;
-        td_buf_lit(o, "Content-Type: application/json\r\nContent-Length: ");
-        o->len += td_utoa(o->p + o->len, body.len);
-        if (r->close) td_buf_lit(o, "\r\nConnection: close\r\n\r\n");
-        else td_buf_lit(o, "\r\n\r\n");
-        memcpy(o->p + o->len, body.p, body.len);
-        o->len += body.len;
+        [self answer:r conn:c];
+        answered++;
+        if (isWrite) { wrote = true; ckRewind = false; }
     }
+    if (lifo) {
+        uint32_t k = nreq;
+        for (; k > i && answered < budget; k--) {
+            TDReq *r = &reqs[k - 1];
+            TDConn *c = conn_at(self, r->slot);
+            if (c->gen != r->gen) continue;
+            if (!c->live && !c->closeAfter) { c->queued--; continue; }
+            if (c->queued > 1) break;              // pipelined: its older request goes first
+            bool isWrite = r->route == R_CREATE || r->route == R_LIKE;
+            if (TD_UNLIKELY(oneWrite) && isWrite) { oneWrite = false; hold = true; }
+            else if (TD_UNLIKELY(hold) && (r->held || isWrite)) {
+                if (!r->held) { r->held = 1; c->held++; }
+                if (ntail == tcap) { tcap = tcap ? tcap * 2 : 256; treqs = realloc(treqs, sizeof(TDReq) * tcap); }
+                treqs[ntail++] = *r;
+                continue;
+            }
+            [self answer:r conn:c];
+            answered++;
+            if (isWrite) { wrote = true; ckRewind = false; }
+        }
+        nreq = k;
+    }
+    if (wrote) lastWriteMs = passMs;
+    nHeldNow = nheld + ntail;
     bool ok = true;
     if (txn && ![st commit]) { ok = false; [st rollback]; }
     pthread_mutex_unlock(&st->lock);
     if (!ok && wrote) {
         // never acknowledge an uncommitted write: drop every connection of this batch
-        for (uint32_t i = 0; i < ndirty; i++) {
-            TDConn *c = conn_at(self, dirty[i]);
+        for (uint32_t d = 0; d < ndirty; d++) {
+            TDConn *c = conn_at(self, dirty[d]);
             c->out.len = 0;
-            [self drop:c slot:dirty[i]];
+            [self drop:c slot:dirty[d]];
         }
     }
-    uint32_t keep = 0;
-    for (uint32_t i = 0; i < ndirty; i++) {
-        uint32_t slot = dirty[i];
+    for (uint32_t d = 0; d < ndirty; d++) {
+        uint32_t slot = dirty[d];
         TDConn *c = conn_at(self, slot);
-        if (c->held && (c->live || c->closeAfter)) {        // still has held requests: stays in the batch, not closed
-            dirty[keep++] = slot;
-            if (c->out.len && !c->sending) [self startSend:c slot:slot];
-            continue;
-        }
-        c->held = 0;
-        c->inBatch = false;
+        c->inDirty = false;
         if (c->out.len && !c->sending) [self startSend:c slot:slot];
-        else if (!c->live && !c->sending && c->closeAfter) { c->closeAfter = false; [self submitClose:c slot:slot]; }
+        else if (!c->queued && !c->live && !c->sending && c->closeAfter) { c->closeAfter = false; [self submitClose:c slot:slot]; }
+        if (!c->queued) c->held = 0;
     }
-    if (nheld) memcpy(reqs, hreqs, sizeof(TDReq) * nheld);
-    nreq = nheld;
-    ndirty = keep;
-    arena.len = 0;
-    if (harena.len) td_buf_put(&arena, harena.p, harena.len);
+    ndirty = 0;
+    // Writes held by a checkpoint go back in front of what wasn't looked at, in order.
+    if (nheld) memcpy(reqs + i - nheld, hreqs, sizeof(TDReq) * nheld);
+    reqHead = i - nheld;
+    if (ntail) { memcpy(reqs + nreq, treqs, sizeof(TDReq) * ntail); nreq += ntail; }   // the tail walk freed their places
+    if (reqHead == nreq) {
+        reqHead = nreq = 0;
+        arena.len = 0;
+    } else if (TD_UNLIKELY(arena.len > (16u << 20))) {
+        // A backlog that never empties: keep only the bodies still waiting.
+        harena.len = 0;
+        for (uint32_t k = reqHead; k < nreq; k++) {
+            TDReq *r = &reqs[k];
+            if (r->route != R_CREATE) continue;
+            uint32_t nameAt = harena.len;
+            td_buf_put(&harena, arena.p + r->nameOff, r->nameLen);
+            uint32_t bodyAt = harena.len;
+            td_buf_put(&harena, arena.p + r->bodyOff, r->bodyLen);
+            r->nameOff = nameAt;
+            r->bodyOff = bodyAt;
+        }
+        TDBuf t = arena; arena = harena; harena = t;
+    }
 }
 
 // ---------------------------------------------------------------- completions
@@ -643,6 +779,22 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
         uint32_t bid = flags >> IORING_CQE_BUFFER_SHIFT;
         TDRingState *rs = &R[k];
         if (c->gen != UD_GEN(ud)) { if (hasBuf) buf_recycle(rs, bid); break; }
+        if (td_opt_rpoll) {
+            if (res > 0) {
+                if (c->live) [self onData:c slot:slot data:rs->bufs + (size_t)bid * BUF_SIZE length:(uint32_t)res];
+                buf_recycle(rs, bid);
+                if (c->live && ((flags & IORING_CQE_F_SOCK_NONEMPTY) || res == BUF_SIZE || !c->pollArmed)) arm_recv(self, c, slot);
+            } else if (res == -ENOBUFS) {
+                nobufs++;
+                if (c->live && !c->needRearm) {
+                    c->needRearm = true;
+                    c->recvArmed = false;
+                    rs->rq[(rs->rqHead + rs->rqLen++) % slots] = slot;
+                    nrearm++;
+                }
+            } else if (res != -EAGAIN && c->live) [self drop:c slot:slot];
+            break;
+        }
         if (!(flags & IORING_CQE_F_MORE)) c->recvArmed = false;
         if (res > 0) {
             if (c->live) [self onData:c slot:slot data:rs->bufs + (size_t)bid * BUF_SIZE length:(uint32_t)res];
@@ -650,11 +802,23 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
             if (!c->recvArmed && c->live) arm_recv(self, c, slot);
         } else if (res == -ENOBUFS) {
             nobufs++;
-            if (c->live && !c->needRearm) { c->needRearm = true; rearm[nrearm++] = slot; }
+            if (c->live && !c->needRearm) {
+                c->needRearm = true;
+                rs->rq[(rs->rqHead + rs->rqLen++) % slots] = slot;
+                nrearm++;
+            }
         } else {
             if (c->live) [self drop:c slot:slot];
             else if (!c->sending && !c->closeAfter) { /* already closing */ }
         }
+        break;
+    }
+    case UD_RPOLL: {
+        TDConn *c = conn_at(self, slot);
+        if (c->gen != UD_GEN(ud)) break;
+        if (!(flags & IORING_CQE_F_MORE)) c->pollArmed = false;
+        if (res > 0 && c->live) arm_recv(self, c, slot);
+        else if (res < 0 && res != -ECANCELED && c->live) [self drop:c slot:slot];
         break;
     }
     case UD_SEND: {
@@ -672,12 +836,12 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
         c->wire.len = 0;
         if (res <= 0) { c->live = false; c->closeAfter = true; }
         if (c->closeAfter) {
-            if (c->inBatch) break;           // flush() closes it after this batch
+            if (c->queued) break;            // flush() closes it after its last answer
             c->closeAfter = false;
             c->live = false;
             [self submitClose:c slot:slot];
         } else if (c->out.len) {
-            if (!c->inBatch) [self startSend:c slot:slot];
+            [self startSend:c slot:slot];    // no flush runs here: what is in out is committed
         } else pool_give(self, &c->wire);
         break;
     }
@@ -692,6 +856,7 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
                 if (q >= 0) [self armAccept:q];
             }
         }
+        if (res < 0) { accErr++; lastAccErr = res; }
         if (res >= 0) {
             uint32_t cid = (uint32_t)k * slots + (uint32_t)res;
             TDConn *c = conn_at(self, cid);
@@ -732,6 +897,30 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
     }
 }
 
+// Admission control. A new connection costs about as much CPU as two requests (handshake, sockets, accept, first read),
+// and when requests are already waiting that CPU comes out of the requests being served. So while a backlog stands the
+// server stops accepting: the listen queue fills, the kernel drops further SYNs at little cost, and clients retry them.
+// Established connections keep all the CPU. The backlog ends, and accept comes back, within passes.
+- (void)gateCheck TD_DIRECT {
+    uint32_t waiting = nreq - reqHead;
+    if (gateRing < 0) {
+        if (waiting <= td_opt_gate * td_opt_answers) return;
+        for (int k = 0; k < nrings; k++) {
+            if (!R[k].acceptArmed) continue;
+            struct io_uring_sqe *cs = sqe_get(&R[k].ring);
+            io_uring_prep_cancel64(cs, UD(UD_ACCEPT, k, 0), 0);
+            io_uring_sqe_set_data64(cs, UD(UD_CLOSE, 0, 0xFFFFFF));
+            gateRing = k;
+            gates++;
+            return;
+        }
+    } else if (waiting <= td_opt_answers / 2 && !R[gateRing].acceptArmed) {
+        int q = [self acceptTarget];
+        gateRing = -1;
+        if (q >= 0 && ![self acceptArmedAnywhere]) [self armAccept:q];
+    }
+}
+
 - (void)reap:(int)k TD_DIRECT {
     struct io_uring *r = &R[k].ring;
     unsigned head, n = 0;
@@ -743,17 +932,20 @@ TD_INLINE void req_err(TDReq *r, int st, const char *msg) {
     io_uring_cq_advance(r, n);
 }
 
-extern int td_opt_ckpt;
+// --ckpass=N: new WAL frames between passive passes in the checkpointer process. Each pass costs a WAL read, the
+// page writes and two fsyncs in the server's own CPU budget, and a page rewritten many times between passes is copied
+// once, so passes are far apart (250, the in-loop autocheckpoint's value, cost ~5% more CPU per request).
+int td_opt_ckpass = 2000;
 int td_opt_hold = 8192;   // --hold=N: WAL frames at which writes wait for one checkpoint pass so the WAL rewinds
 
 static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
 // ---------------------------------------------------------------- checkpointer
 // A child process runs PASSIVE checkpoints (copy + 2 fsyncs) so the loop never
-// waits on them. The loop asks for a pass every td_opt_ckpt new frames. Under
+// waits on them. The loop asks for a pass every td_opt_ckpass new frames. Under
 // constant writes a pass never ends with the WAL fully copied, so the WAL can't
-// rewind; past td_opt_hold frames the loop stops flushing (requests queue up)
-// for one pass, after which the next write rewinds the WAL.
+// rewind; past td_opt_hold frames writes wait (reads are still answered) for one
+// pass, after which the next write rewinds the WAL.
 - (void)ckptGone TD_DIRECT {
     if (ckReq >= 0) close(ckReq);
     ckReq = -1;
@@ -784,7 +976,7 @@ static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
         if (!ckBusy) [self ckptRequest];
         return;
     }
-    if (!ckBusy && f - ckBackfilled >= td_opt_ckpt) [self ckptRequest];
+    if (!ckBusy && f - ckBackfilled >= td_opt_ckpass) [self ckptRequest];
 }
 
 - (void)ckptDone:(int)res TD_DIRECT {
@@ -793,54 +985,127 @@ static double mono_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &
     if (ckRes[0] == SQLITE_OK && ckRes[2] >= 0) ckBackfilled = ckRes[2];
     if (ckHold) {
         if (store->walFrames != ckFrom) [self ckptRequest];   // frames were added during the pass: one more
-        else { ckHold = false; if (getenv("TD_CKLOG")) fprintf(stderr, "hold %.1f ms frames %d rc %d log %d ck %d nobufs %llu\n", (mono_s() - ckHoldT) * 1e3, store->walFrames, ckRes[0], ckRes[1], ckRes[2], (unsigned long long)nobufs); }
+        else { ckHold = false; ckRewind = true; if (getenv("TD_CKLOG")) fprintf(stderr, "hold %.1f ms frames %d rc %d log %d ck %d nobufs %llu\n", (mono_s() - ckHoldT) * 1e3, store->walFrames, ckRes[0], ckRes[1], ckRes[2], (unsigned long long)nobufs); }
     }
     if (ckReq >= 0) [self ckptArmRead];
 }
 
 int td_opt_batch = 128, td_opt_bwait = 1000, td_opt_bthresh = 8;   // --batch=N --bwait=us --bthresh=N
 
+// TD_STATS=1: one line a second with what the accept side and the completion queues saw.
+- (void)stats:(bool)final TD_DIRECT {
+    uint32_t live = 0, dropped = 0;
+    for (int k = 0; k < nrings; k++) { live += R[k].live; if (R[k].active) dropped += *R[k].ring.cq.koverflow; }
+    fprintf(stderr, "stats%s t=%lld live=%u accErr=%llu last=%d cqOvfPasses=%llu cqDropped=%u nobufs=%llu armed=%d rq=%u maxBatch=%llu npool=%u cacheKB=%d miss=%d\n",
+            final ? "-final" : "", (long long)(now - started), live, (unsigned long long)accErr, lastAccErr,
+            (unsigned long long)cqOvf, dropped, (unsigned long long)nobufs, (int)[self acceptArmedAnywhere], nrearm, (unsigned long long)maxBatch, npool, [store cacheStat:0], [store cacheStat:1]);
+    fprintf(stderr, " phases enter=%.3f reap=%.3f flush=%.3f passes=%llu ans=%llu loops=%llu work=%llu ready=%llu timed=%llu etime=%llu tTimed=%.3f\n", tEnter, tReap, tFlush, (unsigned long long)nPass, (unsigned long long)nAns, (unsigned long long)nLoop, (unsigned long long)nWork, (unsigned long long)nReady, (unsigned long long)nTimed, (unsigned long long)nEtime, tTimed);
+    nLoop = nWork = nReady = nTimed = nEtime = 0; tTimed = 0;
+    tEnter = tReap = tFlush = 0; nPass = nAns = 0;
+    maxBatch = 0;
+}
+
 - (void)run {
-    uint32_t lastReq = 0;
-    for (int k = 0; k < nrings; k++) [self setupRing:k];
+    statsOn = getenv("TD_STATS") != NULL;
+    uint32_t lastReq = 0, idlePasses = 0;
+    for (int k = 0; k < nrings; k++)
+        if (![self setupRing:k]) {
+            if (k == 0) exit(1);
+            fprintf(stderr, "serving on %d rings\n", k);
+            nrings = k;
+            break;
+        }
+    if (td_opt_lock) td_lock_code();
     [self armAccept:0];
     if (ckReq >= 0) [self ckptArmRead];
     for (;;) {
-        for (int k = 1; k < nrings; k++)
-            if (R[k].active && io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
+        double t0 = 0, t1 = 0, t2 = 0, t3 = 0;
+        if (TD_UNLIKELY(statsOn)) t0 = mono_s();
+        bool others = false, ready = false;
+        for (int k = 1; k < nrings; k++) {
+            if (!R[k].active) continue;
+            others = true;
+            if (td_opt_rdefer) {
+                // Sends go out, and this ring's completions run now. It isn't entered again until the next pass.
+                io_uring_submit_and_get_events(&R[k].ring);
+                if (io_uring_cq_ready(&R[k].ring)) ready = true;
+            } else if (io_uring_sq_ready(&R[k].ring)) io_uring_submit(&R[k].ring);
+        }
+        others = others && td_opt_rdefer;
         int ret;
+        double tw0 = 0; if (TD_UNLIKELY(statsOn)) { tw0 = mono_s(); nLoop++; }
         // Under load, wait a little for more completions: bigger batches mean
         // fewer io_uring_enter calls, one commit for more writes, warmer caches.
-        if (td_opt_batch > 1 && lastReq >= td_opt_bthresh) {
-            struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = (long long)td_opt_bwait * 1000 };
+        if ((nreq > reqHead + nHeldNow && !ckHold) || (ready && td_opt_ready)) { if (TD_UNLIKELY(statsOn)) { if (nreq > reqHead + nHeldNow && !ckHold) nWork++; else nReady++; } ret = io_uring_submit_and_get_events(&R[0].ring); }   // work is waiting: no pause
+        else if (td_opt_batch > 1 && (lastReq >= td_opt_bthresh || nrearm || others || nHeldNow)) {
+            // Only the wait on ring 0 sleeps, so with other rings in use it always has a time limit, longer when nothing comes.
+            long long us = others && idlePasses > 64 ? 5000 : td_opt_bwait;
+            struct __kernel_timespec ts = { .tv_sec = 0, .tv_nsec = us * 1000 };
             struct io_uring_cqe *cq;
             ret = io_uring_submit_and_wait_timeout(&R[0].ring, &cq, (unsigned)td_opt_batch, &ts, NULL);
+            if (TD_UNLIKELY(statsOn)) { nTimed++; tTimed += mono_s() - tw0; if (ret == -ETIME) nEtime++; }
         } else ret = io_uring_submit_and_wait(&R[0].ring, 1);
         if (ret < 0 && ret != -EINTR && ret != -ETIME && ret != -EBUSY && ret != -EAGAIN) {
-            fprintf(stderr, "io_uring_submit_and_wait: %s\n", strerror(-ret));
-            exit(1);
+            // Never exit here: a dead process leaves no listener, and every later connect is refused. Under memory
+            // pressure the kernel can fail to queue an overflowing completion (-EBADR: CQEs were dropped) or to
+            // allocate (-ENOMEM); the loop goes on with what it has, backing off briefly if the error repeats.
+            if (waitErrs++ < 20 || !(waitErrs & 1023)) {
+                fprintf(stderr, "io_uring_submit_and_wait: %s (%llu)\n", strerror(-ret), (unsigned long long)waitErrs);
+                if (statsOn) [self stats:true];
+            }
+            if (ret != -EBADR) usleep(1000);
         }
+        if (TD_UNLIKELY(statsOn)) t1 = mono_s();
         now = time(NULL);
+        struct timespec mts;
+        clock_gettime(CLOCK_MONOTONIC_COARSE, &mts);
+        passMs = (uint32_t)((uint64_t)mts.tv_sec * 1000 + (uint64_t)mts.tv_nsec / 1000000);
         for (int k = 0; k < nrings; k++) if (k == 0 || R[k].active) [self reap:k];
-        lastReq = nreq;
+        if (TD_UNLIKELY(statsOn)) {
+            t2 = mono_s();
+            for (int k = 0; k < nrings; k++)
+                if (R[k].active && (IO_URING_READ_ONCE(*R[k].ring.sq.kflags) & IORING_SQ_CQ_OVERFLOW)) cqOvf++;
+            if (now != lastStats) { lastStats = now; [self stats:false]; }
+        }
+        lastReq = nreq - reqHead;
+        if (lastReq > maxBatch) maxBatch = lastReq;
+        idlePasses = lastReq ? 0 : idlePasses + 1;
         if (TD_UNLIKELY(ckHold) && mono_s() - ckHoldT > 0.25) {   // child stuck: don't wait longer
             ckHold = false;
             if (getenv("TD_CKLOG")) fprintf(stderr, "hold timeout frames %d\n", store->walFrames);
         }
-        if (nreq) { [self flush]; [self ckptAfterFlush]; }
+        if (nreq > reqHead) {
+            uint32_t before = nreq - reqHead;
+            [self flush];
+            if (TD_UNLIKELY(statsOn)) { nAns += before - (nreq - reqHead); nPass++; t3 = mono_s(); tEnter += t1 - t0; tReap += t2 - t1; tFlush += t3 - t2; }
+            [self ckptAfterFlush];
+        } else if (TD_UNLIKELY(statsOn)) { tEnter += t1 - t0; tReap += t2 - t1; }
+        if (td_opt_gate) [self gateCheck];
         if (nrearm) {
-            for (uint32_t i = 0; i < nrearm; i++) {
-                TDConn *c = conn_at(self, rearm[i]);
-                c->needRearm = false;
-                if (c->live && !c->recvArmed) arm_recv(self, c, rearm[i]);
+            // A burst empties the buffer ring and ends every other armed receive with ENOBUFS. Each socket still has
+            // its request queued, so re-arming them all at once only ends them again. A pass re-arms what the ring's
+            // buffers can take, oldest first; the rest wait a pass, holding no buffer. (#245 and #264 describe this
+            // storm running a 2 GB box out of memory.)
+            for (int k = 0; k < nrings; k++) {
+                TDRingState *rs = &R[k];
+                uint32_t n = rs->rqLen;
+                if (td_opt_rearm && n > (uint32_t)td_opt_rearm) n = (uint32_t)td_opt_rearm;
+                for (uint32_t i = 0; i < n; i++) {
+                    uint32_t cid = rs->rq[rs->rqHead];
+                    rs->rqHead = (rs->rqHead + 1) % slots;
+                    TDConn *c = conn_at(self, cid);
+                    c->needRearm = false;
+                    if (c->live && !c->recvArmed) arm_recv(self, c, cid);
+                }
+                rs->rqLen -= n;
+                nrearm -= n;
             }
-            nrearm = 0;
         }
-        if (![self acceptArmedAnywhere]) {
+        if (gateRing < 0 && ![self acceptArmedAnywhere]) {   // the gate decides while it's closed
             int q = [self acceptTarget];
             if (q >= 0) [self armAccept:q];
         }
-        for (int k = 1; k < nrings; k++) {
+        for (int k = 1; k < nrings && !td_opt_rdefer; k++) {
             if (R[k].active && !R[k].pollArmed) {
                 struct io_uring_sqe *sq = sqe_get(&R[0].ring);
                 io_uring_prep_poll_multishot(sq, R[k].ring.ring_fd, POLLIN);

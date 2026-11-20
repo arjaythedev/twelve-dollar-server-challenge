@@ -713,7 +713,11 @@ static void emit_binop(Codegen *g, Expr *e, Buf *dst) {
     }
     switch (op) {
     case T_PLUS:
-        if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) + (%s))", ls, rs);
+        if (lt && lt->kind == TY_PTR && lt->elem) {
+            const char *pt = lt->elem->kind == TY_I8 ? "unsigned char" : ctype_of(lt->elem);
+            buf_printf(dst, "((%s*)(%s) + (%s))", pt, ls, rs);
+        }
+        else if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) + (%s))", ls, rs);
         else if (numeric) buf_printf(dst, "((%s) + (%s))", ls, rs);
         /* the runtime's hp_add keeps PHP semantics (numeric strings add as
          * numbers), so only project to hstr* when the node is typed string */
@@ -723,7 +727,11 @@ static void emit_binop(Codegen *g, Expr *e, Buf *dst) {
             buf_printf(dst, "hp_add(hv(%s), hv(%s))", ls, rs);
         break;
     case T_MINUS:
-        if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) - (%s))", ls, rs);
+        if (lt && lt->kind == TY_PTR && lt->elem) {
+            const char *pt = lt->elem->kind == TY_I8 ? "unsigned char" : ctype_of(lt->elem);
+            buf_printf(dst, "((%s*)(%s) - (%s))", pt, ls, rs);
+        }
+        else if (lt && lt->kind == TY_PTR) buf_printf(dst, "((char*)(%s) - (%s))", ls, rs);
         else if (numeric) buf_printf(dst, "((%s) - (%s))", ls, rs);
         else buf_printf(dst, "hpbi_scalar_sub(hv(%s), hv(%s))", ls, rs);
         break;
@@ -731,13 +739,20 @@ static void emit_binop(Codegen *g, Expr *e, Buf *dst) {
         if (numeric) buf_printf(dst, "((%s) * (%s))", ls, rs);
         else buf_printf(dst, "hpbi_scalar_mul(hv(%s), hv(%s))", ls, rs);
         break;
-    /* shifts: unbox both sides, since a string/mixed operand is converted by
-     * hp_val_to_int (PHP semantics); the node type is always int */
+    /* Integer shifts are common in typed unsafe record decoders. Keep them
+     * in C integer space instead of wrapping/unwrapping each operand as an
+     * hval. Dynamic and string operands still use PHP's int conversion. */
     case T_SHL:
-        buf_printf(dst, "(hp_val_to_int(hv(%s)) << hp_val_to_int(hv(%s)))", ls, rs);
+        if (lt && rt && type_is_integral(lt->kind) && type_is_integral(rt->kind))
+            buf_printf(dst, "((%s) << (%s))", ls, rs);
+        else
+            buf_printf(dst, "(hp_val_to_int(hv(%s)) << hp_val_to_int(hv(%s)))", ls, rs);
         break;
     case T_SHR:
-        buf_printf(dst, "(hp_val_to_int(hv(%s)) >> hp_val_to_int(hv(%s)))", ls, rs);
+        if (lt && rt && type_is_integral(lt->kind) && type_is_integral(rt->kind))
+            buf_printf(dst, "((%s) >> (%s))", ls, rs);
+        else
+            buf_printf(dst, "(hp_val_to_int(hv(%s)) >> hp_val_to_int(hv(%s)))", ls, rs);
         break;
     case T_SLASH:
         /* the fast path is plain double division; a string operand has to go
@@ -1165,35 +1180,74 @@ static void emit_builtin_call_body(Codegen *g, const char *name, PtrVec args,
     {
         static const struct { const char *name; const char *params; char ret; } T[] = {
             {"iarr_new",          "i",   'i'},
+            {"iarr_new_uninit",   "i",   'i'},
+            {"iarr_release",      "i",   'b'},
             {"iarr_get",          "ii",  'i'},
             {"iarr_set",          "iii", 'b'},
+            {"iarr_get_fast",     "ii",  'i'},
+            {"iarr_set_fast",    "iii", 'b'},
+            {"iarr_data_ptr",    "i",   'i'},
+            {"iarr_len",          "i",   'i'},
+            {"epoll_wait_iarr2",  "iii", 'b'},
             {"sb_new",           "",    'i'},
             {"sb_reserve",       "ii",  'b'},
+            {"sb_len",           "i",   'i'},
+            {"sb_data_ptr",      "i",   'i'},
+            {"sb_discard",       "i",   'b'},
+            {"sb_prepend",       "is",  'b'},
             {"sb_put",           "is",  'b'},
+            {"sb_bytes",         "iii", 'b'},
             {"sb_int",           "ii",  'b'},
             {"sb_json",          "iii", 'b'},
             {"sb_json_str",      "is",  'b'},
             {"sb_take",          "i",   's'},
+            {"stream_send_sb",   "ii",  'i'},
+            {"int_digits",       "i",   'i'},
+            {"jwt_verify",       "ssi", 's'},
+            {"jwt_verifier_new", "s",   's'},
+            {"jwt_verify_prepared", "ssi", 's'},
+            {"json_str_field",   "ss",  's'},
+            {"json_num_field",   "ss",  'i'},
             {"bt_last",          "i",   'i'},
             {"bt_first",         "i",   'i'},
             {"bt_prev",          "i",   'i'},
             {"bt_next",          "i",   'i'},
             {"bt_seek",          "ii",  'i'},
+            {"bt_multi_seek",    "iii", 'i'},
+            {"bt_tail",          "ii",  'i'},
+            {"bt_multi_payloads", "ii", 'b'},
+            {"bt_multi_keys",    "ii",  'i'},
+            {"bt_multi_release", "i",   'b'},
             {"bt_rowid",         "i",   'i'},
             {"bt_payload_ptr",   "i",   'i'},
             {"bt_payload_size",  "i",   'i'},
+            {"bt_payload_pin",   "i",   'i'},
+            {"bt_page_release",  "i",   'b'},
+            {"bt_cols",          "i",   'i'},
+            {"bt_col_off",       "i",   'i'},
+            {"bt_col_len",       "i",   'i'},
+            {"bt_col_int",       "i",   'i'},
+            {"bt_col_int_at",    "ii",  'i'},
+            {"bt_read",          "iii", 'i'},
             {"stream_send_nb",   "is",  'i'},
             {"stream_send2_nb",  "iss", 'i'},
             {"epoll_mod",        "ii",  'b'},
             {"nofile_limit",     "",    'i'},
+            {"runtime_stats",    "",    's'},
             {"uring_active",     "",    'b'},
+            {"uring_direct",     "",    'b'},
+            {"uring_direct_slots", "",  'i'},
             {"strlen",           "s",   'i'},
             {"str_at_eq",        "siis", 'b'},
             {"str_to_int",       "s",   'i'},
+            {"str_to_int_range", "sii", 'i'},
+            {"http_request_bounds", "s", 'i'},
+            {"str_find_range", "ssi", 'i'},
             {"strtolower",       "s",   's'},
             {"trim",             "s",   's'},
             {"substr",           "sii", 's'},
             {"stream_recv",      "ii",  's'},
+            {"stream_recv_release", "i", 'b'},
             {"sqlite_bind_int",  "iii", 'b'},
             {"sqlite_bind_text", "iis", 'b'},
             {"sqlite_step",      "i",   'i'},
@@ -2267,6 +2321,15 @@ static void emit_assign(Codegen *g, Expr *e, Buf *dst) {
         free(ix.data); free(o.data); free(v.data);
         return;
     }
+    if (tgt->kind == EX_DEREF && op == T_ASSIGN) {
+        Buf lval, value;
+        buf_init(&lval); buf_init(&value);
+        emit_expr(g, tgt, &lval);
+        emit_to_type(g, e->u.assign.value, tgt->type, &value);
+        buf_printf(dst, "(%s = %s)", buf_take(&lval), buf_take(&value));
+        free(lval.data); free(value.data);
+        return;
+    }
     if (tgt->kind == EX_FIELD) {
         StructField *sf = tgt->u.field.sf;
         Buf o, v;
@@ -3054,6 +3117,7 @@ static void emit_stmt(Codegen *g, Stmt *s) {
             line(g, "hp_echo(%s);", buf_take(&v));
             free(v.data);
         }
+        line(g, "hp_echo_newline();");
         break;
     }
     case ST_PRINT: {
@@ -3869,6 +3933,46 @@ static void collect_globals_stmt(PtrVec *syms, Stmt *s) {
     }
 }
 
+/* An auto array is normally initialized to a fresh empty value so that
+ * indexed writes have PHP-like behavior. If its first use is an explicit
+ * `$a = []`, that fresh value would be immediately overwritten. Detect this
+ * simple top-level case and start the C slot as NULL instead; the literal
+ * assignment initializes it before any later use. */
+static bool auto_array_starts_with_empty_assignment(AstFn *fn, VarSym *v) {
+    if (!fn || !v || !v->is_auto || !v->type ||
+        strcmp(ctype_of(v->type), "harr*") != 0) return false;
+    /* Function bodies are commonly wrapped in one ST_BLOCK node. Treat that
+     * wrapper as transparent; do not cross control-flow boundaries, where an
+     * assignment may be conditional. */
+    PtrVec *stmts = &fn->body;
+    if (stmts->len == 1 && stmts->items[0] &&
+        ((Stmt *)stmts->items[0])->kind == ST_BLOCK)
+        stmts = &((Stmt *)stmts->items[0])->u.block.stmts;
+    for (size_t i = 0; i < stmts->len; i++) {
+        Stmt *s = stmts->items[i];
+        PtrVec refs = {0};
+        collect_syms_stmt(&refs, s);
+        bool mentions = false;
+        for (size_t j = 0; j < refs.len; j++)
+            if (refs.items[j] == v) { mentions = true; break; }
+        free(refs.items);
+        if (!mentions) continue;
+        if (s->kind != ST_EXPR || !s->u.expr.expr ||
+            s->u.expr.expr->kind != EX_ASSIGN) {
+            return false;
+        }
+        Expr *a = s->u.expr.expr;
+        bool is_empty_init = a->u.assign.target &&
+               a->u.assign.target->kind == EX_VAR &&
+               a->u.assign.target->u.var.sym == v &&
+               a->u.assign.value &&
+               a->u.assign.value->kind == EX_ARRAY_LIT &&
+               a->u.assign.value->u.arr.elems.len == 0;
+        return is_empty_init;
+    }
+    return false;
+}
+
 /* Declare auto vars at fn top (C89-friendly, mirrors PHP hoisting). */
 static void emit_auto_decls(Codegen *g, AstFn *fn) {
     PtrVec syms = {0};
@@ -3888,8 +3992,10 @@ static void emit_auto_decls(Codegen *g, AstFn *fn) {
              * All frame accesses go through (*v). */
             line(g, "hval *%s = hp_box_new();", var_name(v));
         } else {
+            const char *init = auto_array_starts_with_empty_assignment(fn, v)
+                ? "NULL" : zero_init_decl_of(v->type);
             line(g, "%s %s = %s;", ctype_of(v->type),
-                 var_name(v), zero_init_decl_of(v->type));
+                 var_name(v), init);
         }
     }
     /* A by-value parameter that a closure captured by reference under its own

@@ -1,0 +1,357 @@
+{
+  "kernel": "Linux 6.8.0-147-generic, private loopback, zero effective capabilities",
+  "congestion_control": {
+    "measurement": "Server thread CPU in nanoseconds per send. Four independent pools of 1,024 established TCP connections; shuffled socket order, 35-byte requests, 220- or 3,720-byte replies, 32 fixed-file io_uring sends per batch. Rotated/reversed pool order across twelve rounds. All 49,152 responses checked. No SQL or connection setup in the timed section.",
+    "rounds_ns_per_send": [
+      {
+        "pass": 0,
+        "cubic_nodelay": 16522.1,
+        "reno_nodelay": 16345.6,
+        "cubic_default": 16996.2,
+        "reno_default": 16226.8
+      },
+      {
+        "pass": 1,
+        "cubic_nodelay": 16869.1,
+        "reno_nodelay": 16726.9,
+        "cubic_default": 16109.2,
+        "reno_default": 16641.1
+      },
+      {
+        "pass": 2,
+        "cubic_nodelay": 16800.2,
+        "reno_nodelay": 16559.4,
+        "cubic_default": 16972.8,
+        "reno_default": 16859.9
+      },
+      {
+        "pass": 3,
+        "cubic_nodelay": 16790.2,
+        "reno_nodelay": 20528.6,
+        "cubic_default": 20998.1,
+        "reno_default": 16818.1
+      },
+      {
+        "pass": 4,
+        "cubic_nodelay": 20940.5,
+        "reno_nodelay": 20929.5,
+        "cubic_default": 21020.6,
+        "reno_default": 20959.7
+      },
+      {
+        "pass": 5,
+        "cubic_nodelay": 21038.1,
+        "reno_nodelay": 20951.7,
+        "cubic_default": 21042.5,
+        "reno_default": 21085.0
+      },
+      {
+        "pass": 6,
+        "cubic_nodelay": 20917.7,
+        "reno_nodelay": 20842.9,
+        "cubic_default": 20898.9,
+        "reno_default": 20914.8
+      },
+      {
+        "pass": 7,
+        "cubic_nodelay": 21003.4,
+        "reno_nodelay": 20893.3,
+        "cubic_default": 21088.2,
+        "reno_default": 20855.2
+      },
+      {
+        "pass": 8,
+        "cubic_nodelay": 21485.0,
+        "reno_nodelay": 21168.0,
+        "cubic_default": 21019.9,
+        "reno_default": 21931.2
+      },
+      {
+        "pass": 9,
+        "cubic_nodelay": 21083.2,
+        "reno_nodelay": 20835.9,
+        "cubic_default": 21153.6,
+        "reno_default": 21106.4
+      },
+      {
+        "pass": 10,
+        "cubic_nodelay": 20883.1,
+        "reno_nodelay": 20876.9,
+        "cubic_default": 20919.6,
+        "reno_default": 20910.2
+      },
+      {
+        "pass": 11,
+        "cubic_nodelay": 21258.0,
+        "reno_nodelay": 20966.5,
+        "cubic_default": 20988.1,
+        "reno_default": 21237.0
+      }
+    ]
+  },
+  "deferred_accept": {
+    "measurement": "One fresh connection and one verified 4,182-byte SQLite feed reply per user. Six alternating 4,096-connection runs at 5,833 new connections/s. Server on one CPU, clients on another. Application and database objects identical across both arms.",
+    "control_binary_sha256": "ad99780c0ef7fc34ac01fb5741f652ab9c5362e5d953fb05c58163ce8d2a3c28",
+    "deferred_binary_sha256": "1579a8101cfd2e98fab283154cac359ab17efadbbf292e9736f6b17486a2170f",
+    "runs": [
+      {
+        "arm": "base",
+        "run": 0,
+        "connections": 4096,
+        "seconds": 0.7033,
+        "actual_rate": 5824,
+        "server_cpu_us": 80.18,
+        "first_http_p95_ms": 0.259,
+        "TCPDeferAcceptDrop": 0,
+        "listen_overflows": 0,
+        "listen_drops": 0
+      },
+      {
+        "arm": "defer",
+        "run": 1,
+        "connections": 4096,
+        "seconds": 0.7024,
+        "actual_rate": 5831,
+        "server_cpu_us": 84.941,
+        "first_http_p95_ms": 11.115,
+        "TCPDeferAcceptDrop": 4096,
+        "listen_overflows": 0,
+        "listen_drops": 0
+      },
+      {
+        "arm": "defer",
+        "run": 2,
+        "connections": 4096,
+        "seconds": 0.7023,
+        "actual_rate": 5833,
+        "server_cpu_us": 91.024,
+        "first_http_p95_ms": 0.395,
+        "TCPDeferAcceptDrop": 4096,
+        "listen_overflows": 0,
+        "listen_drops": 0
+      },
+      {
+        "arm": "base",
+        "run": 3,
+        "connections": 4096,
+        "seconds": 0.7023,
+        "actual_rate": 5832,
+        "server_cpu_us": 87.366,
+        "first_http_p95_ms": 0.24,
+        "TCPDeferAcceptDrop": 0,
+        "listen_overflows": 0,
+        "listen_drops": 0
+      },
+      {
+        "arm": "base",
+        "run": 4,
+        "connections": 4096,
+        "seconds": 0.7034,
+        "actual_rate": 5823,
+        "server_cpu_us": 87.847,
+        "first_http_p95_ms": 0.238,
+        "TCPDeferAcceptDrop": 0,
+        "listen_overflows": 0,
+        "listen_drops": 0
+      },
+      {
+        "arm": "defer",
+        "run": 5,
+        "connections": 4096,
+        "seconds": 0.7023,
+        "actual_rate": 5832,
+        "server_cpu_us": 100.362,
+        "first_http_p95_ms": 0.326,
+        "TCPDeferAcceptDrop": 4096,
+        "listen_overflows": 0,
+        "listen_drops": 0
+      }
+    ]
+  },
+  "unread_peer_fin": {
+    "topology": "Private Linux 6.8 TCP loopback. In four runs, 8,192 live connections closed with the server paused. NETLINK_SOCK_DIAG sampled receive and send memory before the server resumed.",
+    "trials": 4,
+    "initial_established": 8192,
+    "close_wait_sampled": 8028,
+    "queued_receive_memory_bytes": 7706880,
+    "forward_allocated_bytes": 25175808,
+    "queued_send_bytes": 0,
+    "charge_per_close_wait_bytes": 4096,
+    "separate_read_check": {
+      "connections": 64,
+      "before_fin_charge_bytes": 0,
+      "unread_fin_charge_bytes": 262144,
+      "after_recv_returned_zero_charge_bytes": 0,
+      "sockets_still_open_in_close_wait": 64,
+      "thread_cpu_ns_per_recv": 3099.61
+    }
+  },
+  "one_time_file_cache_advice": {
+    "method": "Two independent, freshly copied ext4 databases. The candidate calls POSIX_FADV_DONTNEED on its own file once before the first SQLite open. Replay of 16,384 mixed application requests. mincore reads track file residency. The copied databases included dirty pages, which the kernel can retain after advice.",
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "control_server_sha256": "dda50531693829782f8047a6cfb3c9ad33ef81ed8ef7b921063d71521a44fa38",
+    "hinted_server_sha256": "50e33141891cd7593a5023823d2a6c026cf9f0425c02cc1f842df379720fdc4c",
+    "paired_replay": [
+      {
+        "advice_enabled": false,
+        "seed_resident_bytes_at_start": 249192448,
+        "seed_resident_bytes_after_open": 249192448,
+        "seed_resident_bytes_after_requests": 249192448,
+        "cgroup_file_bytes_after_requests": 263475200,
+        "physical_read_bytes": 0,
+        "open_us": 1362.618,
+        "first_feed_ms": 0.195491,
+        "first_1024_average_us": 17.4994,
+        "later_average_us": 3.60886,
+        "response_sha256": "fd57841a0ee93a919118cb2b66058c2bed5decfaa746c81b6f2b5f1d9b8033a0",
+        "final_posts": 500151,
+        "final_likes": 2017138
+      },
+      {
+        "advice_enabled": true,
+        "seed_resident_bytes_at_start": 249192448,
+        "seed_resident_bytes_after_open": 30060544,
+        "seed_resident_bytes_after_requests": 33460224,
+        "cgroup_file_bytes_after_requests": 48435200,
+        "physical_read_bytes": 3420160,
+        "open_us": 97219.657,
+        "first_feed_ms": 6.740357,
+        "first_1024_average_us": 117.62239,
+        "later_average_us": 4.95548,
+        "response_sha256": "fd57841a0ee93a919118cb2b66058c2bed5decfaa746c81b6f2b5f1d9b8033a0",
+        "final_posts": 500151,
+        "final_likes": 2017138
+      }
+    ]
+  },
+  "transparent_hugepage_sqlite_arena": {
+    "method": "Two alternating 125,000-operation moving replays for each of three setups. SQLite CONFIG_PAGECACHE uses a 68 MiB aligned arena in the two alternative setups. The third setup also requests MADV_HUGEPAGE. Process CPU includes the measured mixed replay and observation. No sockets in this comparison.",
+    "arms": [
+      "stock",
+      "aligned_68_mib",
+      "aligned_68_mib_with_MADV_HUGEPAGE"
+    ],
+    "warm_process_ns_per_request_median": [
+      4719.8,
+      4617.9,
+      4536.0
+    ],
+    "feed_elapsed_ns": [
+      2283.8,
+      2294.2,
+      2313.6
+    ],
+    "point_elapsed_ns": [
+      624.7,
+      618.2,
+      597.8
+    ],
+    "cold_process_rss_kib": [
+      4890,
+      70014,
+      74348
+    ],
+    "actual_arena_hugepage_kib": [
+      0,
+      0,
+      69632
+    ],
+    "sqlite_misses_measured_per_arm": 2152,
+    "sqlite_writes_measured_per_arm": 28811,
+    "identical_response_sha256": "d612c31ff676a9e691061149c9e8c1ff1b96270aefa67f88b347fd583f86a4a6",
+    "longer_check": "In three prior paired 750,000-operation rounds the stock and huge-page process CPU medians were 3.10 and 3.12 seconds. The application uses the ordinary SQLite allocator."
+  },
+  "readiness_only_listener_admission": {
+    "method": "Bounded accept4 on eight epoll-watched listeners versus bounded ordinary io_uring accepts. The rest of the registration, HTTP, SQLite and WAL path is identical. Queued TCP measurements use four runs per arm. The mixed TCP test sustained 5,793\u20135,797 new peers/s and 16,000 established HTTP exchanges/s. All endpoint processing was pinned to a single CPU.",
+    "control_server_sha256": "83bc5805cf5319a491557614b7cbc3c716e4dbfae1dbc26ee86faea4853cbc9d",
+    "candidate_server_sha256": "5c1c0d1f6e0612bf9ef8a4787823dc9b0b55f405fb59139f4d996a74e3adab5e",
+    "arms": [
+      "bulk_uring_accept",
+      "readiness_accept4"
+    ],
+    "median_queued_cpu_us_per_admit": [
+      7.737,
+      8.071
+    ],
+    "first_request_p99_ms_paired": [
+      [
+        2.036,
+        1.69
+      ],
+      [
+        2.246,
+        2.659
+      ]
+    ],
+    "established_p99_ms_paired": [
+      [
+        1.911,
+        1.564
+      ],
+      [
+        2.074,
+        2.469
+      ]
+    ]
+  },
+  "prioritized_clean_fin_reads": {
+    "method": "8,192 real TCP connections across five fixed-file banks. Four sender cores, one server core including its receive processing, and concurrent HTTP health and pipelined half-closes. Two stock/deferred pairs in opposite order. Counts and peaks are from the instrumented GCC control pair. The separate Clang server pair uses the same policy.",
+    "stock_instrumented_sha256": "e9e0753c67f764c62ec5e1fe78cf6e476e142fc01cd618ef1b921df79a18c7f4",
+    "deferred_instrumented_sha256": "0baeeec91a75e9a60948fa9441681249cf5b2494f84d9f8f5df1c52d73def522",
+    "each_run_clean_eofs_consumed": 8192,
+    "each_run_physical_closes_submitted": 8192,
+    "each_run_retransmissions": 0,
+    "columns": [
+      "arm",
+      "FINs_per_second",
+      "peak_socket_mib",
+      "mean_socket_mib_during_arrival",
+      "FINs_consumed_by_end_of_arrival",
+      "half_consumed_ms",
+      "last_ordinary_close_submitted_ms",
+      "server_cpu_ms"
+    ],
+    "rows": [
+      [
+        "stock",
+        124490,
+        27.31,
+        13.17,
+        1161,
+        153.71,
+        270.52,
+        277.08
+      ],
+      [
+        "deferred",
+        123510,
+        6.96,
+        0.98,
+        6402,
+        32.78,
+        305.78,
+        286.1
+      ],
+      [
+        "deferred",
+        123720,
+        6.89,
+        0.97,
+        6428,
+        34.62,
+        309.7,
+        289.11
+      ],
+      [
+        "stock",
+        125440,
+        27.78,
+        13.22,
+        1080,
+        149.05,
+        357.69,
+        330.93
+      ]
+    ]
+  }
+}

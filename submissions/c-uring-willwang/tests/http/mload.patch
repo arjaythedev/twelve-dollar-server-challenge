@@ -1,0 +1,168 @@
+--- a/mload.c
++++ b/mload.c
+@@ -48,7 +48,7 @@
+
+ struct vu {
+     int fd;
+-    uint8_t state, step, endpoint, hdr_done;
++    uint8_t state, step, endpoint, hdr_done, established;
+     uint32_t id;
+     uint32_t iter;
+     uint32_t last_ids[FEED_IDS];
+@@ -104,6 +104,8 @@
+ static struct heap timers;
+ static int epfd;
+ static struct hist hist_all, hist_ep[EP_COUNT];
++static unsigned int active_connections, hold_start_connections, peak_connections;
++static unsigned long long accepted_connections, failed_connections;
+ static uint64_t errors, errors_by_kind[8], requests, ep_requests[EP_COUNT], ep_bad[EP_COUNT], connects;
+ static char *tokens_blob;
+ static const char **tok_ptr, **user_ptr;
+@@ -329,6 +331,7 @@
+ }
+
+ static void vu_close(struct vu *v) {
++    if (v->established) { v->established = 0; active_connections--; }
+     if (v->fd >= 0) {
+         epoll_ctl(epfd, EPOLL_CTL_DEL, v->fd, NULL);
+         close(v->fd);
+@@ -338,7 +341,7 @@
+
+ static void vu_fail(struct vu *v, int kind) {
+     errors++;
+-    errors_by_kind[kind & 7]++;
++    errors_by_kind[kind & 7]++; if (kind == 2) failed_connections++;
+     if (v->state == V_SENDING || v->state == V_READING) ep_bad[v->endpoint]++;
+     vu_close(v);
+     if (errors >= opt.max_errors) {
+@@ -430,8 +433,35 @@
+     return 0;
+ }
+
++/* Optional per-second observations, all maintained by the load generator. */
++static const unsigned tick_limits[] = {1000, 5000, 10000, 25000, 50000, 100000, 250000,
++                                       500000, 750000, 1000000, 1500000, 2000000, 5000000,
++                                       10000000, 20000000, 60000000};
++enum { TICK_BUCKETS = sizeof(tick_limits) / sizeof(tick_limits[0]) + 1 };
++static uint32_t tick_latency[TICK_BUCKETS];
++static uint64_t tick_requests, tick_total_us;
++static FILE *tick_file;
++static void tick_record(uint64_t us) {
++    if (!tick_file) return;
++    unsigned bucket = 0;
++    while (bucket + 1 < TICK_BUCKETS && us > tick_limits[bucket]) bucket++;
++    tick_latency[bucket]++;
++    tick_requests++;
++    tick_total_us += us;
++}
++static void tick_report(int64_t now) {
++    fprintf(tick_file, "%.3f,%llu,%llu,%u", (double)(now - t_start) / 1e9,
++            (unsigned long long)tick_requests, (unsigned long long)tick_total_us,
++            active_connections);
++    for (unsigned i = 0; i < TICK_BUCKETS; ++i) fprintf(tick_file, ",%u", tick_latency[i]);
++    fputc('\n', tick_file);
++    fflush(tick_file);
++    memset(tick_latency, 0, sizeof tick_latency);
++    tick_requests = tick_total_us = 0;
++}
+ static void vu_response_done(struct vu *v) {
+     uint64_t us = (uint64_t)((now_ns() - v->req_start_ns) / 1000);
++    tick_record(us);
+     hist_add(&hist_all, us);
+     hist_add(&hist_ep[v->endpoint], us);
+     requests++;
+@@ -493,6 +523,10 @@
+                 vu_fail(v, 2);
+                 return;
+             }
++            v->established = 1;
++            active_connections++;
++            accepted_connections++;
++            if (active_connections > peak_connections) peak_connections = active_connections;
+             vu_send(v);
+         }
+         return;
+@@ -647,6 +681,11 @@
+         i++;
+     }
+     if (!opt.vus) usage();
++    const char *ofs = getenv("MLOAD_OFFSET"), *seed = getenv("MLOAD_SEED"), *warm = getenv("MLOAD_WARM");
++    const char *histpath = getenv("MLOAD_HIST");
++    uint32_t offset = ofs ? strtoul(ofs, NULL, 10) : 0;
++    uint32_t rngseed = seed ? strtoul(seed, NULL, 10) : 23456789;
++    double warmup = warm ? atof(warm) : 0;
+     struct rlimit rl;
+     if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < rl.rlim_max) {
+         rl.rlim_cur = rl.rlim_max;
+@@ -676,9 +715,9 @@
+         struct vu *v = &vus[i];
+         v->fd = -1;
+         v->id = i;
+-        v->rng = 0x9e3779b9u ^ (i * 2654435761u) ^ (uint32_t)t_start;
++        v->rng = 0x9e3779b9u ^ ((i + offset) * 2654435761u) ^ rngseed;
+         if (!v->rng) v->rng = 1;
+-        uint32_t ti = i % ntokens;
++        uint32_t ti = (i + offset) % ntokens;
+         v->tok = tok_ptr[ti];
+         v->tok_len = tok_len[ti];
+         v->user = user_ptr[ti];
+@@ -688,11 +727,28 @@
+         double start = opt.ramp * (double)i / (double)opt.vus + between(v, 0, 5) * opt.think_scale;
+         timer_add(i, t_start + (int64_t)(start * 1e9));
+     }
++    int64_t t_warm = t_start + (int64_t)(warmup * 1e9);
+     int64_t t_end = t_start + (int64_t)(opt.duration * 1e9);
++    const char *tick_name = getenv("MLOAD_TICKS");
++    if (tick_name) {
++        tick_file = fopen(tick_name, "w");
++        if (!tick_file) { perror("interval histogram"); return 2; }
++    }
++    int64_t next_tick = t_start + 1000000000LL;
+     int64_t next_report = t_start + (int64_t)opt.report_every * 1000000000LL;
+     struct epoll_event evs[1024];
+     while (now_ns() < t_end) {
+         int64_t now = now_ns();
++        if (tick_file && now >= next_tick) {
++            tick_report(now);
++            next_tick = t_start + (1 + (now - t_start)/1000000000LL)*1000000000LL;
++        }
++        if (t_warm && now >= t_warm) {
++            t_warm = 0; hold_start_connections = active_connections;
++            memset(&hist_all, 0, sizeof hist_all); memset(hist_ep, 0, sizeof hist_ep);
++            memset(errors_by_kind, 0, sizeof errors_by_kind); memset(ep_bad, 0, sizeof ep_bad);
++            memset(ep_requests, 0, sizeof ep_requests); requests = errors = 0;
++        }
+         uint32_t vi;
+         while (timer_peek(&vi) && vus[vi].deadline_ns <= now) {
+             timer_pop();
+@@ -711,6 +767,30 @@
+         int n = epoll_wait(epfd, evs, 1024, timeout_ms);
+         for (int i = 0; i < n; i++) vu_event(&vus[evs[i].data.u32], evs[i].events);
+     }
++    /* Capture outstanding HTTP requests only after the timed event loop is finished. */
++    const int64_t sampled_at = now_ns();
++    unsigned pending[EP_COUNT] = {0}, over60[EP_COUNT] = {0}, connecting = 0;
++    unsigned long long oldest_us[EP_COUNT] = {0};
++    for (uint32_t i = 0; i < opt.vus; ++i) {
++        const struct vu *v = &vus[i];
++        if (v->state == V_CONNECTING) { ++connecting; continue; }
++        if (v->state != V_READING && v->state != V_SENDING) continue;
++        unsigned long long age = (unsigned long long)((sampled_at - v->req_start_ns) / 1000);
++        ++pending[v->endpoint];
++        if (age >= 60000000ULL) ++over60[v->endpoint];
++        if (age > oldest_us[v->endpoint]) oldest_us[v->endpoint] = age;
++    }
+     report(1);
++    printf("pending_connect=%u\n", connecting);
++    for (int ep = 0; ep < EP_COUNT; ++ep)
++        printf("pending_http ep=%d count=%u over60s=%u oldest_us=%llu\n",
++               ep, pending[ep], over60[ep], oldest_us[ep]);
++    printf("connections_open start=%u end=%u peak=%u successes=%llu failed=%llu\n", hold_start_connections, active_connections, peak_connections, accepted_connections, failed_connections);
++    if (histpath) {
++        FILE *h = fopen(histpath, "wb");
++        if (!h) { perror("histogram output"); return 2; }
++        if (fwrite(hist_all.fine, 4, 100000, h) != 100000 ||
++            fwrite(hist_all.coarse, 4, 60000, h) != 60000 || fclose(h)) return 2;
++    }
+     return 0;
+ }

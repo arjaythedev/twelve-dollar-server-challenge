@@ -196,6 +196,11 @@ class Server {
           return false;
         }
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        /* 关掉 TCP_QUICKACK：连接建立后的第一个请求由响应顺带确认，而不是内核先补一个
+         * 单独的 bare ACK。ramp 期每个连接都能少一个包（fsharp-uring-delneg #437 的做法，
+         * 他们因此把 p95 从 154 ms 降到 16 ms 的尾部问题里也提到过；QUICKACK=1 恢复默认）。 */
+        int quickack = 0;
+        setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof quickack);
         /* 接收缓冲上限设在 listener 上，accept 出来的连接会继承（c-iouring-jowinjestine #486
          * 就是这么做的：8 个 listener 一律 16 KiB，PSI 高压时再降到 8 KiB）。默认的自动调优
          * 会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上的。请求只有

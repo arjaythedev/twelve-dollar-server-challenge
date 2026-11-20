@@ -120,6 +120,36 @@ static struct {
 } S;
 static uint64_t reads_done; /* single-shot reads that returned data or EAGAIN */
 
+/* Batch-level latency diagnosis, no request allocations or hot-path logs. */
+enum {
+  DP_OTHER_RINGS, DP_WAIT, DP_BEGIN, DP_READY, DP_REAP, DP_DRAIN,
+  DP_HELD, DP_COMMIT, DP_FLUSH, DP_DB_TICK, DP_PUBLISH, DP_POLICY,
+  DP_MEMGOV, DP_COUNT
+};
+static const char *const diag_name[DP_COUNT] = {
+  "rings", "wait", "begin", "ready", "reap", "drain", "held",
+  "commit", "flush", "db_tick", "publish", "policy", "memgov"
+};
+static int latency_trace = 1;
+static struct {
+  uint64_t total_ns[DP_COUNT], max_ns[DP_COUNT], over_10ms[DP_COUNT];
+  uint64_t part_ns[DP_COUNT], worst_parts_ns[DP_COUNT], worst_turn_ns;
+  uint64_t read_no_progress, queued_read_stalls, enobufs_ring[MAX_RINGS];
+  uint64_t worst_ready, worst_rq, worst_enobufs, batches;
+} D;
+static inline uint64_t diag_start(void) { return latency_trace ? now_ns() : 0; }
+static inline void diag_add(unsigned phase, uint64_t ns) {
+  if (!latency_trace) return;
+  D.part_ns[phase] = ns;
+  D.total_ns[phase] += ns;
+  if (ns > D.max_ns[phase]) D.max_ns[phase] = ns;
+  if (ns >= 10000000ULL) D.over_10ms[phase]++;
+}
+static inline void diag_end(unsigned phase, uint64_t start) {
+  if (latency_trace) diag_add(phase, now_ns() - start);
+}
+
+
 /* ---------- arenas ---------- */
 
 /* Arenas are their own mappings, not heap blocks: one a burst needed beyond the pool goes back to
@@ -496,7 +526,12 @@ static void on_recv(unsigned ri, struct io_uring_cqe *cqe, int multishot) {
     }
     return;
   }
-  if (cqe->res == -ENOBUFS) { S.enobufs++; queue_read(ri, slot, c); return; }
+  if (cqe->res == -ENOBUFS) {
+    S.enobufs++;
+    if (latency_trace) D.enobufs_ring[ri]++;
+    queue_read(ri, slot, c);
+    return;
+  }
   if (cqe->res == -EAGAIN) { arm_idle(ri, slot, c); return; }
   finish_conn(ri, slot, c); /* EOF or an error */
 }
@@ -625,7 +660,13 @@ static unsigned read_rounds(void) {
     for (unsigned i = 0; i < NR; i++)
       if (ring_pending_submit(&R[i].r)) ring_enter(&R[i].r, 0, 0);
     n += reap_all();
-    if (reads_done == before) break; /* no buffers for any of them: the next batch tries again */
+    if (reads_done == before) {
+      if (latency_trace) {
+        D.read_no_progress++;
+        if (rq_head < nrq) D.queued_read_stalls++;
+      }
+      break; /* no buffers for any of them: the next batch tries again */
+    }
   }
   return n;
 }
@@ -770,6 +811,28 @@ static void stats(uint64_t dt_ns) {
       (unsigned long long)(MG.cg_current >> 20), (unsigned long long)(MG.cg_limit >> 20),
       (unsigned long long)(MG.cg_sock >> 20), MG.tcp_mem_pages,
       (unsigned long long)MG.changes, (unsigned long long)MG.samples);
+  if (latency_trace) {
+    fprintf(stderr, " latency_trace batches=%llu no_read_progress=%llu queued_read_stalls=%llu"
+                    " worst_turn_ms=%.3f worst_ready=%llu worst_rq=%llu worst_enobufs=%llu"
+                    " enobufs_by_ring=",
+            (unsigned long long)D.batches,
+            (unsigned long long)D.read_no_progress,
+            (unsigned long long)D.queued_read_stalls,
+            (double)D.worst_turn_ns / 1e6,
+            (unsigned long long)D.worst_ready,
+            (unsigned long long)D.worst_rq,
+            (unsigned long long)D.worst_enobufs);
+    for (unsigned i = 0; i < NR; i++)
+      fprintf(stderr, "%s%llu", i ? "," : "", (unsigned long long)D.enobufs_ring[i]);
+    fprintf(stderr, "\n latency_phases=total_ms/max_ms/over10ms/worst_turn_ms");
+    for (unsigned i = 0; i < DP_COUNT; i++)
+      fprintf(stderr, " %s=%.3f/%.3f/%llu/%.3f", diag_name[i],
+              (double)D.total_ns[i] / 1e6, (double)D.max_ns[i] / 1e6,
+              (unsigned long long)D.over_10ms[i],
+              (double)D.worst_parts_ns[i] / 1e6);
+    fputc('\n', stderr);
+    memset(&D, 0, sizeof D);
+  }
   majflt_prev = ru.ru_majflt;
   memset(&S, 0, sizeof S);
   A.db.bulk_max_ns = A.db.hold_max_ns = A.db.hold_total_ns = A.db.tail_frames_max = 0;
@@ -1071,6 +1134,7 @@ int main(int argc, char **argv) {
   accept_next = nslots / 8 < ACCEPT_NEXT_MAX ? nslots / 8 : ACCEPT_NEXT_MAX;
   if (accept_stop < 16) accept_stop = 16;
   if (accept_next <= accept_stop) accept_next = accept_stop + 16;
+  latency_trace = env_long("LATENCY_TRACE", 1) != 0;
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
@@ -1117,6 +1181,7 @@ int main(int argc, char **argv) {
   long pre = env_long("PRE_CONNS", 330000); /* pre-create six rings for a 310k+ run; use 430000 for 400k */
   while (NR < NR_MAX && (long)NR * (long)nslots < pre && ring_create(NR) == 0) NR++;
   prewarm();
+  fprintf(stderr, "latency_trace=%d (LATENCY_TRACE=0 disables phase timing)\n", latency_trace);
   fprintf(stderr, "experiment: idle_poll=%d eventfd_wake=%d recv_size=%u backlog_slice_us=%u pre_conns=%ld\n",
           poll_idle, eventfd_wake, recv_buf_size, backlog_slice_us, pre);
   fprintf(stderr, "listening on %s:%s: up to %u rings x %u direct descriptors; cache %d KiB; code locked %zu KiB\n", host, port, NR_MAX,

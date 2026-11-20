@@ -1503,7 +1503,10 @@ refused.
 `build.sh` on a scratch database, a look ahead at connections, faster JSON writers; not merged: it scored below the merged
 row) held **266,000** (25,524 req/s, p95 21.1 / p99 191.8 ms, 0 err, 72 % CPU, 26 µs/req, 1,348 MB, 2026-11-19), 42/42
 tests: the 280,000 5-minute hold failed on p99 (1.07 s at 77 % CPU, 0 errors) after passing the 2-minute probe; 290,000,
-300,000 and 320,000 failed the 2-minute probe on p99 (1.02 / 1.40 / 3.83 s, 0 errors).
+300,000 and 320,000 failed the 2-minute probe on p99 (1.02 / 1.40 / 3.83 s, 0 errors). Re-run at its newer head
+`a3c80ab` (adds the program's own code on a 2 MB page) it held **280,000** (26,714 req/s, p95 25.4 / p99 811.9 ms, 0 err,
+76 % CPU, 26 µs/req, 740 MB, 2026-11-20), 42/42 tests, equal to the merged row, so not merged; 290,000 failed the
+2-minute probe on p99 (1.12 s, 0 errors).
 
 ᶴ **brainfuck-iouring-harshitkhandelwal208** stays on its merged #493 row. Its follow-up **#535** (`398c007`, growable
 response buffers, JSON escaping, replies held until the batch commits, profile-guided build recorded by `build.sh` on a

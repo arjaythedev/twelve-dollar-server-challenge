@@ -936,7 +936,11 @@ errors. #532 stays open. **#533** (`2380f62`: #486 with opt-in io_uring writebac
 `URING_WAL_WRITEBACK`, off by default) held **280,000** (26,666 req/s, p95 146.6 / p99 942.5 ms, 0 err, 77 % CPU,
 26 µs/req, 800 MB, 2026-11-20), below #486's 300,000, so not merged: 290,000 failed the 2-minute probe on p95/p99
 (1.04 / 1.95 s at 79 % CPU), 300,000 on p95/p99 (862 ms / 2.55 s at 84 % CPU) and 320,000 on p95/p99 (1.85 / 2.55 s at
-92 % CPU), all with 0 errors. #533 stays open.
+92 % CPU), all with 0 errors. #533 stays open. **#534** (`7220a38`: #486 with live receive-buffer updates on
+already-accepted connections, `TCP_LIVE_RCVBUF`, on by default) held **270,000** (25,863 req/s, p95 44.4 / p99
+331.6 ms, 0 err, 74 % CPU, 26 µs/req, 1,152 MB, 2026-11-20), below #486's 300,000, so not merged: 280,000 failed the
+2-minute probe on p95/p99 (2.71 / 3.11 s at 82 % CPU) and 320,000 on p95/p99 (1.49 / 2.20 s at 94 % CPU), all with 0
+errors. #534 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

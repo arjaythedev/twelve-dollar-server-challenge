@@ -717,7 +717,11 @@ tied the merged row) held **280,000** (26,665 req/s, p95 41.4 / p99 961.5 ms, 0 
 (1.46 / 5.02 s at 92 % CPU). Its next commit `7991d71` (every POST hold capped at 250 ms, also past the log limit;
 held, not merged: below the merged row) held **270,000** (25,862 req/s, p95 28.4 / p99 269.0 ms, 0 err, 73 % CPU,
 26 µs/req, 1,033 MB, 2026-11-19); 280,000 failed the 2-minute probe on p99 (1.09 s, 0 errors) and 320,000 on p95/p99
-(1.66 / 6.31 s at 90 % CPU).
+(1.66 / 6.31 s at 90 % CPU). Its next commit `98d3a84` (POSTs held only for the 250 ms tail pass, checkpoint cycles
+start at 4,096 WAL frames with a PASSIVE backstop at 65,536, WAL writeback kicked every 8 MB; held, not merged: below
+the merged row) held **270,000** (25,841 req/s, p95 30.7 / p99 315.5 ms, 0 err, 74 % CPU, 26 µs/req, 898 MB,
+2026-11-20); 280,000 failed the 2-minute probe on p99 (7.69 s, 0 errors) and 320,000 on p95/p99 (5.27 / 8.58 s at
+87 % CPU).
 
 ᴷ **kotlin-nio-3x3xX3N0N** stays on its merged #83 row. Its follow-up **#377** (`9ab23cc`, rejects tokens without a
 numeric `exp`, two-step /feed, checkpointer thread through `PRAGMA wal_checkpoint`, 2 ms group-commit window, 3 workers;

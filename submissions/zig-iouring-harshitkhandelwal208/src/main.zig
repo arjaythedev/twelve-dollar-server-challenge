@@ -4,7 +4,6 @@ const linux = std.os.linux;
 const server = @import("server.zig");
 const dbm = @import("db.zig");
 const jwt = @import("jwt.zig");
-const sys = @import("sys.zig");
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
@@ -108,9 +107,6 @@ pub fn main(init: std.process.Init) !void {
     const jwt_key = jwt.Key.init(jwt_secret);
     const s = try server.Server.init(sqlite_path, jwt_key);
     try s.makeListeners(host, port);
-
-    // Lock all pre-allocated structures into RAM to eliminate page faults during benchmark
-    sys.lockMemory();
 
     std.log.info("Server listening on {d}.{d}.{d}.{d}:{d} with {d} rings x {d} slots = {d} direct descriptors", .{
         host[0], host[1], host[2], host[3], port, s.active_rings, server.slots_per_ring, s.active_rings * server.slots_per_ring,

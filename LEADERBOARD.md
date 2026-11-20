@@ -1533,7 +1533,9 @@ and 1.80 / 3.05 s at 93 % CPU, 0 errors).
 box, one read transaction per pass; not merged: it scored below the merged row) held **210,000** (20,575 req/s, p95 35.0 /
 p99 189.9 ms, 0 err, 87 % CPU, 39 µs/req, 658 MB, 2026-11-19), 42/42 tests: 220,000 failed the 2-minute probe on p95/p99
 (788 ms / 1.80 s at 89 % CPU, 0 errors), 240,000 on p95/p99 (1.01 / 2.24 s at 94 % CPU) and 320,000 with 69 % connection
-refused.
+refused. Re-run at `e4b4d12` (`PRAGMA mmap_size=0`; not merged: it scored below the merged row): **219,000** (21,381
+req/s, p95 29.5 / p99 180.7 ms, 0 err, 86 % CPU, 37 µs/req, 1,065 MB, 2026-11-20), 42/42 tests: 230,000 failed the
+5-minute hold on p99 (1.58 s at 90 % CPU, 0 errors) and 240,000 the 2-minute probe on p95/p99 (596 ms / 1.53 s at 92 % CPU).
 
 ᵉ **go-iouring-DblD** stays on its merged #498 row. Its follow-up **#523** (`a0a8a72`, profile-guided build recorded by
 `build.sh` on a scratch database, a look ahead at connections, faster JSON writers; not merged: it scored below the merged

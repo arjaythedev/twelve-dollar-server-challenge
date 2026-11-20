@@ -98,7 +98,7 @@ To diagnose a 310K failure, compare the `over10ms` counts and maxima across
 the final ten-second windows. Large `commit` or `begin` times point toward
 SQLite/WAL; `rings` or `wait` toward deferred kernel task work or scheduling;
 `ready` or `drain` toward long batches; `ENOBUFS`/queued read stalls
-toward receive-buffer starvation. These are **correlations**, not causal
+toward receive-buffer starvation. The `latency_sched` line also reports cgroup CPU-quota throttle events/milliseconds and voluntary/involuntary context switches, to distinguish kernel scheduling stalls from work inside the loop. These are **correlations**, not causal
 proof: `no_read_progress` can also reflect asynchronous completions that
 have not arrived yet. Rerun with tracing disabled before accepting any score
 improvement or regression.

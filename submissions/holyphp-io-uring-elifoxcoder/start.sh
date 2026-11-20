@@ -74,6 +74,22 @@ export HPHP_FEED_USER_RAW="${HPHP_FEED_USER_RAW:-1}"
 # Resolve the feed's 20 author rows with one generic sorted B-tree batch seek
 # instead of one cursor seek per author. Set 0 to compare the legacy path.
 export HPHP_FEED_BATCH_USERS="${HPHP_FEED_BATCH_USERS:-1}"
+# Read the feed's newest posts with one generic B-tree tail walk plus batched
+# payload/key reads (three builtin calls) instead of ~100 per-row cursor
+# calls; overflow records fall back to the per-row path. Mirrored A/B/B/A at
+# 130k connections: -1.2% CPU per request. Set 0 for the per-row walk.
+export HPHP_FEED_TAIL_BATCH="${HPHP_FEED_TAIL_BATCH:-1}"
+# 1024 provided receive buffers per ring (the Rust leader's count) instead of
+# 4096: the ring is consumed in order, so fewer buffers stay cache-warm, and
+# ~10 MB less memory is pinned. Set 4096 for the previous pool.
+export HPHP_PBUF_N="${HPHP_PBUF_N:-1024}"
+# No eventfd on the rings (as the multi-ring Rust loop): the kernel then
+# signals nothing per CQ flush, and secondary-ring completions are drained
+# after ring 0's bounded wait (64 CQEs or 1 ms). Mirrored A/B/B/A at 130k
+# connections: about -2% CPU per request, same tail. Unset (empty) restores the
+# registered eventfd; HPHP_RING_EVENTFD=async registers it for io-wq
+# completions only.
+export HPHP_RING_EVENTFD="${HPHP_RING_EVENTFD-0}"
 # These typed fast-array accesses are used only with in-range feed-loop indices.
 # Set 0 to restore runtime bounds checks while diagnosing array logic.
 export HPHP_IARR_FAST="${HPHP_IARR_FAST:-1}"

@@ -180,7 +180,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 92 | python-pypy-iouring-kiwamizamurai | #284 | PyPy (io_uring, SQLite B-tree reads) | **155,000** | 15,201 | 120 | 277 | 0.00 | 80 | 49 | 525 | 2026-11-03 |
 | 92 | ruby-btreereads-cicloid | #308 | Ruby (io_uring, SQLite B-tree reads) | **155,000** | 15,121 | 274 | 545 | 0.00 | 87 | 53 | 791 | 2026-11-04 |
 | 92 | wat-sqlite-ext-delneg | #466 | WebAssembly (hand-written WAT, WasmEdge AOT, loaded as an extension by the stock sqlite3 shell, io_uring) | **155,000** | 15,116 | 384.9 | 652.2 | 0.00 | 76 | 47 | 521 | 2026-11-15 |
-| 92 | brainfuck-iouring-harshitkhandelwal208 | #493 | Brainfuck (self-hosted BF compiler, C io_uring runtime) | **155,000** | 15,165 | 250.9 | 567.4 | 0.00 | 77 | 47 | 487 | 2026-11-17 |
+| 92 | brainfuck-iouring-harshitkhandelwal208 | #493 | Brainfuck (self-hosted BF compiler, C io_uring runtime) | **155,000** ᶴ | 15,165 | 250.9 | 567.4 | 0.00 | 77 | 47 | 487 | 2026-11-17 |
 | 97 | c-iouring-ssmurfgg04-gif | #112 | C (io_uring) | **150,000** | 14,611 | 385 | 524 | 0.00 | 78 | 50 | 413 | 2026-10-21 |
 | 98 | c-ammarserver-AmmarkoV | #54 | C (AmmarServer, io_uring) | **135,000** | 13,239 | 95 | 470 | 0.00 | 76 | 53 | 320 | 2026-10-27 |
 | 98 | go-epoll-brady1408 | #111 | Go (raw epoll, cgo SQLite) | **135,000** | 13,169 | 366 | 962 | 0.00 | 100 | 70 | 296 | 2026-10-27 |
@@ -1504,6 +1504,12 @@ refused.
 row) held **266,000** (25,524 req/s, p95 21.1 / p99 191.8 ms, 0 err, 72 % CPU, 26 µs/req, 1,348 MB, 2026-11-19), 42/42
 tests: the 280,000 5-minute hold failed on p99 (1.07 s at 77 % CPU, 0 errors) after passing the 2-minute probe; 290,000,
 300,000 and 320,000 failed the 2-minute probe on p99 (1.02 / 1.40 / 3.83 s, 0 errors).
+
+ᶴ **brainfuck-iouring-harshitkhandelwal208** stays on its merged #493 row. Its follow-up **#535** (`398c007`, growable
+response buffers, JSON escaping, replies held until the batch commits, profile-guided build recorded by `build.sh` on a
+scratch database; not merged: it scored below the merged row) held **150,000** (14,724 req/s, p95 98.5 / p99 160.4 ms,
+0 err, 76 % CPU, 48 µs/req, 616 MB, 2026-11-20), 42/42 tests: 155,000 failed the 2-minute probe on p95/p99 (413 ms /
+4.15 s at 77 % CPU, 0 errors) and 160,000 on p95/p99 (1.05 / 3.61 s at 80 % CPU).
 
 ## Patches (ᵖ) and failures
 

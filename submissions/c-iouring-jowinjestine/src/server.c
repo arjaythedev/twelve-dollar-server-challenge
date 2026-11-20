@@ -1145,6 +1145,11 @@ int main(int argc, char **argv) {
     writes_ok = !A.db.writes_held;
     if (writes_ok && db_begin_write(&A.db) < 0) writes_ok = 0; /* the tail thread is restarting the log: this batch reads only */
     answers_left = answers_per_pass;
+    /* Optional bounded catch-up when requests already occupy the ready list.
+     * Keep baseline budgeting when the queue is short. */
+    if (env_long("ADAPTIVE_ANSWER_BUDGET", 1) && nready >= 4096 &&
+        answers_per_pass <= UINT32_MAX / 2)
+      answers_left = answers_per_pass * 2;
     run_ready(); /* oldest first: what earlier batches read, before this batch's arrivals can take the answer slots */
     unsigned ncq = reap_all();
     ncq += read_rounds();

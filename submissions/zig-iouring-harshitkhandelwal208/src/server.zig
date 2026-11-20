@@ -46,9 +46,10 @@ pub const max_pending_size: usize = 65535;
 
 // Retry the entire set: shrinking only the last ring cannot recover memory
 // already charged to the earlier queues. This runs only during startup.
-fn initRingSet(context: anytype, comptime init_worker: anytype, comptime deinit_worker: anytype) !void {
+fn initRingSet(context: anytype, comptime init_worker: anytype, comptime deinit_worker: anytype, comptime wait_cleanup: anytype) !void {
     const cq_limits = [_]u32{ 65536, 32768, 16384, 8192 };
     attempts: for (cq_limits, 0..) |cq_limit, attempt| {
+        if (attempt != 0) wait_cleanup(context);
         var initialized: u32 = 0;
         var complete = false;
         defer if (!complete) {
@@ -405,7 +406,7 @@ pub const Server = struct {
         // Pre-allocate all descriptor tables, but activate rings only as the
         // previous table fills.  A single vCPU should not poll idle rings while
         // the connection ramp is still below one table's capacity.
-        try initRingSet(s, Server.initWorker, Server.deinitWorker);
+        try initRingSet(s, Server.initWorker, Server.deinitWorker, Server.waitRingCleanup);
         s.active_rings = 1;
 
         return s;
@@ -426,6 +427,14 @@ pub const Server = struct {
         self.db.deinit();
         const smem: []align(4096) u8 = @as([*]align(4096) u8, @ptrCast(@alignCast(self)))[0..@sizeOf(Server)];
         sys.unmap(smem);
+    }
+
+    fn waitRingCleanup(_: *Server) void {
+        // close(io_uring_fd) schedules kernel teardown asynchronously. Allow
+        // its RCU/workqueue cleanup to return the old queues' resource charges
+        // before creating replacements. Successful startup never waits here.
+        var remaining = linux.timespec{ .sec = 1, .nsec = 0 };
+        while (sys.errnoOf(linux.nanosleep(&remaining, &remaining)) == .INTR) {}
     }
 
     fn deinitWorker(self: *Server, idx: u32) void {
@@ -1662,6 +1671,9 @@ const RingSetTest = struct {
     live: [k_ring_count]u32 = @splat(0),
     attempts: u32 = 0,
     fatal: bool = false,
+    deferred: bool = false,
+    pending_release: u32 = 0,
+    waits: u32 = 0,
 
     fn init(self: *RingSetTest, idx: u32, cq_limit: u32) !void {
         if (idx == 0) self.attempts += 1;
@@ -1674,35 +1686,46 @@ const RingSetTest = struct {
 
     fn deinit(self: *RingSetTest, idx: u32) void {
         std.debug.assert(self.live[idx] != 0);
-        self.used -= self.live[idx];
+        if (self.deferred) self.pending_release += self.live[idx] else self.used -= self.live[idx];
         self.live[idx] = 0;
+    }
+
+    fn wait(self: *RingSetTest) void {
+        // Kernel accounting can outlive close(). Waiting must follow cleanup.
+        for (self.live) |cq| std.debug.assert(cq == 0);
+        self.used -= self.pending_release;
+        self.pending_release = 0;
+        self.waits += 1;
     }
 };
 
 test "ring startup preserves full queues when resources permit" {
     var state = RingSetTest{ .budget = k_ring_count * 65536 };
-    try initRingSet(&state, RingSetTest.init, RingSetTest.deinit);
+    try initRingSet(&state, RingSetTest.init, RingSetTest.deinit, RingSetTest.wait);
     try std.testing.expectEqual(1, state.attempts);
+    try std.testing.expectEqual(0, state.waits);
     for (state.live) |cq| try std.testing.expectEqual(65536, cq);
 }
 
 test "ring startup releases partial set before retrying all eight rings" {
-    var state = RingSetTest{ .budget = 7 * 65536 };
-    try initRingSet(&state, RingSetTest.init, RingSetTest.deinit);
+    var state = RingSetTest{ .budget = 7 * 65536, .deferred = true };
+    try initRingSet(&state, RingSetTest.init, RingSetTest.deinit, RingSetTest.wait);
     try std.testing.expectEqual(2, state.attempts);
+    try std.testing.expectEqual(1, state.waits);
+    try std.testing.expectEqual(0, state.pending_release);
     try std.testing.expectEqual(k_ring_count * 32768, state.used);
     for (state.live) |cq| try std.testing.expectEqual(32768, cq);
 }
 
 test "ring startup cleans up exhausted and non-resource failures" {
     var exhausted = RingSetTest{ .budget = 7 * 8192 };
-    try std.testing.expectError(error.SystemResources, initRingSet(&exhausted, RingSetTest.init, RingSetTest.deinit));
+    try std.testing.expectError(error.SystemResources, initRingSet(&exhausted, RingSetTest.init, RingSetTest.deinit, RingSetTest.wait));
     try std.testing.expectEqual(4, exhausted.attempts);
     try std.testing.expectEqual(0, exhausted.used);
     for (exhausted.live) |cq| try std.testing.expectEqual(0, cq);
 
     var fatal = RingSetTest{ .budget = k_ring_count * 65536, .fatal = true };
-    try std.testing.expectError(error.PermissionDenied, initRingSet(&fatal, RingSetTest.init, RingSetTest.deinit));
+    try std.testing.expectError(error.PermissionDenied, initRingSet(&fatal, RingSetTest.init, RingSetTest.deinit, RingSetTest.wait));
     try std.testing.expectEqual(1, fatal.attempts);
     try std.testing.expectEqual(0, fatal.used);
 }

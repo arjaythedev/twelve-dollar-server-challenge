@@ -1136,6 +1136,13 @@ static sqlite3 *wal_db;
 static int wal_asks, wal_frames, wal_asked_at, wal_busy, wal_last_pass;
 static int64_t post_deadline;  // 0: no limit
 static int64_t mono_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1000000000LL + t.tv_nsec; }
+// WALKICK_MB: once that much new log is written, queue its writeback (SYNC_FILE_RANGE_WRITE on an io-wq thread) so
+// dirty WAL pages never pile up to the kernel's dirty threshold, where write() on the loop waits in balance_dirty_pages
+// (follows #516). Only starts writeback, never waits: durability is still SQLite's own syncs. 0: off.
+#ifndef WALKICK_MB
+#define WALKICK_MB 8
+#endif
+static int kick_fd = -1;
 static int wal_hook(void *u, sqlite3 *d, const char *n, int frames) { wal_frames = frames; return SQLITE_OK; }
 static void *wal_worker(void *a) {
   uint64_t go, outcome;
@@ -1159,7 +1166,19 @@ static void wal_copied(uint64_t outcome) {
 }
 // Between batches, with no transaction open: a write only restarts the log from a read transaction begun after the
 // last copy, so POSTs can't be let go in the middle of a batch.
+static int64_t kicked_to;
+static void wal_kick(void) {
+  if (!WALKICK_MB || kick_fd < 0) return;
+  int64_t fin = (32 + (int64_t)wal_frames * (4096 + 24)) & ~4095LL;  // whole pages only, the last is still filling
+  if (fin < kicked_to) kicked_to = 0;                                 // the log restarted
+  if (fin - kicked_to < ((int64_t)WALKICK_MB << 20)) return;
+  struct io_uring_sqe *s = sqe(0);
+  io_uring_prep_sync_file_range(s, kick_fd, (unsigned)(fin - kicked_to), kicked_to, SYNC_FILE_RANGE_WRITE);
+  s->flags |= IOSQE_ASYNC; s->user_data = T_NOP;
+  kicked_to = fin;
+}
 static void wal_after_commit(void) {
+  wal_kick();
   if (wal_outcome) { uint64_t o = wal_outcome; wal_outcome = 0; wal_copied(o); }
   if (wal_frames >= WAL_MAX && wal_busy) { hold_posts = 1; post_deadline = 0; }
   else if (!wal_busy && wal_frames >= WAL_START) wal_ask();
@@ -1178,6 +1197,7 @@ static void db_open(const char *path) {
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0;"
                    "SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
   sqlite3_wal_hook(db, wal_hook, NULL);
+  if (WALKICK_MB) { char w[4096]; snprintf(w, sizeof w, "%s-wal", path); kick_fd = open(w, O_RDONLY | O_CLOEXEC); }
   wal_asks = eventfd(0, EFD_CLOEXEC); wal_replies = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (wal_asks < 0 || wal_replies < 0 || sqlite3_open_v2(path, &wal_db, fl, "unix-excl") != SQLITE_OK ||
       sqlite3_exec(wal_db, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) { fprintf(stderr, "checkpoint connection failed\n"); exit(1); }

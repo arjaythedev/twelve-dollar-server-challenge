@@ -306,45 +306,69 @@ Function.Feed.PutEscN {
     Body: {
         IfCondition EqualTo(p, 0) ThenBlock: { ReturnValue(0) }
         IfCondition LessEqual(n, 0) ThenBlock: { ReturnValue(0) }
+        ol = FeedSt.len
+        // One pass: each 8-byte word is tested for '"', '\' and bytes below
+        // 0x20, and a clean word is stored straight to the output. The first
+        // special byte switches to Feed.PutEscByte from there. The output has
+        // 64 bytes of slack past cap, so the last word store may run past n.
+        IfCondition GreaterThan(Add(ol, n), FeedSt.cap) ThenBlock: {
+            Feed.PutEscSlow(p, 0, n)
+            ReturnValue(0)
+        }
+        out = Add(FeedSt.out, ol)
         ones = 72340172838076673
         hi = Multiply(ones, 128)
         c20 = Multiply(ones, 32)
         q = Multiply(ones, 34)
         bs = Multiply(ones, 92)
-        need = 0
         i = 0
         WhileLoop LessEqual(Add(i, 8), n) {
             w = RDMEM_64(Add(p, i))
             nw = BitwiseXor(w, -1)
+            t = Subtract(w, c20)
+            t = BitwiseAnd(t, nw)
             wq = BitwiseXor(w, q)
+            u = Subtract(wq, ones)
+            v = BitwiseXor(wq, -1)
+            u = BitwiseAnd(u, v)
+            t = BitwiseOr(t, u)
             wb = BitwiseXor(w, bs)
-            t = BitwiseAnd(BitwiseAnd(Subtract(w, c20), nw), hi)
-            t = BitwiseOr(t, BitwiseAnd(BitwiseAnd(Subtract(wq, ones), BitwiseXor(wq, -1)), hi))
-            t = BitwiseOr(t, BitwiseAnd(BitwiseAnd(Subtract(wb, ones), BitwiseXor(wb, -1)), hi))
+            u = Subtract(wb, ones)
+            v = BitwiseXor(wb, -1)
+            u = BitwiseAnd(u, v)
+            t = BitwiseOr(t, u)
+            t = BitwiseAnd(t, hi)
             IfCondition NotEqual(t, 0) ThenBlock: {
-                need = 1
-                BreakLoop
+                FeedSt.len = Add(ol, i)
+                Feed.PutEscSlow(p, i, n)
+                ReturnValue(0)
             }
+            WRMEM_64(Add(out, i), w)
             i = Add(i, 8)
         }
-        IfCondition EqualTo(need, 0) ThenBlock: {
-            WhileLoop LessThan(i, n) {
-                ch = RDMEM_8(p, i)
-                IfCondition Or(Or(EqualTo(ch, 34), EqualTo(ch, 92)), LessThan(ch, 32)) ThenBlock: {
-                    need = 1
-                    BreakLoop
-                }
-                i = Add(i, 1)
+        WhileLoop LessThan(i, n) {
+            ch = RDMEM_8(p, i)
+            IfCondition Or(Or(EqualTo(ch, 34), EqualTo(ch, 92)), LessThan(ch, 32)) ThenBlock: {
+                FeedSt.len = Add(ol, i)
+                Feed.PutEscSlow(p, i, n)
+                ReturnValue(0)
             }
+            WRMEM_8(out, i, ch)
+            i = Add(i, 1)
         }
-        IfCondition EqualTo(need, 0) ThenBlock: {
-            Feed.Put(p, n)
-            ReturnValue(0)
-        }
-        i2 = 0
+        FeedSt.len = Add(ol, n)
+    }
+}
+
+// Bytes [from, n) of p through the escaping writer.
+Function.Feed.PutEscSlow {
+    Input: p: Address
+    Input: from: Integer
+    Input: n: Integer
+    Body: {
+        i2 = from
         WhileLoop LessThan(i2, n) {
-            ch2 = RDMEM_8(p, i2)
-            Feed.PutEscByte(ch2)
+            Feed.PutEscByte(RDMEM_8(p, i2))
             i2 = Add(i2, 1)
         }
     }

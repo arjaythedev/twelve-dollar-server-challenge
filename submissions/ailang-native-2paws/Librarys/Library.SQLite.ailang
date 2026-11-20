@@ -1982,26 +1982,53 @@ Function.SQLite.RangeCount {
         IfCondition NotEqual(flags, 10) ThenBlock: { ReturnValue(0) }
         ptrbase = Add(h, 8)
         ci = SQLite.LowerBound(page, pageno, ncells, 0, a)
+        // One pass over the leaf: each cell's key is decoded here (a one-byte
+        // record header with a 1-4 byte integer key, the shape of this index),
+        // and IdxKeyAt only for any other cell. A run longer than 16 entries
+        // jumps to its end with a binary search.
+        run_k = -1
+        run_n = 0
         WhileLoop LessThan(ci, ncells) {
-            k = SQLite.IdxKeyAt(page, ptrbase, 0, ci)
-            IfCondition GreaterThan(k, b) ThenBlock: { ReturnValue(0) }
-            // end of this key's run: a short scan, then a binary search for long runs
-            e = Add(ci, 1)
-            lim = Add(ci, 8)
-            IfCondition GreaterThan(lim, ncells) ThenBlock: { lim = ncells }
-            WhileLoop LessThan(e, lim) {
-                ke = SQLite.IdxKeyAt(page, ptrbase, 0, e)
-                IfCondition NotEqual(ke, k) ThenBlock: { BreakLoop }
-                e = Add(e, 1)
-            }
-            IfCondition EqualTo(e, lim) ThenBlock: {
-                IfCondition LessThan(lim, ncells) ThenBlock: {
-                    e = SQLite.LowerBound(page, pageno, ncells, 0, Add(k, 1))
+            poff = Add(ptrbase, Multiply(ci, 2))
+            coff = BitwiseOr(LeftShift(RDMEM_8(page, poff), 8), RDMEM_8(page, Add(poff, 1)))
+            cell = Add(page, coff)
+            k = -1
+            IfCondition LessThan(RDMEM_8(cell, 0), 128) ThenBlock: {
+                hsz = RDMEM_8(cell, 1)
+                IfCondition And(LessThan(hsz, 128), GreaterThan(hsz, 1)) ThenBlock: {
+                    st = RDMEM_8(cell, 2)
+                    d = Add(Add(cell, 1), hsz)
+                    IfCondition EqualTo(st, 1) ThenBlock: { k = RDMEM_8(d, 0) }
+                    IfCondition EqualTo(st, 2) ThenBlock: { k = BitwiseOr(LeftShift(RDMEM_8(d, 0), 8), RDMEM_8(d, 1)) }
+                    IfCondition EqualTo(st, 3) ThenBlock: {
+                        k = BitwiseOr(BitwiseOr(LeftShift(RDMEM_8(d, 0), 16), LeftShift(RDMEM_8(d, 1), 8)), RDMEM_8(d, 2))
+                    }
+                    IfCondition EqualTo(st, 4) ThenBlock: {
+                        k = BitwiseOr(BitwiseOr(LeftShift(RDMEM_8(d, 0), 24), LeftShift(RDMEM_8(d, 1), 16)), BitwiseOr(LeftShift(RDMEM_8(d, 2), 8), RDMEM_8(d, 3)))
+                    }
                 }
             }
-            SQLite.CntAdd(k, Subtract(e, ci))
-            ci = e
+            IfCondition LessThan(k, 0) ThenBlock: { k = SQLite.IdxKeyAt(page, ptrbase, 0, ci) }
+            IfCondition GreaterThan(k, b) ThenBlock: {
+                IfCondition GreaterThan(run_n, 0) ThenBlock: { SQLite.CntAdd(run_k, run_n) }
+                ReturnValue(0)
+            }
+            IfCondition EqualTo(k, run_k) ThenBlock: {
+                run_n = Add(run_n, 1)
+                ci = Add(ci, 1)
+                IfCondition EqualTo(run_n, 16) ThenBlock: {
+                    e = SQLite.LowerBound(page, pageno, ncells, 0, Add(k, 1))
+                    run_n = Add(run_n, Subtract(e, ci))
+                    ci = e
+                }
+            } ElseBlock: {
+                IfCondition GreaterThan(run_n, 0) ThenBlock: { SQLite.CntAdd(run_k, run_n) }
+                run_k = k
+                run_n = 1
+                ci = Add(ci, 1)
+            }
         }
+        IfCondition GreaterThan(run_n, 0) ThenBlock: { SQLite.CntAdd(run_k, run_n) }
     }
 }
 

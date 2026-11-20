@@ -68,9 +68,6 @@ extern int madvise(nativeint addr, unativeint len, int advice)
 [<DllImport(L, SetLastError = true)>]
 extern int setpriority(int which, int who, int prio)
 
-[<DllImport(L, SetLastError = true)>]
-extern int sched_setscheduler(int pid, int policy, int& param)
-
 [<DllImport(L)>]
 extern int gettid()
 

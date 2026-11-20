@@ -10,6 +10,8 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <arpa/inet.h>
+#include <limits.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <sys/mman.h>
@@ -34,6 +36,9 @@
  * and the process was OOM-killed above 85k users. */
 #define POOL_COUNT 16384
 #define POOL_BUF_SIZE 16384
+#define RESPONSE_HEADROOM 512
+#define MAX_REQUEST_SIZE 65536
+#define MAX_BATCH_REPLIES 1024
 #define K_LISTENER_COUNT 8
 
 #define FLAG_OPEN 1
@@ -50,6 +55,7 @@ void bf_execute(int64_t *tape, int64_t *tape_start, int64_t *tape_end);
 static sqlite3 *db = NULL;
 static sqlite3_stmt *st_begin = NULL;
 static sqlite3_stmt *st_commit = NULL;
+static sqlite3_stmt *st_rollback = NULL;
 static sqlite3_stmt *st_feed = NULL;
 static sqlite3_stmt *st_post = NULL;
 static sqlite3_stmt *st_check = NULL;
@@ -58,25 +64,18 @@ static sqlite3_stmt *st_like = NULL;
 static sqlite3_stmt *st_unlike = NULL;
 static sqlite3_stmt *st_count = NULL;
 static int in_tx = 0;
-static int writes_held = 0;
 static char jwt_secret[256];
 static time_t start_time = 0;
 
-static inline void db_begin(void) {
-    if (!in_tx) {
-        sqlite3_step(st_begin);
-        sqlite3_reset(st_begin);
-        in_tx = 1;
-    }
+static inline int step_and_reset(sqlite3_stmt *stmt) {
+    int rc = sqlite3_step(stmt);
+    sqlite3_reset(stmt);
+    return rc;
 }
 
-static inline void db_commit_if_needed(void) {
-    if (in_tx && writes_held > 0) {
-        sqlite3_step(st_commit);
-        sqlite3_reset(st_commit);
-        in_tx = 0;
-        writes_held = 0;
-    }
+static inline bool db_begin(void) {
+    if (!in_tx) in_tx = step_and_reset(st_begin) == SQLITE_DONE;
+    return in_tx;
 }
 
 typedef struct {
@@ -112,6 +111,8 @@ typedef struct {
     int status_code;
     char content_type[64];
     char *resp_buf;
+    size_t resp_cap;
+    int resp_offset;
     int resp_len;
     char *out_body;
     int out_body_len;
@@ -137,8 +138,9 @@ static inline char* acquire_pool(RespPool *p) {
 
 static inline void release_pool(RespPool *p, char *ptr) {
     if (!ptr) return;
-    if (ptr >= p->mem && ptr < p->mem + (POOL_COUNT * POOL_BUF_SIZE)) {
-        uint32_t id = (uint32_t)((ptr - p->mem) / POOL_BUF_SIZE);
+    uintptr_t offset = (uintptr_t)ptr - (uintptr_t)p->mem;
+    if (offset < POOL_COUNT * POOL_BUF_SIZE) {
+        uint32_t id = offset / POOL_BUF_SIZE;
         p->free_stack[p->top++] = (uint16_t)id;
     } else {
         free(ptr);
@@ -183,7 +185,7 @@ typedef struct {
 static RingWorker rings[K_RING_COUNT];
 static uint32_t active_rings = 1;
 static int listeners[K_LISTENER_COUNT];
-static volatile bool running = true;
+static volatile sig_atomic_t running = 1;
 
 static const int8_t b64_table[256] = {
     ['A']=0,['B']=1,['C']=2,['D']=3,['E']=4,['F']=5,['G']=6,['H']=7,['I']=8,['J']=9,['K']=10,['L']=11,['M']=12,['N']=13,['O']=14,['P']=15,
@@ -371,76 +373,96 @@ void bf_mmio_crypto(int64_t *tape) {
     else { tape[8] = 0; tape[9] = 1; }
 }
 
+static bool reserve_response(RequestContext *req, char **pos, size_t extra) {
+    size_t used = *pos - req->resp_buf;
+    if (extra <= req->resp_cap - used) return true;
+    if (extra > INT_MAX - used) return false;
+    size_t capacity = used + extra;
+    if (req->resp_cap <= INT_MAX / 2 && capacity < req->resp_cap * 2) capacity = req->resp_cap * 2;
+    char *larger = malloc(capacity);
+    if (!larger) return false;
+    memcpy(larger + RESPONSE_HEADROOM, req->out_body, used - RESPONSE_HEADROOM);
+    release_pool(&resp_pool, req->resp_buf);
+    req->resp_buf = larger;
+    req->resp_cap = capacity;
+    req->out_body = larger + RESPONSE_HEADROOM;
+    *pos = larger + used;
+    return true;
+}
+
+static bool append_post(RequestContext *req, sqlite3_stmt *stmt, char **pos) {
+    const char *body = (const char *)sqlite3_column_text(stmt, 1);
+    int body_bytes = sqlite3_column_bytes(stmt, 1);
+    const char *created = (const char *)sqlite3_column_text(stmt, 2);
+    int created_bytes = sqlite3_column_bytes(stmt, 2);
+    const char *author = (const char *)sqlite3_column_text(stmt, 3);
+    int author_bytes = sqlite3_column_bytes(stmt, 3);
+    if (!body || !created || !author) return false;
+    size_t text_bytes = (size_t)body_bytes + created_bytes + author_bytes;
+    // Include JSON punctuation, two integers, and room for the outer object.
+    if (text_bytes > (INT_MAX - 128) / 6 || !reserve_response(req, pos, 128 + 6 * text_bytes)) return false;
+
+    char *p = *pos;
+    memcpy(p, "{\"id\":", 6); p += 6;
+    p = write_u64(p, (uint64_t)sqlite3_column_int64(stmt, 0));
+    memcpy(p, ",\"body\":\"", 9); p += 9;
+    p = escape_json_str(p, body, body_bytes);
+    memcpy(p, "\",\"created_at\":\"", 16); p += 16;
+    p = escape_json_str(p, created, created_bytes);
+    memcpy(p, "\",\"author\":\"", 12); p += 12;
+    p = escape_json_str(p, author, author_bytes);
+    memcpy(p, "\",\"like_count\":", 15); p += 15;
+    p = write_u64(p, (uint64_t)sqlite3_column_int64(stmt, 4));
+    *p++ = '}';
+    *pos = p;
+    return true;
+}
+
+static void database_failed(RequestContext *req) {
+    req->status_code = 500;
+    req->out_body_len = sprintf(req->out_body, "{\"error\":\"database operation failed\"}");
+}
+
 void bf_mmio_db(int64_t *tape) {
     if (!curr_conn) return;
     int op = tape[16];
     int64_t id = tape[17];
     if (op == 1) {
-        sqlite3_reset(st_feed);
         char *p = curr_conn->out_body;
         memcpy(p, "{\"posts\":[", 10); p += 10;
-        int count = 0;
-        while (sqlite3_step(st_feed) == SQLITE_ROW) {
-            if (count > 0) *(p++) = ',';
-            int64_t pid = sqlite3_column_int64(st_feed, 0);
-            const char *body = (const char*)sqlite3_column_text(st_feed, 1);
-            int body_bytes = sqlite3_column_bytes(st_feed, 1);
-            const char *created_at = (const char*)sqlite3_column_text(st_feed, 2);
-            int created_bytes = sqlite3_column_bytes(st_feed, 2);
-            const char *uname = (const char*)sqlite3_column_text(st_feed, 3);
-            int user_bytes = sqlite3_column_bytes(st_feed, 3);
-            int64_t likes = sqlite3_column_int64(st_feed, 4);
-
-            memcpy(p, "{\"id\":", 6); p += 6;
-            p = write_u64(p, (uint64_t)pid);
-            memcpy(p, ",\"body\":\"", 9); p += 9;
-            p = escape_json_str(p, body, body_bytes);
-            memcpy(p, "\",\"created_at\":\"", 16); p += 16;
-            memcpy(p, created_at, created_bytes); p += created_bytes;
-            memcpy(p, "\",\"author\":\"", 12); p += 12;
-            memcpy(p, uname, user_bytes); p += user_bytes;
-            memcpy(p, "\",\"like_count\":", 15); p += 15;
-            p = write_u64(p, (uint64_t)likes);
-            *(p++) = '}';
-            count++;
+        int rc;
+        while ((rc = sqlite3_step(st_feed)) == SQLITE_ROW) {
+            if (p != curr_conn->out_body + 10) *p++ = ',';
+            if (!append_post(curr_conn, st_feed, &p)) break;
         }
-        *(p++) = ']'; *(p++) = '}'; *p = 0;
+        sqlite3_reset(st_feed);
+        if (rc != SQLITE_DONE) {
+            database_failed(curr_conn);
+            return;
+        }
+        *p++ = ']'; *p++ = '}';
         curr_conn->out_body_len = p - curr_conn->out_body;
         curr_conn->status_code = 200;
-        strcpy(curr_conn->content_type, "application/json");
         return;
     }
     if (op == 2) {
-        sqlite3_reset(st_post);
         sqlite3_bind_int64(st_post, 1, id);
-        if (sqlite3_step(st_post) == SQLITE_ROW) {
-            int64_t pid = sqlite3_column_int64(st_post, 0);
-            const char *body = (const char*)sqlite3_column_text(st_post, 1);
-            int body_bytes = sqlite3_column_bytes(st_post, 1);
-            const char *created_at = (const char*)sqlite3_column_text(st_post, 2);
-            int created_bytes = sqlite3_column_bytes(st_post, 2);
-            const char *uname = (const char*)sqlite3_column_text(st_post, 3);
-            int user_bytes = sqlite3_column_bytes(st_post, 3);
-            int64_t likes = sqlite3_column_int64(st_post, 4);
+        int rc = sqlite3_step(st_post);
+        if (rc == SQLITE_ROW) {
             char *p = curr_conn->out_body;
-            memcpy(p, "{\"post\":{\"id\":", 14); p += 14;
-            p = write_u64(p, (uint64_t)pid);
-            memcpy(p, ",\"body\":\"", 9); p += 9;
-            p = escape_json_str(p, body, body_bytes);
-            memcpy(p, "\",\"created_at\":\"", 16); p += 16;
-            memcpy(p, created_at, created_bytes); p += created_bytes;
-            memcpy(p, "\",\"author\":\"", 12); p += 12;
-            memcpy(p, uname, user_bytes); p += user_bytes;
-            memcpy(p, "\",\"like_count\":", 15); p += 15;
-            p = write_u64(p, (uint64_t)likes);
-            *(p++) = '}'; *(p++) = '}'; *p = 0;
-            curr_conn->out_body_len = p - curr_conn->out_body;
-            curr_conn->status_code = 200;
-            strcpy(curr_conn->content_type, "application/json");
-        } else {
+            memcpy(p, "{\"post\":", 8); p += 8;
+            if (append_post(curr_conn, st_post, &p)) {
+                *p++ = '}';
+                curr_conn->out_body_len = p - curr_conn->out_body;
+                curr_conn->status_code = 200;
+            } else {
+                database_failed(curr_conn);
+            }
+        } else if (rc == SQLITE_DONE) {
             curr_conn->status_code = 404;
-            strcpy(curr_conn->content_type, "application/json");
             curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"post not found\"}");
+        } else {
+            database_failed(curr_conn);
         }
         sqlite3_reset(st_post);
         return;
@@ -483,12 +505,14 @@ void bf_mmio_db(int64_t *tape) {
         if (clen == 0) { curr_conn->status_code = 400; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"body is required\"}"); return; }
         int ulen = utf8_strlen(cstart, clen);
         if (ulen > 500) { curr_conn->status_code = 400; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"body must be at most 500 characters\"}"); return; }
-        db_begin();
+        if (!db_begin()) {
+            database_failed(curr_conn);
+            return;
+        }
         sqlite3_reset(st_insert);
         sqlite3_bind_int64(st_insert, 1, curr_conn->auth_uid);
         sqlite3_bind_text(st_insert, 2, cstart, clen, SQLITE_TRANSIENT);
         if (sqlite3_step(st_insert) == SQLITE_ROW) {
-            writes_held++;
             int64_t new_id = sqlite3_column_int64(st_insert, 0);
             const char *created_at = (const char*)sqlite3_column_text(st_insert, 1);
             char *p = curr_conn->out_body;
@@ -500,7 +524,7 @@ void bf_mmio_db(int64_t *tape) {
         } else {
             curr_conn->status_code = 500; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"error\":\"insert failed\"}");
         }
-        sqlite3_reset(st_insert);
+        if (sqlite3_reset(st_insert) != SQLITE_OK) database_failed(curr_conn);
         return;
     }
     if (op == 4) {
@@ -512,15 +536,19 @@ void bf_mmio_db(int64_t *tape) {
             sqlite3_reset(st_check); return;
         }
         sqlite3_reset(st_check);
-        db_begin();
+        if (!db_begin()) {
+            database_failed(curr_conn);
+            return;
+        }
         sqlite3_reset(st_like);
         sqlite3_bind_int64(st_like, 1, curr_conn->auth_uid);
         sqlite3_bind_int64(st_like, 2, id);
-        sqlite3_step(st_like);
+        if (step_and_reset(st_like) != SQLITE_DONE) {
+            database_failed(curr_conn);
+            return;
+        }
         int changes = sqlite3_changes(db);
-        sqlite3_reset(st_like);
         if (changes > 0) {
-            writes_held++;
             curr_conn->status_code = 201; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"liked\":true,\"already_liked\":false,\"post_id\":%ld}", (long)id);
         } else {
             curr_conn->status_code = 200; curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"liked\":true,\"already_liked\":true,\"post_id\":%ld}", (long)id);
@@ -537,19 +565,26 @@ void bf_mmio_db(int64_t *tape) {
             sqlite3_reset(st_check); return;
         }
         sqlite3_reset(st_check);
-        db_begin();
+        if (!db_begin()) {
+            database_failed(curr_conn);
+            return;
+        }
         sqlite3_reset(st_unlike);
         sqlite3_bind_int64(st_unlike, 1, curr_conn->auth_uid);
         sqlite3_bind_int64(st_unlike, 2, id);
-        sqlite3_step(st_unlike);
-        int changes = sqlite3_changes(db);
-        sqlite3_reset(st_unlike);
-        if (changes > 0) writes_held++;
+        if (step_and_reset(st_unlike) != SQLITE_DONE) {
+            database_failed(curr_conn);
+            return;
+        }
         sqlite3_reset(st_count);
         sqlite3_bind_int64(st_count, 1, id);
-        int64_t count = 0;
-        if (sqlite3_step(st_count) == SQLITE_ROW) count = sqlite3_column_int64(st_count, 0);
+        int rc = sqlite3_step(st_count);
+        int64_t count = rc == SQLITE_ROW ? sqlite3_column_int64(st_count, 0) : 0;
         sqlite3_reset(st_count);
+        if (rc != SQLITE_ROW) {
+            database_failed(curr_conn);
+            return;
+        }
         curr_conn->status_code = 200;
         curr_conn->out_body_len = sprintf(curr_conn->out_body, "{\"liked\":false,\"post_id\":%ld,\"like_count\":%ld}", (long)id, (long)count);
         strcpy(curr_conn->content_type, "application/json");
@@ -613,7 +648,7 @@ void bf_mmio_net(int64_t *tape) {
     
     char *send_start = curr_conn->out_body - hdr_len;
     memcpy(send_start, hdr, hdr_len);
-    curr_conn->resp_buf = send_start;
+    curr_conn->resp_offset = send_start - curr_conn->resp_buf;
     curr_conn->resp_len = hdr_len + curr_conn->out_body_len;
 }
 
@@ -768,6 +803,39 @@ static void arm_close(RingWorker *w, uint32_t slot, Conn *c) {
     c->flags &= ~FLAG_OPEN;
 }
 
+static struct {
+    RingWorker *ring;
+    uint32_t slot;
+} batch_replies[MAX_BATCH_REPLIES];
+static unsigned reply_count;
+
+static void commit_and_send(void) {
+    if (!in_tx) return;
+    bool committed = step_and_reset(st_commit) == SQLITE_DONE;
+    if (!committed && !sqlite3_get_autocommit(db)) {
+        if (step_and_reset(st_rollback) != SQLITE_DONE && !sqlite3_get_autocommit(db)) {
+            fprintf(stderr, "Could not roll back failed SQLite batch\n");
+            running = 0;
+        }
+    }
+    in_tx = false;
+
+    for (unsigned i = 0; i < reply_count; i++) {
+        RingWorker *w = batch_replies[i].ring;
+        uint32_t slot = batch_replies[i].slot;
+        Conn *c = &w->conns[slot];
+        if (!committed) {
+            const char body[] = "{\"error\":\"database commit failed\"}";
+            char *end = write_http_header(c->out_buf, 500, sizeof(body) - 1, c->keep_alive);
+            memcpy(end, body, sizeof(body) - 1);
+            c->out_off = 0;
+            c->out_len = end - c->out_buf + sizeof(body) - 1;
+        }
+        arm_send(w, slot, c);
+    }
+    reply_count = 0;
+}
+
 static inline int parse_content_length(const char *headers, int head_len) {
     const char *p = headers;
     const char *end = headers + head_len;
@@ -778,7 +846,16 @@ static inline int parse_content_length(const char *headers, int head_len) {
         if (line_len >= 15 && strncasecmp(p, "Content-Length:", 15) == 0) {
             const char *val = p + 15;
             while (val < next_line && (*val == ' ' || *val == '\t')) val++;
-            return atoi(val);
+            int length = 0;
+            const char *digits_end = val;
+            while (digits_end < next_line && *digits_end >= '0' && *digits_end <= '9') {
+                int digit = *digits_end++ - '0';
+                if (length > (MAX_REQUEST_SIZE - digit) / 10) return -1;
+                length = length * 10 + digit;
+            }
+            if (digits_end == val) return -1;
+            while (digits_end < next_line && (*digits_end == ' ' || *digits_end == '\t')) digits_end++;
+            return digits_end == next_line ? length : -1;
         }
         p = next_line + 2;
     }
@@ -881,7 +958,14 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     }
 
     req_ctx.resp_buf = acquire_pool(&resp_pool);
-    req_ctx.out_body = req_ctx.resp_buf + 512;
+    if (!req_ctx.resp_buf) {
+        arm_close(w, slot, c);
+        return;
+    }
+    req_ctx.resp_cap = POOL_BUF_SIZE;
+    req_ctx.out_body = req_ctx.resp_buf + RESPONSE_HEADROOM;
+
+    if (reply_count == MAX_BATCH_REPLIES) commit_and_send();
 
     curr_conn = &req_ctx;
     static int64_t bf_tape[256];
@@ -914,11 +998,16 @@ static void process_http_request(RingWorker *w, uint32_t slot, Conn *c, const ch
     if (bf_tape[32] == 1) bf_mmio_net(bf_tape);
 
     c->out_buf = req_ctx.resp_buf;
-    c->out_len = req_ctx.resp_len;
-    c->out_off = 0;
+    c->out_len = req_ctx.resp_offset + req_ctx.resp_len;
+    c->out_off = req_ctx.resp_offset;
     c->keep_alive = req_ctx.keep_alive;
 
-    arm_send(w, slot, c);
+    if (in_tx) {
+        batch_replies[reply_count].ring = w;
+        batch_replies[reply_count++].slot = slot;
+    } else {
+        arm_send(w, slot, c);
+    }
 }
 
 static void handle_incoming_data(RingWorker *w, uint32_t slot, Conn *c, const char *data, int data_len) {
@@ -927,17 +1016,17 @@ static void handle_incoming_data(RingWorker *w, uint32_t slot, Conn *c, const ch
             if (c->in_len + data_len > c->in_cap) {
                 uint32_t new_cap = c->in_cap * 2;
                 if (new_cap < c->in_len + data_len) new_cap = c->in_len + data_len + 1024;
-                if (new_cap > 65536) {
-                    if (c->in_buf) {
-                        free(c->in_buf);
-                        c->in_buf = NULL;
-                        c->in_len = 0;
-                        c->in_cap = 0;
-                    }
+                if (c->in_len + data_len > MAX_REQUEST_SIZE) {
                     arm_close(w, slot, c);
                     return;
                 }
-                c->in_buf = realloc(c->in_buf, new_cap);
+                if (new_cap > MAX_REQUEST_SIZE) new_cap = MAX_REQUEST_SIZE;
+                char *larger = realloc(c->in_buf, new_cap);
+                if (!larger) {
+                    arm_close(w, slot, c);
+                    return;
+                }
+                c->in_buf = larger;
                 c->in_cap = new_cap;
             }
             memcpy(c->in_buf + c->in_len, data, data_len);
@@ -951,6 +1040,10 @@ static void handle_incoming_data(RingWorker *w, uint32_t slot, Conn *c, const ch
         }
         int head_len = (end_head - c->in_buf) + 4;
         int clen = parse_content_length(c->in_buf, head_len);
+        if (clen < 0 || clen > MAX_REQUEST_SIZE - head_len) {
+            arm_close(w, slot, c);
+            return;
+        }
         int total_req = head_len + clen;
         if ((int)c->in_len < total_req) {
             arm_recv(w, slot, c);
@@ -977,6 +1070,10 @@ static void handle_incoming_data(RingWorker *w, uint32_t slot, Conn *c, const ch
         if (end_head) {
             int head_len = (end_head - data) + 4;
             int clen = parse_content_length(data, head_len);
+            if (clen < 0 || clen > MAX_REQUEST_SIZE - head_len) {
+                arm_close(w, slot, c);
+                return;
+            }
             int total_req = head_len + clen;
             if (data_len >= total_req) {
                 process_http_request(w, slot, c, data, total_req);
@@ -985,6 +1082,10 @@ static void handle_incoming_data(RingWorker *w, uint32_t slot, Conn *c, const ch
                 if (leftover > 0) {
                     c->in_cap = (leftover > 2048 ? leftover + 2048 : 4096);
                     c->in_buf = malloc(c->in_cap);
+                    if (!c->in_buf) {
+                        c->keep_alive = false;
+                        return;
+                    }
                     memcpy(c->in_buf, data + total_req, leftover);
                     c->in_len = leftover;
                 }
@@ -994,6 +1095,10 @@ static void handle_incoming_data(RingWorker *w, uint32_t slot, Conn *c, const ch
 
         c->in_cap = (data_len > 2048 ? data_len + 2048 : 4096);
         c->in_buf = malloc(c->in_cap);
+        if (!c->in_buf) {
+            arm_close(w, slot, c);
+            return;
+        }
         memcpy(c->in_buf, data, data_len);
         c->in_len = data_len;
         arm_recv(w, slot, c);
@@ -1226,6 +1331,7 @@ static int init_worker(uint32_t id) {
 
     size_t sq_sz = p.sq_off.array + p.sq_entries * sizeof(unsigned);
     void *sq_ptr = mmap(NULL, sq_sz, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, w->ring_fd, IORING_OFF_SQ_RING);
+    if (sq_ptr == MAP_FAILED) { perror("submission ring mmap"); return -1; }
     w->sq_khead = sq_ptr + p.sq_off.head;
     w->sq_ktail = sq_ptr + p.sq_off.tail;
     w->sq_kflags = sq_ptr + p.sq_off.flags;
@@ -1238,8 +1344,10 @@ static int init_worker(uint32_t id) {
     size_t sqes_sz = p.sq_entries * sizeof(struct io_uring_sqe);
     w->sqes = mmap(NULL, sqes_sz, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, w->ring_fd, IORING_OFF_SQES);
 
+    if (w->sqes == MAP_FAILED) { perror("submission entries mmap"); return -1; }
     size_t cq_sz = p.cq_off.cqes + p.cq_entries * sizeof(struct io_uring_cqe);
     void *cq_ptr = mmap(NULL, cq_sz, PROT_READ|PROT_WRITE, MAP_SHARED|MAP_POPULATE, w->ring_fd, IORING_OFF_CQ_RING);
+    if (cq_ptr == MAP_FAILED) { perror("completion ring mmap"); return -1; }
     w->cq_khead = cq_ptr + p.cq_off.head;
     w->cq_ktail = cq_ptr + p.cq_off.tail;
     w->cqes = cq_ptr + p.cq_off.cqes;
@@ -1260,20 +1368,24 @@ static int init_worker(uint32_t id) {
 
     size_t ring_bytes = N_BUFS_PER_RING * sizeof(struct io_uring_buf);
     void *rmem = mmap(NULL, ring_bytes, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_SHARED, -1, 0);
+    if (rmem == MAP_FAILED) { perror("buffer ring mmap"); return -1; }
     struct io_uring_buf_reg breg;
     memset(&breg, 0, sizeof(breg));
     breg.ring_addr = (uint64_t)rmem;
     breg.ring_entries = N_BUFS_PER_RING;
     breg.bgid = BGID;
-    if (sys_io_uring_register(w->ring_fd, IORING_REGISTER_PBUF_RING, &breg, 1) != 0 && errno == EINVAL) {
+    int rc = sys_io_uring_register(w->ring_fd, IORING_REGISTER_PBUF_RING, &breg, 1);
+    if (rc != 0 && errno == EINVAL) {
         breg.resv[0] = 1;
-        sys_io_uring_register(w->ring_fd, IORING_REGISTER_PBUF_RING, &breg, 1);
+        rc = sys_io_uring_register(w->ring_fd, IORING_REGISTER_PBUF_RING, &breg, 1);
     }
+    if (rc != 0) { perror("register receive buffers"); return -1; }
     w->pbuf_ring = rmem;
     w->pbuf_tail = 0;
 
     size_t bufs_sz = N_BUFS_PER_RING * BUF_SIZE;
     w->pbuf_mem = mmap(NULL, bufs_sz, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+    if (w->pbuf_mem == MAP_FAILED) { perror("receive pool mmap"); return -1; }
     madvise(w->pbuf_mem, bufs_sz, MADV_HUGEPAGE);
 
     for (int i = 0; i < N_BUFS_PER_RING; i++) {
@@ -1283,6 +1395,7 @@ static int init_worker(uint32_t id) {
 
     size_t conns_sz = SLOTS_PER_RING * sizeof(Conn);
     w->conns = mmap(NULL, conns_sz, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+    if (w->conns == MAP_FAILED) { perror("connection table mmap"); return -1; }
     madvise(w->conns, conns_sz, MADV_HUGEPAGE);
     memset(w->conns, 0, conns_sz);
 
@@ -1291,7 +1404,7 @@ static int init_worker(uint32_t id) {
 
 static void sig_handler(int sig) {
     (void)sig;
-    exit(0);
+    running = 0;
 }
 
 int main(int argc, char **argv) {
@@ -1310,7 +1423,22 @@ int main(int argc, char **argv) {
     }
 
     start_time = time(NULL);
-    const char *port_str = getenv("PORT"); int port = port_str ? atoi(port_str) : 80;
+    const char *port_str = getenv("PORT");
+    long port = 80;
+    if (port_str) {
+        char *end;
+        port = strtol(port_str, &end, 10);
+        if (end == port_str || *end || port < 0 || port > UINT16_MAX) {
+            fprintf(stderr, "Invalid PORT\n");
+            return 1;
+        }
+    }
+    struct in_addr bind_addr = { .s_addr = htonl(INADDR_ANY) };
+    const char *host = getenv("HOST");
+    if (host && inet_pton(AF_INET, host, &bind_addr) != 1) {
+        fprintf(stderr, "HOST must be an IPv4 address\n");
+        return 1;
+    }
     const char *db_path = getenv("SQLITE_PATH"); if (!db_path) db_path = "feed.db";
     const char *secret = getenv("JWT_SECRET"); if (!secret) secret = "twelve-dollar-challenge";
     strncpy(jwt_secret, secret, sizeof(jwt_secret)-1);
@@ -1326,22 +1454,37 @@ int main(int argc, char **argv) {
     sqlite3_exec(db, "PRAGMA temp_store=MEMORY;", NULL, NULL, NULL);
     sqlite3_exec(db, "PRAGMA busy_timeout=5000;", NULL, NULL, NULL);
 
-    sqlite3_prepare_v3(db, "BEGIN IMMEDIATE;", -1, SQLITE_PREPARE_PERSISTENT, &st_begin, NULL);
-    sqlite3_prepare_v3(db, "COMMIT;", -1, SQLITE_PREPARE_PERSISTENT, &st_commit, NULL);
-    sqlite3_prepare_v3(db, "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20;", -1, SQLITE_PREPARE_PERSISTENT, &st_feed, NULL);
-    sqlite3_prepare_v3(db, "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_post, NULL);
-    sqlite3_prepare_v3(db, "SELECT 1 FROM posts WHERE id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_check, NULL);
-    sqlite3_prepare_v3(db, "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at;", -1, SQLITE_PREPARE_PERSISTENT, &st_insert, NULL);
-    sqlite3_prepare_v3(db, "INSERT OR IGNORE INTO likes (user_id, post_id) VALUES (?, ?);", -1, SQLITE_PREPARE_PERSISTENT, &st_like, NULL);
-    sqlite3_prepare_v3(db, "DELETE FROM likes WHERE user_id = ? AND post_id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_unlike, NULL);
-    sqlite3_prepare_v3(db, "SELECT count(*) FROM likes WHERE post_id = ?;", -1, SQLITE_PREPARE_PERSISTENT, &st_count, NULL);
+    const struct {
+        sqlite3_stmt **stmt;
+        const char *sql;
+    } statements[] = {
+        { &st_begin, "BEGIN IMMEDIATE;" },
+        { &st_commit, "COMMIT;" },
+        { &st_rollback, "ROLLBACK;" },
+        { &st_feed, "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20;" },
+        { &st_post, "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?;" },
+        { &st_check, "SELECT 1 FROM posts WHERE id = ?;" },
+        { &st_insert, "INSERT INTO posts (user_id, body) VALUES (?, ?) RETURNING id, created_at;" },
+        { &st_like, "INSERT OR IGNORE INTO likes (user_id, post_id) VALUES (?, ?);" },
+        { &st_unlike, "DELETE FROM likes WHERE user_id = ? AND post_id = ?;" },
+        { &st_count, "SELECT count(*) FROM likes WHERE post_id = ?;" },
+    };
+    for (size_t i = 0; i < sizeof(statements) / sizeof(statements[0]); i++) {
+        if (sqlite3_prepare_v3(db, statements[i].sql, -1, SQLITE_PREPARE_PERSISTENT,
+                               statements[i].stmt, NULL) != SQLITE_OK) {
+            fprintf(stderr, "SQLite prepare failed: %s\n", sqlite3_errmsg(db));
+            return 1;
+        }
+    }
 
     // Initialize RespPool (16384 * 16384 bytes = 256 MB virtual; pages are
     // committed on demand, avoiding the unbounded fallback under bursts).
     size_t pool_bytes = POOL_COUNT * POOL_BUF_SIZE;
     resp_pool.mem = mmap(NULL, pool_bytes, PROT_READ|PROT_WRITE, MAP_ANONYMOUS|MAP_PRIVATE, -1, 0);
+    if (resp_pool.mem == MAP_FAILED) { perror("response pool mmap"); return 1; }
     madvise(resp_pool.mem, pool_bytes, MADV_HUGEPAGE);
     resp_pool.free_stack = malloc(POOL_COUNT * sizeof(uint16_t));
+    if (!resp_pool.free_stack) { perror("response pool allocation"); return 1; }
     for (uint32_t i = 0; i < POOL_COUNT; i++) {
         resp_pool.free_stack[i] = (uint16_t)i;
     }
@@ -1365,9 +1508,16 @@ int main(int argc, char **argv) {
         memset(&addr, 0, sizeof(addr));
         addr.sin_family = AF_INET;
         addr.sin_port = htons(port);
-        addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        addr.sin_addr = bind_addr;
         if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
             perror("bind"); return 1;
+        }
+        if (port == 0) {
+            socklen_t addr_len = sizeof(addr);
+            if (getsockname(fd, (struct sockaddr *)&addr, &addr_len) != 0) {
+                perror("getsockname"); return 1;
+            }
+            port = ntohs(addr.sin_port);
         }
         if (listen(fd, 65535) != 0) {
             perror("listen"); return 1;
@@ -1386,7 +1536,7 @@ int main(int argc, char **argv) {
     rings[0].accepting = true;
     fill_accepts(&rings[0]);
 
-    fprintf(stderr, "Brainfuck io_uring Server listening on port %d with 1 active of %d rings x %d = %d direct descriptors\n",
+    fprintf(stderr, "Brainfuck io_uring Server listening on port %ld with 1 active of %d rings x %d = %d direct descriptors\n",
         port, K_RING_COUNT, SLOTS_PER_RING, K_RING_COUNT * SLOTS_PER_RING);
 
     uint32_t wait_ri = 0;
@@ -1427,7 +1577,7 @@ int main(int argc, char **argv) {
 
         spill_accepts();
 
-        db_commit_if_needed();
+        commit_and_send();
     }
 
     return 0;

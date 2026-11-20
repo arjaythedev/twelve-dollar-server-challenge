@@ -174,14 +174,27 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 
 - **Feed:** the first 20 entries of `posts_created_at_id_idx` (`created_at DESC, id DESC`, so exactly the spec's
   order), then each post and its author. The n-th post and its author are read through cursors of their own, so when
-  requests in a pass ask for the same rows, SQLite's move returns at once from a cursor already there; every request
-  still decodes the rows from SQLite's pages. Like counts take one range walk of `likes_post_id_idx` when the 20 ids
-  lie within 512 of each other, a seek per post otherwise.
-- **Post:** `GET /posts/:id` reads post X and its author through cursor pair X mod 32 (`POSTSLOTS`, 0 for one
-  shared pair). The posts asked for are the few that feeds list, so a pair mostly stays on one of them and the move
-  returns at once instead of descending from the root; the row and its like count are still read for every request.
-  Test box, 300,000 requests for the 20 newest posts at random on 3,000 connections: 4,780 user-space instructions per
-  request against 6,700 with one shared pair (2,620 cycles against 3,400).
+  requests in a transaction ask for the same rows the cursor is already there: the server keeps the rowid it put
+  each cursor on and doesn't send it to search for the row it is on (`sqlite3BtreeTableMoveto` would return at
+  once); every request still decodes the rows from SQLite's pages. Like counts take one range walk of
+  `likes_post_id_idx` when the 20 ids lie within 512 of each other, a seek per post otherwise.
+- **Post:** `GET /posts/:id` reads post X through one of 64 posts cursors, each serving a run of 32 consecutive ids
+  (`POSTRUN`; 0: cursor X mod 32, searched from the root each time), and its author through users cursor X mod 32
+  (`POSTSLOTS`, 0 for one shared pair). Under load the posts asked for are the ones feeds listed in the last seconds,
+  a thousand or more of the newest: an id rarely comes twice in one transaction, a neighbour's mostly does. From a
+  row of its run the cursor steps to the one asked for (`sqlite3BtreeNext`/`Previous`, mostly inside one leaf) and
+  the key it lands on is checked; only the first request of a run in a transaction searches from the root. The row
+  and its like count are read for every request.
+- **Fewer searches from the root.** A search costs a page lookup and a binary search per level on memory the network
+  path has pushed out of the CPU's caches: the profile had about 9 % of the loop thread in them, 2.7 a request. Two
+  more are spared besides the post's. A feed that read 20 index entries leaves that cursor on the 20th; the next feed of
+  the transaction reads them from there back to the first, and its step before the first must find the start of the
+  index, so every second feed does without the walk from the root. The 20 newest posts mostly have no like yet: a
+  cursor that stays on the last entry of `likes_post_id_idx` shows that in one read (`sqlite3BtreeLast` returns at
+  once from a cursor already there), and the range walk runs only when that entry is for one of them or a newer
+  post. Test box, 160,000 users, 30 s of the hold (counted with uprobes): 28,900 searches from the root a second
+  against 46,600, 1.7 a request against 2.7. At 320,000 users the difference in CPU per request stayed inside the test
+  box's run-to-run spread.
 - **Live reads:** every request reads its rows while it is served (rule 5). Only prepared statements, cursors, key
   descriptions and the four root pages are kept, and the schema cookie is checked once per transaction. A read transaction
   that read-only passes share always sees the latest commit: only the loop writes, and a pass that writes commits.
@@ -218,7 +231,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `POSTRUN` (32), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
 startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `STATS` (1: a line a second on stderr).

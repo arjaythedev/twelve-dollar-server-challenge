@@ -120,7 +120,7 @@ impl HmacKey {
         if key.len() > 64 {
             let mut h = Sha256::new();
             h.update(key);
-            k0.copy_from_slice(&h.finish());
+            k0[..32].copy_from_slice(&h.finish());
         } else {
             k0[..key.len()].copy_from_slice(key);
         }

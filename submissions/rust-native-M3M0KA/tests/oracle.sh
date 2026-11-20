@@ -4,10 +4,10 @@
 #
 #   bash tests/oracle.sh [number-of-random-posts]
 #
-# Two servers read the same database state: one with the B-tree read plans, one
-# with FEED_NO_PLAN=1 (pure SQL). Stage 1 compares a fresh seed; stage 2 applies
-# writes through the plan server, then both servers are restarted on copies of
-# that exact database and compared again.
+# Two servers read the same database state: one with the custom B-tree feed
+# builder and one with FEED_FORCE_SQL=1. Stage 1 compares a fresh seed; stage 2
+# applies writes through the B-tree server, then both servers are restarted on
+# copies of that exact database and compared again.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
@@ -15,7 +15,10 @@ N=${1:-3000}
 PORT_A=${PORT_A:-3211}
 PORT_B=${PORT_B:-3212}
 WORK=$(mktemp -d)
-TOKEN=$(jq -r '.[0].token' "$ROOT/seed/tokens.json")
+SERVER_BIN=${FEED_BIN:-$HERE/bin/feed}
+SEED=${FEED_SEED:-$ROOT/seed/feed.db}
+TOKEN_FILE=${FEED_TOKENS:-$ROOT/seed/tokens.json}
+TOKEN=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[0]["token"])' "$TOKEN_FILE")
 PID_A=""
 PID_B=""
 
@@ -34,12 +37,20 @@ trap cleanup EXIT
 
 start() { # port, extra env, db -> pid in $STARTED
   SQLITE_PATH="$3" JWT_SECRET=twelve-dollar-challenge HOST=127.0.0.1 PORT="$1" \
-    env $2 "$HERE/bin/feed" >"$WORK/server-$1.log" 2>&1 &
+    env $2 "$SERVER_BIN" >"$WORK/server-$1.log" 2>&1 &
   STARTED=$!
 }
 
 wait_up() {
-  for _ in $(seq 300); do curl -sf "http://127.0.0.1:$1/health" >/dev/null && return 0; sleep 0.1; done
+  for _ in $(seq 300); do
+    curl -sf "http://127.0.0.1:$1/health" >/dev/null && return 0
+    state=$(ps -o stat= -p "$STARTED" 2>/dev/null || true)
+    if [[ -z "$state" || "$state" == Z* ]]; then
+      wait "$STARTED" 2>/dev/null || true
+      echo "server on $1 exited before becoming healthy"; cat "$WORK/server-$1.log"; exit 1
+    fi
+    sleep 0.1
+  done
   echo "server on $1 never became healthy"; cat "$WORK/server-$1.log"; exit 1
 }
 
@@ -64,8 +75,8 @@ grab() { # port, outdir
 }
 
 shuf -i 1-500000 -n "$N" | sort -n > "$WORK/ids.txt"
-cp "$ROOT/seed/feed.db" "$WORK/a.db"
-cp "$ROOT/seed/feed.db" "$WORK/b.db"
+cp "$SEED" "$WORK/a.db"
+cp "$SEED" "$WORK/b.db"
 
 fail=0
 compare() { # label
@@ -90,8 +101,8 @@ grep -q "read plans: enabled" "$WORK/server-$PORT_A.log" || {
 
 start "$PORT_B" "FEED_NO_PLAN=1" "$WORK/b.db"; PID_B=$STARTED
 wait_up "$PORT_B"
-grep -q "disabled by FEED_NO_PLAN" "$WORK/server-$PORT_B.log" || {
-  echo "the SQL reference did not disable the plan"; exit 1; }
+grep -q "read plans: disabled by FEED_NO_PLAN" "$WORK/server-$PORT_B.log" || {
+  echo "the SQL treatment did not select its forced feed path"; exit 1; }
 
 grab "$PORT_A" "$WORK/plan"; grab "$PORT_B" "$WORK/sql"
 compare "fresh seed"
@@ -108,7 +119,12 @@ curl -s -X POST "http://127.0.0.1:$PORT_A/posts/500001/like" -H "Authorization: 
 
 stop "$PID_A"; stop "$PID_B"
 # Make the copy self-contained: checkpoint the WAL, then copy the file.
-sqlite3 "$WORK/a.db" "PRAGMA wal_checkpoint(TRUNCATE);" > /dev/null
+DB_PATH="$WORK/a.db" python3 - <<'PY'
+import os, sqlite3
+db = sqlite3.connect(os.environ["DB_PATH"])
+db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+db.close()
+PY
 rm -f "$WORK/b.db" "$WORK/b.db-wal" "$WORK/b.db-shm"
 cp "$WORK/a.db" "$WORK/b.db"
 cp "$WORK/a.db" "$WORK/a2.db"
@@ -121,14 +137,22 @@ rm -rf "$WORK/plan" "$WORK/sql"
 grab "$PORT_A" "$WORK/plan"; grab "$PORT_B" "$WORK/sql"
 compare "after writes"
 
-# Stage 3: writes this server did not make. A backdated timestamp, a rowid gap
-# and two posts with the same timestamp are exactly the cases a plan that
-# assumed dense ordered ids would get wrong or switch itself off over.
+# Stage 3: writes this server did not make. Put an older ID at the top of the
+# composite order, then add a rowid gap and equal timestamps. The B-tree plan
+# must follow (created_at DESC, id DESC), even when IDs do not descend globally.
 stop "$PID_A"; stop "$PID_B"
-sqlite3 "$WORK/a2.db" "UPDATE posts SET created_at='1999-01-01T00:00:00.000Z' WHERE id = 499990;
-  INSERT INTO posts (id, user_id, body, created_at) VALUES (700000, 1, 'rowid gap', '2026-12-31T23:59:59.999Z');
-  INSERT INTO posts (user_id, body, created_at) VALUES (2, 'same timestamp', '2026-12-31T23:59:59.999Z');" >/dev/null
-sqlite3 "$WORK/a2.db" "PRAGMA wal_checkpoint(TRUNCATE);" >/dev/null
+DB_PATH="$WORK/a2.db" python3 - <<'PY'
+import os, sqlite3
+db = sqlite3.connect(os.environ["DB_PATH"])
+db.execute("UPDATE posts SET created_at=? WHERE id=?", ("9999-12-31T23:59:59.999Z", 499990))
+db.execute("INSERT INTO posts (id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
+           (700000, 1, "rowid gap", "2026-12-31T23:59:59.999Z"))
+db.execute("INSERT INTO posts (user_id, body, created_at) VALUES (?, ?, ?)",
+           (2, "same timestamp", "2026-12-31T23:59:59.999Z"))
+db.commit()
+db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+db.close()
+PY
 rm -f "$WORK/b.db" "$WORK/b.db-wal" "$WORK/b.db-shm"
 cp "$WORK/a2.db" "$WORK/b.db"
 start "$PORT_A" "" "$WORK/a2.db"; PID_A=$STARTED

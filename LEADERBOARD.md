@@ -927,7 +927,12 @@ CPU), all with 0 errors. #529 stays open. **#530** (`93bc381`: #486 with an adap
 **#531** (`26e4f6c`: #486 with opt-in pressure-gated page-cache drops, `DB_DROP_PRESSURE_ONLY`, off by default) held
 **290,000** (27,553 req/s, p95 87.4 / p99 645.8 ms, 0 err, 79 % CPU, 26 µs/req, 849 MB, 2026-11-20), below #486's
 300,000, so not merged: 300,000 failed the 2-minute probe on p95/p99 (551 ms / 1.82 s at 81 % CPU) and 320,000 on
-p95/p99 (1.26 / 1.89 s at 93 % CPU), all with 0 errors. #531 stays open.
+p95/p99 (1.26 / 1.89 s at 93 % CPU), all with 0 errors. #531 stays open. **#532** (`a667373`: #486 with the `pad`
+field dropped from the connection struct, checked at 32 bytes by a `_Static_assert`) held **285,000** (27,118 req/s,
+p95 122.6 / p99 285.6 ms, 0 err, 78 % CPU, 26 µs/req, 939 MB, 2026-11-20), below #486's 300,000, so not merged: 300,000
+passed the 2-minute probe but failed the 5-minute hold on p95/p99 (672 ms / 1.34 s at 84 % CPU), 310,000 failed the
+2-minute probe on p95/p99 (665 ms / 1.06 s at 86 % CPU) and 320,000 on p95/p99 (1.71 / 2.93 s at 94 % CPU), all with 0
+errors. #532 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

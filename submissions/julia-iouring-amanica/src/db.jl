@@ -70,7 +70,9 @@ function db_open(path::String)
     db_exec("PRAGMA synchronous=NORMAL")
     db_exec("PRAGMA busy_timeout=5000")
     db_exec("PRAGMA cache_size=-65536")
-    db_exec("PRAGMA mmap_size=268435456")
+    # No mmap (fsharp-kestrel-delneg): pages through SQLite's own cache. At 200k users ~4 points less CPU at
+    # the same request rate than a 256 MB map (PLAN 8.15).
+    db_exec("PRAGMA mmap_size=0")
     db_exec("PRAGMA temp_store=MEMORY")
     # dev A/B only (dev/ct.sh PRAGMAS=): extra statements after the defaults, e.g. "PRAGMA mmap_size=0".
     extra = get(ENV, "JR_PRAGMAS", "")

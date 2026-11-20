@@ -42,6 +42,9 @@ roughly 250–290k on the benchmark box. See "Running locally" for how that was 
 - Reads share the pass's transaction too: one WAL snapshot per pass instead of one per statement (~3 per
   GET /feed). Each request still runs its own queries (rule 5). /feed alone: 18–20 → 12–13 µs; at 200k
   users, CPU at the same request rate 89–98% → 83–93% (3 alternating pairs, lower in each).
+- No memory map for the database (`mmap_size=0`): SQLite reads pages through its own 64 MB cache. At the
+  same request rate, CPU 79–80% → 74–79% at 200k users (3 alternating pairs, lower in each) and 94.5% →
+  91% at 240k, p95 8.7–9.8 → 5.9–6.2 ms, p99 109–120 → 139–141 ms.
 - GET /feed: when the 20 newest posts have consecutive ids (the usual case), their like counts come from
   one range scan instead of 20 lookups; otherwise the plain query. Same JSON, live data on every request.
   Blast ~+12% req/s; at 200k users p95 fell from 12–43 ms to 4–18 ms.
@@ -57,7 +60,8 @@ The code is our own, in Julia, but most of the design follows what other entries
 - **[fsharp-kestrel-delneg](../fsharp-kestrel-delneg/)**: checkpoints on their own thread and connection,
   holding writes (reads go on) once the WAL reaches 15,000 frames, letting that thread restart the WAL so
   the header `fsync` stays off the loop, and the Ubuntu 6.8.0-147 workaround for
-  `IORING_REGISTER_PBUF_RING` (retry with `resv[0]=1`).
+  `IORING_REGISTER_PBUF_RING` (retry with `resv[0]=1`). Also `mmap_size=0`: SQLite reads pages through
+  its own cache, not a memory map.
 - **[rust-epoll-scooter1337](../rust-epoll-scooter1337/)**: the feed range scan: find the 20 newest ids,
   fetch rows and like counts with range scans when they are close together, and fall back to the plain
   query otherwise. Ours is a narrower variant (only consecutive ids; the counts come from one scan).
@@ -206,8 +210,7 @@ blocked for 1–4 s while the whole host stalled), not steady overload.
 ### Tried and dropped
 
 Measured one at a time, kept only if they helped: SQLite at `-O3`, `-march=x86-64-v3`, extra
-`SQLITE_OMIT_*` options, SQLite PGO (0–7% even as an upper bound), `mmap_size=0` (no throughput change,
-worse p95), a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
+`SQLITE_OMIT_*` options, SQLite PGO (0–7% even as an upper bound), a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
 everywhere), restarting the WAL from the checkpoint thread after every catch-up (more fsyncs, worse
 latency), prefaulting buffers (moves page faults, doesn't remove them). A writer thread (a C pthread with
 its own connection commits the POSTs in batches while the loop keeps serving reads; replies still wait for
@@ -265,4 +268,12 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | P8.6: journal_size_limit=0 | – | 225,000 (204 MB) | – |
 | P8.6: journal_size_limit default | – | 225,000 (199 MB) | – |
 | HEAD aot+8.2 | – | 240,000 (209 MB) | – |
+| 8.12 ours | – | 200,000 (198 MB) | – |
+| 8.12 profile 200k | – | 200,000 (590 MB) | – |
+| mmap 256MB (default) | – | 240,000 (221 MB) | – |
+| mmap_size=0 | – | 240,000 (195 MB) | – |
+| cache 64MB (default; mmap 0) | – | 200,000 (182 MB) | – |
+| cache 32MB | – | 200,000 (185 MB) | – |
+| NBUF 16384 (default) | – | 200,000 (177 MB) | – |
+| NBUF 8192 | – | 200,000 (142 MB) | – |
 <!-- results:end -->

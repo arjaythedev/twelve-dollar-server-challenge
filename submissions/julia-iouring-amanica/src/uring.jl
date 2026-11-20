@@ -55,7 +55,9 @@ const OWN_ARENA = 0xff          # a send from the slot's own buffer, not from an
 
 const SQ_ENTRIES = 4096
 const CQ_ENTRIES = 65536
-const NBUF = 16384              # provided receive buffers per ring (16 MB): every completion not yet handled
+# Provided receive buffers per ring (16 MB): every completion not yet handled
+# JR_NBUF: dev A/B only (dev/ct.sh NBUF=), a power of two; empty means the default.
+const NBUF = let v = get(ENV, "JR_NBUF", ""); isempty(v) ? 16384 : parse(Int, v) end
 const BUFSZ = 1024              # holds one; a request is a few hundred bytes, longer ones arrive in parts
 const ACCEPTS = 4096            # single-shot accepts in flight: refilled once per pass, so this is the most a
                                 # pass can accept. 256 overflowed the 4096-entry listen backlog during ramp-up

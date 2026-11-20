@@ -78,6 +78,31 @@ mostly idle sockets under `LimitNOFILE=65535`.
   receive buffers are faulted in when a ring is made, and the page-cache arena at startup, so
   nothing is left to be found when memory is shortest.
 
+## Diagnosing the 300K–310K tail-latency cliff
+
+`LATENCY_TRACE=1` (default for this diagnostic experiment) adds batch-level phase
+timing and a breakdown of `ENOBUFS` and read-queue stalls to the existing
+ten-second stderr stats. It makes no change to admission, read sweep budgets,
+transaction boundaries, or response ordering. Set `LATENCY_TRACE=0` to
+remove the extra timestamps and measure observer overhead.
+
+The `latency_phases` line gives `total_ms/max_ms/over10ms/worst_turn_ms` for
+each phase: secondary-ring enters (`rings`), ring-0 wait, SQLite begin,
+ready-list processing, CQ reaping, aggressive read draining, held releases,
+SQLite commit, send scheduling, checkpoint tick, buffer publishing,
+accept/rearm policy, and memory-governor sampling. A separate line reports
+per-ring `ENOBUFS`, read rounds making no progress, and the ready/read
+queue depths and buffer shortages observed on the slowest batch.
+
+To diagnose a 310K failure, compare the `over10ms` counts and maxima across
+the final ten-second windows. Large `commit` or `begin` times point toward
+SQLite/WAL; `rings` or `wait` toward deferred kernel task work or scheduling;
+`ready` or `drain` toward long batches; `ENOBUFS`/queued read stalls
+toward receive-buffer starvation. These are **correlations**, not causal
+proof: `no_read_progress` can also reflect asynchronous completions that
+have not arrived yet. Rerun with tracing disabled before accepting any score
+improvement or regression.
+
 ## A batch
 
 1. Every completion is handled. Requests are answered straight into the arena, up to 16,384 a

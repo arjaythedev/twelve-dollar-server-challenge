@@ -112,6 +112,9 @@ static uint64_t *ready, *held, *rq, *poll_rearms;
 static unsigned n_poll_rearms, poll_rearms_cap;
 static unsigned nready, ready_cap, nheld, held_cap, nrq, rq_head, rq_cap;
 static unsigned answers_left;
+/* Cap fresh read sweeps when older requests are backlogged. */
+static unsigned fairness_read_budget = 4096;
+static uint64_t fairness_limited_passes;
 
 static struct {
   uint64_t batches, cqes, reqs, accepts, closes, enobufs, reads, deferred, rq_max, ready_max, max_batch, cq_overflow, cancels;
@@ -640,11 +643,6 @@ static unsigned read_rounds(void) {
  * before they run out. Without it the buffers ran dry mid-pass, requests sat in their sockets, and
  * each socket holding one counted a page against tcp_mem: past ~30k of them TCP went into memory
  * pressure and pruned queues (CPU, drops, retransmits) until the OOM killer ended it at 285k. */
-/* A large read sweep can monopolize the event loop while earlier requests
- * wait in ready. Keep the normal throughput path unchanged when there is
- * no accumulated ready backlog. */
-static unsigned fairness_read_budget = 4096;
-static uint64_t fairness_limited_passes;
 static unsigned reap_every = 512;
 static void run_ready(void) {
   unsigned n = nready, i = 0, since = 0;

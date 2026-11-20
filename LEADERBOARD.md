@@ -73,7 +73,7 @@ its follow-up PR #460 (`b118b95`, merged: 8 io_uring rings, SQLite B-tree cursor
 profile recorded on the box; that step fell back to the plain Zig build on the box, so it was scored without PGO;
 its earlier `122da96` held 260,000 and `7c2ebfb` 219,000); its first merged #454 code (`ede8d01`) held 65,000
 (connection-capped, see ᶜ). Its later follow-up #488 (`4b2fc29`; held, not merged: it didn't beat the merged row)
-scored 219,000 and its next commit `68c90b7` 270,000 (see ᶜ).
+scored 219,000, its next commit `68c90b7` 270,000 and `4ba3152` 257,000 (see ᶜ).
 
 **Re-runs.** The first submissions (#2–#29) were scored on a DigitalOcean $12 droplet, which is about 2× slower for
 CPU-bound servers, so those numbers aren't comparable. All of them have now been re-run on this box (finished
@@ -1165,7 +1165,10 @@ the 2-minute probe but failed the 5-minute hold on p99 (8.33 s, 69 % CPU), 240,0
 (1.25 s) and 320,000 on p95 (36.0 s). Its next commit `68c90b7` (a short wait that rotates across rings once more
 than one is active) held **270,000** (25,836 req/s, p95 63.6 / p99 291.3 ms, 0 errors, 86 % CPU, 30 µs/req, 915 MB,
 2026-11-17), still below the merged row, so it isn't merged either; 280,000 failed the 2-minute probe on p99 (3.76 s)
-and 320,000 on p95 (37.1 s).
+and 320,000 on p95 (37.1 s). Its commit `4ba3152` held **257,000** (24,754 req/s, p95 22.4 / p99 148.1 ms, 0 errors,
+69 % CPU, 25 µs/req, 854 MB, 2026-11-20); 270,000 passed the 2-minute probe but failed the 5-minute hold on p99
+(16.2 s), 280,000 failed the 2-minute probe on p99 (2.15 s) and 320,000 on p95 (19.0 s). Also below the merged row,
+and it writes SQLite's private cursor fields (see the open questions below), so it isn't merged.
 
 ᴹ **C++ io_uring #442** (`8512d44`, follow-up to the merged #412's 65,000 ᶜ: rewrite into `src/`, PASSIVE checkpoints on
 a second connection) held **199,000** (19,576 req/s, p95 15.0 / p99 80.7 ms, 0 errors, 64 % CPU, 30 µs/req, 1,170 MB,
@@ -1687,6 +1690,10 @@ public plugin APIs (a custom page cache through `SQLITE_CONFIG_PCACHE2`, a custo
   `table_moveto` reimplements `sqlite3BtreeTableMoveto` (moveToRoot / moveToChild / findCell) and sets `BtCursor`
   fields (`ix`, `curFlags`, `info.nKey`, `info.nSize`). Same open question for Arjay as #296 / #317 / #318. Scored 240k
   at `4c2205c` (below the merged #191 row, footnote ᵂ); held open.
+- **zig-iouring-harshitkhandelwal208 #488 (follow-up to #460) writes SQLite's private B-tree cursor fields**: at
+  `4ba3152`, `shim.c`'s `seek_author` does its own descent (moveToRoot / moveToChild / findCell) and sets `BtCursor`
+  fields (`ix`, `info.nSize`, `info.nKey`, `curFlags`); `td_feed_ids` also clears `curFlags` / `info.nSize`. Same open
+  question for Arjay as #296 / #317 / #318. Scored 257k at `4ba3152` (below the merged #460 row, footnote ᶜ); held open.
 - **c-iouring-fajarreza-gif #302 reuses c-iouring-pavlyhalim #245's syscall layer**: `src/sys.h` (io_uring ABI/ring
   code, 415 lines) is byte-identical to #245's and `sha256.h` nearly so (credited in its README since `d7a2e70`);
   `server.c`, HTTP, JWT and the database code are new. Arjay ruled 2026-11-04: credited reuse is fine → merged at

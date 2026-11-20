@@ -1204,6 +1204,10 @@ p99 234.0 ms, 0 errors, 82 % CPU, 25 µs/req, 853 MB, 2026-11-19). 320,000 faile
 **290,000** (27,526 req/s, p95 79.9 / p99 678.7 ms, 0 errors, 79 % CPU, 26 µs/req, 773 MB, 2026-11-19). 300,000 failed
 the 2-minute probe on p99 (4.45 s, 0 errors) and 320,000 on p99 (4.50 s, 0 errors). It beats the merged 270,000
 (`7bac38a`), so #522 is merged and the row moves to `656946e`, replacing the unmerged `d3ab60c` (310,000).
+Follow-up #526 (`d4886c4`: accept depth back to 2,048) held **270,000** (25,866 req/s, p95 62.3 / p99 205.7 ms,
+0 errors, 77 % CPU, 27 µs/req, 959 MB, 2026-11-20); 280,000 failed the 2-minute probe on p99 (5.60 s, 0 errors) and
+320,000 on p99 15.4 s with 0.24 % timeouts. That is below the merged 290,000, so #526 isn't merged and the row stays
+at `656946e`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

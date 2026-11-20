@@ -920,7 +920,10 @@ at 80 % CPU) and 320,000 on p95/p99 (1.52 / 2.07 s at 90 % CPU), all with 0 erro
 (`7c4456c`: #486 with an adaptive completion-queue wait, `ADAPTIVE_CQ_WAIT`, on by default) held **290,000** (27,520
 req/s, p95 216.1 / p99 685.5 ms, 0 err, 79 % CPU, 26 µs/req, 761 MB, 2026-11-20), below #486's 300,000, so not merged:
 300,000 failed the 2-minute probe on p95/p99 (1.45 / 2.07 s at 84 % CPU) and 320,000 on p95/p99 (1.84 / 2.15 s at 93 %
-CPU), all with 0 errors. #529 stays open.
+CPU), all with 0 errors. #529 stays open. **#530** (`93bc381`: #486 with an adaptive per-pass answer budget,
+`ADAPTIVE_ANSWER_BUDGET`, on by default) held **270,000** (25,865 req/s, p95 33.3 / p99 222.7 ms, 0 err, 74 % CPU,
+26 µs/req, 797 MB, 2026-11-20), below #486's 300,000, so not merged: 280,000 failed the 2-minute probe on p95/p99
+(788 ms / 2.24 s at 75 % CPU) and 320,000 on p95/p99 (1.68 / 2.15 s at 92 % CPU), all with 0 errors. #530 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

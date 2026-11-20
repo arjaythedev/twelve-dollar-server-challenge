@@ -12,6 +12,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sys/resource.h>
+#include <sched.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -43,6 +44,8 @@ static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback t
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
 #define CKPT_NICE 19
+static int ckpt_sched_idle = 1; /* CKPT_SCHED_IDLE=0: restore nice(19) for nonurgent bulk */
+static long wb_kick_bytes = 64L * 4120; /* WAL_KICK_KB, default 258 KiB */
 #define CKPT_URGENT_NICE 10 /* ~10 % of a core against the loop: enough to catch up, not enough to stall it */
 
 enum { CK_IDLE, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
@@ -416,13 +419,19 @@ static void wb_kick(struct ck_thread *t) {
   if (wal_fd_open(t) < 0) return;
   int64_t end = wal_end(d);
   if (end < t->wb_kicked) t->wb_kicked = 0; /* the log restarted */
-  if (end - t->wb_kicked < (int64_t)(64 * 4120)) return;
+  if (end - t->wb_kicked < (int64_t)wb_kick_bytes) return;
   if (sync_file_range(t->wal_fd, t->wb_kicked, end - t->wb_kicked, SYNC_FILE_RANGE_WRITE) == 0) t->wb_kicked = end;
 }
 static void *ck_main(void *arg) {
   struct ck_thread *t = arg;
   struct db *d = t->d;
-  if (t->nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), t->nice);
+  /* Only the nonurgent bulk worker is eligible for idle scheduling.
+   * Urgent and tail workers retain their original priority. */
+  if (t->state == CK_BULK && !t->urgent && ckpt_sched_idle) {
+    struct sched_param param = { .sched_priority = 0 };
+    if (sched_setscheduler(0, SCHED_IDLE, &param) != 0 && t->nice)
+      setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), t->nice);
+  } else if (t->nice) setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), t->nice);
   for (;;) {
     pthread_mutex_lock(&d->mu);
     while (d->ck_state != t->state || (t->state == CK_BULK && d->ck_urgent != t->urgent)) {

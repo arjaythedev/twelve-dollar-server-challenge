@@ -932,7 +932,11 @@ field dropped from the connection struct, checked at 32 bytes by a `_Static_asse
 p95 122.6 / p99 285.6 ms, 0 err, 78 % CPU, 26 µs/req, 939 MB, 2026-11-20), below #486's 300,000, so not merged: 300,000
 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (672 ms / 1.34 s at 84 % CPU), 310,000 failed the
 2-minute probe on p95/p99 (665 ms / 1.06 s at 86 % CPU) and 320,000 on p95/p99 (1.71 / 2.93 s at 94 % CPU), all with 0
-errors. #532 stays open.
+errors. #532 stays open. **#533** (`2380f62`: #486 with opt-in io_uring writeback of the WAL file,
+`URING_WAL_WRITEBACK`, off by default) held **280,000** (26,666 req/s, p95 146.6 / p99 942.5 ms, 0 err, 77 % CPU,
+26 µs/req, 800 MB, 2026-11-20), below #486's 300,000, so not merged: 290,000 failed the 2-minute probe on p95/p99
+(1.04 / 1.95 s at 79 % CPU), 300,000 on p95/p99 (862 ms / 2.55 s at 84 % CPU) and 320,000 on p95/p99 (1.85 / 2.55 s at
+92 % CPU), all with 0 errors. #533 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

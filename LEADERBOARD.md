@@ -243,7 +243,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 133 | typescript-tinyjs-animuni-express | #410 | TypeScript (TinyJS on Bun) | **71,000** ᶠ ᵀ | 6,534 | 184.3 | 524.0 | 0.93 | 92 | 132 | 219 | 2026-11-14 |
 | 133 | tex-luatex-unorig-username | #468 | TeX (LuaTeX: TeX macro loop, Lua 5.3, lsqlite3, epoll C module) | **71,000** ᶠ ᵅ | 6,546 | 76.8 | 116.6 | 0.93 | 93 | 133 | 238 | 2026-11-15 |
 | 133 | prolog-swipl-unorig-username | #471 | Prolog (SWI-Prolog, SQLite C binding, epoll C module) | **71,000** ᶠ ᴴ | 6,548 | 79.9 | 117.8 | 0.93 | 84 | 120 | 684 | 2026-11-16 |
-| 133 | rust-axum-sham-404 | #524 | Rust (Axum) | **71,000** ᶠ | 6,165 | 112.1 | 238.8 | 0.99 | 69 | 104 | 1,587 | 2026-11-19 |
+| 133 | rust-axum-sham-404 | #524 | Rust (Axum) | **71,000** ᶠ ᶭ | 6,165 | 112.1 | 238.8 | 0.99 | 69 | 104 | 1,587 | 2026-11-19 |
 | 133 | c-fio-tbsvttr | #5 | C (facil.io) | **71,000** | 6,959 | 130 | 621 | 0.00 | 81 | 108 | 646 | 2026-10-26 |
 | 133 | ruby-async-cicloid | #71 | Ruby (async, YJIT) | **71,000** | 6,967 | 121 | 349 | 0.00 | 83 | 111 | 362 | 2026-10-27 |
 | 133 | forth-gforth-FantasticForth | #171 | Forth (gforth, epoll) | **71,000** | 6,916 | 291 | 765 | 0.00 | 92 | 124 | 318 | 2026-10-29 |
@@ -1513,6 +1513,12 @@ response buffers, JSON escaping, replies held until the batch commits, profile-g
 scratch database; not merged: it scored below the merged row) held **150,000** (14,724 req/s, p95 98.5 / p99 160.4 ms,
 0 err, 76 % CPU, 48 µs/req, 616 MB, 2026-11-20), 42/42 tests: 155,000 failed the 2-minute probe on p95/p99 (413 ms /
 4.15 s at 77 % CPU, 0 errors) and 160,000 on p95/p99 (1.05 / 3.61 s at 80 % CPU).
+
+ᶭ **rust-axum-sham-404** stays on its merged #524 row. Its follow-up **#536** (`6407a0f`, `Connection: close` once the
+open-connection count nears the fd limit; not merged: it scored below the merged row) held **65,000** (6,371 req/s,
+p95 182.5 / p99 469.7 ms, 0 err, 92 % CPU, 134 µs/req, 1,084 MB, 2026-11-20), 42/42 tests. CPU-bound before the fd
+limit: 68,000 and 70,000 failed the 2-minute probe on p95/p99 (370 ms / 1.45 s at 94 % CPU and 456 ms / 1.93 s at
+96 % CPU, 0 errors), 80,000 on p95/p99 (4.87 / 5.76 s at 98 % CPU).
 
 ## Patches (ᵖ) and failures
 

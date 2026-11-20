@@ -69,6 +69,15 @@ pub inline fn escapedLen(s: []const u8) usize {
 }
 
 pub inline fn writeU64Direct(buf: []u8, val: u64) usize {
+    if (val < 10) {
+        buf[0] = '0' + @as(u8, @intCast(val));
+        return 1;
+    }
+    if (val < 100) {
+        const off: usize = @intCast(val * 2);
+        buf[0..2].* = digits[off..][0..2].*;
+        return 2;
+    }
     var v = val;
     var b: [24]u8 = undefined;
     var i: usize = 24;
@@ -93,71 +102,34 @@ pub inline fn writeU64Direct(buf: []u8, val: u64) usize {
     return len;
 }
 
+inline fn cleanJsonChunk(comptime width: usize, bytes: @Vector(width, u8)) bool {
+    const V = @Vector(width, u8);
+    return !@reduce(.Or, (bytes == @as(V, @splat('"'))) | (bytes == @as(V, @splat('\\'))) | (bytes < @as(V, @splat(0x20))));
+}
+
 pub inline fn writeJsonStringDirect(dest: [*]u8, s: []const u8) usize {
-    var d: usize = 0;
     var i: usize = 0;
-    const hex = "0123456789abcdef";
-
-    const V = @Vector(16, u8);
-    const quote_v: V = @splat('"');
-    const slash_v: V = @splat('\\');
-    const space_v: V = @splat(0x20);
-
-    while (i + 16 <= s.len) {
-        const chunk: V = s[i..][0..16].*;
-        const has_quote = chunk == quote_v;
-        const has_slash = chunk == slash_v;
-        const has_ctrl = chunk < space_v;
-        const needs_escape = has_quote | has_slash | has_ctrl;
-
-        if (!@reduce(.Or, needs_escape)) {
-            @memcpy(dest[d..][0..16], s[i..][0..16]);
-            d += 16;
-            i += 16;
-        } else {
-            const end = i + 16;
-            while (i < end) : (i += 1) {
-                const ch = s[i];
-                if (ch == '"' or ch == '\\' or ch < 0x20) {
-                    switch (ch) {
-                        '"' => {
-                            @memcpy(dest[d..][0..2], "\\\"");
-                            d += 2;
-                        },
-                        '\\' => {
-                            @memcpy(dest[d..][0..2], "\\\\");
-                            d += 2;
-                        },
-                        '\n' => {
-                            @memcpy(dest[d..][0..2], "\\n");
-                            d += 2;
-                        },
-                        '\r' => {
-                            @memcpy(dest[d..][0..2], "\\r");
-                            d += 2;
-                        },
-                        '\t' => {
-                            @memcpy(dest[d..][0..2], "\\t");
-                            d += 2;
-                        },
-                        else => {
-                            dest[d] = '\\';
-                            dest[d + 1] = 'u';
-                            dest[d + 2] = '0';
-                            dest[d + 3] = '0';
-                            dest[d + 4] = hex[ch >> 4];
-                            dest[d + 5] = hex[ch & 0xf];
-                            d += 6;
-                        },
-                    }
-                } else {
-                    dest[d] = ch;
-                    d += 1;
-                }
-            }
+    if (s.len >= 16) {
+        const last = s.len - 16;
+        while (i < last and cleanJsonChunk(16, s[i..][0..16].*)) : (i += 16) {
+            dest[i..][0..16].* = s[i..][0..16].*;
+        }
+        // An overlapping final vector stays inside the input and output.
+        if (i >= last and cleanJsonChunk(16, s[last..][0..16].*)) {
+            dest[last..][0..16].* = s[last..][0..16].*;
+            return s.len;
+        }
+    } else if (s.len >= 8) {
+        const last = s.len - 8;
+        if (cleanJsonChunk(8, s[0..8].*) and cleanJsonChunk(8, s[last..][0..8].*)) {
+            dest[0..8].* = s[0..8].*;
+            dest[last..][0..8].* = s[last..][0..8].*;
+            return s.len;
         }
     }
 
+    var d = i;
+    const hex = "0123456789abcdef";
     while (i < s.len) : (i += 1) {
         const ch = s[i];
         if (ch == '"' or ch == '\\' or ch < 0x20) {
@@ -204,6 +176,11 @@ pub const Buf = struct {
     ptr: [*]u8 = undefined,
     len: usize = 0,
     cap: usize = 0,
+    borrowed: bool = false,
+
+    pub fn wrap(storage: []u8) Buf {
+        return .{ .ptr = storage.ptr, .cap = storage.len, .borrowed = true };
+    }
 
     pub fn init(capacity: usize) !Buf {
         const p = try gpa.alloc(u8, capacity);
@@ -211,7 +188,7 @@ pub const Buf = struct {
     }
 
     pub fn deinit(self: *Buf) void {
-        if (self.cap > 0) gpa.free(self.ptr[0..self.cap]);
+        if (!self.borrowed and self.cap > 0) gpa.free(self.ptr[0..self.cap]);
         self.* = .{};
     }
 
@@ -223,7 +200,12 @@ pub const Buf = struct {
         if (self.len + extra <= self.cap) return;
         var new_cap = if (self.cap == 0) 4096 else self.cap * 2;
         while (new_cap < self.len + extra) new_cap *= 2;
-        const new_mem = try gpa.realloc(self.ptr[0..self.cap], new_cap);
+        const new_mem = if (self.borrowed) blk: {
+            const mem = try gpa.alloc(u8, new_cap);
+            @memcpy(mem[0..self.len], self.slice());
+            self.borrowed = false;
+            break :blk mem;
+        } else try gpa.realloc(self.ptr[0..self.cap], new_cap);
         self.ptr = new_mem.ptr;
         self.cap = new_cap;
     }
@@ -266,4 +248,21 @@ test "writeU64Direct and writeJsonString" {
     b.reset();
     b.writeJsonString("hello \"world\"\n");
     try std.testing.expectEqualStrings("hello \\\"world\\\"\\n", b.slice());
+}
+
+test "JSON string copies and escapes at vector boundaries" {
+    var input: [65]u8 = @splat('a');
+    var output: [130]u8 = undefined;
+    for (0..input.len + 1) |len| {
+        try std.testing.expectEqual(len, writeJsonStringDirect(&output, input[0..len]));
+        try std.testing.expectEqualSlices(u8, input[0..len], output[0..len]);
+        for (0..len) |pos| {
+            input[pos] = '\n';
+            try std.testing.expectEqual(len + 1, writeJsonStringDirect(&output, input[0..len]));
+            try std.testing.expectEqualSlices(u8, input[0..pos], output[0..pos]);
+            try std.testing.expectEqualStrings("\\n", output[pos..][0..2]);
+            try std.testing.expectEqualSlices(u8, input[pos + 1 .. len], output[pos + 2 .. len + 1]);
+            input[pos] = 'a';
+        }
+    }
 }

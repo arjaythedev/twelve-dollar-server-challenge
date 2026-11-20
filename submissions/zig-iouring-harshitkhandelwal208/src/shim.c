@@ -27,12 +27,15 @@ static int batch_broken;
 static BtCursor *cur[NCUR];
 static int cur_open;
 
-static u8 *spill;
-static u32 spill_cap;
+static u8 *spill[NCUR];
+static u32 spill_cap[NCUR];
+static pthread_t ck_thread;
+static int ck_started;
+static int ck_stop;
 
 #define CKPT_FRAMES 4096
 #define CKPT_FORCE 65536
-#define HOLD_MAX_MS 100
+#define HOLD_MAX_MS 250
 #define CKPT_NICE 19
 
 static sqlite3 *ckdb;
@@ -107,10 +110,11 @@ static void *ck_main(void *arg) {
   setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), CKPT_NICE);
   for (;;) {
     int st;
-    while ((st = __atomic_load_n(&ck_state, __ATOMIC_ACQUIRE)) != CK_BULK && st != CK_TAIL) {
-      if (st == -1) return 0; // Shutdown signal
-      struct timespec ts = { .tv_sec = 1, .tv_nsec = 0 };
-      syscall(SYS_futex, &ck_state, FUTEX_WAIT_PRIVATE, st, &ts, NULL, 0);
+    st = __atomic_load_n(&ck_state, __ATOMIC_ACQUIRE);
+    if (__atomic_load_n(&ck_stop, __ATOMIC_ACQUIRE)) return 0;
+    if (st != CK_BULK && st != CK_TAIL) {
+      syscall(SYS_futex, &ck_state, FUTEX_WAIT_PRIVATE, st, NULL, NULL, 0);
+      continue;
     }
     int nlog = -1, ndone = -2;
     int rc = sqlite3_wal_checkpoint_v2(ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
@@ -136,15 +140,16 @@ static int ck_start(const char *path, char *err, int n) {
     ckdb = NULL;
     return -1;
   }
-  pthread_t t;
-  int rc = pthread_create(&t, NULL, ck_main, 0);
+  ck_stop = 0;
+  ck_state = CK_IDLE;
+  int rc = pthread_create(&ck_thread, NULL, ck_main, 0);
   if (rc != 0) {
     snprintf(err, n, "ck pthread_create: %d (%s)", rc, strerror(rc));
     sqlite3_close(ckdb);
     ckdb = NULL;
     return -1;
   }
-  pthread_detach(t);
+  ck_started = 1;
   return 0;
 }
 
@@ -196,7 +201,7 @@ int td_open(const char *path, char *err, int n) {
   st_begin = prep("BEGIN");
   st_commit = prep("COMMIT");
   st_rollback = prep("ROLLBACK");
-  st_post = prep("INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at");
+  st_post = prep("INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
   st_like = prep("INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING");
   st_unlike = prep("DELETE FROM likes WHERE user_id = ?1 AND post_id = ?2");
   st_check = prep("SELECT 1 FROM posts WHERE id = ?1");
@@ -318,7 +323,88 @@ void td_rollback(void) {
 
 void *td_cursor(int i) { return cur[i]; }
 
+// Read a table key in place, as sqlite3BtreeTableMoveto does. A leaf
+// cell prefixes the key with a payload length. Interior cells have no length.
+static int table_key_at(MemPage *page, unsigned index, i64 *key) {
+  const u8 *p = findCellPastPtr(page, index);
+  if (page->leaf) {
+    while (p < page->aDataEnd && *p++ >= 128) {}
+  }
+  if (p >= page->aDataEnd) return 0;
+  *key = sqlite3VarintValue(p);
+  return 1;
+}
+
+// Author lookups are rarely adjacent. Predict a cell from live page keys,
+// verify the actual key or child interval, and let SQLite handle misses.
+static int seek_author(BtCursor *c, i64 id) {
+  int rc = moveToRoot(c);
+  if (rc != SQLITE_OK) return rc == SQLITE_EMPTY ? 0 : -1;
+  for (;;) {
+    MemPage *page = c->pPage;
+    unsigned last = page->nCell - 1;
+    i64 first_key, last_key;
+    if (!table_key_at(page, 0, &first_key)) break;
+    unsigned index;
+    if (page->leaf) {
+      u64 delta = (u64)id - (u64)first_key;
+      i64 found;
+      if (delta > last || !table_key_at(page, (unsigned)delta, &found) || found != id) break;
+      c->ix = (u16)delta;
+      c->info.nSize = 0;
+      c->info.nKey = found;
+      c->curFlags |= BTCF_ValidNKey;
+      return 1;
+    }
+    if (id <= first_key) {
+      index = 0;
+    } else {
+      if (!table_key_at(page, last, &last_key)) break;
+      if (id > last_key) {
+        index = last + 1;
+      } else {
+        u64 span = (u64)last_key - (u64)first_key;
+        if (span == 0 || span > UINT32_MAX) break;
+        u64 delta = (u64)id - (u64)first_key;
+        index = (unsigned)((delta * last + span - 1) / span);
+        // The separators are upper bounds. Walk a small neighborhood;
+        // uneven splits and gaps can put the prediction further away.
+        i64 upper;
+        if (!table_key_at(page, index, &upper)) break;
+        if (id > upper) {
+          if (index == last || !table_key_at(page, ++index, &upper) || id > upper) break;
+        } else if (index > 0) {
+          i64 previous;
+          if (!table_key_at(page, index - 1, &previous)) break;
+          if (id <= previous) {
+            --index;
+            if (index > 0 && (!table_key_at(page, index - 1, &previous) || id <= previous)) break;
+          }
+        }
+      }
+    }
+    Pgno child = index > last ? get4byte(page->aData + page->hdrOffset + 8)
+                              : get4byte(findCell(page, index));
+    c->ix = (u16)index;
+    rc = moveToChild(c, child);
+    if (rc != SQLITE_OK) return -1;
+  }
+  int result;
+  rc = sqlite3BtreeTableMoveto(c, id, 0, &result);
+  return rc == SQLITE_OK ? result == 0 && c->eState == CURSOR_VALID : -1;
+}
+
 int td_seek(BtCursor *c, i64 id) {
+  // SQLite already checks for the next ascending rowid. Feeds frequently
+  // traverse adjacent posts in reverse; verify the key before accepting it.
+  if (c->eState == CURSOR_VALID && (c->curFlags & BTCF_ValidNKey) &&
+      id < INT64_MAX && c->info.nKey == id + 1) {
+    int rc = sqlite3BtreePrevious(c, 0);
+    if (rc == SQLITE_OK) {
+      getCellInfo(c);
+      if (c->info.nKey == id) return 1;
+    } else if (rc != SQLITE_DONE) return -1;
+  }
   int res = 0;
   if (sqlite3BtreeTableMoveto(c, id, 0, &res) != SQLITE_OK) return -1;
   return res == 0 && c->eState == CURSOR_VALID;
@@ -346,53 +432,101 @@ int td_seek_ge(BtCursor *c, i64 k) {
   return 1;
 }
 
+static inline int parse_like_idx_cell(MemPage *pg, int i, i64 *pid) {
+  if (i < 0 || i >= pg->nCell) return 0;
+  u8 *cell = findCell(pg, i) + pg->childPtrSize;
+  u32 len = cell[0];
+  const u8 *p = cell + 1;
+  if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 0;
+  u32 h = p[0], t = p[1];
+  if (h >= len || h < 3 || t >= 0x80) return 0;
+  if (t >= 1 && t <= 6) {
+    static const u8 sz[7] = {0, 1, 2, 3, 4, 6, 8};
+    u32 k = sz[t];
+    if (h + k > len) return 0;
+    const u8 *q = p + h;
+    if (k == 1) {
+      *pid = (int8_t)q[0];
+    } else if (k == 2) {
+      uint16_t raw;
+      memcpy(&raw, q, 2);
+      *pid = (int16_t)__builtin_bswap16(raw);
+    } else if (k == 3) {
+      uint32_t raw = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8);
+      *pid = ((int32_t)raw) >> 8;
+    } else if (k == 4) {
+      uint32_t raw;
+      memcpy(&raw, q, 4);
+      *pid = (int32_t)__builtin_bswap32(raw);
+    } else if (k == 8) {
+      uint64_t raw;
+      memcpy(&raw, q, 8);
+      *pid = (int64_t)__builtin_bswap64(raw);
+    } else {
+      uint64_t raw = ((uint64_t)q[0] << 56) | ((uint64_t)q[1] << 48) | ((uint64_t)q[2] << 40) |
+                     ((uint64_t)q[3] << 32) | ((uint64_t)q[4] << 24) | ((uint64_t)q[5] << 16);
+      *pid = ((int64_t)raw) >> 16;
+    }
+    return 1;
+  } else if (t == 8 || t == 9) {
+    *pid = t - 8;
+    return 1;
+  }
+  return 0;
+}
+
 int td_count_likes(BtCursor *c, i64 lo, i64 hi, unsigned *n) {
   if (hi < lo || (hi - lo) > 1000) return 1;
+
+  // Fast path: Tail backward walk for recent feed posts
+  int empty = 1;
+  if (sqlite3BtreeLast(c, &empty) == SQLITE_OK && !empty && c->eState == CURSOR_VALID && c->pPage->leaf) {
+    i64 pid = 0;
+    i64 first_pid;
+    if (parse_like_idx_cell(c->pPage, c->ix, &pid) &&
+        (pid <= hi || (parse_like_idx_cell(c->pPage, 0, &first_pid) && first_pid <= hi))) {
+      for (;;) {
+        if (c->eState != CURSOR_VALID) return -1;
+        MemPage *pg = c->pPage;
+        int i = c->ix, first = pg->leaf ? 0 : i;
+        // Index keys are ordered. A leaf whose endpoints have the same
+        // post id contributes its entire remaining cell count in one step.
+        i64 low_pid, high_pid;
+        if (i - first >= 16 && parse_like_idx_cell(pg, first, &low_pid) &&
+            parse_like_idx_cell(pg, i, &high_pid) && low_pid == high_pid) {
+          if (low_pid < lo) return 0;
+          if (low_pid <= hi) n[low_pid - lo] += (unsigned)(i - first + 1);
+          i = first - 1;
+        }
+        for (; i >= first; i--) {
+          if (!parse_like_idx_cell(pg, i, &pid)) return 1;
+          if (pid < lo) return 0;
+          if (pid <= hi) n[pid - lo]++;
+        }
+        c->ix = (u16)first;
+        int r = sqlite3BtreePrevious(c, 0);
+        if (r == SQLITE_DONE) return 0;
+        if (r != SQLITE_OK) return -1;
+      }
+    }
+  }
+
+  // Fallback: standard forward seek
   int r = td_seek_ge(c, lo);
   if (r <= 0) return r;
   for (;;) {
     MemPage *pg = c->pPage;
     int i = c->ix, last = pg->leaf ? pg->nCell : i + 1;
+    i64 first_pid, last_pid;
+    if (last - i >= 16 && parse_like_idx_cell(pg, i, &first_pid) &&
+        parse_like_idx_cell(pg, last - 1, &last_pid) && first_pid == last_pid) {
+      if (first_pid > hi) return 0;
+      if (first_pid >= lo) n[first_pid - lo] += (unsigned)(last - i);
+      i = last;
+    }
     for (; i < last; i++) {
-      u8 *cell = findCell(pg, i) + pg->childPtrSize;
-      u32 len = cell[0];
-      const u8 *p = cell + 1;
-      if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 1;
-      u32 h = p[0], t = p[1];
-      if (h >= len || h < 3 || t >= 0x80) return 1;
       i64 v;
-      if (t >= 1 && t <= 6) {
-        static const u8 sz[7] = {0, 1, 2, 3, 4, 6, 8};
-        u32 k = sz[t];
-        if (h + k > len) return 1;
-        const u8 *q = p + h;
-        if (k == 1) {
-          v = (int8_t)q[0];
-        } else if (k == 2) {
-          uint16_t raw;
-          memcpy(&raw, q, 2);
-          v = (int16_t)__builtin_bswap16(raw);
-        } else if (k == 3) {
-          uint32_t raw = ((uint32_t)q[0] << 24) | ((uint32_t)q[1] << 16) | ((uint32_t)q[2] << 8);
-          v = ((int32_t)raw) >> 8;
-        } else if (k == 4) {
-          uint32_t raw;
-          memcpy(&raw, q, 4);
-          v = (int32_t)__builtin_bswap32(raw);
-        } else if (k == 8) {
-          uint64_t raw;
-          memcpy(&raw, q, 8);
-          v = (int64_t)__builtin_bswap64(raw);
-        } else {
-          uint64_t raw = ((uint64_t)q[0] << 56) | ((uint64_t)q[1] << 48) | ((uint64_t)q[2] << 40) |
-                         ((uint64_t)q[3] << 32) | ((uint64_t)q[4] << 24) | ((uint64_t)q[5] << 16);
-          v = ((int64_t)raw) >> 16;
-        }
-      } else if (t == 8 || t == 9) {
-        v = t - 8;
-      } else {
-        return 1;
-      }
+      if (!parse_like_idx_cell(pg, i, &v)) return 1;
       if (v > hi) return 0;
       if (v >= lo && (v - lo) <= (hi - lo)) n[v - lo]++;
     }
@@ -401,6 +535,51 @@ int td_count_likes(BtCursor *c, i64 lo, i64 hi, unsigned *n) {
     if (rc == SQLITE_DONE) return 0;
     if (rc != SQLITE_OK) return -1;
   }
+}
+
+// Read rowids from consecutive cells before asking SQLite to cross a page.
+// The full SQLite decoder also handles overflow records and unusual headers.
+static int feed_cell_rowid(MemPage *page, int index, i64 *id) {
+  const u8 *cell = findCell(page, index) + page->childPtrSize;
+  size_t available = (size_t)(page->aDataEnd - cell);
+  if (available < 4) return 0;
+  unsigned len = cell[0];
+  if (len >= 128 || len > page->maxLocal || len + 1 > available) return 0;
+  const u8 *record = cell + 1;
+  unsigned header = record[0];
+  if (header < 3 || header > len) return 0;
+  unsigned type = record[header - 1];
+  if (type < 1 || type > 9 || type == 7) return 0;
+  unsigned bytes = sqlite3SmallTypeSizes[type];
+  if (header + bytes > len) return 0;
+  Mem value;
+  sqlite3VdbeSerialGet(record + len - bytes, type, &value);
+  *id = value.u.i;
+  return 1;
+}
+
+int td_feed_ids(BtCursor *c, i64 *ids, int limit) {
+  int empty, rc = sqlite3BtreeFirst(c, &empty);
+  if (rc != SQLITE_OK) return -1;
+  if (empty) return 0;
+  for (int n = 0; n < limit;) {
+    MemPage *page = c->pPage;
+    int last = page->leaf ? page->nCell : c->ix + 1;
+    for (int i = c->ix; i < last; ++i) {
+      if (!feed_cell_rowid(page, i, &ids[n])) {
+        c->ix = (u16)i;
+        c->info.nSize = 0;
+        c->curFlags &= ~(BTCF_ValidOvfl | BTCF_ValidNKey | BTCF_AtLast);
+        if (sqlite3VdbeIdxRowid(db, c, &ids[n]) != SQLITE_OK) return -1;
+      }
+      if (++n == limit) return n;
+    }
+    c->ix = (u16)(last - 1);
+    rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) return n;
+    if (rc != SQLITE_OK) return -1;
+  }
+  return 0;
 }
 
 int td_first(BtCursor *c) {
@@ -419,15 +598,26 @@ const u8 *td_payload(BtCursor *c, u32 *len) {
   getCellInfo(c);
   u32 total = c->info.nPayload;
   if (c->info.nLocal == total) { *len = total; return c->info.pPayload; }
-  if (total > spill_cap) {
-    sqlite3_free(spill);
-    spill_cap = total + 4096;
-    spill = sqlite3_malloc(spill_cap);
-    if (!spill) { spill_cap = 0; return 0; }
+  // Keep overflow payloads alive until the next read on the same cursor.
+  int slot = 0;
+  while (slot < NCUR && cur[slot] != c) slot++;
+  if (slot == NCUR) return NULL;
+  if (total > spill_cap[slot]) {
+    u8 *mem = sqlite3_realloc64(spill[slot], total);
+    if (!mem) return NULL;
+    spill[slot] = mem;
+    spill_cap[slot] = total;
   }
-  if (sqlite3BtreePayload(c, 0, total, spill) != SQLITE_OK) return 0;
+  if (sqlite3BtreePayload(c, 0, total, spill[slot]) != SQLITE_OK) return NULL;
   *len = total;
-  return spill;
+  return spill[slot];
+}
+
+int td_seek_payload(BtCursor *c, i64 id, const u8 **data, u32 *len) {
+  int found = c == cur[1] ? seek_author(c, id) : td_seek(c, id);
+  if (found != 1) return found;
+  *data = td_payload(c, len);
+  return *data ? 1 : -1;
 }
 
 i64 td_rowid(BtCursor *c) { return sqlite3BtreeIntegerKey(c); }
@@ -439,21 +629,28 @@ static void check_tx(void) {
   }
 }
 
+static inline int fmt_utc_now(char *buf) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  struct tm tm;
+  gmtime_r(&ts.tv_sec, &tm);
+  return snprintf(buf, 32, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ",
+                  tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+                  tm.tm_hour, tm.tm_min, tm.tm_sec, ts.tv_nsec / 1000000);
+}
+
 int td_insert_post(i64 user_id, const char *body, int len, i64 *id, char *created, int *created_len) {
+  int n = fmt_utc_now(created);
+  *created_len = n;
   sqlite3_bind_int64(st_post, 1, user_id);
   sqlite3_bind_text(st_post, 2, body, len, SQLITE_STATIC);
+  sqlite3_bind_text(st_post, 3, created, n, SQLITE_STATIC);
   int rc = sqlite3_step(st_post);
-  if (rc != SQLITE_ROW) { sqlite3_reset(st_post); check_tx(); return -1; }
-  *id = sqlite3_column_int64(st_post, 0);
-  int n = sqlite3_column_bytes(st_post, 1);
-  const unsigned char *t = sqlite3_column_text(st_post, 1);
-  if (!t || n > 63) { sqlite3_reset(st_post); return -1; }
-  memcpy(created, t, n);
-  *created_len = n;
-  rc = sqlite3_step(st_post);
   sqlite3_reset(st_post);
   sqlite3_clear_bindings(st_post);
-  return rc == SQLITE_DONE ? 0 : -1;
+  if (rc != SQLITE_DONE) { check_tx(); return -1; }
+  *id = sqlite3_last_insert_rowid(db);
+  return 0;
 }
 
 int td_insert_like(i64 user_id, i64 post_id) {
@@ -498,8 +695,13 @@ void td_feed_sql_reset(void) {
 }
 
 void td_close(void) {
-  __atomic_store_n(&ck_state, -1, __ATOMIC_RELEASE);
-  syscall(SYS_futex, &ck_state, FUTEX_WAKE_PRIVATE, 1, NULL, NULL, 0);
+  if (ck_started) {
+    __atomic_store_n(&ck_stop, 1, __ATOMIC_RELEASE);
+    ck_set(-1);
+    pthread_join(ck_thread, NULL);
+    ck_started = 0;
+  }
+  wal_frames = 0;
   close_cursors();
   for (int i = 0; i < NCUR; i++) {
     if (cur[i]) { sqlite3_free(cur[i]); cur[i] = NULL; }
@@ -515,7 +717,9 @@ void td_close(void) {
   if (st_feed) { sqlite3_finalize(st_feed); st_feed = NULL; }
   if (ki_feed) { sqlite3KeyInfoUnref(ki_feed); ki_feed = NULL; }
   if (ki_likes) { sqlite3KeyInfoUnref(ki_likes); ki_likes = NULL; }
-  if (spill) { sqlite3_free(spill); spill = NULL; spill_cap = 0; }
+  for (int i = 0; i < NCUR; i++) {
+    sqlite3_free(spill[i]); spill[i] = NULL; spill_cap[i] = 0;
+  }
   if (ckdb) { sqlite3_close(ckdb); ckdb = NULL; }
   if (db) { sqlite3_close(db); db = NULL; }
   in_batch = 0;

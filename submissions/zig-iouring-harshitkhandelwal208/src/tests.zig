@@ -307,7 +307,7 @@ test "escapedLen and digitsU64" {
     }
 }
 
-test "getPostDirect single post serialization" {
+test "single post serialized into a borrowed response slab" {
     if (access("../../seed/feed.db", 0) != 0) return;
 
     var db: dbm.Db = .{};
@@ -315,28 +315,75 @@ test "getPostDirect single post serialization" {
     defer db.deinit();
 
     var direct_dest: [1024]u8 = undefined;
-    const res = db.getPostDirect(1, &direct_dest, true);
-    switch (res) {
-        .ok => |pos| {
-            const out = direct_dest[pos.start_off .. pos.start_off + pos.total_len];
-            try std.testing.expect(std.mem.startsWith(u8, out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "));
-            try std.testing.expect(std.mem.indexOf(u8, out, "\"id\":1") != null);
-            try std.testing.expect(std.mem.indexOf(u8, out, "\"body\":") != null);
-            try std.testing.expect(std.mem.indexOf(u8, out, "\"author\":") != null);
-            try std.testing.expect(std.mem.indexOf(u8, out, "\"like_count\":") != null);
-            try std.testing.expect(std.mem.endsWith(u8, out, "}}"));
+    var buf = bufm.Buf.wrap(direct_dest[http.head_room..]);
+    defer buf.deinit();
+    try std.testing.expectEqual(dbm.Db.GetPostResult.ok, db.getPost(1, &buf));
+    try std.testing.expect(buf.borrowed);
+    const out = http.finishResponse(&direct_dest, buf.len, 200, true, false);
+    try std.testing.expect(std.mem.startsWith(u8, out, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "));
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"id\":1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"body\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"author\":") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "\"like_count\":") != null);
+    try std.testing.expect(std.mem.endsWith(u8, out, "}}"));
 
-            // Verify Content-Length header matches exact JSON body length
-            const sep = "\r\n\r\n";
-            const sep_idx = std.mem.indexOf(u8, out, sep).?;
-            const body = out[sep_idx + sep.len ..];
-            var cl_hdr: [64]u8 = undefined;
-            const cl_str = try std.fmt.bufPrint(&cl_hdr, "Content-Length: {}\r\n", .{body.len});
-            try std.testing.expect(std.mem.indexOf(u8, out[0..sep_idx + 2], cl_str) != null);
-        },
-        else => unreachable,
-    }
+    // Verify Content-Length header matches exact JSON body length
+    const sep = "\r\n\r\n";
+    const sep_idx = std.mem.indexOf(u8, out, sep).?;
+    const body = out[sep_idx + sep.len ..];
+    var cl_hdr: [64]u8 = undefined;
+    const cl_str = try std.fmt.bufPrint(&cl_hdr, "Content-Length: {}\r\n", .{body.len});
+    try std.testing.expect(std.mem.indexOf(u8, out[0 .. sep_idx + 2], cl_str) != null);
 }
 
+test "multi-ring dynamic spillover logic" {
+    var s: server.Server = undefined;
+    s.active_rings = 1;
+    for (0..server.k_ring_count) |i| {
+        s.rings[i].id = @intCast(i);
+        s.rings[i].slots = 1000;
+        s.rings[i].margin = 100;
+        s.rings[i].nconn = 0;
+        s.rings[i].full = false;
+        s.rings[i].accepting = false;
+        s.rings[i].depth = 64;
+        s.rings[i].accepts = @splat(8); // All accepts already armed in this policy-only fixture.
+    }
 
+    s.rings[0].accepting = true;
 
+    // While ring 0 has capacity, spillAccepts does not activate ring 1
+    s.spillAccepts();
+    try std.testing.expectEqual(@as(usize, 1), s.active_rings);
+    try std.testing.expect(s.rings[0].accepting);
+    try std.testing.expect(!s.rings[1].accepting);
+
+    // Ring 0 reaches threshold and becomes full
+    s.rings[0].nconn = 950;
+    s.rings[0].full = true;
+    s.rings[0].accepting = false;
+
+    // spillAccepts dynamically activates ring 1
+    s.spillAccepts();
+    try std.testing.expectEqual(@as(usize, 2), s.active_rings);
+    try std.testing.expect(s.rings[1].accepting);
+
+    // Ring 1 reaches threshold and becomes full
+    s.rings[1].nconn = 950;
+    s.rings[1].full = true;
+    s.rings[1].accepting = false;
+
+    // spillAccepts dynamically activates ring 2
+    s.spillAccepts();
+    try std.testing.expectEqual(@as(usize, 3), s.active_rings);
+    try std.testing.expect(s.rings[2].accepting);
+
+    // If ring 0 connections drain, it re-arms accepts on ring 0
+    s.rings[0].nconn = 200;
+    s.rings[0].full = false;
+    s.rings[2].full = true;
+    s.rings[2].accepting = false;
+
+    s.spillAccepts();
+    try std.testing.expect(s.rings[0].accepting);
+}

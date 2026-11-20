@@ -97,6 +97,7 @@ fn scanHead(data: []const u8, nl: *[max_lines]u32, nn: *usize) ?usize {
 /// Whether an Accept-Encoding value lists gzip with a non-zero quality: a comma-separated list of codings, each with
 /// optional parameters (`gzip;q=0.5`, `gzip; q=0`, `GZIP ; Q=0.000`).
 fn acceptsGzip(val: []const u8) bool {
+    if (std.mem.indexOf(u8, val, "gzip") == null and std.mem.indexOf(u8, val, "GZIP") == null) return false;
     var codings = std.mem.splitScalar(u8, val, ',');
     while (codings.next()) |item| {
         var parts = std.mem.splitScalar(u8, item, ';');
@@ -209,10 +210,16 @@ pub fn parseHead(data: []const u8) Parsed {
                 h.content_length = n;
             },
             10 => if (std.ascii.eqlIgnoreCase(name, "connection")) {
-                var it = std.mem.tokenizeAny(u8, val, ", \t");
-                while (it.next()) |tok| {
-                    if (std.ascii.eqlIgnoreCase(tok, "close")) h.keep_alive = false;
-                    if (std.ascii.eqlIgnoreCase(tok, "keep-alive")) h.keep_alive = true;
+                if (std.ascii.eqlIgnoreCase(val, "close")) {
+                    h.keep_alive = false;
+                } else if (std.ascii.eqlIgnoreCase(val, "keep-alive")) {
+                    h.keep_alive = true;
+                } else {
+                    var it = std.mem.tokenizeAny(u8, val, ", \t");
+                    while (it.next()) |tok| {
+                        if (std.ascii.eqlIgnoreCase(tok, "close")) h.keep_alive = false;
+                        if (std.ascii.eqlIgnoreCase(tok, "keep-alive")) h.keep_alive = true;
+                    }
                 }
             },
             15 => if (std.ascii.eqlIgnoreCase(name, "accept-encoding")) {
@@ -237,11 +244,15 @@ pub const Body = union(enum) {
 };
 
 /// `rest` is everything buffered after the head.
-pub fn takeBody(h: *const Head, rest: []const u8, sc: *Scratch) Body {
+pub inline fn takeBody(h: *const Head, rest: []const u8, sc: *Scratch) Body {
     if (!h.chunked) {
         if (rest.len < h.content_length) return .need_more;
         return .{ .ok = .{ .data = rest[0..h.content_length], .consumed = h.content_length } };
     }
+    return takeChunkedBody(rest, sc);
+}
+
+fn takeChunkedBody(rest: []const u8, sc: *Scratch) Body {
     // Chunked: validate the framing first (sizes), then copy the payload into scratch memory.
     // Framing is re-checked from the start whenever more bytes arrive, so everything that is scanned is bounded: at most
     // `max_chunks` chunks, size lines of at most 64 bytes (extensions included) and 4 KiB of trailers. Payload bytes are

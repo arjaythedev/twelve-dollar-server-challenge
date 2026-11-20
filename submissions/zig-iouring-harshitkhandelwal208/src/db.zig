@@ -23,10 +23,10 @@ extern "c" fn td_in_batch() c_int;
 extern "c" fn td_cursor(i: c_int) ?*anyopaque;
 extern "c" fn td_seek(c: ?*anyopaque, id: i64) c_int;
 extern "c" fn td_seek_ge(c: ?*anyopaque, k: i64) c_int;
-extern "c" fn td_first(c: ?*anyopaque) c_int;
+extern "c" fn td_feed_ids(c: ?*anyopaque, ids: [*]i64, limit: c_int) c_int;
 extern "c" fn td_next(c: ?*anyopaque) c_int;
 extern "c" fn td_payload(c: ?*anyopaque, len: *u32) ?[*]const u8;
-extern "c" fn td_rowid(c: ?*anyopaque) i64;
+extern "c" fn td_seek_payload(c: ?*anyopaque, id: i64, data: *[*]const u8, len: *u32) c_int;
 extern "c" fn td_count_likes(c: ?*anyopaque, lo: i64, hi: i64, n: [*]u32) c_int;
 extern "c" fn td_insert_post(uid: i64, body: [*]const u8, len: c_int, id: *i64, created: [*]u8, clen: *c_int) c_int;
 extern "c" fn td_insert_like(uid: i64, pid: i64) c_int;
@@ -159,27 +159,70 @@ inline fn getPayload(cur: ?*anyopaque) ![]const u8 {
     return ptr[0..len];
 }
 
-const Row = struct {
-    id: i64 = 0,
-    user_id: i64 = 0,
-    body: []const u8 = "",
-    created: []const u8 = "",
-    author: []const u8 = "",
-    likes: i64 = 0,
-};
+inline fn recordAt(cur: ?*anyopaque, id: i64) ![]const u8 {
+    var data: [*]const u8 = undefined;
+    var len: u32 = undefined;
+    return switch (td_seek_payload(cur, id, &data, &len)) {
+        1 => data[0..len],
+        0 => DbError.NotFound,
+        else => DbError.DbFailed,
+    };
+}
+
+const PostFields = struct { uid: i64, body: []const u8, created: []const u8 };
+
+inline fn fastDecodePost(p: []const u8) ?PostFields {
+    if (p.len < 32) return null;
+    const hsz = p[0];
+    if (hsz < 5 or hsz >= p.len or p[1] != 0) return null;
+    // The fixed-width path requires SQLite's one-byte TEXT serial type for
+    // a 24-byte timestamp. Other records use the complete header decoder.
+    if (p[hsz - 1] != 13 + 2 * 24 or p[hsz - 2] & 0x80 != 0) return null;
+    const t_uid = p[2];
+    const uid_len: usize = switch (t_uid) {
+        1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 4,
+        6 => 8,
+        8, 9 => 0,
+        else => return null,
+    };
+    if (hsz + uid_len + 24 > p.len) return null;
+    const puid = p[hsz .. hsz + uid_len];
+    const uid: i64 = switch (t_uid) {
+        1 => @as(i8, @bitCast(puid[0])),
+        2 => std.mem.readInt(i16, puid[0..2], .big),
+        3 => blk: {
+            const raw = (@as(u32, puid[0]) << 24) | (@as(u32, puid[1]) << 16) | (@as(u32, puid[2]) << 8);
+            break :blk @as(i32, @bitCast(raw)) >> 8;
+        },
+        4 => std.mem.readInt(i32, puid[0..4], .big),
+        6 => std.mem.readInt(i64, puid[0..8], .big),
+        8 => 0,
+        9 => 1,
+        else => return null,
+    };
+    const created = p[p.len - 24 .. p.len];
+    const body = p[hsz + uid_len .. p.len - 24];
+    return .{ .uid = uid, .body = body, .created = created };
+}
+
+inline fn fastDecodeUser(p: []const u8) ?[]const u8 {
+    if (p.len < 5) return null;
+    const hsz = p[0];
+    if (hsz < 4 or hsz >= p.len) return null;
+    if (p[1] != 0) return null; // INTEGER PRIMARY KEY alias is type 0 (NULL)
+    const t_name = p[2];
+    if (t_name < 13 or (t_name & 1) == 0 or t_name >= 128) return null;
+    const name_len = (t_name - 13) >> 1;
+    if (hsz + name_len > p.len) return null;
+    return p[hsz .. hsz + name_len];
+}
 
 pub const Db = struct {
     pub const ExistsResult = enum { exists, not_found, err };
     pub const GetPostResult = enum { ok, not_found, err };
-    pub const GetPostDirectOk = struct {
-        start_off: usize,
-        total_len: usize,
-    };
-    pub const GetPostDirectResult = union(enum) {
-        ok: GetPostDirectOk,
-        not_found,
-        err,
-    };
     pub const LikeResult = enum { created, already_liked, not_found, err };
     pub const UnlikeResult = enum { ok, not_found, err };
 
@@ -263,143 +306,39 @@ pub const Db = struct {
     }
 
     pub fn feed(self: *Db, out: *Buf) !void {
-        if (!self.beginTx()) return self.feedSql(out);
+        const start = out.len;
+        self.feedFromIndex(out) catch {
+            out.len = start;
+            try self.feedSql(out);
+        };
+    }
 
+    fn feedFromIndex(self: *Db, out: *Buf) !void {
+        if (!self.beginTx()) return DbError.DbFailed;
         const cp = td_cursor(POSTS);
         const cu = td_cursor(USERS);
-        const ci = td_cursor(FEED_IDX);
         const cl = td_cursor(LIKES_IDX);
-
-        var rows: [FEED_LEN]Row = undefined;
-        var n_rows: usize = 0;
-
-        // 1. Walk feed index: newest first (created_at DESC, id DESC)
-        var r = td_first(ci);
-        while (r == 1 and n_rows < FEED_LEN) {
-            const p = getPayload(ci) catch return self.feedSql(out);
-            const cols = columns(3, p) catch return self.feedSql(out);
-            const post_id = intOf(cols[1].t, cols[1].b) catch return self.feedSql(out);
-            const created = text(cols[0]) catch return self.feedSql(out);
-            rows[n_rows] = .{
-                .id = post_id,
-                .created = created,
+        var ids: [FEED_LEN]i64 = undefined;
+        const n = td_feed_ids(td_cursor(FEED_IDX), &ids, ids.len);
+        if (n < 0) return DbError.DbFailed;
+        const posts = ids[0..@intCast(n)];
+        out.writeAll("{\"posts\":[");
+        if (posts.len > 0) {
+            const lo = std.mem.min(i64, posts);
+            const hi = std.mem.max(i64, posts);
+            var counts: [RANGE_SPAN + 1]u32 = undefined;
+            const grouped = blk: {
+                if (lo < 1 or hi - lo > RANGE_SPAN) break :blk false;
+                @memset(counts[0..@intCast(hi - lo + 1)], 0);
+                break :blk td_count_likes(cl, lo, hi, &counts) == 0;
             };
-            n_rows += 1;
-            r = td_next(ci);
-        }
-        if (r < 0) return self.feedSql(out);
-
-        if (n_rows == 0) {
-            out.writeAll("{\"posts\":[]}");
-            return;
-        }
-
-        // 2. Sort order array in ascending post id order using branch-friendly insertion sort (n_rows <= 20)
-        var order: [FEED_LEN]usize = undefined;
-        for (0..n_rows) |i| order[i] = i;
-        var s_i: usize = 1;
-        while (s_i < n_rows) : (s_i += 1) {
-            const key = order[s_i];
-            const key_id = rows[key].id;
-            var s_j: usize = s_i;
-            while (s_j > 0 and rows[order[s_j - 1]].id > key_id) : (s_j -= 1) {
-                order[s_j] = order[s_j - 1];
-            }
-            order[s_j] = key;
-        }
-
-        const min_id: i64 = rows[order[0]].id;
-        const max_id: i64 = rows[order[n_rows - 1]].id;
-
-        for (0..n_rows) |k| {
-            const idx = order[k];
-            const pid = rows[idx].id;
-            if (td_seek(cp, pid) != 1) return self.feedSql(out);
-            const p = getPayload(cp) catch return self.feedSql(out);
-            const cols = columns(3, p) catch return self.feedSql(out);
-            rows[idx].user_id = intOf(cols[1].t, cols[1].b) catch return self.feedSql(out);
-            rows[idx].body = text(cols[2]) catch return self.feedSql(out);
-        }
-
-        // 3. Fetch authors by rowid seek (caching recent authors in 128-entry direct table)
-        var author_cache: [128]struct { uid: i64 = -1, author: []const u8 = "" } = @splat(.{});
-        for (0..n_rows) |i| {
-            const uid = rows[i].user_id;
-            const slot = @as(usize, @intCast(uid ^ (uid >> 6))) & 127;
-            if (author_cache[slot].uid == uid) {
-                rows[i].author = author_cache[slot].author;
-            } else {
-                if (td_seek(cu, uid) != 1) return self.feedSql(out);
-                const p = getPayload(cu) catch return self.feedSql(out);
-                const cols = columns(2, p) catch return self.feedSql(out);
-                const a = text(cols[1]) catch return self.feedSql(out);
-                rows[i].author = a;
-                author_cache[slot] = .{ .uid = uid, .author = a };
+            for (posts, 0..) |id, i| {
+                const likes = if (grouped) counts[@intCast(id - lo)] else try countLikes(cl, id);
+                if (i != 0) out.writeByte(',');
+                try appendPost(cp, cu, id, likes, out);
             }
         }
-
-        // 4. Like counts: range walk when span <= RANGE_SPAN
-        if (max_id >= min_id and max_id - min_id <= RANGE_SPAN) {
-            const span: usize = @intCast(max_id - min_id + 1);
-            var counts_buf: [RANGE_SPAN + 1]u32 = @splat(0);
-            if (td_count_likes(cl, min_id, max_id, &counts_buf) == 0) {
-                for (0..n_rows) |i| {
-                    const idx: usize = @intCast(rows[i].id - min_id);
-                    if (idx < span) rows[i].likes = counts_buf[idx];
-                }
-            } else {
-                for (0..n_rows) |i| {
-                    rows[i].likes = countLikes(cl, rows[i].id) catch return self.feedSql(out);
-                }
-            }
-        } else {
-            for (0..n_rows) |i| {
-                rows[i].likes = countLikes(cl, rows[i].id) catch return self.feedSql(out);
-            }
-        }
-
-        // 5. Emit JSON directly into output buffer with single ensure
-        try out.ensure(n_rows * 650 + 64);
-        var ptr = out.ptr + out.len;
-        const initial_ptr = ptr;
-
-        @memcpy(ptr[0..10], "{\"posts\":[");
-        ptr += 10;
-
-        for (0..n_rows) |i| {
-            if (i > 0) {
-                ptr[0] = ',';
-                ptr += 1;
-            }
-            @memcpy(ptr[0..6], "{\"id\":");
-            ptr += 6;
-            ptr += bufm.writeU64Direct(ptr[0..24], @intCast(rows[i].id));
-
-            @memcpy(ptr[0..9], ",\"body\":\"");
-            ptr += 9;
-            ptr += bufm.writeJsonStringDirect(ptr, rows[i].body);
-
-            @memcpy(ptr[0..16], "\",\"created_at\":\"");
-            ptr += 16;
-            @memcpy(ptr[0..rows[i].created.len], rows[i].created);
-            ptr += rows[i].created.len;
-
-            @memcpy(ptr[0..12], "\",\"author\":\"");
-            ptr += 12;
-            ptr += bufm.writeJsonStringDirect(ptr, rows[i].author);
-
-            @memcpy(ptr[0..15], "\",\"like_count\":");
-            ptr += 15;
-            ptr += bufm.writeU64Direct(ptr[0..24], @intCast(rows[i].likes));
-
-            ptr[0] = '}';
-            ptr += 1;
-        }
-
-        @memcpy(ptr[0..2], "]}");
-        ptr += 2;
-
-        out.len += @intFromPtr(ptr) - @intFromPtr(initial_ptr);
+        out.writeAll("]}");
     }
 
     pub fn feedSql(self: *Db, out: *Buf) !void {
@@ -439,128 +378,48 @@ pub const Db = struct {
 
     pub fn getPost(self: *Db, id: i64, out: *Buf) GetPostResult {
         if (!self.beginTx()) return .err;
-        const cp = td_cursor(POSTS);
-        const cu = td_cursor(USERS);
-        const cl = td_cursor(LIKES_IDX);
-
-        const seek_res = td_seek(cp, id);
-        if (seek_res == 0) return .not_found;
-        if (seek_res < 0) return .err;
-
-        const p = getPayload(cp) catch return .err;
-        const cols = columns(4, p) catch return .err;
-        const uid = intOf(cols[1].t, cols[1].b) catch return .err;
-        const body = text(cols[2]) catch return .err;
-        const created = text(cols[3]) catch return .err;
-
-        if (td_seek(cu, uid) != 1) return .not_found;
-        const up = getPayload(cu) catch return .err;
-        const ucols = columns(2, up) catch return .err;
-        const author = text(ucols[1]) catch return .err;
-
-        const likes = countLikes(cl, id) catch return .err;
-
-        out.ensure(body.len * 6 + author.len * 6 + 128) catch return .err;
-        var ptr = out.ptr + out.len;
-        const initial_ptr = ptr;
-
-        @memcpy(ptr[0..14], "{\"post\":{\"id\":");
-        ptr += 14;
-        ptr += bufm.writeU64Direct(ptr[0..24], @intCast(id));
-
-        @memcpy(ptr[0..9], ",\"body\":\"");
-        ptr += 9;
-        ptr += bufm.writeJsonStringDirect(ptr, body);
-
-        @memcpy(ptr[0..16], "\",\"created_at\":\"");
-        ptr += 16;
-        @memcpy(ptr[0..created.len], created);
-        ptr += created.len;
-
-        @memcpy(ptr[0..12], "\",\"author\":\"");
-        ptr += 12;
-        ptr += bufm.writeJsonStringDirect(ptr, author);
-
-        @memcpy(ptr[0..15], "\",\"like_count\":");
-        ptr += 15;
-        ptr += bufm.writeU64Direct(ptr[0..24], @intCast(likes));
-
-        @memcpy(ptr[0..2], "}}");
-        ptr += 2;
-
-        out.len += @intFromPtr(ptr) - @intFromPtr(initial_ptr);
+        const likes = countLikes(td_cursor(LIKES_IDX), id) catch return .err;
+        const start = out.len;
+        out.writeAll("{\"post\":");
+        appendPost(td_cursor(POSTS), td_cursor(USERS), id, likes, out) catch |err| {
+            out.len = start;
+            return if (err == DbError.NotFound) .not_found else .err;
+        };
+        out.writeByte('}');
         return .ok;
     }
 
-    pub fn getPostDirect(self: *Db, id: i64, dest: [*]u8, keep_alive: bool) GetPostDirectResult {
-        if (!self.beginTx()) return .err;
-        const cp = td_cursor(POSTS);
-        const cu = td_cursor(USERS);
-        const cl = td_cursor(LIKES_IDX);
+    fn appendPost(cp: ?*anyopaque, cu: ?*anyopaque, id: i64, likes: i64, out: *Buf) !void {
+        const p = try recordAt(cp, id);
+        const post: PostFields = fastDecodePost(p) orelse blk: {
+            const cols = try columns(4, p);
+            break :blk .{ .uid = try intOf(cols[1].t, cols[1].b), .body = try text(cols[2]), .created = try text(cols[3]) };
+        };
+        const u = try recordAt(cu, post.uid);
+        const author = fastDecodeUser(u) orelse try text((try columns(2, u))[1]);
 
-        const seek_res = td_seek(cp, id);
-        if (seek_res == 0) return .not_found;
-        if (seek_res < 0) return .err;
-
-        const p = getPayload(cp) catch return .err;
-        const cols = columns(4, p) catch return .err;
-        const uid = intOf(cols[1].t, cols[1].b) catch return .err;
-        const body = text(cols[2]) catch return .err;
-        const created = text(cols[3]) catch return .err;
-
-        if (td_seek(cu, uid) != 1) return .not_found;
-        const up = getPayload(cu) catch return .err;
-        const ucols = columns(2, up) catch return .err;
-        const author = text(ucols[1]) catch return .err;
-
-        const likes = countLikes(cl, id) catch return .err;
-
-        // Serialize JSON body starting at dest + 128 in a single linear pass (no redundant escaping pre-scan)
-        const body_start = dest + 128;
-        var ptr = body_start;
-
-        @memcpy(ptr[0..14], "{\"post\":{\"id\":");
-        ptr += 14;
+        // Consume both cursor payloads while their pages are still pinned.
+        // Reserve the maximum JSON expansion; the normal slab path is one comparison.
+        try out.ensure(104 + post.created.len + 6 * (post.body.len + author.len));
+        var ptr = out.ptr + out.len;
+        ptr[0..6].* = "{\"id\":".*;
+        ptr += 6;
         ptr += bufm.writeU64Direct(ptr[0..24], @intCast(id));
-
-        @memcpy(ptr[0..9], ",\"body\":\"");
+        ptr[0..9].* = ",\"body\":\"".*;
         ptr += 9;
-        ptr += bufm.writeJsonStringDirect(ptr, body);
-
-        @memcpy(ptr[0..16], "\",\"created_at\":\"");
+        ptr += bufm.writeJsonStringDirect(ptr, post.body);
+        ptr[0..16].* = "\",\"created_at\":\"".*;
         ptr += 16;
-        @memcpy(ptr[0..created.len], created);
-        ptr += created.len;
-
-        @memcpy(ptr[0..12], "\",\"author\":\"");
+        @memcpy(ptr[0..post.created.len], post.created);
+        ptr += post.created.len;
+        ptr[0..12].* = "\",\"author\":\"".*;
         ptr += 12;
         ptr += bufm.writeJsonStringDirect(ptr, author);
-
-        @memcpy(ptr[0..15], "\",\"like_count\":");
+        ptr[0..15].* = "\",\"like_count\":".*;
         ptr += 15;
         ptr += bufm.writeU64Direct(ptr[0..24], @intCast(likes));
-
-        @memcpy(ptr[0..2], "}}");
-        ptr += 2;
-
-        const body_len = @intFromPtr(ptr) - @intFromPtr(body_start);
-
-        // Prepend HTTP response headers directly into the 128-byte headroom before dest + 128
-        const prefix = if (keep_alive)
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
-        else
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
-        const d_len = bufm.digitsU64(body_len);
-        const hdr_len = prefix.len + d_len + 4;
-        const start_off = 128 - hdr_len;
-        var h_ptr = dest + start_off;
-        @memcpy(h_ptr[0..prefix.len], prefix);
-        h_ptr += prefix.len;
-        _ = bufm.writeU64Direct(h_ptr[0..24], body_len);
-        h_ptr += d_len;
-        @memcpy(h_ptr[0..4], "\r\n\r\n");
-
-        return .{ .ok = .{ .start_off = start_off, .total_len = hdr_len + body_len } };
+        ptr[0] = '}';
+        out.len = @intFromPtr(ptr + 1) - @intFromPtr(out.ptr);
     }
 
     pub fn checkPostExists(self: *Db, id: i64) ExistsResult {
@@ -573,7 +432,6 @@ pub const Db = struct {
     }
 
     pub fn likePost(self: *Db, uid: i64, post_id: i64, out: *Buf) LikeResult {
-        if (!self.beginTx()) return .err;
         const exists = self.checkPostExists(post_id);
         if (exists == .not_found) return .not_found;
         if (exists == .err) return .err;
@@ -595,7 +453,6 @@ pub const Db = struct {
     }
 
     pub fn unlikePost(self: *Db, uid: i64, post_id: i64, out: *Buf) UnlikeResult {
-        if (!self.beginTx()) return .err;
         const exists = self.checkPostExists(post_id);
         if (exists == .not_found) return .not_found;
         if (exists == .err) return .err;

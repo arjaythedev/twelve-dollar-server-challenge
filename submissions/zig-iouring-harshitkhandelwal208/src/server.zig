@@ -30,11 +30,16 @@ pub const n_bufs_per_ring: u16 = 1024;
 pub const bgid: u16 = 1;
 
 pub const pool_buf_size: usize = 16384;
-pub const pool_count: usize = 4096;
+// Keep enough fixed response slabs for a connection ramp to remain allocation
+// free.  Falling back to libc allocation when a 4K slab is exhausted turns a
+// transient send backlog into allocator contention on the single event-loop
+// core.  The mapping remains demand-paged, so unused slabs do not consume the
+// cgroup's resident-memory budget.
+pub const pool_count: usize = 16384;
 
-// Six fixed-file tables provide 392,832 connection slots: comfortably above the
-// 350k target while avoiding two otherwise-empty rings worth of per-pass syscalls.
-pub const k_ring_count: usize = 6;
+// Eight tables retain the proven 523,776-slot ceiling.  They are allocated
+// before the ramp but are not polled until the accept policy activates them.
+pub const k_ring_count: usize = 8;
 pub const k_listener_count: usize = 8;
 pub const slots_per_ring: u32 = 65472;
 pub const max_pending_size: usize = 65535;
@@ -42,8 +47,6 @@ pub const max_pending_size: usize = 65535;
 pub const ACCEPT_DEPTH: u32 = 512;
 pub const READS_PER_PASS: usize = 16384;
 pub const ANSWERS_PER_PASS: u32 = 2048;
-pub const WAIT_MIN: u32 = 256;
-pub const WAIT_NS: i64 = 1_000_000; // 1 ms
 
 pub const RespPool = struct {
     mem: [*]u8 = undefined,
@@ -108,20 +111,18 @@ inline fn milliTimestamp() i64 {
 pub const gen_mask: u32 = 0x00ffffff;
 
 inline fn ud(tag: Tag, gen: u32, idx: u32) u64 {
-    return (@as(u64, @intFromEnum(tag)) << 56) | (@as(u64, gen & gen_mask) << 32) | idx;
+    return (@as(u64, @backingInt(tag)) << 56) | (@as(u64, gen & gen_mask) << 32) | idx;
 }
 
 pub const Conn = struct {
     gen: u32 = 0,
     flags: u16 = 0,
-    ring_idx: u8 = 0,
     pend_len: u16 = 0,
     pend_buf: ?[*]u8 = null,
     out: ?[*]u8 = null,
-    out_len: u16 = 0,
-    out_off: u16 = 0,
+    out_len: u32 = 0,
+    out_off: u32 = 0,
     pend_cap: u16 = 0,
-    reserved: u8 = 0,
 
     pub const FLAG_OPEN: u16 = 1 << 0;
     pub const FLAG_RECV_LIVE: u16 = 1 << 1;
@@ -230,7 +231,7 @@ pub const Conn = struct {
 };
 
 comptime {
-    std.debug.assert(@sizeOf(Conn) == 32);
+    std.debug.assert(@sizeOf(Conn) == 40);
 }
 
 pub const QEntry = packed struct(u64) {
@@ -351,14 +352,15 @@ pub const Server = struct {
     held: [65536]QEntry = undefined,
     n_held: usize = 0,
 
-    touched: [65536]struct { ring_idx: u8, slot: u32 } = undefined,
+    // One entry per direct descriptor covers a whole-ring disconnect burst.
+    touched: [k_ring_count * slots_per_ring]packed struct(u32) { ring_idx: u8, slot: u24 } = undefined,
     n_touched: usize = 0,
 
     pub fn init(sqlite_path: []const u8, jwt_key: Key) !*Server {
         const smem = try sys.mapAnon(@sizeOf(Server));
         sys.madviseHuge(smem);
         const s: *Server = @ptrCast(@alignCast(smem.ptr));
-        @memset(smem, 0);
+        // Anonymous mappings start zeroed. Leave the burst queues demand-paged.
 
         try s.db.open(sqlite_path);
         s.jwt = jwt_key;
@@ -414,7 +416,11 @@ pub const Server = struct {
         rw.full = false;
         rw.reads = 0;
         rw.depth = ACCEPT_DEPTH;
-        rw.margin = 1024;
+        // Stop accepts well before a direct-file table is full.  A completed
+        // direct accept has already left the listen queue, so a late switch
+        // can drop the connection even though another pre-created ring has
+        // capacity.  The accept depth remains safely below this margin.
+        rw.margin = 6144;
 
         rw.ring = initRing() catch |err| {
             std.log.err("initRing({d}) failed: {}", .{ idx, err });
@@ -431,24 +437,25 @@ pub const Server = struct {
 
         const cmem = try sys.mapAnon(@as(usize, slots_per_ring) * @sizeOf(Conn));
         sys.madviseHuge(cmem);
+        if (idx == 0) sys.prefault(cmem);
         rw.conns = @as([*]Conn, @ptrCast(@alignCast(cmem.ptr)))[0..slots_per_ring];
     }
 
     fn initRing() !IoUring {
         const sq_sizes = [_]u16{ 4096, 2048, 1024 };
-        const cq_sizes = [_]u32{ 32768, 16384, 8192 };
+        const cq_sizes = [_]u32{ 65536, 32768, 16384, 8192 };
         var last: anyerror = error.RingInitFailed;
 
         const IORING_SETUP_COOP_TASKRUN: u32 = 1 << 8;
-        const IORING_SETUP_TASKRUN_FLAG: u32 = 1 << 9;
+        const IORING_SETUP_SUBMIT_ALL: u32 = 1 << 7;
         const IORING_SETUP_SINGLE_ISSUER: u32 = 1 << 12;
         const IORING_SETUP_DEFER_TASKRUN: u32 = 1 << 13;
 
-        // 1. Try with DEFER_TASKRUN + SINGLE_ISSUER + TASKRUN_FLAG (highest throughput on Linux 6.1+)
+        // 1. Try with DEFER_TASKRUN + SINGLE_ISSUER + SUBMIT_ALL (matching #1 Rust engine)
         for (sq_sizes) |sq| {
             for (cq_sizes) |cq| {
                 var p = std.mem.zeroInit(linux.io_uring_params, .{
-                    .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_TASKRUN_FLAG,
+                    .flags = linux.IORING_SETUP_CQSIZE | IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN | IORING_SETUP_SUBMIT_ALL | linux.IORING_SETUP_TASKRUN_FLAG,
                 });
                 p.cq_entries = cq;
                 if (IoUring.init_params(sq, &p)) |r| return r else |e| last = e;
@@ -515,6 +522,7 @@ pub const Server = struct {
 
         const bmem = try sys.mapAnon(@as(usize, n_bufs_per_ring) * buf_size);
         sys.madviseHuge(bmem);
+        if (w.id == 0) sys.prefault(bmem);
         w.pbuf_mem = bmem.ptr;
         w.pbuf_ring = @ptrCast(@alignCast(rmem.ptr));
         w.pbuf_tail = 0;
@@ -536,12 +544,12 @@ pub const Server = struct {
 
     inline fn returnBuf(w: *RingWorker, bid: u16) void {
         const idx = w.pbuf_tail & (n_bufs_per_ring - 1);
-        w.pbuf_ring[idx] = .{
-            .addr = @intFromPtr(w.pbuf_mem) + (@as(usize, bid) * buf_size),
-            .len = buf_size,
-            .bid = bid,
-            .resv = 0,
-        };
+        // Entry zero's reserved field aliases the kernel-visible ring tail.
+        // Only publishBufs may change it, after all entries are initialized.
+        const entry = &w.pbuf_ring[idx];
+        entry.addr = @intFromPtr(w.pbuf_mem) + (@as(usize, bid) * buf_size);
+        entry.len = buf_size;
+        entry.bid = bid;
         w.pbuf_tail +%= 1;
     }
 
@@ -551,14 +559,18 @@ pub const Server = struct {
     }
 
     inline fn getSqe(w: *RingWorker) ?*linux.io_uring_sqe {
-        return w.ring.get_sqe() catch null;
+        return w.ring.get_sqe() catch {
+            // Bursts can fill the SQ while completions are still being drained.
+            _ = w.ring.submit() catch return null;
+            return w.ring.get_sqe() catch null;
+        };
     }
 
     pub fn makeListeners(self: *Server, host: [4]u8, port: u16) !void {
         const one: c_int = 1;
         const rcv: c_int = 2048;
-        const snd: c_int = 2048;
-        const clamp: c_int = 2048;
+        const snd: c_int = 32768;
+        const clamp: c_int = 16384;
 
         for (0..k_listener_count) |i| {
             const s = linux.socket(linux.AF.INET, linux.SOCK.STREAM | linux.SOCK.NONBLOCK | linux.SOCK.CLOEXEC, 0);
@@ -586,7 +598,7 @@ pub const Server = struct {
         }
     }
 
-    fn armAccepts(self: *Server, w: *RingWorker) void {
+    pub fn armAccepts(self: *Server, w: *RingWorker) void {
         w.accepting = true;
         self.fillAccepts(w);
     }
@@ -606,7 +618,7 @@ pub const Server = struct {
     /// Keep accepts armed on one non-full active ring.  Fixed-file tables are
     /// expensive to poll on a single core, so later rings are activated only
     /// after earlier ones run out of safe accept headroom.
-    fn spillAccepts(self: *Server) void {
+    pub fn spillAccepts(self: *Server) void {
         for (0..self.active_rings) |i| {
             const w = &self.rings[i];
             if (w.accepting and !w.full) return;
@@ -657,65 +669,48 @@ pub const Server = struct {
         }
     }
 
-    inline fn hasCqes(w: *const RingWorker) bool {
-        const head = w.ring.cq.head.*;
-        const tail = @atomicLoad(u32, w.ring.cq.tail, .acquire);
-        return head != tail;
-    }
-
     pub var running: std.atomic.Value(bool) = std.atomic.Value(bool).init(true);
 
     pub fn run(self: *Server) !void {
+        var last_completions: usize = 0;
         while (running.load(.monotonic)) {
-            var any_cqes = false;
-            for (0..self.active_rings) |i| {
-                if (hasCqes(&self.rings[i])) {
-                    any_cqes = true;
-                    break;
+            const userspace_ready = !self.rq.isEmpty() or !self.ready.isEmpty() or (self.n_held > 0 and !self.db.writesHeld());
+            const wait_index = self.wait_ri;
+            var ready_elsewhere: u32 = 0;
+            for (self.rings[0..self.active_rings], 0..) |*w, i| {
+                if (i == wait_index) continue;
+                const submitted = w.ring.flush_sq();
+                // DEFER_TASKRUN advertises pending kernel work through the SQ
+                // flags. A quiet secondary ring needs no syscall on this pass.
+                if (submitted != 0 or w.ring.flags & linux.IORING_SETUP_TASKRUN_FLAG == 0 or
+                    @atomicLoad(u32, w.ring.sq.flags, .acquire) & (linux.IORING_SQ_TASKRUN | linux.IORING_SQ_CQ_OVERFLOW) != 0)
+                {
+                    _ = linux.io_uring_enter(w.ring.fd, submitted, 0, linux.IORING_ENTER_GETEVENTS, null);
                 }
+                ready_elsewhere += w.ring.cq_ready();
             }
-            var any_to_submit = false;
-            for (0..self.active_rings) |i| {
-                if (self.rings[i].ring.sq.sqe_head != self.rings[i].ring.sq.sqe_tail) {
-                    any_to_submit = true;
-                    break;
-                }
+            const w = &self.rings[wait_index];
+            const submitted = w.ring.flush_sq();
+            const batch_goal = 96;
+            const batching = last_completions >= 8;
+            if (userspace_ready or ready_elsewhere >= batch_goal or (!batching and ready_elsewhere != 0)) {
+                _ = linux.io_uring_enter(w.ring.fd, submitted, 0, linux.IORING_ENTER_GETEVENTS, null);
+            } else {
+                // Subtract completions already visible on other rings before
+                // waiting. Bound the wait even when the selected ring is quiet.
+                const minimum: u32 = if (batching) batch_goal - ready_elsewhere else 1;
+                const timeout: i64 = if (batching or self.active_rings > 1 or self.n_held > 0) 800_000 else 50_000_000;
+                _ = enterWithTimeout(w.ring.fd, submitted, minimum, timeout);
             }
-            // Do not enter an idle wait while CQEs or SQEs are already ready:
-            // with DEFER_TASKRUN that otherwise postpones progress by one
-            // timeout interval and amplifies the p99 during a connection ramp.
-            const busy = any_cqes or any_to_submit or !self.rq.isEmpty() or !self.ready.isEmpty();
-
-            // With deferred task-run, a long wait on one ring can defer the
-            // completions queued on every other active ring.  Once connection
-            // pressure has activated another ring, use a short rotating wait
-            // to bound that cross-ring tail; the larger idle batch remains
-            // useful while the server is still on its single initial ring.
-            const multi_ring = self.active_rings > 1;
-            const wait_min: u32 = if (multi_ring) 1 else WAIT_MIN;
-            const wait_ns: i64 = if (multi_ring) 50_000 else WAIT_NS;
-            const wait_ri = if (multi_ring) self.wait_ri % self.active_rings else 0;
-            self.wait_ri +%= 1;
-
-            // Iterate active rings in reverse order (highest down to 0).
-            var ri: usize = self.active_rings;
-            while (ri > 0) {
-                ri -= 1;
-                const w = &self.rings[ri];
-                const to_submit = w.ring.flush_sq();
-
-                if (ri == wait_ri and !busy) {
-                    _ = enterWithTimeout(w.ring.fd, to_submit, wait_min, wait_ns);
-                } else if (to_submit > 0 or (w.ring.flags & (1 << 13) != 0)) {
-                    _ = linux.io_uring_enter(w.ring.fd, to_submit, 0, linux.IORING_ENTER_GETEVENTS, null);
-                }
-            }
+            self.wait_ri = if (wait_index + 1 < self.active_rings) wait_index + 1 else 0;
+            self.now = sys.nowUnix();
 
             self.answers_left = ANSWERS_PER_PASS;
 
             // Drain CQEs across all active rings
+            last_completions = 0;
             for (0..self.active_rings) |i| {
-                _ = self.drainRing(&self.rings[i]);
+                last_completions += self.drainRing(&self.rings[i]);
             }
 
             // Answer connections on ready list (oldest first, drain first)
@@ -746,7 +741,7 @@ pub const Server = struct {
         var cur = head;
         while (cur != tail) : (cur +%= 1) {
             const cqe = &w.ring.cq.cqes[cur & mask];
-            const tag: Tag = @enumFromInt(@as(u8, @truncate(cqe.user_data >> 56)));
+            const tag: Tag = @fromBackingInt(@intCast(@as(u8, @truncate(cqe.user_data >> 56))));
             const gen: u32 = @truncate((cqe.user_data >> 32) & gen_mask);
             const slot: u32 = @truncate(cqe.user_data);
 
@@ -783,6 +778,7 @@ pub const Server = struct {
         if (w.accepting) {
             if (w.full) {
                 w.accepting = false;
+                self.spillAccepts();
             } else {
                 self.fillAccepts(w);
             }
@@ -803,7 +799,6 @@ pub const Server = struct {
             c.* = .{
                 .gen = (c.gen +% 1) & gen_mask,
                 .flags = Conn.FLAG_OPEN,
-                .ring_idx = @intCast(w.id),
             };
             w.nconn += 1;
             self.armRecv(w, slot, c);
@@ -812,8 +807,8 @@ pub const Server = struct {
                 w.full = true;
                 self.spillAccepts();
             }
-        } else if (res == -@as(i32, @intCast(@intFromEnum(linux.E.NFILE))) or
-            res == -@as(i32, @intCast(@intFromEnum(linux.E.MFILE))))
+        } else if (res == -@as(i32, @intCast(@backingInt(linux.E.NFILE))) or
+            res == -@as(i32, @intCast(@backingInt(linux.E.MFILE))))
         {
             w.full = true;
             self.spillAccepts();
@@ -834,7 +829,7 @@ pub const Server = struct {
                 c.setRecvLive(false);
                 self.queueRead(w.id, slot, c);
             }
-        } else if (res == -@as(i32, @intCast(@intFromEnum(linux.E.NOBUFS))) or res == -105) {
+        } else if (res == -@as(i32, @intCast(@backingInt(linux.E.NOBUFS))) or res == -105) {
             c.setRecvLive(false);
             self.queueRead(w.id, slot, c);
         } else {
@@ -860,9 +855,9 @@ pub const Server = struct {
             } else {
                 self.armRecv(w, slot, c);
             }
-        } else if (res == -@as(i32, @intCast(@intFromEnum(linux.E.AGAIN)))) {
+        } else if (res == -@as(i32, @intCast(@backingInt(linux.E.AGAIN)))) {
             self.armRecv(w, slot, c);
-        } else if (res == -@as(i32, @intCast(@intFromEnum(linux.E.NOBUFS))) or res == -105) {
+        } else if (res == -@as(i32, @intCast(@backingInt(linux.E.NOBUFS))) or res == -105) {
             self.queueRead(w.id, slot, c);
         } else {
             self.finishConn(w, slot, c);
@@ -1019,10 +1014,8 @@ pub const Server = struct {
     fn markTouched(self: *Server, ring_idx: u8, slot: u32, c: *Conn) void {
         if (!c.isInBatch()) {
             c.setInBatch(true);
-            if (self.n_touched < self.touched.len) {
-                self.touched[self.n_touched] = .{ .ring_idx = ring_idx, .slot = slot };
-                self.n_touched += 1;
-            }
+            self.touched[self.n_touched] = .{ .ring_idx = ring_idx, .slot = @intCast(slot) };
+            self.n_touched += 1;
         }
     }
 
@@ -1045,7 +1038,7 @@ pub const Server = struct {
             c.pend_buf = mem.ptr;
             c.pend_cap = @intCast(cap);
         } else if (total > c.pend_cap) {
-            var new_cap: usize = @as(usize, c.pend_cap) * 2;
+            var new_cap: usize = @min(max_pending_size, @as(usize, c.pend_cap) * 2);
             while (new_cap < total) {
                 if (new_cap > max_pending_size / 2) {
                     new_cap = max_pending_size;
@@ -1068,6 +1061,8 @@ pub const Server = struct {
     fn finishConn(self: *Server, w: *RingWorker, slot: u32, c: *Conn) void {
         if (c.isHeld() or c.isReady()) {
             c.setEof(true);
+        } else if (c.out == null and !c.isInBatch() and !c.isSendLive()) {
+            self.armClose(w, slot, c);
         } else {
             c.setCloseAfter(true);
             self.markTouched(@intCast(w.id), slot, c);
@@ -1099,11 +1094,17 @@ pub const Server = struct {
             const parsed = http.parseHead(rem);
             switch (parsed) {
                 .ok => |head| {
-                    const req_len = head.head_len + head.content_length;
-                    if (offset + req_len > input.len) {
-                        break;
-                    }
-                    const body = rem[head.head_len..req_len];
+                    self.scratch.reset();
+                    const payload = switch (http.takeBody(&head, rem[head.head_len..], &self.scratch)) {
+                        .need_more => break,
+                        .bad => |status| {
+                            self.sendError(w, slot, c, status, "bad request", false);
+                            c.setCloseAfter(true);
+                            offset = input.len;
+                            break;
+                        },
+                        .ok => |payload| payload,
+                    };
 
                     // Check write hold during active WAL checkpoint tail
                     if ((head.method == .post or head.method == .delete) and self.db.writesHeld()) {
@@ -1121,8 +1122,8 @@ pub const Server = struct {
                         break;
                     }
 
-                    offset += req_len;
-                    self.dispatchRoute(w, slot, c, &head, body);
+                    offset += head.head_len + payload.consumed;
+                    self.dispatchRoute(w, slot, c, &head, payload.data);
                 },
                 .need_more => break,
                 .bad => |status| {
@@ -1155,7 +1156,6 @@ pub const Server = struct {
     }
 
     fn dispatchRoute(self: *Server, w: *RingWorker, slot: u32, c: *Conn, head: *const http.Head, body: []const u8) void {
-        self.scratch.reset();
         self.resp_buf.reset();
         const keep_alive = head.keep_alive;
         if (!keep_alive) c.setCloseAfter(true);
@@ -1165,44 +1165,7 @@ pub const Server = struct {
 
         // Route: GET /feed
         if (method == .get and std.mem.eql(u8, path, "/feed")) {
-            if (self.resp_pool.acquire()) |p| {
-                var feed_buf = Buf{
-                    .ptr = p.ptr + 128,
-                    .len = 0,
-                    .cap = pool_buf_size - 128,
-                };
-                if (self.db.feed(&feed_buf)) {
-                    const prefix = if (keep_alive)
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
-                    else
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: ";
-                    const d_len = bufm.digitsU64(feed_buf.len);
-                    const hdr_len = prefix.len + d_len + 4;
-                    const start_off = 128 - hdr_len;
-                    var h_ptr = p.ptr + start_off;
-                    @memcpy(h_ptr[0..prefix.len], prefix);
-                    h_ptr += prefix.len;
-                    _ = bufm.writeU64Direct(h_ptr[0..24], feed_buf.len);
-                    h_ptr += d_len;
-                    @memcpy(h_ptr[0..4], "\r\n\r\n");
-
-                    c.out = p.ptr + start_off;
-                    c.out_len = @intCast(hdr_len + feed_buf.len);
-                    c.out_off = 0;
-                    c.setOutPool(true);
-                    self.markTouched(@intCast(w.id), slot, c);
-                    return;
-                } else |_| {
-                    self.resp_pool.release(p.ptr);
-                    self.sendError(w, slot, c, 500, "internal server error", keep_alive);
-                    return;
-                }
-            }
-            self.db.feed(&self.resp_buf) catch {
-                self.sendError(w, slot, c, 500, "internal server error", keep_alive);
-                return;
-            };
-            self.sendResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive);
+            self.sendRead(w, slot, c, null, keep_alive);
             return;
         }
 
@@ -1264,35 +1227,7 @@ pub const Server = struct {
                         return;
                     };
 
-                    if (self.resp_pool.acquire()) |p| {
-                        const res = self.db.getPostDirect(post_id, p.ptr, keep_alive);
-                        switch (res) {
-                            .ok => |pos| {
-                                c.out = p.ptr + pos.start_off;
-                                c.out_len = @intCast(pos.total_len);
-                                c.out_off = 0;
-                                c.setOutPool(true);
-                                self.markTouched(@intCast(w.id), slot, c);
-                                return;
-                            },
-                            .not_found => {
-                                self.resp_pool.release(p.ptr);
-                                self.sendError(w, slot, c, 404, "post not found", keep_alive);
-                                return;
-                            },
-                            .err => {
-                                self.resp_pool.release(p.ptr);
-                                self.sendError(w, slot, c, 500, "internal server error", keep_alive);
-                                return;
-                            },
-                        }
-                    }
-
-                    switch (self.db.getPost(post_id, &self.resp_buf)) {
-                        .ok => self.sendResponse(w, slot, c, 200, self.resp_buf.slice(), keep_alive),
-                        .not_found => self.sendError(w, slot, c, 404, "post not found", keep_alive),
-                        .err => self.sendError(w, slot, c, 500, "internal server error", keep_alive),
-                    }
+                    self.sendRead(w, slot, c, post_id, keep_alive);
                     return;
                 }
 
@@ -1350,7 +1285,6 @@ pub const Server = struct {
         const token = std.mem.trim(u8, h[7..], " \t");
         if (token.len == 0) return error.MissingToken;
 
-        self.now = sys.nowUnix();
         switch (self.jwt.verify(token, self.now, &self.scratch)) {
             .ok => |claims| return claims,
             .invalid => return error.InvalidToken,
@@ -1385,15 +1319,11 @@ pub const Server = struct {
             @memcpy(buf[0..s.len], s);
             off = s.len;
         } else {
-            const line = switch (status) {
-                400 => "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\n",
-                401 => "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\n",
-                404 => "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n",
-                503 => "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n",
-                else => "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\n",
-            };
+            const line = http.statusLine(status);
+            const content_type = "Content-Type: application/json\r\n";
             @memcpy(buf[0..line.len], line);
-            off = line.len;
+            @memcpy(buf[line.len..][0..content_type.len], content_type);
+            off = line.len + content_type.len;
         }
 
         if (!keep_alive) {
@@ -1413,6 +1343,33 @@ pub const Server = struct {
         off += end.len;
 
         return off;
+    }
+
+    fn sendRead(self: *Server, w: *RingWorker, slot: u32, c: *Conn, post_id: ?i64, keep_alive: bool) void {
+        const slab = self.resp_pool.acquire();
+        var local: Buf = if (slab) |p| Buf.wrap(p[http.head_room..]) else .{};
+        defer local.deinit();
+        const out = if (slab != null) &local else &self.resp_buf;
+        const result: Db.GetPostResult = if (post_id) |id|
+            self.db.getPost(id, out)
+        else if (self.db.feed(out)) .ok else |_| .err;
+        if (slab) |p| {
+            if (result == .ok and local.borrowed) {
+                const response = http.finishResponse(p, local.len, 200, keep_alive, false);
+                c.out = response.ptr;
+                c.out_len = @intCast(response.len);
+                c.out_off = 0;
+                c.setOutPool(true);
+                self.markTouched(@intCast(w.id), slot, c);
+                return;
+            }
+            self.resp_pool.release(p.ptr);
+        }
+        switch (result) {
+            .ok => self.sendResponse(w, slot, c, 200, out.slice(), keep_alive),
+            .not_found => self.sendError(w, slot, c, 404, "post not found", keep_alive),
+            .err => self.sendError(w, slot, c, 500, "internal server error", keep_alive),
+        }
     }
 
     fn sendResponse(self: *Server, w: *RingWorker, slot: u32, c: *Conn, status: u16, body: []const u8, keep_alive: bool) void {
@@ -1458,16 +1415,9 @@ pub const Server = struct {
         const s = getSqe(w) orelse return;
         const slice = c.out.?[c.out_off..c.out_len];
 
-        // Conditional Zero-Copy Send:
-        // For large payloads (>= 8 KB, e.g. /feed), use IORING_OP_SEND_ZC to bypass kernel skb copy.
-        // For small payloads (< 8 KB), standard copy send is faster and avoids 2-CQE event handling overhead.
-        if (slice.len >= 8192) {
-            s.prep_send_zc(@intCast(slot), slice, linux.MSG.NOSIGNAL, 0);
-            c.setZcPending(true);
-        } else {
-            s.prep_send(@intCast(slot), slice, linux.MSG.NOSIGNAL);
-            c.setZcPending(false);
-        }
+        // Standard copy send avoids 2-CQE page-pinning and notification latency
+        s.prep_send(@intCast(slot), slice, linux.MSG.NOSIGNAL);
+        c.setZcPending(false);
 
         s.flags |= linux.IOSQE_FIXED_FILE;
         s.user_data = ud(.send, c.gen, slot);
@@ -1552,10 +1502,17 @@ pub const Server = struct {
             // Buffer is still held by kernel for zerocopy send; wait for NOTIF CQE before shutdown/close
             return;
         }
-        const s1 = getSqe(w) orelse return;
-        s1.prep_shutdown(@intCast(slot), linux.SHUT.RDWR);
-        s1.flags |= linux.IOSQE_FIXED_FILE | linux.IOSQE_IO_HARDLINK;
-        s1.user_data = ud(.shut, c.gen, slot);
+        // Wake outstanding socket operations before removing the direct
+        // descriptor. After peer EOF an idle socket needs only the close.
+        if (c.isRecvLive() or c.isReadLive() or c.isSendLive()) {
+            if (w.ring.sq_ready() + 2 > w.ring.sq.sqes.len) {
+                _ = w.ring.submit() catch return;
+            }
+            const shutdown = getSqe(w) orelse return;
+            shutdown.prep_shutdown(@intCast(slot), linux.SHUT.RDWR);
+            shutdown.flags |= linux.IOSQE_FIXED_FILE | linux.IOSQE_IO_HARDLINK;
+            shutdown.user_data = ud(.shut, c.gen, slot);
+        }
 
         const s2 = getSqe(w) orelse return;
         s2.prep_close_direct(slot);
@@ -1642,3 +1599,19 @@ pub const Server = struct {
         return @intCast(v);
     }
 };
+
+test "buffer ring wrap publishes only the completed batch" {
+    var entries: [2]linux.io_uring_buf = undefined;
+    const memory = try gpa.alloc(u8, buf_size);
+    defer gpa.free(memory);
+    var worker: RingWorker = undefined;
+    worker.pbuf_mem = memory.ptr;
+    worker.pbuf_ring = &entries;
+    worker.pbuf_tail = n_bufs_per_ring;
+    const ring: *linux.io_uring_buf_ring = @ptrCast(&entries[0]);
+    ring.tail = n_bufs_per_ring;
+    Server.returnBuf(&worker, 0);
+    try std.testing.expectEqual(n_bufs_per_ring, ring.tail);
+    Server.publishBufs(&worker);
+    try std.testing.expectEqual(n_bufs_per_ring + 1, ring.tail);
+}

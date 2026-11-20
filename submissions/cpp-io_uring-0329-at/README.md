@@ -37,6 +37,8 @@
 
 **数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找（20 个 id 跨度 < 512 时用一次 seek 加顺序扫描，否则退回逐个 seek；阈值与 rust-iouring-kensac #264 的 512 对齐）；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
 
+**JWT 的 SHA-256 压缩调用 libcrypto。** `SHA256_Transform` 是 libcrypto 导出的符号，且只读写 `ctx->h`——而 `h` 是 `SHA256_CTX` 的第一个成员，所以把自己的 8 字状态直接传进去即可，增量哈希和 HMAC 的结构一行都不用改，OpenSSL 的 CPU 派发会自己挑 AVX2/AVX-512/SHA-NI 路径（fsharp-uring-delneg #437 同样是走 OpenSSL 的 SHA-256）。用 `dlopen("libcrypto.so.3")` 在第一次 `Sha256::create()` 时解析，所以**编译期不需要 libssl-dev、二进制也不链接 libcrypto**；解析不到就退回本文件的标量实现，行为一致。本地实测 JWT 验证 2.03 → 1.55 µs。
+
 **C++23 编译期计算。** 响应头由 `consteval` 在编译期拼成 `std::array`（状态行 + Content-Type + Content-Length 占位），运行时一次拷贝；JSON 转义表、base64url 表、两位数字表和 serial-type 长度表都是 `constexpr`；record 里的整数用 `std::byteswap` + 位运算解码，输入用 `std::string_view`/`std::span` 表达。
 
 **PGO。** `build.sh` 默认跑两遍：先用 `-fprofile-generate` 编一版，起一个临时实例（端口 3987、临时库）跑完整的 42 项检查加 300 次 `/feed` 训练，再用 `-fprofile-use` 重编——分支布局和内联决策据此优化，和 c-iouring-public 的 `PGO=0` 开关是同一套做法。训练只在 shell + curl 上完成（CI 没有 k6），任何一步失败就退回普通 `-O3` 构建；`PGO=0 ./build.sh` 可跳过。

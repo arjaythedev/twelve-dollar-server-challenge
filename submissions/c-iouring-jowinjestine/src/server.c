@@ -1191,14 +1191,18 @@ int main(int argc, char **argv) {
   uint64_t last_stats = now_ns(), te_prev = 0;
   unsigned last_cqes = 0;
   for (;;) {
+    uint64_t phase_start = diag_start();
     /* 1. the other rings: submit what the last batch queued and collect their completions */
     for (unsigned i = 1; i < NR; i++)
       if (!eventfd_wake || ring_pending_submit(&R[i].r)) ring_enter(&R[i].r, 0, 0);
+    diag_end(DP_OTHER_RINGS, phase_start);
+    phase_start = diag_start();
     /* 2. ring 0 waits (unless work is already queued): bigger batches share one commit */
     int busy = nready || (nrq > rq_head) || (nheld && !A.db.writes_held);
     long rc;
     if (busy) rc = ring_enter(&R[0].r, 0, 0);
     else rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, last_cqes ? wait_ns : IDLE_NS);
+    diag_end(DP_WAIT, phase_start);
     if (rc < 0 && rc != -ETIME && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN) {
       fprintf(stderr, "io_uring_enter: %s\n", strerror((int)-rc));
       return 1;
@@ -1206,24 +1210,43 @@ int main(int argc, char **argv) {
     /* 3. the batch */
     uint64_t t = now_ns();
     if (last_cqes && te_prev && t - te_prev > S.max_gap_ns) S.max_gap_ns = t - te_prev; /* a busy wait should take ~1 ms */
+    phase_start = diag_start();
     A.now = (int64_t)time(NULL);
     writes_ok = !A.db.writes_held;
     if (writes_ok && db_begin_write(&A.db) < 0) writes_ok = 0; /* the tail thread is restarting the log: this batch reads only */
+    diag_end(DP_BEGIN, phase_start);
+    phase_start = diag_start();
     answers_left = answers_per_pass;
     run_ready(); /* oldest first: what earlier batches read, before this batch's arrivals can take the answer slots */
+    diag_end(DP_READY, phase_start);
+    phase_start = diag_start();
     unsigned ncq = reap_all();
-    ncq += read_rounds();
+    diag_end(DP_REAP, phase_start);
+    phase_start = diag_start();
+    ncq += read_rounds(); /* retain the full 16,384-read budget from #486 */
+    diag_end(DP_DRAIN, phase_start);
+    phase_start = diag_start();
     if (writes_ok && nheld) release_held();
+    diag_end(DP_HELD, phase_start);
     uint64_t tc = now_ns();
     int failed = db_commit(&A.db) < 0;
     uint64_t tc2 = now_ns();
     if (tc2 - tc > S.max_commit_ns) S.max_commit_ns = tc2 - tc;
+    diag_add(DP_COMMIT, tc2 - tc);
+    phase_start = diag_start();
     flush_replies(failed);
+    diag_end(DP_FLUSH, phase_start);
+    phase_start = diag_start();
     A.db.wrote = 0;
     db_tick(&A.db); /* no transaction is open: the only point where a hold starts or ends */
+    diag_end(DP_DB_TICK, phase_start);
+    phase_start = diag_start();
     for (unsigned i = 0; i < NR; i++) ring_buf_publish(&R[i].r);
+    diag_end(DP_PUBLISH, phase_start);
+    phase_start = diag_start();
     rearm_ended_polls();
     accept_policy();
+    diag_end(DP_POLICY, phase_start);
     last_cqes = ncq;
     S.batches++;
     S.cqes += ncq;
@@ -1232,7 +1255,20 @@ int main(int argc, char **argv) {
     if (nready > S.ready_max) S.ready_max = nready;
     uint64_t te = now_ns();
     te_prev = te;
+    phase_start = diag_start();
     memgov_tick(te);
+    diag_end(DP_MEMGOV, phase_start);
+    if (latency_trace) {
+      D.batches++;
+      uint64_t turn_ns = now_ns() - t;
+      if (turn_ns > D.worst_turn_ns) {
+        D.worst_turn_ns = turn_ns;
+        memcpy(D.worst_parts_ns, D.part_ns, sizeof D.part_ns);
+        D.worst_ready = nready;
+        D.worst_rq = nrq - rq_head;
+        D.worst_enobufs = S.enobufs;
+      }
+    }
     if (te - t > S.max_turn_ns) S.max_turn_ns = te - t;
     if (t - last_stats > STATS_NS) { stats(t - last_stats); last_stats = t; }
     if (stop_requested) {

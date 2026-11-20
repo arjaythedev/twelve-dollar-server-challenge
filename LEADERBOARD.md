@@ -1245,6 +1245,10 @@ the 2-minute probe on p99 (4.45 s, 0 errors) and 320,000 on p99 (4.50 s, 0 error
 Follow-up #526 (`d4886c4`: accept depth back to 2,048) held **270,000** (25,866 req/s, p95 62.3 / p99 205.7 ms,
 0 errors, 77 % CPU, 27 µs/req, 959 MB, 2026-11-20); 280,000 failed the 2-minute probe on p99 (5.60 s, 0 errors) and
 320,000 on p99 15.4 s with 0.24 % timeouts. That is below the merged 290,000, so #526 isn't merged and the row stays
+at `656946e`. #526 at `635e01a` (accept depth 2,048, 64 answers per pass, 64 MB page cache, `TCP_QUICKACK` off on the
+listeners) held **280,000** (26,698 req/s, p95 47.2 / p99 442.5 ms, 0 errors, 78 % CPU, 26 µs/req, 884 MB,
+2026-11-20); 290,000 failed the 2-minute probe on p99 (1.08 s, 0 errors), 300,000 on p99 (1.95 s, 0 errors) and
+320,000 on p99 11.0 s with 0.37 % timeouts. Still below the merged 290,000, so #526 isn't merged and the row stays
 at `656946e`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's

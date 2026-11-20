@@ -72,11 +72,12 @@ struct conn {
   uint16_t flags;
   uint32_t pend_len; /* partial or waiting input, rare */
   uint32_t pend_cap;
-  uint32_t pad;
   uint8_t *pend;
   struct arena *send_arena;
 };
 
+/* Keep hot connection state compact; verify layout on supported 64-bit ABI. */
+_Static_assert(sizeof(struct conn) == 32, "unexpected connection layout");
 struct rs {
   struct ring r;
   struct conn *conns;

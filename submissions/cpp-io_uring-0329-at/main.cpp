@@ -60,7 +60,10 @@ constexpr size_t kDrainBudget = 2048;
 /* 每 pass 答多少请求。2,048 是错的：一个请求 27 us，2,048 个就是 55 ms，pass 本身就长，
  * 排队一叠加 p99 就失控（280k 探针 5.6 s）。fsharp-uring-delneg #437 的 ANSWERS 默认是 64，
  * 一个 pass 约 1.7 ms，backlog 被摊平成很多短 pass。 */
-constexpr uint32_t kAnswersPerPass = 64;
+/* 每 pass 答多少请求。2,048 太长（一个 pass 55 ms，ramp 期 p99 失控）；64 让 pass 只有 1.7 ms，
+ * 但把 COMMIT 推到 391 次/秒（约 1.2% CPU）；256 是折中：pass 6.9 ms、COMMIT 98 次/秒，本地
+ * 20k 连接的 p99 从 64 时的 227 ms 降到 87.6 ms。 */
+constexpr uint32_t kAnswersPerPass = 256;
 constexpr uint32_t kIdleSeconds = 90;
 
 constexpr uint64_t kEvAccept = 1;

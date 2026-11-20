@@ -1,7 +1,0 @@
-bin/
-*.db
-*.db-wal
-*.db-shm
-*.log
-*.prof
-COMPACT_STATE.md

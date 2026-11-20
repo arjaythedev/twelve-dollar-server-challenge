@@ -1,2 +1,0 @@
-# Experiment: workers never restart, as in PR 40 (symfony/runtime's runner restarts them every 500 requests)
-FRANKENPHP_LOOP_MAX=0

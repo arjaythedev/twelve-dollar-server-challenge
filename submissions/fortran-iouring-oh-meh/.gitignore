@@ -1,6 +1,0 @@
-bin/
-build/
-third_party/
-*.o
-*.a
-*.mod

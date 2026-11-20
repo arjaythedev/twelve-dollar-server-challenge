@@ -1,0 +1,25 @@
+--- a/public/index.php
++++ b/public/index.php
+@@ -23,7 +23,7 @@
+     return;
+ }
+ 
+-// Worker mode: Symfony boots once, then handles requests in a loop, restarted every 500 requests like symfony/runtime
++// Worker mode: Symfony boots once, then handles requests in a loop, never restarted (experiment)
+ $kernel->boot();
+ $request = $response = null;
+ $handler = static function () use ($kernel, $env, &$request, &$response): void {
+@@ -32,7 +32,6 @@
+     $response = $kernel->handle($request);
+     $response->send();
+ };
+-$loops = 0;
+ do {
+     $keepRunning = frankenphp_handle_request($handler);
+     // After the response is sent: Symfony resets its services
+@@ -40,4 +39,4 @@
+         $kernel->terminate($request, $response);
+     }
+     gc_collect_cycles();
+-} while ($keepRunning && ++$loops < 500);
++} while ($keepRunning);

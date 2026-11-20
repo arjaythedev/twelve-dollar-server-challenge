@@ -1,4 +1,0 @@
-*.db
-*.db-wal
-*.db-shm
-bench-out/

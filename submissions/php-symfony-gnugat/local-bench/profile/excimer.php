@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 // auto_prepend_file: samples the PHP thread's CPU clock every 0.1 ms, from before index.php runs until the script
 // ends. In classic mode that's one request, Symfony's boot included; in worker mode, a worker's whole life (restarted
-// every 500 requests by symfony/runtime). Collapsed stacks are appended to /tmp/profile/stacks.txt.
+// every 500 requests by public/index.php). Collapsed stacks are appended to /tmp/profile/stacks.txt.
 // EXCIMER_EVENT=real samples wall-clock time instead: waits included (SQLite's locks, opening the database).
 if ('cli' === \PHP_SAPI || !extension_loaded('excimer')) {
     return;

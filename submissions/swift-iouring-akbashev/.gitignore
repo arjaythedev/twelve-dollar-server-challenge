@@ -1,5 +1,0 @@
-.build/
-.swiftpm/
-.deps/
-Sources/CSQLite/sqlite3.c
-Sources/CSQLite/include/sqlite3.h

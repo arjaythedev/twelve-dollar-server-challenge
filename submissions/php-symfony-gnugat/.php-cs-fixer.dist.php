@@ -35,8 +35,6 @@ $finder = (new PhpCsFixer\Finder())
         __DIR__,
     ])
     ->exclude([
-        // Ignored by the repository's root .gitignore, which the tools container (this folder only) can't see
-        'local-bench/results',
         'var',
     ])
     ->notPath([

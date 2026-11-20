@@ -15,7 +15,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpKernel\Attribute\ValueResolver;
 use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
-use Symfony\Component\JsonStreamer\StreamWriterInterface;
+use Symfony\Component\JsonStreamer\JsonStreamWriter;
 use Symfony\Component\Routing\Attribute\Route;
 use Symfony\Component\Security\Http\Attribute\CurrentUser;
 use Symfony\Component\TypeInfo\Type;
@@ -24,13 +24,10 @@ final class PostController extends AbstractController
 {
     private const int FEED_SIZE = 20;
 
-    /**
-     * @param StreamWriterInterface<array<string, mixed>> $jsonStreamWriter
-     */
     public function __construct(
         private readonly PostRepository $posts,
         private readonly PostLikeRepository $likes,
-        private readonly StreamWriterInterface $jsonStreamWriter,
+        private readonly JsonStreamWriter $jsonStreamWriter,
     ) {
     }
 

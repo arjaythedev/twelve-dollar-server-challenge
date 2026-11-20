@@ -1,5 +1,0 @@
-build/
-.bin/
-.gopath/
-.gocache/
-vendor/

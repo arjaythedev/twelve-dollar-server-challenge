@@ -2,46 +2,4 @@
 # Runs the server in the foreground. It reads SQLITE_PATH, JWT_SECRET, HOST and
 # PORT from the environment, as required by SPEC.md.
 set -euo pipefail
-# Ring-owned descriptors (io_uring direct descriptors + multishot recv)
-# remove the 65535 real-fd ceiling. The runtime keeps the classic real-fd
-# path automatically if registration or the provided-buffer ring fails, and
-# HPHP_DIRECT=0 forces it.
-export HPHP_DIRECT="${HPHP_DIRECT:-1}"
-export HPHP_BG_CHECKPOINT="${HPHP_BG_CHECKPOINT:-1}"
-# Optional: parse requests directly from the selected io_uring buffer when they
-# fit in one receive. Partial/multi-buffer requests promote to an owned string.
-# Enable with HPHP_RECV_ZEROCOPY=1; the default copy path remains the baseline.
-export HPHP_RECV_ZEROCOPY="${HPHP_RECV_ZEROCOPY:-0}"
-# Store only partial receive buffers in the PHP map; idle sockets need no
-# per-connection empty-string entry. Set 0 to compare the legacy layout.
-export HPHP_SPARSE_BUFS="${HPHP_SPARSE_BUFS:-1}"
-# Six rings x 65535 direct slots = ~393k table slots; the runtime falls back
-# to one ring (and to the real-fd path) when setup fails.
-export HPHP_RINGS="${HPHP_RINGS:-6}"
-# Bounded ring-0 waits and a 512-deep single-shot accept queue are the
-# direct-mode defaults. Set HPHP_ACCEPT_DEPTH=0 to use multishot accept.
-export HPHP_RING0_WAIT="${HPHP_RING0_WAIT:-1}"
-export HPHP_ACCEPT_DEPTH="${HPHP_ACCEPT_DEPTH:-512}"
-# Keep accept ownership on one ring at a time and hand over before its direct
-# table reaches the reserved-slot watermark (leader-style bounded accepts).
-# Set HPHP_ACCEPT_HANDOVER=0 to retain the prior multi-ring accept scheduler.
-export HPHP_ACCEPT_HANDOVER="${HPHP_ACCEPT_HANDOVER:-1}"
-# The leader caps accepted TCP receive/send buffers through its listener; on
-# Linux these options are inherited by accepted sockets, including direct fds.
-# Set 0 for an A/B comparison with the kernel defaults.
-export HPHP_SOCKET_BUFFERS="${HPHP_SOCKET_BUFFERS:-1}"
-# Decode the fixed posts record inline in HolyPHP instead of making five
-# per-column B-tree builtin calls. Set 0 to retain bt_cols/column accessors.
-export HPHP_FEED_RAW="${HPHP_FEED_RAW:-1}"
-# Exact-mix high-load WSL A/B favored a 1 ms ceiling over 2 ms at 260k
-# configured users; both the CQE target and timeout remain overridable.
-case "$HPHP_RINGS" in
-  ''|*[!0-9]*) ;;
-  *)
-    if [ "$HPHP_DIRECT" = "1" ] && [ "$HPHP_RINGS" -gt 1 ] && [ "$HPHP_RING0_WAIT" != "0" ]; then
-      export HPHP_BATCH_N="${HPHP_BATCH_N:-64}"
-      export HPHP_BATCH_US="${HPHP_BATCH_US:-1000}"
-    fi
-    ;;
-esac
 exec "$(dirname "$0")/bin/server"

@@ -1125,6 +1125,8 @@ int main(int argc, char **argv) {
 
   uint64_t last_stats = now_ns(), te_prev = 0;
   unsigned last_cqes = 0;
+  int adaptive_cq_wait = env_long("ADAPTIVE_CQ_WAIT", 1) != 0;
+  unsigned cq_hot_streak = 0;
   for (;;) {
     /* 1. the other rings: submit what the last batch queued and collect their completions */
     for (unsigned i = 1; i < NR; i++)
@@ -1133,6 +1135,7 @@ int main(int argc, char **argv) {
     int busy = nready || (nrq > rq_head) || (nheld && !A.db.writes_held);
     long rc;
     if (busy) rc = ring_enter(&R[0].r, 0, 0);
+    else if (adaptive_cq_wait && cq_hot_streak >= 3) rc = ring_enter(&R[0].r, 0, 0);
     else rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, last_cqes ? wait_ns : IDLE_NS);
     if (rc < 0 && rc != -ETIME && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN) {
       fprintf(stderr, "io_uring_enter: %s\n", strerror((int)-rc));
@@ -1159,6 +1162,8 @@ int main(int argc, char **argv) {
     for (unsigned i = 0; i < NR; i++) ring_buf_publish(&R[i].r);
     rearm_ended_polls();
     accept_policy();
+    if (ncq >= 256) { if (cq_hot_streak < 4) cq_hot_streak++; }
+    else if (cq_hot_streak) cq_hot_streak--;
     last_cqes = ncq;
     S.batches++;
     S.cqes += ncq;

@@ -26,6 +26,9 @@
 #define IDLE_NS 100000000ULL
 /* the batch shape (tunable for experiments: ANSWERS_PER_PASS, WAIT_MIN, WAIT_US) */
 static unsigned answers_per_pass = 2048, wait_min = 256;
+static int uring_wal_writeback, wal_wb_fd = -1, wal_wb_pending;
+static uint64_t wal_wb_last_ns, wal_wb_errors;
+static int64_t wal_wb_offset;
 static int poll_idle = 0; /* IDLE_POLL=1: idle sockets wait on a multishot poll instead of a multishot receive */
 static int eventfd_wake = 0; /* EVENTFD_WAKE=1: other rings wake ring 0 through an eventfd (more, smaller batches: more CPU) */
 static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
@@ -37,7 +40,7 @@ static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
 #define STATS_NS 10000000000ULL
 
-enum { UD_ACCEPT = 1, UD_RECV, UD_READ, UD_SEND, UD_SHUTDOWN, UD_CLOSE, UD_CANCEL, UD_POLL, UD_EVENTFD };
+enum { UD_ACCEPT = 1, UD_RECV, UD_READ, UD_SEND, UD_SHUTDOWN, UD_CLOSE, UD_CANCEL, UD_POLL, UD_EVENTFD, UD_WAL_WRITEBACK };
 #define UD(op, ring, gen, slot) (((uint64_t)(op) << 56) | ((uint64_t)(ring) << 48) | ((uint64_t)(gen) << 32) | (uint64_t)(slot))
 #define UD_OP(u) ((unsigned)((u) >> 56))
 #define UD_RING(u) ((unsigned)((u) >> 48) & 0xff)
@@ -540,6 +543,27 @@ static void on_eventfd(struct io_uring_cqe *cqe) {
                      UD(UD_EVENTFD, notified_ring, 0, 0));
 }
 
+/* Optional io_uring WAL writeback: at most one request in flight.
+ * The WAL FD is kept open until process exit, including across WAL restarts.
+ * A restart is detected by a decreasing observed file length. */
+static void wal_writeback_tick(uint64_t now) {
+  if (!uring_wal_writeback || wal_wb_pending || now - wal_wb_last_ns < 100000000ULL) return;
+  wal_wb_last_ns = now;
+  if (wal_wb_fd < 0) return;
+  struct stat st;
+  if (fstat(wal_wb_fd, &st) != 0) return;
+  int64_t end = st.st_size;
+  if (end < wal_wb_offset) wal_wb_offset = 0;
+  if (end - wal_wb_offset < 8LL * 1024 * 1024) return;
+  struct io_uring_sqe *sqe = ring_sqe(&R[0].r);
+  sqe->opcode = IORING_OP_SYNC_FILE_RANGE;
+  sqe->fd = wal_wb_fd;
+  sqe->off = (uint64_t)wal_wb_offset;
+  sqe->len = (uint32_t)(end - wal_wb_offset > UINT32_MAX ? UINT32_MAX : end - wal_wb_offset);
+  sqe->sync_range_flags = SYNC_FILE_RANGE_WRITE;
+  sqe->user_data = UD(UD_WAL_WRITEBACK, 0, 0, 0);
+  wal_wb_pending = 1;
+}
 static unsigned reap(unsigned ri) {
   struct ring *r = &R[ri].r;
   if (LOAD_RLX(r->sq_flags) & IORING_SQ_CQ_OVERFLOW) S.cq_overflow++;
@@ -547,6 +571,11 @@ static unsigned reap(unsigned ri) {
   while (head != tail) {
     struct io_uring_cqe *cqe = &r->cqes[head & r->cq_mask];
     switch (UD_OP(cqe->user_data)) {
+    case UD_WAL_WRITEBACK:
+      wal_wb_pending = 0;
+      if (cqe->res < 0) wal_wb_errors++;
+      else { struct stat st; if (wal_wb_fd >= 0 && fstat(wal_wb_fd, &st) == 0) wal_wb_offset = st.st_size; }
+      break;
     case UD_RECV: on_recv(ri, cqe, 1); break;
     case UD_POLL: on_poll(ri, cqe); break;
     case UD_EVENTFD: on_eventfd(cqe); break;
@@ -1102,6 +1131,19 @@ int main(int argc, char **argv) {
   int cache_kib = (int)env_long("CACHE_KIB", 65536); /* 64 MB: the likes index (24 MB), the post tails and their indexes stay resident */
 
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
+  uring_wal_writeback = env_long("URING_WAL_WRITEBACK", 0) != 0;
+  if (uring_wal_writeback) {
+    char wal_path[1024];
+    snprintf(wal_path, sizeof wal_path, "%s-wal", db_path);
+    wal_wb_fd = open(wal_path, O_RDONLY | O_CLOEXEC);
+    if (wal_wb_fd < 0) {
+      fprintf(stderr, "uring WAL writeback disabled: %s\\n", strerror(errno));
+      uring_wal_writeback = 0;
+    } else {
+      /* Disable worker-based writeback to isolate the new mechanism. */
+      wb_kick_ms = 0;
+    }
+  }
 
   const char *err = "";
   for (unsigned l = 0; l < NLISTEN; l++) {
@@ -1168,6 +1210,7 @@ int main(int argc, char **argv) {
     uint64_t te = now_ns();
     te_prev = te;
     memgov_tick(te);
+    wal_writeback_tick(te);
     if (te - t > S.max_turn_ns) S.max_turn_ns = te - t;
     if (t - last_stats > STATS_NS) { stats(t - last_stats); last_stats = t; }
     if (stop_requested) {

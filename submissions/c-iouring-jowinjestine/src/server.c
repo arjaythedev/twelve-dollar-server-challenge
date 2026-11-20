@@ -1209,6 +1209,7 @@ int main(int argc, char **argv) {
     }
     /* 3. the batch */
     uint64_t t = now_ns();
+    uint64_t batch_enobufs_before = S.enobufs;
     if (last_cqes && te_prev && t - te_prev > S.max_gap_ns) S.max_gap_ns = t - te_prev; /* a busy wait should take ~1 ms */
     phase_start = diag_start();
     A.now = (int64_t)time(NULL);
@@ -1266,7 +1267,7 @@ int main(int argc, char **argv) {
         memcpy(D.worst_parts_ns, D.part_ns, sizeof D.part_ns);
         D.worst_ready = nready;
         D.worst_rq = nrq - rq_head;
-        D.worst_enobufs = S.enobufs;
+        D.worst_enobufs = S.enobufs - batch_enobufs_before;
       }
     }
     if (te - t > S.max_turn_ns) S.max_turn_ns = te - t;

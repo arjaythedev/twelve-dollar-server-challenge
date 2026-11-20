@@ -94,10 +94,22 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   SQL. Writes always use prepared SQL. A like's post check is a B-tree seek.
 - **A worker thread copies the log back, and the event loop decides when.** The worker runs at nice 19 on its own connection,
   through the `unix-excl` VFS: the process owns the file, the WAL index lives in its heap, and a transaction takes no file locks.
-  The loop asks for a `PASSIVE` pass over an eventfd after 8,192 WAL frames (32 MB) and the outcome comes back on a second
+  The loop asks for a `PASSIVE` pass over an eventfd after 4,096 WAL frames (16 MB) and the outcome comes back on a second
   eventfd as an ordinary ring completion, so the loop never waits for an fsync. A log only restarts once fully copied, which
-  steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, for at most 250 ms (reads go
-  on). Past 32,768 frames (a disk or CPU too slow for the worker) each hold is still 250 ms, then one pass of POSTs goes through and the next hold starts, as in cpp-io_uring-0329-at (#522) and rust-iouring-kensac (#264): a slow disk lets the log grow instead of holding POSTs for seconds. 1,024-frame passes were tried and scored lower on the benchmark box (270,000 and 260,000 against 280,000). Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
+  steady writes prevent, so if frames arrived during a pass, POSTs stay unread for one more pass, the tail pass, for at most
+  250 ms (reads go on). Only the tail pass holds, at any log size, and a hold that runs out is not started again until the
+  next tail pass. If the worker keeps falling behind and the log reaches 65,536 frames, the loop runs one `PASSIVE` pass
+  itself on its own connection while the worker is idle, and the log restarts if that copied everything. That bound is soft:
+  it is only checked between worker passes, so the log can pass 65,536 frames by what is written during a nice-19 pass
+  (setting the worker back to nice 0 needs `CAP_SYS_NICE`), and on a disk too slow for the tail pass to finish within 250 ms
+  that loop pass is what restarts the log, at the cost of a stall while it syncs. Every 8 MB of new
+  log the loop also queues the WAL's writeback (`SYNC_FILE_RANGE_WRITE`, on an io_uring worker, never waited for), so dirty
+  log pages do not pile up until a `write()` on the loop waits in `balance_dirty_pages`. Earlier builds held POSTs during
+  every pass past 32,768 frames with no time limit (rig 280,000) or for 250 ms re-armed each pass (270,000); 1,024-frame
+  passes scored 270,000 and 260,000. The old cycle size, truncation and kick settings are reachable at build time
+  (`-DWAL_START=8192`, `-DCKPT_FORCE=0`, `-DWALKICK_MB=0`, `-DJSL=33751040`); the old size-based hold is not, so that build
+  has no log bound once the worker falls behind. `-DDBKICK=1` also has the worker start the database file's writeback
+  after each pass that left frames behind, so a later full pass finds fewer dirty pages to sync (off by default). Durability is unchanged: WAL with `synchronous=NORMAL`, and a response
   waits for its `COMMIT`. If a commit fails, nothing from a batch with writes is sent and its connections are closed.
 - **Provided-buffer registration retries.** Ubuntu's 6.8.0-136 and later kernels reject a buffer ring whose
   reserved words are zero (Launchpad #2162843), which stops a server from starting at all. It retries once
@@ -110,11 +122,10 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **SQLite settings**: WAL, `synchronous=NORMAL`, no `mmap`, a 32 MB page cache (a cached page keeps its
   parsed header and needs no WAL lookup; `mmap` measured 4% more CPU per request), prepared statements built
   once with `SQLITE_PREPARE_PERSISTENT`, `SQLITE_THREADSAFE=2` with unused features left out.
-  `journal_size_limit=33751040` (8,192 frames): after the log restarts, the first commit cuts the WAL file back to
-  that size and no further, so in the steady state frames overwrite blocks the file already has and the log's
-  `fdatasync` has no new extents to record. (Before this it was 0, the idea from #326: truncate to nothing so frames
-  append to fresh pages.) Only the file's size changes; the frame counts and checkpoint outcomes the hold logic
-  reads are the same.
+  `journal_size_limit=-1`: the WAL file is never cut back, so frames overwrite blocks the file already has and the
+  first commit after a log restart never runs an `ftruncate` on the loop (which would wait on pages still under
+  writeback). Earlier builds used 0 (the idea from #326) and then 8,192 frames. Only the file's size changes; the frame
+  counts and checkpoint outcomes the hold logic reads are the same.
 - **Code and read-only data are locked in RAM** (as #245, #257 and #326 do). There is no swap, so reclaim at the memory
   wall takes file-backed pages first, and the loop would stall on major faults reading its own code or libc back from
   disk. `dl_iterate_phdr` walks every loaded object and `mlock`s its non-writable `PT_LOAD` segments: 2,978 KB, within
@@ -163,8 +174,10 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
   kernel memory (measured at 330,000: 3.3 KB unreclaimable slab, 1 KB of dentries and inodes that count as
   reclaimable but stay pinned while the socket is open), so every 100 MB the process keeps is about 23,000
   users. The page cache is 32 MB, the receive pools 2 MB per ring, the send pool at most 512 x 8 KB. WAL
-  checkpoints start at 8,192 frames: larger thresholds cost less CPU but keep the WAL in page cache, and
-  32,000 frames brought the out-of-memory kill forward from about 350,000 connections to about 330,000.
+  checkpoints start at 4,096 frames: larger thresholds cost less CPU but keep the WAL in page cache, and
+  32,000 frames brought the out-of-memory kill forward from about 350,000 connections to about 330,000. The 65,536-frame
+  backstop trades against this: a log that reaches it holds about 268 MB, and with `journal_size_limit=-1` the file keeps
+  that size, so it only fires when the worker has already fallen behind.
 - **HTTP/1.1 keep-alive** with no idle timeout, pipelining, `Connection: close`, HTTP/1.0 and
   `Expect: 100-continue`. Chunked request bodies aren't supported (they're out of scope).
 - **No tuning outside the process** (rule 11): it only raises its own soft descriptor limit to the hard
@@ -250,13 +263,16 @@ WAL 136 MB.
 
 Code adapted from rust-iouring-kensac (`csrc/shim.c`, #248 and #264): `key_info`, `seek_row`, `rootpage`, `layout_is`, `prep` and
 the setup of the index seek in `likes_from` follow it closely, including some names. Ideas from the same entry: B-tree cursor
-reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds (each capped at 250 ms, also as in cpp-io_uring-0329-at #522), `SO_REUSEPORT` listeners,
+reads, the `unix-excl` VFS, page cache over `mmap`, a low-priority checkpoint thread with write holds, `SO_REUSEPORT` listeners,
 `DEFER_TASKRUN` on every ring, and bounded reads and answers after a burst (#264). Checkpoint coordination and the likes count
 were rewritten for this entry, and its read bound was chosen by the sweep above. The `resv[0]` retry is also from
 rust-iouring-kensac and from c-iouring-pavlyhalim (#245). From objc-uring-delneg (#326, `1baccb2`): the newest-first order
 of the parked list with its aging bound, and 128 answers per pass (ideas, no code copied; the list
 here is this entry's own queue). Locking code in RAM follows c-iouring-pavlyhalim (#245), mojo-iouring-oh-meh (#257) and
-#326; sizing the completion queue over the connection count follows #245.
+#326; sizing the completion queue over the connection count follows #245. The current write path follows rust-iouring-kensac
+(#264): holding POSTs only for the tail pass, the 65,536-frame inline pass as a backstop, 4,096-frame cycles and never
+truncating the WAL file. The 8 MB WAL writeback kick is from fsharp-uring-delneg (#516). Ideas only, no code copied for
+these.
 
 ## Earlier measurements (arm64, before the B-tree reads)
 

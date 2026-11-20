@@ -1167,28 +1167,31 @@ static void btree_setup(void) {  // leaves bt_ok 0 (SQL for every read) on anyth
 // The log is copied back by a worker thread at low priority, on its own connection, so the loop never waits for an
 // fsync. The loop alone decides: it asks for a pass by eventfd and the outcome comes back as a ring completion. A
 // log can only restart once all of it is copied, which steady writes prevent, so if frames arrived during a pass the
-// loop stops taking POSTs (reads go on) for one more pass, for at most POST_WAIT_NS. Past WAL_MAX frames each hold is
-// still 250 ms, then one pass of POSTs goes through and the next hold starts: a slow disk grows the log, it never
-// holds a POST for seconds.
+// loop stops taking POSTs (reads go on) for one more pass, the tail pass, for at most POST_WAIT_NS. Only the tail pass
+// holds, at any log size (#264). If the worker keeps falling behind, the loop copies the log itself at CKPT_FORCE.
 #ifndef WAL_START
-#define WAL_START 8192
+#define WAL_START 4096
 #endif
-#define WAL_MAX (4 * WAL_START)
+#ifndef CKPT_FORCE
+#define CKPT_FORCE 65536  // 0: no inline pass
+#endif
 #define POST_WAIT_NS 250000000LL
 enum { WAL_LEFT = 1, WAL_ALL };  // what a pass reports; a counter value, so never 0
 static sqlite3 *wal_db;
 static int wal_asks, wal_frames, wal_asked_at, wal_busy, wal_last_pass;
-static int64_t post_deadline;  // 0: no limit
-// Past WAL_MAX, POSTs wait for the pass at most MAX_HOLD_NS from when the log first passed it (0: no limit). No limit:
-// once a limit ran out, every later hold was let go at once and the log grew for the rest of the run.
-#ifndef MAX_HOLD_NS
-#define MAX_HOLD_NS 0
+static int64_t post_deadline;
+// WALKICK_MB: once that much new log is written, queue its writeback (SYNC_FILE_RANGE_WRITE on an io-wq thread) so
+// dirty WAL pages never pile up to the kernel's dirty threshold, where write() on the loop waits in balance_dirty_pages
+// (#516). Only starts writeback, never waits: durability is still SQLite's own syncs. 0: off.
+#ifndef WALKICK_MB
+#define WALKICK_MB 8
 #endif
-#ifndef HOLD_CAP
-#define HOLD_CAP 1  // no hold outlives POST_WAIT_NS; past WAL_MAX the next pass re-arms a fresh one (#522, #264). 0: unbounded hold
+// DBKICK: after a pass that left frames behind (SQLite syncs the database file only after a full pass), the worker
+// queues the database file's writeback the same way. 0: off.
+#ifndef DBKICK
+#define DBKICK 0
 #endif
-static int64_t full_since;
-static int64_t full_deadline(void) { if (!MAX_HOLD_NS) return 0; if (!full_since) full_since = mono_ns(); return full_since + MAX_HOLD_NS; }
+static int kick_fd = -1, db_kick_fd = -1;
 static int wal_hook(void *u, sqlite3 *d, const char *n, int frames) { wal_frames = frames; return SQLITE_OK; }
 static void *wal_worker(void *a) {
   uint64_t go, outcome;
@@ -1197,6 +1200,7 @@ static void *wal_worker(void *a) {
     int log = -1, done = -2, rc = sqlite3_wal_checkpoint_v2(wal_db, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &done);
     outcome = rc == SQLITE_OK && log == done ? WAL_ALL : WAL_LEFT;
     if (write(wal_replies, &outcome, 8) != 8) return NULL;
+    if (DBKICK && db_kick_fd >= 0 && outcome == WAL_LEFT) sync_file_range(db_kick_fd, 0, 0, SYNC_FILE_RANGE_WRITE);
   }
   return NULL;
 }
@@ -1204,40 +1208,59 @@ static void wal_ask(void) { uint64_t one = 1; wal_busy = 1; wal_asked_at = wal_f
 static void wal_copied(uint64_t outcome) {
   wal_busy = 0;
   // All copied, and nothing committed since the pass was asked for: the next write restarts the log.
-  if (outcome == WAL_ALL && wal_frames == wal_asked_at) { wal_frames = 0; wal_last_pass = 0; hold_posts = 0; full_since = 0; return; }
+  if (outcome == WAL_ALL && wal_frames == wal_asked_at) { wal_frames = 0; wal_last_pass = 0; hold_posts = 0; return; }
   if (wal_last_pass) { wal_last_pass = 0; hold_posts = 0; return; }  // POSTs were let go early, or the pass failed: try again later
-  wal_last_pass = 1;
-  if (!HOLD_CAP || !hold_posts) post_deadline = wal_frames >= WAL_MAX && !HOLD_CAP ? full_deadline() : mono_ns() + POST_WAIT_NS;
-  hold_posts = 1;  // HOLD_CAP: a hold already running keeps its deadline, so none outlives POST_WAIT_NS
+  wal_last_pass = 1; hold_posts = 1; post_deadline = mono_ns() + POST_WAIT_NS;
   wal_ask();
+}
+static int64_t kicked_to;
+static void wal_kick(void) {
+  if (!WALKICK_MB || kick_fd < 0) return;
+  int64_t fin = (32 + (int64_t)wal_frames * (4096 + 24)) & ~4095LL;  // whole pages only, the last is still filling
+  if (fin < kicked_to) kicked_to = 0;                                 // the log restarted
+  if (fin - kicked_to < ((int64_t)WALKICK_MB << 20)) return;
+  struct io_uring_sqe *s = sqe(0);
+  io_uring_prep_sync_file_range(s, kick_fd, (unsigned)(fin - kicked_to), kicked_to, SYNC_FILE_RANGE_WRITE);
+  s->flags |= IOSQE_ASYNC; s->user_data = T_NOP;
+  kicked_to = fin;
 }
 // Between batches, with no transaction open: a write only restarts the log from a read transaction begun after the
 // last copy, so POSTs can't be let go in the middle of a batch.
 static void wal_after_commit(void) {
+  wal_kick();
   if (wal_outcome) { uint64_t o = wal_outcome; wal_outcome = 0; wal_copied(o); }
-  if (wal_frames >= WAL_MAX && wal_busy) {
-    if (!HOLD_CAP) { hold_posts = 1; post_deadline = full_deadline(); }
-    else if (!hold_posts) { hold_posts = 1; post_deadline = mono_ns() + POST_WAIT_NS; }  // one pass of POSTs between holds
-  }
-  else if (!wal_busy && wal_frames >= WAL_START) wal_ask();
+  if (wal_busy) return;
+  // Last resort; the worker is idle, so no other reader holds frames back. The bound is soft: nothing checks it while a
+  // nice-19 pass is in flight (setting the worker back to nice 0 needs CAP_SYS_NICE), so the log can pass CKPT_FORCE by
+  // what is written during that pass.
+  if (CKPT_FORCE && wal_frames >= CKPT_FORCE) {
+    int log = 0, done = 0;
+    if (in_txn) return;  // a checkpoint inside a transaction returns SQLITE_LOCKED; the next pass that committed runs it
+    if (sqlite3_wal_checkpoint_v2(db, "main", SQLITE_CHECKPOINT_PASSIVE, &log, &done) == SQLITE_OK && log == done) wal_frames = 0;
+    else wal_ask();  // an I/O error: hand it back to the worker rather than retry on the loop every pass
+  } else if (wal_frames >= WAL_START) wal_ask();
 }
 static int wal_hold_over(void) {
-  if (hold_posts && post_deadline && mono_ns() > post_deadline) hold_posts = 0;
+  if (hold_posts && mono_ns() > post_deadline) hold_posts = 0;
   return !hold_posts;
 }
 
+#ifndef JSL
+#define JSL -1  // -1: never cut the log file back
+#endif
 static void db_open(const char *path) {
   // unix-excl: one process owns the file, the WAL index lives in its heap, and a transaction takes no file locks.
   int fl = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX;
   if (sqlite3_open_v2(path, &db, fl, "unix-excl") != SQLITE_OK) { fprintf(stderr, "open %s: %s\n", path, sqlite3_errmsg(db)); exit(1); }
   sqlite3_busy_timeout(db, 5000);
   char *e = NULL;
-  // journal_size_limit = 8,192 frames of 24 + 4,096 bytes: a restarted log is cut back to that size, not to nothing, so in the steady
-  // state frames overwrite blocks the file already has and the log's fdatasync has no new extents to record. Only the
-  // file's size changes: the frame counts and checkpoint outcomes the hold logic below reads are the same.
+  // journal_size_limit -1: a restarted log keeps its file, so frames overwrite blocks it already has and the first
+  // COMMIT after a restart never truncates on the loop (JSL=33751040 is the old 8,192-frame cut).
   if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-" STR(CACHE_KB) "; PRAGMA wal_autocheckpoint=0;"
-                   "PRAGMA journal_size_limit=33751040; SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
+                   "PRAGMA journal_size_limit=" STR(JSL) "; SELECT count(*) FROM users WHERE id = 1;", NULL, NULL, &e) != SQLITE_OK) { fprintf(stderr, "pragma: %s\n", e); exit(1); }
   sqlite3_wal_hook(db, wal_hook, NULL);
+  if (WALKICK_MB) { char w[4096]; snprintf(w, sizeof w, "%s-wal", path); kick_fd = open(w, O_RDONLY | O_CLOEXEC); }
+  if (DBKICK) db_kick_fd = open(path, O_RDONLY | O_CLOEXEC);
   wal_asks = eventfd(0, EFD_CLOEXEC); wal_replies = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
   if (wal_asks < 0 || wal_replies < 0 || sqlite3_open_v2(path, &wal_db, fl, "unix-excl") != SQLITE_OK ||
       sqlite3_exec(wal_db, "PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0; PRAGMA cache_size=16;", NULL, NULL, NULL) != SQLITE_OK) { fprintf(stderr, "checkpoint connection failed\n"); exit(1); }

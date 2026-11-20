@@ -16,6 +16,7 @@ FixedPool.SQLiteSys {
     "FSTAT": Initialize=5
     "MMAP": Initialize=9
     "WRITE": Initialize=1
+    "PREAD": Initialize=17
     "PWRITE": Initialize=18
     "FDATASYNC": Initialize=75
     "FTRUNCATE": Initialize=77
@@ -50,6 +51,17 @@ FixedPool.SQLiteOvc {
 // Record: op, arg, 0, len, then len bytes padded to 8. A record never wraps: op 0 or
 // fewer than 32 bytes left means the rest of the lap is unused.
 FixedPool.SQLiteIo {
+    // SQLITE_IO_INLINE=1: WAL and DB writes run in this process (no I/O process,
+    // no eventfd kicks). On one CPU the separate process adds only switches.
+    "inline": Initialize=0, CanChange=True
+    // 1 after copy_file_range failed once in the checkpoint worker
+    "nocfr": Initialize=0, CanChange=True
+    // 16-byte DBW payload cell: [wal offset][page size]
+    "wcell": Initialize=0, CanChange=True
+    // bytes of the entry IoReserve made, published by IoPublish
+    "pend": Initialize=0, CanChange=True
+    "iwfd": Initialize=-1, CanChange=True
+    "idfd": Initialize=-1, CanChange=True
     "blk": Initialize=0, CanChange=True
     "size": Initialize=0, CanChange=True
     "head": Initialize=0, CanChange=True
@@ -84,11 +96,21 @@ FixedPool.SQLiteOp {
     "SYNC_WAL": Initialize=3
     "SYNC_DB": Initialize=4
     "MARK": Initialize=6
+    // Checkpoint write-back of one page straight from its WAL frame: arg is the
+    // database offset, the entry's third word the WAL offset of the page bytes.
+    "DBW": Initialize=7
     "RING": Initialize=67108864
     "CRING": Initialize=33554432
 }
 
 FixedPool.SQLiteDB {
+    // WAL offset of the newest frame's page bytes, per page number (0 = none),
+    // for checkpoint write-back from the WAL instead of a copy of the page.
+    "fofs": Initialize=0, CanChange=True
+    // The overlay: page number -> page copy (SQLite.OvGet/OvSet), ov_n entries.
+    "ov": Initialize=0, CanChange=True
+    "ov_n": Initialize=0, CanChange=True
+    "fofs_n": Initialize=0, CanChange=True
     "fd": Initialize=0, CanChange=True
     "map": Initialize=0, CanChange=True
     "size": Initialize=0, CanChange=True
@@ -418,6 +440,125 @@ Function.SQLite.PageKey {
     }
 }
 
+// ---- Page-number structures (no decimal-string keys) ----
+// The overlay: page number -> committed-or-dirty page copy, a flat array.
+Function.SQLite.OvGet {
+    Input: pgno: Integer
+    Output: Address
+    Body: {
+        IfCondition GreaterEqual(pgno, SQLiteDB.ov_n) ThenBlock: { ReturnValue(0) }
+        IfCondition LessThan(pgno, 0) ThenBlock: { ReturnValue(0) }
+        ReturnValue(RDMEM_64(Add(SQLiteDB.ov, Multiply(pgno, 8))))
+    }
+}
+
+Function.SQLite.OvSet {
+    Input: pgno: Integer
+    Input: buf: Address
+    Body: {
+        IfCondition GreaterEqual(pgno, SQLiteDB.ov_n) ThenBlock: {
+            nn = Multiply(Add(pgno, 1), 2)
+            IfCondition LessThan(nn, 1024) ThenBlock: { nn = 1024 }
+            nb = Allocate(Multiply(nn, 8))
+            MemorySet(nb, 0, Multiply(nn, 8))
+            IfCondition NotEqual(SQLiteDB.ov, 0) ThenBlock: {
+                MemoryCopy(nb, SQLiteDB.ov, Multiply(SQLiteDB.ov_n, 8))
+                Deallocate(SQLiteDB.ov, Multiply(SQLiteDB.ov_n, 8))
+            }
+            SQLiteDB.ov = nb
+            SQLiteDB.ov_n = nn
+        }
+        WRMEM_64(Add(SQLiteDB.ov, Multiply(pgno, 8)), buf)
+    }
+}
+
+// A page set: a list of page numbers plus one membership byte per page.
+// Layout: [0] list, [8] count, [16] list capacity, [24] marks, [32] marks capacity.
+Function.SQLite.PsNew {
+    Output: Address
+    Body: {
+        s = Allocate(40)
+        WRMEM_64(s, Allocate(Multiply(256, 8)))
+        WRMEM_64(Add(s, 8), 0)
+        WRMEM_64(Add(s, 16), 256)
+        mk = Allocate(4096)
+        MemorySet(mk, 0, 4096)
+        WRMEM_64(Add(s, 24), mk)
+        WRMEM_64(Add(s, 32), 4096)
+        ReturnValue(s)
+    }
+}
+
+Function.SQLite.PsHas {
+    Input: s: Address
+    Input: pgno: Integer
+    Output: Integer
+    Body: {
+        IfCondition Or(LessThan(pgno, 0), GreaterEqual(pgno, RDMEM_64(Add(s, 32)))) ThenBlock: { ReturnValue(0) }
+        ReturnValue(RDMEM_8(RDMEM_64(Add(s, 24)), pgno))
+    }
+}
+
+Function.SQLite.PsAdd {
+    Input: s: Address
+    Input: pgno: Integer
+    Body: {
+        mcap = RDMEM_64(Add(s, 32))
+        IfCondition GreaterEqual(pgno, mcap) ThenBlock: {
+            nm = Multiply(Add(pgno, 1), 2)
+            nb = Allocate(nm)
+            MemorySet(nb, 0, nm)
+            MemoryCopy(nb, RDMEM_64(Add(s, 24)), mcap)
+            Deallocate(RDMEM_64(Add(s, 24)), mcap)
+            WRMEM_64(Add(s, 24), nb)
+            WRMEM_64(Add(s, 32), nm)
+        }
+        mk = RDMEM_64(Add(s, 24))
+        IfCondition NotEqual(RDMEM_8(mk, pgno), 0) ThenBlock: { ReturnValue(0) }
+        WRMEM_8(mk, pgno, 1)
+        n = RDMEM_64(Add(s, 8))
+        cap = RDMEM_64(Add(s, 16))
+        IfCondition GreaterEqual(n, cap) ThenBlock: {
+            nc = Multiply(cap, 2)
+            nl = Allocate(Multiply(nc, 8))
+            MemoryCopy(nl, RDMEM_64(s), Multiply(n, 8))
+            Deallocate(RDMEM_64(s), Multiply(cap, 8))
+            WRMEM_64(s, nl)
+            WRMEM_64(Add(s, 16), nc)
+        }
+        WRMEM_64(Add(RDMEM_64(s), Multiply(n, 8)), pgno)
+        WRMEM_64(Add(s, 8), Add(n, 1))
+    }
+}
+
+Function.SQLite.PsN {
+    Input: s: Address
+    Output: Integer
+    Body: { ReturnValue(RDMEM_64(Add(s, 8))) }
+}
+
+Function.SQLite.PsAt {
+    Input: s: Address
+    Input: i: Integer
+    Output: Integer
+    Body: { ReturnValue(RDMEM_64(Add(RDMEM_64(s), Multiply(i, 8)))) }
+}
+
+Function.SQLite.PsClear {
+    Input: s: Address
+    Body: {
+        n = RDMEM_64(Add(s, 8))
+        lst = RDMEM_64(s)
+        mk = RDMEM_64(Add(s, 24))
+        i = 0
+        WhileLoop LessThan(i, n) {
+            WRMEM_8(mk, RDMEM_64(Add(lst, Multiply(i, 8))), 0)
+            i = Add(i, 1)
+        }
+        WRMEM_64(Add(s, 8), 0)
+    }
+}
+
 Function.SQLite.FilePage {
     Input: pageno: Integer
     Output: Address
@@ -460,10 +601,7 @@ Function.SQLite.Page {
         }
         ov = 0
         IfCondition GreaterThan(SQLiteDB.dirty_n, 0) ThenBlock: {
-            IfCondition NotEqual(SQLiteDB.overlay, 0) ThenBlock: {
-                key = SQLite.PageKey(pageno)
-                ov = Hash.Get(SQLiteDB.overlay, key)
-            }
+            ov = SQLite.OvGet(pageno)
         }
         IfCondition NotEqual(tab, 0) ThenBlock: {
             WRMEM_64(e, pageno)
@@ -479,18 +617,17 @@ Function.SQLite.Dirty {
     Input: pageno: Integer
     Output: Address
     Body: {
-        key = SQLite.PageKey(pageno)
-        ov = Hash.Get(SQLiteDB.overlay, key)
+        ov = SQLite.OvGet(pageno)
         IfCondition EqualTo(ov, 0) ThenBlock: {
             src = SQLite.FilePage(pageno)
             IfCondition EqualTo(src, 0) ThenBlock: { ReturnValue(0) }
             ov = Allocate(SQLiteDB.page)
             MemoryCopy(ov, src, SQLiteDB.page)
-            Hash.Set(SQLiteDB.overlay, key, ov)
+            SQLite.OvSet(pageno, ov)
             SQLite.OvcDrop(pageno)
             SQLiteDB.dirty_n = Add(SQLiteDB.dirty_n, 1)
         }
-        Hash.Set(SQLiteDB.txn, key, pageno)
+        SQLite.PsAdd(SQLiteDB.txn, pageno)
         ReturnValue(ov)
     }
 }
@@ -546,12 +683,14 @@ Function.SQLite.Open {
         SQLiteDB.wal_size = 0
         SQLiteDB.path = path
         SQLiteDB.keybuf = Allocate(24)
-        SQLiteDB.overlay = Hash.Create(64)
+        // Page-number keyed: the overlay is a flat array (SQLite.OvGet/OvSet) and the
+        // transaction and checkpoint sets are page sets (SQLite.Ps*).
+        SQLite.OvSet(0, 0)
         SQLiteOvc.tab = Allocate(65536)
         MemorySet(SQLiteOvc.tab, 0, 65536)
-        SQLiteDB.txn = Hash.Create(64)
-        SQLiteDB.ckpt = Hash.Create(256)
-        SQLiteDB.frz = Hash.Create(256)
+        SQLiteDB.txn = SQLite.PsNew()
+        SQLiteDB.ckpt = SQLite.PsNew()
+        SQLiteDB.frz = SQLite.PsNew()
         SQLiteFeed.slots = Allocate(1280)
         SQLiteCnt.leaf = 0
         SQLiteCnt.first = 0
@@ -2193,10 +2332,11 @@ Function.SQLite.LoadWal {
             dbn = SQLite.BE32(mp, Add(off, 4))
             buf = Allocate(ps)
             MemoryCopy(buf, Add(mp, Add(off, 24)), ps)
-            key = SQLite.PageKey(pgno)
-            Hash.Set(SQLiteDB.overlay, key, buf)
+            old = SQLite.OvGet(pgno)
+            IfCondition NotEqual(old, 0) ThenBlock: { Deallocate(old, ps) }
+            IfCondition EqualTo(old, 0) ThenBlock: { SQLiteDB.dirty_n = Add(SQLiteDB.dirty_n, 1) }
+            SQLite.OvSet(pgno, buf)
             SQLite.OvcDrop(pgno)
-            SQLiteDB.dirty_n = Add(SQLiteDB.dirty_n, 1)
             IfCondition GreaterThan(dbn, 0) ThenBlock: {
                 SQLiteDB.npages = dbn
             }
@@ -2254,6 +2394,36 @@ Function.SQLite.WalEnsure {
     }
 }
 
+// Remember where page pgno's newest frame keeps its bytes in the WAL.
+Function.SQLite.FofsSet {
+    Input: pgno: Integer
+    Input: off: Integer
+    Body: {
+        IfCondition GreaterEqual(pgno, SQLiteDB.fofs_n) ThenBlock: {
+            nn = Multiply(Add(pgno, 1), 2)
+            IfCondition LessThan(nn, 1024) ThenBlock: { nn = 1024 }
+            nb = Allocate(Multiply(nn, 8))
+            MemorySet(nb, 0, Multiply(nn, 8))
+            IfCondition NotEqual(SQLiteDB.fofs, 0) ThenBlock: {
+                MemoryCopy(nb, SQLiteDB.fofs, Multiply(SQLiteDB.fofs_n, 8))
+                Deallocate(SQLiteDB.fofs, Multiply(SQLiteDB.fofs_n, 8))
+            }
+            SQLiteDB.fofs = nb
+            SQLiteDB.fofs_n = nn
+        }
+        WRMEM_64(Add(SQLiteDB.fofs, Multiply(pgno, 8)), off)
+    }
+}
+
+Function.SQLite.FofsGet {
+    Input: pgno: Integer
+    Output: Integer
+    Body: {
+        IfCondition GreaterEqual(pgno, SQLiteDB.fofs_n) ThenBlock: { ReturnValue(0) }
+        ReturnValue(RDMEM_64(Add(SQLiteDB.fofs, Multiply(pgno, 8))))
+    }
+}
+
 Function.SQLite.WalFrame {
     Input: pgno: Integer
     Input: commit: Integer
@@ -2263,6 +2433,30 @@ Function.SQLite.WalFrame {
         IfCondition EqualTo(ok, 0) ThenBlock: { ReturnValue(0) }
         ps = SQLiteDB.page
         fr = Add(24, ps)
+        // With the I/O process the frame is built where the I/O process reads it:
+        // the header, one copy of the page, the checksum in place.
+        IfCondition NotEqual(SQLiteIo.blk, 0) ThenBlock: {
+            IfCondition EqualTo(SQLiteIo.inline, 0) ThenBlock: {
+                woff = SQLiteDB.wal_size
+                buf = SQLite.IoReserve(SQLiteOp.WAL, woff, fr)
+                SQLite.PutBE32(buf, 0, pgno)
+                dbn = 0
+                IfCondition EqualTo(commit, 1) ThenBlock: { dbn = SQLiteDB.npages }
+                SQLite.PutBE32(buf, 4, dbn)
+                SQLite.PutBE32(buf, 8, SQLiteDB.salt1)
+                SQLite.PutBE32(buf, 12, SQLiteDB.salt2)
+                SQLite.WalCkAdd(buf, 0, 8)
+                page = SQLite.Page(pgno)
+                MemoryCopy(Add(buf, 24), page, ps)
+                SQLite.WalCkAdd(buf, 24, ps)
+                SQLite.PutBE32(buf, 16, SQLiteDB.wal_ck0)
+                SQLite.PutBE32(buf, 20, SQLiteDB.wal_ck1)
+                SQLite.IoPublish()
+                SQLite.FofsSet(pgno, Add(woff, 24))
+                SQLiteDB.wal_size = Add(woff, fr)
+                ReturnValue(1)
+            }
+        }
         buf = SQLiteDB.wal_buf
         IfCondition EqualTo(buf, 0) ThenBlock: {
             buf = Allocate(fr)
@@ -2285,6 +2479,7 @@ Function.SQLite.WalFrame {
         SQLite.PutBE32(buf, 20, SQLiteDB.wal_ck1)
         IfCondition NotEqual(SQLiteIo.blk, 0) ThenBlock: { SQLite.IoPut(SQLiteOp.WAL, SQLiteDB.wal_size, buf, fr) }
         IfCondition EqualTo(SQLiteIo.blk, 0) ThenBlock: { SystemCall(SQLiteSys.PWRITE, SQLiteDB.wal_fd, buf, fr, SQLiteDB.wal_size) }
+        SQLite.FofsSet(pgno, Add(SQLiteDB.wal_size, 24))
         SQLiteDB.wal_size = Add(SQLiteDB.wal_size, fr)
         ReturnValue(1)
     }
@@ -2294,7 +2489,7 @@ Function.SQLite.Commit {
     Output: Integer
     Body: {
         IfCondition EqualTo(SQLiteDB.txn, 0) ThenBlock: { ReturnValue(1) }
-        IfCondition EqualTo(Hash.Size(SQLiteDB.txn), 0) ThenBlock: { ReturnValue(1) }
+        IfCondition EqualTo(SQLite.PsN(SQLiteDB.txn), 0) ThenBlock: { ReturnValue(1) }
         // SQLite reads the page count from page 1 (offset 28) whenever the
         // change counter matches version-valid-for, WAL or not. Log page 1
         // with the new count in the commit that grew the file, as SQLite
@@ -2304,21 +2499,20 @@ Function.SQLite.Commit {
             p1 = SQLite.Dirty(1)
             SQLite.PutBE32(p1, 28, SQLiteDB.npages)
         }
-        vals = Hash.Values(SQLiteDB.txn)
-        n = Array.Size(vals)
+        txn = SQLiteDB.txn
+        n = SQLite.PsN(txn)
         IfCondition EqualTo(n, 0) ThenBlock: { ReturnValue(1) }
         i = 0
         last = Subtract(n, 1)
         WhileLoop LessThan(i, n) {
-            pgno = Array.Get(vals, i)
+            pgno = SQLite.PsAt(txn, i)
             cmt = 0
             IfCondition EqualTo(i, last) ThenBlock: { cmt = 1 }
             SQLite.WalFrame(pgno, cmt)
-            Hash.Set(SQLiteDB.ckpt, SQLite.PageKey(pgno), pgno)
+            SQLite.PsAdd(SQLiteDB.ckpt, pgno)
             i = Add(i, 1)
         }
-        Array.Destroy(vals)
-        Hash.Clear(SQLiteDB.txn)
+        SQLite.PsClear(txn)
         t0 = 0
         IfCondition NotEqual(SQLiteIo.slow, 0) ThenBlock: { t0 = SQLite.Ms() }
         IfCondition NotEqual(SQLiteIo.blk, 0) ThenBlock: { SQLiteIo.commit_seq = SQLite.IoMark() }
@@ -2355,16 +2549,14 @@ Function.SQLite.Backfill {
     Input: set: Address
     Input: skip: Address
     Body: {
-        vals = Hash.Values(set)
-        n = Array.Size(vals)
+        n = SQLite.PsN(set)
         ps = SQLiteDB.page
         i = 0
         WhileLoop LessThan(i, n) {
-            pgno = Array.Get(vals, i)
-            key = SQLite.PageKey(pgno)
+            pgno = SQLite.PsAt(set, i)
             later = 0
             IfCondition NotEqual(skip, 0) ThenBlock: {
-                IfCondition NotEqual(Hash.Get(skip, key), 0) ThenBlock: { later = 1 }
+                IfCondition NotEqual(SQLite.PsHas(skip, pgno), 0) ThenBlock: { later = 1 }
             }
             page = SQLite.Page(pgno)
             IfCondition EqualTo(later, 0) ThenBlock: {
@@ -2374,10 +2566,9 @@ Function.SQLite.Backfill {
                     // Inside the mapping the file now has this page, and the
                     // read-only private mapping shows it, so drop the copy.
                     IfCondition LessThan(off, SQLiteDB.size) ThenBlock: {
-                        key = SQLite.PageKey(pgno)
-                        ov = Hash.Get(SQLiteDB.overlay, key)
+                        ov = SQLite.OvGet(pgno)
                         IfCondition NotEqual(ov, 0) ThenBlock: {
-                            Hash.Delete(SQLiteDB.overlay, key)
+                            SQLite.OvSet(pgno, 0)
                             SQLite.OvcDrop(pgno)
                             Deallocate(ov, ps)
                             SQLiteDB.dirty_n = Subtract(SQLiteDB.dirty_n, 1)
@@ -2387,8 +2578,7 @@ Function.SQLite.Backfill {
             }
             i = Add(i, 1)
         }
-        Array.Destroy(vals)
-        Hash.Clear(set)
+        SQLite.PsClear(set)
     }
 }
 
@@ -2497,17 +2687,16 @@ Function.SQLite.RestartWal {
         SQLiteDB.wal_fd = Subtract(0, 1)
         SQLiteDB.wal_size = 0
         SQLiteDB.bf_at = 0
-        vals = Hash.Values(SQLiteDB.ckpt)
-        n = Array.Size(vals)
+        ck = SQLiteDB.ckpt
+        n = SQLite.PsN(ck)
         last = Subtract(n, 1)
         i = 0
         WhileLoop LessThan(i, n) {
             cmt = 0
             IfCondition EqualTo(i, last) ThenBlock: { cmt = 1 }
-            SQLite.WalFrame(Array.Get(vals, i), cmt)
+            SQLite.WalFrame(SQLite.PsAt(ck, i), cmt)
             i = Add(i, 1)
         }
-        Array.Destroy(vals)
     }
 }
 
@@ -2546,6 +2735,7 @@ Function.SQLite.SyncApply {
 
 Function.SQLite.IoKick {
     Body: {
+        IfCondition EqualTo(SQLiteIo.inline, 1) ThenBlock: { ReturnValue(0) }
         SystemCall(SQLiteSys.WRITE, SQLiteDB.sync_req, SQLiteIo.one, 8)
     }
 }
@@ -2585,6 +2775,29 @@ Function.SQLite.IoPut {
     Input: src: Address
     Input: len: Integer
     Body: {
+        IfCondition EqualTo(SQLiteIo.inline, 1) ThenBlock: {
+            IfCondition EqualTo(op, SQLiteOp.WAL) ThenBlock: { SystemCall(SQLiteSys.PWRITE, SQLiteIo.iwfd, src, len, arg) }
+            IfCondition EqualTo(op, SQLiteOp.DB) ThenBlock: { SystemCall(SQLiteSys.PWRITE, SQLiteIo.idfd, src, len, arg) }
+            IfCondition EqualTo(op, SQLiteOp.SYNC_WAL) ThenBlock: { SystemCall(SQLiteSys.FDATASYNC, SQLiteIo.iwfd, 0, 0) }
+            IfCondition EqualTo(op, SQLiteOp.SYNC_DB) ThenBlock: { SystemCall(SQLiteSys.FDATASYNC, SQLiteIo.idfd, 0, 0) }
+            IfCondition EqualTo(op, SQLiteOp.MARK) ThenBlock: { WRMEM_64(Add(SQLiteIo.blk, 8), arg) }
+            ReturnValue(0)
+        }
+        pay = SQLite.IoReserve(op, arg, len)
+        IfCondition GreaterThan(len, 0) ThenBlock: { MemoryCopy(pay, src, len) }
+        SQLite.IoPublish()
+    }
+}
+
+// Make room for an entry with a len-byte payload, write its header, and return
+// the payload address. Nothing is visible to the I/O process until IoPublish.
+// One entry at a time: IoPublish must follow before the next IoReserve.
+Function.SQLite.IoReserve {
+    Input: op: Integer
+    Input: arg: Integer
+    Input: len: Integer
+    Output: Address
+    Body: {
         need = Add(32, BitwiseAnd(Add(len, 7), -8))
         sz = SQLiteIo.size
         phys = BitwiseAnd(SQLiteIo.head, Subtract(sz, 1))
@@ -2603,8 +2816,16 @@ Function.SQLite.IoPut {
         WRMEM_64(Add(p, 8), arg)
         WRMEM_64(Add(p, 16), 0)
         WRMEM_64(Add(p, 24), len)
-        IfCondition GreaterThan(len, 0) ThenBlock: { MemoryCopy(Add(p, 32), src, len) }
-        SQLiteIo.head = Add(SQLiteIo.head, need)
+        SQLiteIo.pend = need
+        ReturnValue(Add(p, 32))
+    }
+}
+
+// Make the reserved entry visible to the I/O process.
+Function.SQLite.IoPublish {
+    Body: {
+        SQLiteIo.head = Add(SQLiteIo.head, SQLiteIo.pend)
+        SQLiteIo.pend = 0
         WRMEM_64(Add(SQLiteIo.blk, 16), SQLiteIo.head)
     }
 }
@@ -2741,18 +2962,14 @@ Function.SQLite.IoBackfill {
     Input: skip: Address
     Output: Integer
     Body: {
-        IfCondition EqualTo(SQLiteIo.cq_vals, 0) ThenBlock: {
-            SQLiteIo.cq_vals = Hash.Values(set)
-            SQLiteIo.cq_i = 0
-        }
-        vals = SQLiteIo.cq_vals
-        n = Array.Size(vals)
+        // set (the frozen set) does not change until IoDrop, so cq_i alone
+        // resumes the walk after a full worker ring.
+        n = SQLite.PsN(set)
         ps = SQLiteDB.page
         i = SQLiteIo.cq_i
         WhileLoop LessThan(i, n) {
-            pgno = Array.Get(vals, i)
-            key = SQLite.PageKey(pgno)
-            IfCondition EqualTo(Hash.Get(skip, key), 0) ThenBlock: {
+            pgno = SQLite.PsAt(set, i)
+            IfCondition EqualTo(SQLite.PsHas(skip, pgno), 0) ThenBlock: {
                 page = SQLite.Page(pgno)
                 IfCondition NotEqual(page, 0) ThenBlock: {
                     IfCondition EqualTo(SQLite.CkFits(ps), 0) ThenBlock: {
@@ -2760,13 +2977,19 @@ Function.SQLite.IoBackfill {
                         ReturnValue(0)
                     }
                     off = Multiply(Subtract(pgno, 1), ps)
-                    SQLite.CkPut(SQLiteOp.DB, off, page, ps)
+                    // Not committed since the freeze (not in skip), so its newest
+                    // frame holds exactly these bytes, and SYNC_WAL ahead of it in
+                    // the worker ring waits until the WAL writer is past that frame.
+                    wo = SQLite.FofsGet(pgno)
+                    IfCondition And(GreaterThan(wo, 0), NotEqual(SQLiteIo.cblk, 0)) ThenBlock: {
+                        SQLite.CkPutW(off, wo)
+                    } ElseBlock: {
+                        SQLite.CkPut(SQLiteOp.DB, off, page, ps)
+                    }
                 }
             }
             i = Add(i, 1)
         }
-        Array.Destroy(vals)
-        SQLiteIo.cq_vals = 0
         SQLiteIo.cq_i = 0
         ReturnValue(1)
     }
@@ -2856,6 +3079,21 @@ Function.SQLite.CkMark {
 
 // Append a record to the worker ring. Write-back pages are only put after CkFits, so
 // the wait below is reached only for a control record behind a stalled disk.
+// A DBW entry: write the page at WAL offset wal_off to database offset db_off.
+// The payload is 16 bytes, [wal_off][page size]: CkPut copies it before it
+// publishes the entry, and the worker was forked before the database was
+// opened, so it does not know the page size itself.
+Function.SQLite.CkPutW {
+    Input: db_off: Integer
+    Input: wal_off: Integer
+    Body: {
+        IfCondition EqualTo(SQLiteIo.wcell, 0) ThenBlock: { SQLiteIo.wcell = Allocate(16) }
+        WRMEM_64(SQLiteIo.wcell, wal_off)
+        WRMEM_64(Add(SQLiteIo.wcell, 8), SQLiteDB.page)
+        SQLite.CkPut(SQLiteOp.DBW, db_off, SQLiteIo.wcell, 16)
+    }
+}
+
 Function.SQLite.CkPut {
     Input: op: Integer
     Input: arg: Integer
@@ -2898,6 +3136,47 @@ Function.SQLite.CkPut {
     }
 }
 
+// One page from the WAL file into the database file. copy_file_range (326) moves
+// it inside the kernel; a kernel or filesystem that refuses gets pread + pwrite.
+// cpy: 16 bytes of offsets, then a 65536-byte buffer for the fallback. A short
+// read means the frame is not in the WAL: say so instead of writing garbage.
+Function.SQLite.CkCopy {
+    Input: wfd: Integer
+    Input: woff: Integer
+    Input: dfd: Integer
+    Input: doff: Integer
+    Input: ps: Integer
+    Input: cpy: Address
+    Body: {
+        IfCondition Or(LessEqual(ps, 0), GreaterThan(ps, 65536)) ThenBlock: {
+            PrintMessage("checkpoint: bad page size in a DBW entry\n")
+            ReturnValue(0)
+        }
+        IfCondition EqualTo(SQLiteIo.nocfr, 0) ThenBlock: {
+            WRMEM_64(cpy, woff)
+            WRMEM_64(Add(cpy, 8), doff)
+            left = ps
+            WhileLoop GreaterThan(left, 0) {
+                r = SystemCall(326, wfd, cpy, dfd, Add(cpy, 8), left, 0)
+                IfCondition LessEqual(r, 0) ThenBlock: { BreakLoop }
+                left = Subtract(left, r)
+            }
+            IfCondition EqualTo(left, 0) ThenBlock: { ReturnValue(0) }
+            // Partial or refused: redo the whole page the plain way from now on.
+            SQLiteIo.nocfr = 1
+        }
+        buf = Add(cpy, 16)
+        got = SystemCall(SQLiteSys.PREAD, wfd, buf, ps, woff)
+        IfCondition NotEqual(got, ps) ThenBlock: {
+            PrintMessage("checkpoint: short WAL read at ")
+            PrintNumber(woff)
+            PrintMessage("\n")
+            ReturnValue(0)
+        }
+        SystemCall(SQLiteSys.PWRITE, dfd, buf, ps, doff)
+    }
+}
+
 // The checkpoint worker process: database write-back and both fdatasyncs, in ring
 // order. SYNC_WAL waits until the I/O process has published WAL mark `arg`, so the
 // sync covers every frame of the checkpoint. Exits like IoServe once the database
@@ -2918,6 +3197,8 @@ Function.SQLite.CkServe {
         buf = SQLiteDB.sync_buf
         pfd = SQLiteIo.pfd
         req = SQLiteIo.creq
+        // copy_file_range offsets (16 bytes) and a page buffer for the fallback
+        cpy = Allocate(Add(16, 65536))
         tail = 0
         WhileLoop 1 {
             head = RDMEM_64(Add(blk, 16))
@@ -2947,6 +3228,9 @@ Function.SQLite.CkServe {
                     t0 = 0
                     IfCondition NotEqual(SQLiteIo.slow, 0) ThenBlock: { t0 = SQLite.Ms() }
                     IfCondition EqualTo(op, SQLiteOp.DB) ThenBlock: { SystemCall(SQLiteSys.PWRITE, dfd, src, len, arg) }
+                    IfCondition EqualTo(op, SQLiteOp.DBW) ThenBlock: {
+                        SQLite.CkCopy(wfd, RDMEM_64(src), dfd, arg, RDMEM_64(Add(src, 8)), cpy)
+                    }
                     IfCondition EqualTo(op, SQLiteOp.SYNC_WAL) ThenBlock: {
                         WhileLoop LessThan(RDMEM_64(wdone), arg) {
                             SystemCall(SQLiteSys.POLL, pfd, 0, 1)
@@ -2979,20 +3263,17 @@ Function.SQLite.IoDrop {
     Input: set: Address
     Input: skip: Address
     Body: {
-        vals = Hash.Values(set)
-        n = Array.Size(vals)
+        n = SQLite.PsN(set)
         ps = SQLiteDB.page
         i = 0
         WhileLoop LessThan(i, n) {
-            pgno = Array.Get(vals, i)
-            key = SQLite.PageKey(pgno)
-            IfCondition EqualTo(Hash.Get(skip, key), 0) ThenBlock: {
+            pgno = SQLite.PsAt(set, i)
+            IfCondition EqualTo(SQLite.PsHas(skip, pgno), 0) ThenBlock: {
                 off = Multiply(Subtract(pgno, 1), ps)
                 IfCondition LessThan(off, SQLiteDB.size) ThenBlock: {
-                    key = SQLite.PageKey(pgno)
-                    ov = Hash.Get(SQLiteDB.overlay, key)
+                    ov = SQLite.OvGet(pgno)
                     IfCondition NotEqual(ov, 0) ThenBlock: {
-                        Hash.Delete(SQLiteDB.overlay, key)
+                        SQLite.OvSet(pgno, 0)
                         SQLite.OvcDrop(pgno)
                         Deallocate(ov, ps)
                         SQLiteDB.dirty_n = Subtract(SQLiteDB.dirty_n, 1)
@@ -3001,8 +3282,7 @@ Function.SQLite.IoDrop {
             }
             i = Add(i, 1)
         }
-        Array.Destroy(vals)
-        Hash.Clear(set)
+        SQLite.PsClear(set)
     }
 }
 
@@ -3028,6 +3308,18 @@ Function.SQLite.StartSyncer {
             SQLiteIo.pfd = Allocate(8)
             SQLiteIo.one = Allocate(8)
             WRMEM_64(SQLiteIo.one, 1)
+        }
+        IfCondition EqualTo(SQLiteIo.inline, 1) ThenBlock: {
+            IfCondition NotEqual(SQLiteIo.blk, 0) ThenBlock: {
+                SQLiteDB.path = path
+                SQLiteIo.iwfd = SystemCall(SQLiteSys.OPEN, SQLite.WalName(), Add(SQLiteSys.O_RDWR, SQLiteSys.O_CREAT), SQLiteSys.MODE)
+                SQLiteIo.idfd = SystemCall(SQLiteSys.OPEN, path, SQLiteSys.O_RDWR, 0)
+                IfCondition And(GreaterEqual(SQLiteIo.iwfd, 0), GreaterEqual(SQLiteIo.idfd, 0)) ThenBlock: {
+                    IfCondition NotEqual(SQLiteIo.want_ck, 0) ThenBlock: { SQLite.StartCkWorker(path) }
+                    ReturnValue(1)
+                }
+            }
+            SQLiteIo.inline = 0
         }
         pid = SystemCall(SQLiteSys.FORK)
         IfCondition NotEqual(pid, 0) ThenBlock: {
@@ -3101,35 +3393,21 @@ Function.SQLite.Remap {
         SQLiteDB.map = mp
         SQLiteDB.size = need
         ps = SQLiteDB.page
-        keys = Hash.Keys(SQLiteDB.overlay)
-        n = Array.Size(keys)
-        i = 0
-        WhileLoop LessThan(i, n) {
-            key = Array.Get(keys, i)
-            pgno = 0
-            j = 0
-            c = RDMEM_8(key, 0)
-            WhileLoop NotEqual(c, 0) {
-                pgno = Add(Multiply(pgno, 10), Subtract(c, 48))
-                j = Add(j, 1)
-                c = RDMEM_8(key, j)
-            }
-            pending = 0
-            IfCondition NotEqual(Hash.Get(SQLiteDB.ckpt, key), 0) ThenBlock: { pending = 1 }
-            IfCondition EqualTo(pending, 0) ThenBlock: {
-              IfCondition LessThan(Multiply(Subtract(pgno, 1), ps), need) ThenBlock: {
-                ov = Hash.Get(SQLiteDB.overlay, key)
-                IfCondition NotEqual(ov, 0) ThenBlock: {
-                    Hash.Delete(SQLiteDB.overlay, key)
-                    SQLite.OvcDrop(pgno)
-                    Deallocate(ov, ps)
-                    SQLiteDB.dirty_n = Subtract(SQLiteDB.dirty_n, 1)
+        pgno = 1
+        WhileLoop LessThan(pgno, SQLiteDB.ov_n) {
+            ov = SQLite.OvGet(pgno)
+            IfCondition NotEqual(ov, 0) ThenBlock: {
+                IfCondition EqualTo(SQLite.PsHas(SQLiteDB.ckpt, pgno), 0) ThenBlock: {
+                    IfCondition LessThan(Multiply(Subtract(pgno, 1), ps), need) ThenBlock: {
+                        SQLite.OvSet(pgno, 0)
+                        SQLite.OvcDrop(pgno)
+                        Deallocate(ov, ps)
+                        SQLiteDB.dirty_n = Subtract(SQLiteDB.dirty_n, 1)
+                    }
                 }
-              }
             }
-            i = Add(i, 1)
+            pgno = Add(pgno, 1)
         }
-        Array.Destroy(keys)
     }
 }
 
@@ -3309,10 +3587,9 @@ Function.SQLite.AllocPage {
         MemorySet(buf, 0, SQLiteDB.page)
         WRMEM_8(buf, 0, flags)
         SQLite.PutBE16(buf, 5, SQLiteDB.usable)
-        key = SQLite.PageKey(pn)
-        Hash.Set(SQLiteDB.overlay, key, buf)
+        SQLite.OvSet(pn, buf)
         SQLite.OvcDrop(pn)
-        Hash.Set(SQLiteDB.txn, key, pn)
+        SQLite.PsAdd(SQLiteDB.txn, pn)
         SQLiteDB.dirty_n = Add(SQLiteDB.dirty_n, 1)
         ReturnValue(pn)
     }

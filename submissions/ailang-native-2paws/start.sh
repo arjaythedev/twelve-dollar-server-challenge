@@ -20,4 +20,8 @@ export HTTP_DIRECT="${HTTP_DIRECT:-1}"
 export HTTP_RXMULTI="${HTTP_RXMULTI:-1}"
 export HTTP_FRONTS="${HTTP_FRONTS:-3}"
 export HTTP_BUFSZ="${HTTP_BUFSZ:-8192}"
+# Each event-loop pass waits for 256 completions or 1 ms, whichever comes first,
+# so one io_uring_enter serves a batch instead of a single completion.
+export HTTP_WAIT_MIN="${HTTP_WAIT_MIN:-256}"
+export HTTP_WAIT_US="${HTTP_WAIT_US:-1000}"
 exec ./feed_server.x

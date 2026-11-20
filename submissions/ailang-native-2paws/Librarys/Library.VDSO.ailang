@@ -1,0 +1,153 @@
+// Library.VDSO.ailang — clock_gettime through the kernel's vDSO.
+//
+// The kernel maps a small ELF image (the vDSO) into every process. Its
+// __vdso_clock_gettime reads the clock from a shared page without entering
+// the kernel. VDSO.Init finds that function: AT_SYSINFO_EHDR (auxv type 33)
+// gives the image base, the PT_LOAD and PT_DYNAMIC program headers give the
+// load offset and the dynamic section, and DT_SYMTAB/DT_STRTAB give the
+// symbols. Every step that fails leaves VDSO.cg at 0, and VDSO.ClockGettime
+// then makes the clock_gettime syscall (228) as before.
+
+FixedPool.VDSO {
+    "cg": Initialize=0, CanChange=True
+    "done": Initialize=0, CanChange=True
+}
+
+// 1 when the NUL-terminated string at p equals lit.
+Function.VDSO.NameIs {
+    Input: p: Address
+    Input: lit: Address
+    Output: Integer
+    Body: {
+        i = 0
+        WhileLoop 1 {
+            a = RDMEM_8(p, i)
+            b = RDMEM_8(lit, i)
+            IfCondition NotEqual(a, b) ThenBlock: { ReturnValue(0) }
+            IfCondition EqualTo(a, 0) ThenBlock: { ReturnValue(1) }
+            i = Add(i, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+// The vDSO base from /proc/self/auxv, or 0.
+Function.VDSO.Base {
+    Output: Address
+    Body: {
+        fd = SystemCall(2, "/proc/self/auxv", 0, 0)
+        IfCondition LessThan(fd, 0) ThenBlock: { ReturnValue(0) }
+        buf = Allocate(4096)
+        n = SystemCall(0, fd, buf, 4096)
+        SystemCall(3, fd, 0, 0)
+        base = 0
+        i = 0
+        WhileLoop LessEqual(Add(i, 16), n) {
+            t = RDMEM_64(Add(buf, i))
+            IfCondition EqualTo(t, 33) ThenBlock: {
+                base = RDMEM_64(Add(buf, Add(i, 8)))
+                BreakLoop
+            }
+            IfCondition EqualTo(t, 0) ThenBlock: { BreakLoop }
+            i = Add(i, 16)
+        }
+        Deallocate(buf, 4096)
+        ReturnValue(base)
+    }
+}
+
+// Find __vdso_clock_gettime. Safe to call more than once.
+Function.VDSO.Init {
+    Body: {
+        IfCondition EqualTo(VDSO.done, 1) ThenBlock: { ReturnValue(VDSO.cg) }
+        VDSO.done = 1
+        base = VDSO.Base()
+        IfCondition EqualTo(base, 0) ThenBlock: { ReturnValue(0) }
+        // ELF magic and 64-bit class
+        IfCondition NotEqual(RDMEM_32(base), 1179403647) ThenBlock: { ReturnValue(0) }
+        IfCondition NotEqual(RDMEM_8(base, 4), 2) ThenBlock: { ReturnValue(0) }
+        phoff = RDMEM_64(Add(base, 32))
+        phentsize = BitwiseAnd(RDMEM_16(Add(base, 54)), 65535)
+        phnum = BitwiseAnd(RDMEM_16(Add(base, 56)), 65535)
+        load_off = 0
+        have_load = 0
+        dyn = 0
+        i = 0
+        WhileLoop LessThan(i, phnum) {
+            ph = Add(base, Add(phoff, Multiply(i, phentsize)))
+            ptype = BitwiseAnd(RDMEM_32(ph), 4294967295)
+            IfCondition EqualTo(ptype, 1) ThenBlock: {
+                IfCondition EqualTo(have_load, 0) ThenBlock: {
+                    // load_off = base + p_offset - p_vaddr
+                    load_off = Subtract(Add(base, RDMEM_64(Add(ph, 8))), RDMEM_64(Add(ph, 16)))
+                    have_load = 1
+                }
+            }
+            IfCondition EqualTo(ptype, 2) ThenBlock: {
+                dyn = Add(base, RDMEM_64(Add(ph, 8)))
+            }
+            i = Add(i, 1)
+        }
+        IfCondition EqualTo(have_load, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(dyn, 0) ThenBlock: { ReturnValue(0) }
+        symtab = 0
+        strtab = 0
+        hash = 0
+        d = dyn
+        WhileLoop 1 {
+            tag = RDMEM_64(d)
+            IfCondition EqualTo(tag, 0) ThenBlock: { BreakLoop }
+            val = RDMEM_64(Add(d, 8))
+            IfCondition EqualTo(tag, 4) ThenBlock: { hash = Add(val, load_off) }
+            IfCondition EqualTo(tag, 5) ThenBlock: { strtab = Add(val, load_off) }
+            IfCondition EqualTo(tag, 6) ThenBlock: { symtab = Add(val, load_off) }
+            d = Add(d, 16)
+        }
+        IfCondition EqualTo(symtab, 0) ThenBlock: { ReturnValue(0) }
+        IfCondition EqualTo(strtab, 0) ThenBlock: { ReturnValue(0) }
+        // Symbol count: DT_HASH nchain, else the gap up to the string table.
+        nsym = 0
+        IfCondition NotEqual(hash, 0) ThenBlock: {
+            nsym = BitwiseAnd(RDMEM_32(Add(hash, 4)), 4294967295)
+        } ElseBlock: {
+            IfCondition GreaterThan(strtab, symtab) ThenBlock: {
+                nsym = Divide(Subtract(strtab, symtab), 24)
+            }
+        }
+        IfCondition GreaterThan(nsym, 4096) ThenBlock: { nsym = 4096 }
+        s = 0
+        WhileLoop LessThan(s, nsym) {
+            sym = Add(symtab, Multiply(s, 24))
+            name = BitwiseAnd(RDMEM_32(sym), 4294967295)
+            info = RDMEM_8(sym, 4)
+            shndx = BitwiseAnd(RDMEM_16(Add(sym, 6)), 65535)
+            value = RDMEM_64(Add(sym, 8))
+            // STT_FUNC, defined
+            IfCondition EqualTo(BitwiseAnd(info, 15), 2) ThenBlock: {
+                IfCondition NotEqual(shndx, 0) ThenBlock: {
+                    IfCondition NotEqual(value, 0) ThenBlock: {
+                        IfCondition EqualTo(VDSO.NameIs(Add(strtab, name), "__vdso_clock_gettime"), 1) ThenBlock: {
+                            VDSO.cg = Add(value, load_off)
+                            ReturnValue(VDSO.cg)
+                        }
+                    }
+                }
+            }
+            s = Add(s, 1)
+        }
+        ReturnValue(0)
+    }
+}
+
+// clock_gettime(clock, ts). The vDSO when VDSO.Init found it, else the syscall.
+Function.VDSO.ClockGettime {
+    Input: clock: Integer
+    Input: ts: Address
+    Output: Integer
+    Body: {
+        IfCondition NotEqual(VDSO.cg, 0) ThenBlock: {
+            ReturnValue(CallIndirect(VDSO.cg, clock, ts))
+        }
+        ReturnValue(SystemCall(228, clock, ts))
+    }
+}

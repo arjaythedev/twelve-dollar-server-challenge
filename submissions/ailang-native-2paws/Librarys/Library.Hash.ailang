@@ -123,6 +123,21 @@ Function.Hash.Create {
     }
 }
 
+// A table without the insertion-order array. Delete stays O(1): with the
+// array, every delete scans it (Hash.OrderRemove) and shifts it down. Keys
+// and Values then come back in slot order instead of insertion order.
+Function.Hash.CreateUnordered {
+    Input: capacity: Integer
+    Output: Address
+    Body: {
+        t = Hash.Create(capacity)
+        ord = RDMEM_64(Add(t, 32))
+        IfCondition EqualTo(Array.IsArray(ord), 1) ThenBlock: { Array.Destroy(ord) }
+        WRMEM_64(Add(t, 32), 0)
+        ReturnValue(t)
+    }
+}
+
 // Convenience: create with default capacity 16
 Function.Hash.New {
     Output: Address

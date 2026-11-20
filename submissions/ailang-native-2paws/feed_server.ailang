@@ -10,6 +10,7 @@ LibraryImport.Crypto
 LibraryImport.HTTP1
 LibraryImport.HTTP1Front
 LibraryImport.SQLite
+LibraryImport.VDSO
 
 FixedPool.FeedSt {
     "out": Initialize=0, CanChange=True
@@ -58,7 +59,7 @@ Function.Feed.Init {
 Function.Feed.NowUnix {
     Output: Integer
     Body: {
-        SystemCall(228, 0, FeedSt.ts)
+        VDSO.ClockGettime(0, FeedSt.ts)
         ReturnValue(RDMEM_64(FeedSt.ts))
     }
 }
@@ -976,6 +977,8 @@ SubRoutine.Main {
     FeedSt.iso = Allocate(32)
     MemorySet(FeedSt.ts, 0, 16)
     FeedSt.start = Feed.NowUnix()
+    // clock_gettime through the vDSO: no kernel entry per JWT expiry check
+    VDSO.Init()
     path = Env.Get("SQLITE_PATH")
     IfCondition EqualTo(path, 0) ThenBlock: {
         PrintMessage("FAIL SQLITE_PATH\n")
@@ -1010,6 +1013,10 @@ SubRoutine.Main {
     IfCondition EqualTo(HTTP1St.direct, 1) ThenBlock: { fronts = 0 }
     HTTP1St.rxmulti = Env.GetInt("HTTP_RXMULTI")
     HTTP1St.stats = Env.GetInt("HTTP_STATS")
+    // A pass waits for HTTP_WAIT_MIN completions or HTTP_WAIT_US, whichever comes
+    // first. 0 keeps the default: wait for one completion, no timeout.
+    HTTP1St.wait_min = Env.GetInt("HTTP_WAIT_MIN")
+    HTTP1St.wait_us = Env.GetInt("HTTP_WAIT_US")
     pn = Env.GetInt("HTTP_PBUF_N")
     IfCondition GreaterThan(pn, 0) ThenBlock: { HTTP1St.pbuf_n = pn }
     pz = Env.GetInt("HTTP_PBUF_SZ")
@@ -1039,6 +1046,7 @@ SubRoutine.Main {
     }
     SQLiteIo.slow = Env.GetInt("SQLITE_CKSLOW_MS")
     IfCondition LessThan(SQLiteIo.slow, 0) ThenBlock: { SQLiteIo.slow = 0 }
+    IfCondition EqualTo(Env.GetInt("SQLITE_IO_INLINE"), 1) ThenBlock: { SQLiteIo.inline = 1 }
     SQLite.StartSyncer(path)
     dbok = SQLite.Open(path)
     FeedSt.ok = dbok

@@ -86,6 +86,8 @@ FixedPool.HTTP1St {
     "pbuf_sz": Initialize=2048, CanChange=True
     "starve_h": Initialize=0, CanChange=True
     "stats": Initialize=0, CanChange=True
+    "wait_min": Initialize=0, CanChange=True
+    "wait_us": Initialize=0, CanChange=True
     "st_t": Initialize=0, CanChange=True
     "st_pass": Initialize=0, CanChange=True
     "st_cqe": Initialize=0, CanChange=True
@@ -1490,7 +1492,11 @@ Function.HTTP1.Serve {
                 IfCondition GreaterThan(HTTP1St.nring, 1) ThenBlock: {
                     IoUring.EnterWait(IoUring.SqPending(), 1, 1000, HTTP1St.waitarg)
                 } ElseBlock: {
-                    IoUring.Enter(IoUring.SqPending(), 1, IoUringEnter.GETEVENTS)
+                    IfCondition GreaterThan(HTTP1St.wait_min, 1) ThenBlock: {
+                        IoUring.EnterWait(IoUring.SqPending(), HTTP1St.wait_min, HTTP1St.wait_us, HTTP1St.waitarg)
+                    } ElseBlock: {
+                        IoUring.Enter(IoUring.SqPending(), 1, IoUringEnter.GETEVENTS)
+                    }
                 }
             }
             HTTP1.Drain(0)

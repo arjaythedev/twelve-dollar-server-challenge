@@ -232,17 +232,21 @@ static int prep(const char *sql, sqlite3_stmt **st) {
 // The memory SQLite's page cache keeps its pages in, on 2 MB pages.
 //
 // SQLite lets the application hand it one block of memory for page contents
-// (SQLITE_CONFIG_PAGECACHE); the cache itself stays SQLite's own. A 16 MB cache on the usual
-// 4 KB pages is 4,096 pages of memory, more than the CPU's address-translation cache (TLB)
+// (SQLITE_CONFIG_PAGECACHE); the cache itself stays SQLite's own. A 32 MB cache on the usual
+// 4 KB pages is 8,192 pages of memory, more than the CPU's address-translation cache (TLB)
 // covers, so a B-tree descent pays for page-table walks on top of its cache misses, and in
-// a virtual machine each walk is two-dimensional. On 2 MB pages the whole cache is 10 entries.
+// a virtual machine each walk is two-dimensional. On 2 MB pages the whole block (38 MB with the
+// page headers and a margin) is 19 entries.
 // Linux gives a process such pages if it asks for them region by region (madvise), which is
 // a request about our own memory, not a setting of the box. The block is touched once here,
 // at startup, so the kernel finds and clears the memory before the first request, not
-// during one. If any of this fails SQLite allocates its pages the ordinary way.
+// during one. It is touched from the top down: SQLite hands out the slots of the block from
+// the highest address first, and on a box whose free memory is fragmented the kernel has
+// 2 MB pages for only the first part that is touched, so those go where the pages in use
+// are. If any of this fails SQLite allocates its pages the ordinary way.
 static uint8_t *page_block;
 static size_t page_block_len;
-#define CACHE_PAGES 4096 // 16 MB of 4 KB pages; PRAGMA cache_size below says the same
+#define CACHE_PAGES 8192 // 32 MB of 4 KB pages; PRAGMA cache_size below says the same
 static void page_memory(void) {
   int header = 0;
   sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &header);
@@ -252,7 +256,7 @@ static void page_memory(void) {
   if (raw == MAP_FAILED) return;
   uint8_t *block = (uint8_t *)(((uintptr_t)raw + huge - 1) & ~(uintptr_t)(huge - 1));
   madvise(block, len, MADV_HUGEPAGE);
-  for (size_t at = 0; at < len; at += 4096) block[at] = 0;
+  for (size_t at = len; at; at -= 4096) block[at - 4096] = 0;
   if (sqlite3_config(SQLITE_CONFIG_PAGECACHE, block, (int)slot, (int)(len / slot)) != SQLITE_OK) return;
   page_block = block;
   page_block_len = len;
@@ -371,13 +375,190 @@ const char *db_text_memory(long *moved_kb, long *huge_kb) {
   return text_left;
 }
 
+// ---- WAL writes: one write per commit ---------------------------------------------------------
+//
+// SQLite writes each WAL frame with two calls (a 24-byte header, then the page), so a commit
+// of four pages is eight pwrite calls. This is a file layer (sqlite3_vfs, SQLite's public
+// interface for that) on top of SQLite's own "unix-excl": for the WAL file, a write that
+// continues exactly where the one before it ended is kept in a buffer, and the buffer goes
+// to the file in one call when the page of the commit frame arrives. Every other call on the
+// file (read, sync, truncate, size, lock, file control, close, a write somewhere else, a
+// write that does not fit) first writes what is buffered and then goes through unchanged.
+// So the file receives the same bytes at the same offsets in the same order as without the
+// layer; the commit frame is in the kernel before SQLite updates the WAL's index and before
+// COMMIT returns; and a sync happens where SQLite asks for it. A failed write is reported
+// from the call that caused it, inside the transaction, as SQLite's own would be.
+// The design and the commit-frame test (bytes 4-7 of a frame header hold the database size
+// and are zero except on a commit frame) are go-iouring-davidefrageri's (#354, shim.c), who
+// names c-iouring-pavlyhalim (#245) for the pattern.
+//
+// "unix-excl" itself: the process takes the lock on the database file once and keeps it, the
+// WAL's index lives in ordinary memory shared by our three connections instead of a -shm
+// file, and a transaction makes no fcntl() locking calls. No other process can open the
+// database while the server runs. (As rust-iouring-kensac, #264, and #354.)
+#define WAL_HDR 24
+#define WAL_BUF (128 << 10)
+
+typedef struct {
+  sqlite3_file base;
+  sqlite3_file *real;
+  int is_wal, commit, len;
+  sqlite3_int64 off, last_end;
+  unsigned char *buf;
+} wal_file;
+#define WF(p) ((wal_file *)(p))
+#define REAL(p) (WF(p)->real)
+#define WF_REAL_OFF ((sizeof(wal_file) + 15) & ~(size_t)15)
+
+static sqlite3_vfs *vfs_under, vfs_wal;
+static atomic_long wal_writes, wal_frames; // write calls that reached the WAL file; frames SQLite wrote
+// For the test only: a running hash of every (offset, byte) SQLite asked to be written to the
+// WAL, and of every one handed to the file. With nothing buffered the two must be equal.
+static int wal_check;
+static unsigned long long wal_asked, wal_given;
+static void wal_hash(unsigned long long *h, const unsigned char *b, int n, sqlite3_int64 off) {
+  for (int i = 0; i < n; i++) *h = (*h ^ (unsigned long long)(off + i) ^ ((unsigned long long)b[i] << 56)) * 1099511628211ULL;
+}
+
+static int wf_put(wal_file *f, const void *b, int n, sqlite3_int64 off) {
+  atomic_fetch_add(&wal_writes, 1);
+  if (wal_check) wal_hash(&wal_given, b, n, off);
+  return f->real->pMethods->xWrite(f->real, b, n, off);
+}
+static int wf_flush(wal_file *f) {
+  if (!f->len) return SQLITE_OK;
+  int n = f->len;
+  f->len = 0;
+  return wf_put(f, f->buf, n, f->off);
+}
+#define FLUSH(p)                   \
+  do {                             \
+    int rc_ = wf_flush(WF(p));     \
+    if (rc_ != SQLITE_OK) return rc_; \
+  } while (0)
+
+static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
+  wal_file *f = WF(p);
+  if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
+  if (wal_check) wal_hash(&wal_asked, b, n, off);
+  int continues = off == f->last_end;
+  f->last_end = off + n;
+  if (f->len + n > WAL_BUF) FLUSH(p);
+  if (!continues || n > WAL_BUF) {
+    FLUSH(p);
+    f->commit = 0;
+    return wf_put(f, b, n, off);
+  }
+  if (!f->len) f->off = off;
+  memcpy(f->buf + f->len, b, (size_t)n);
+  f->len += n;
+  if (n == WAL_HDR) {
+    const unsigned char *h = b;
+    f->commit = (h[4] | h[5] | h[6] | h[7]) != 0;
+    atomic_fetch_add(&wal_frames, 1);
+    return SQLITE_OK;
+  }
+  if (f->commit) {
+    f->commit = 0;
+    return wf_flush(f);
+  }
+  return SQLITE_OK;
+}
+static int wf_close(sqlite3_file *p) {
+  wal_file *f = WF(p);
+  int rc = wf_flush(f), rc2 = f->real->pMethods ? f->real->pMethods->xClose(f->real) : SQLITE_OK;
+  sqlite3_free(f->buf);
+  f->buf = 0;
+  return rc != SQLITE_OK ? rc : rc2;
+}
+static int wf_read(sqlite3_file *p, void *b, int n, sqlite3_int64 off) { FLUSH(p); return REAL(p)->pMethods->xRead(REAL(p), b, n, off); }
+static int wf_truncate(sqlite3_file *p, sqlite3_int64 size) { FLUSH(p); return REAL(p)->pMethods->xTruncate(REAL(p), size); }
+static int wf_sync(sqlite3_file *p, int flags) { FLUSH(p); return REAL(p)->pMethods->xSync(REAL(p), flags); }
+static int wf_size(sqlite3_file *p, sqlite3_int64 *size) { FLUSH(p); return REAL(p)->pMethods->xFileSize(REAL(p), size); }
+static int wf_lock(sqlite3_file *p, int l) { FLUSH(p); return REAL(p)->pMethods->xLock(REAL(p), l); }
+static int wf_unlock(sqlite3_file *p, int l) { FLUSH(p); return REAL(p)->pMethods->xUnlock(REAL(p), l); }
+static int wf_reserved(sqlite3_file *p, int *out) { return REAL(p)->pMethods->xCheckReservedLock(REAL(p), out); }
+static int wf_control(sqlite3_file *p, int op, void *arg) { FLUSH(p); return REAL(p)->pMethods->xFileControl(REAL(p), op, arg); }
+static int wf_sector(sqlite3_file *p) { return REAL(p)->pMethods->xSectorSize(REAL(p)); }
+static int wf_device(sqlite3_file *p) { return REAL(p)->pMethods->xDeviceCharacteristics(REAL(p)); }
+static int wf_shm_map(sqlite3_file *p, int pg, int sz, int extend, void volatile **out) { return REAL(p)->pMethods->xShmMap(REAL(p), pg, sz, extend, out); }
+static int wf_shm_lock(sqlite3_file *p, int off, int n, int flags) { return REAL(p)->pMethods->xShmLock(REAL(p), off, n, flags); }
+static void wf_shm_barrier(sqlite3_file *p) { REAL(p)->pMethods->xShmBarrier(REAL(p)); }
+static int wf_shm_unmap(sqlite3_file *p, int del) { return REAL(p)->pMethods->xShmUnmap(REAL(p), del); }
+static int wf_fetch(sqlite3_file *p, sqlite3_int64 off, int n, void **pp) { FLUSH(p); return REAL(p)->pMethods->xFetch(REAL(p), off, n, pp); }
+static int wf_unfetch(sqlite3_file *p, sqlite3_int64 off, void *pg) { return REAL(p)->pMethods->xUnfetch(REAL(p), off, pg); }
+
+static const sqlite3_io_methods wf_methods = {3, wf_close, wf_read, wf_write, wf_truncate, wf_sync, wf_size, wf_lock, wf_unlock, wf_reserved,
+                                              wf_control, wf_sector, wf_device, wf_shm_map, wf_shm_lock, wf_shm_barrier, wf_shm_unmap, wf_fetch, wf_unfetch};
+
+static int wv_open(sqlite3_vfs *v, sqlite3_filename name, sqlite3_file *p, int flags, int *out_flags) {
+  (void)v;
+  wal_file *f = WF(p);
+  memset(f, 0, sizeof *f);
+  f->last_end = -1;
+  f->real = (sqlite3_file *)((char *)p + WF_REAL_OFF);
+  int rc = vfs_under->xOpen(vfs_under, name, f->real, flags, out_flags);
+  if (!f->real->pMethods) return rc;
+  f->is_wal = (flags & SQLITE_OPEN_WAL) != 0;
+  if (f->real->pMethods->iVersion < 3 || (f->is_wal && !(f->buf = sqlite3_malloc(WAL_BUF)))) {
+    f->real->pMethods->xClose(f->real);
+    return f->is_wal && !f->buf ? SQLITE_NOMEM : SQLITE_CANTOPEN;
+  }
+  p->pMethods = &wf_methods;
+  return rc;
+}
+static int wv_delete(sqlite3_vfs *v, const char *z, int sync) { (void)v; return vfs_under->xDelete(vfs_under, z, sync); }
+static int wv_access(sqlite3_vfs *v, const char *z, int flags, int *out) { (void)v; return vfs_under->xAccess(vfs_under, z, flags, out); }
+static int wv_full_pathname(sqlite3_vfs *v, const char *z, int n, char *out) { (void)v; return vfs_under->xFullPathname(vfs_under, z, n, out); }
+static int wv_randomness(sqlite3_vfs *v, int n, char *out) { (void)v; return vfs_under->xRandomness(vfs_under, n, out); }
+static int wv_sleep(sqlite3_vfs *v, int us) { (void)v; return vfs_under->xSleep(vfs_under, us); }
+static int wv_current_time(sqlite3_vfs *v, double *t) { (void)v; return vfs_under->xCurrentTime(vfs_under, t); }
+static int wv_last_error(sqlite3_vfs *v, int n, char *m) { (void)v; return vfs_under->xGetLastError(vfs_under, n, m); }
+static int wv_current_time64(sqlite3_vfs *v, sqlite3_int64 *t) { (void)v; return vfs_under->xCurrentTimeInt64(vfs_under, t); }
+
+// The name of the file layer the connections open with: ours if it could be set up, else
+// SQLite's "unix-excl" as it is.
+static const char *wal_vfs(void) {
+  if (vfs_wal.zName) return vfs_wal.zName;
+  vfs_under = sqlite3_vfs_find("unix-excl");
+  if (!vfs_under || vfs_under->iVersion < 2) return "unix-excl";
+  vfs_wal.iVersion = 2;
+  vfs_wal.szOsFile = (int)WF_REAL_OFF + vfs_under->szOsFile;
+  vfs_wal.mxPathname = vfs_under->mxPathname;
+  vfs_wal.xOpen = wv_open, vfs_wal.xDelete = wv_delete, vfs_wal.xAccess = wv_access, vfs_wal.xFullPathname = wv_full_pathname;
+  vfs_wal.xRandomness = wv_randomness, vfs_wal.xSleep = wv_sleep, vfs_wal.xCurrentTime = wv_current_time;
+  vfs_wal.xGetLastError = wv_last_error, vfs_wal.xCurrentTimeInt64 = wv_current_time64;
+  if (sqlite3_vfs_register(&vfs_wal, 0) != SQLITE_OK) return "unix-excl";
+  return vfs_wal.zName = "wal-one-write";
+}
+
+// For the stats line: write calls that reached the WAL file and frames SQLite wrote, since
+// the last call. With the layer working there is about one write per commit.
+void db_wal_writes(long *writes, long *frames) {
+  *writes = atomic_exchange(&wal_writes, 0);
+  *frames = atomic_exchange(&wal_frames, 0);
+}
+
+// For the test: start hashing (on = 1), or report whether everything SQLite has asked to be
+// written since then reached the file, byte for byte and in order (on = 0; 1 if so).
+int db_wal_check(int on) {
+  if (on) {
+    wal_check = 1, wal_asked = wal_given = 0;
+    return 1;
+  }
+  return wal_asked == wal_given && wal_asked != 0;
+}
+
 int db_open(const char *path) {
   page_memory();
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, 0) != SQLITE_OK) return fail("open");
+  const char *vfs = wal_vfs();
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) return fail("open");
   // WAL is already set in the seed file. synchronous=NORMAL is the weakest setting rule 6 allows.
-  // cache_size: SQLite's own page cache, 16 MB instead of the default 2 MB. With 2 MB the hot
-  // pages did not fit and were fetched again from the kernel on most requests.
-  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-16384;", 0, 0, 0) != SQLITE_OK) return fail("pragma");
+  // cache_size: SQLite's own page cache, 32 MB instead of the default 2 MB. With 2 MB the hot
+  // pages did not fit and were fetched again from the kernel on most requests; with 16 MB one
+  // page fetch in 1,300 still missed (300 reads a second on the loop thread at 150,000 users,
+  // 600 at 250,000); with 32 MB none does.
+  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;", 0, 0, 0) != SQLITE_OK) return fail("pragma");
   if (prep("SELECT 1", &st_health)) return -1;
   if (prep(POST_COLS "ORDER BY p.created_at DESC, p.id DESC LIMIT 20", &st_feed)) return -1;
   if (prep(POST_COLS "WHERE p.id = ?", &st_post)) return -1;
@@ -388,8 +569,8 @@ int db_open(const char *path) {
 
   bt_setup();
 
-  if (sqlite3_open_v2(path, &ckpt_db, SQLITE_OPEN_READWRITE, 0) != SQLITE_OK) return fail("open (finisher)");
-  if (sqlite3_open_v2(path, &copy_db, SQLITE_OPEN_READWRITE, 0) != SQLITE_OK) return fail("open (copier)");
+  if (sqlite3_open_v2(path, &ckpt_db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) return fail("open (finisher)");
+  if (sqlite3_open_v2(path, &copy_db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) return fail("open (copier)");
   if ((db_fd = open(path, O_RDWR | O_CLOEXEC)) < 0) return fail("open (for sync)");
   sqlite3_exec(ckpt_db, "PRAGMA synchronous=NORMAL;", 0, 0, 0);
   sqlite3_exec(copy_db, "PRAGMA synchronous=NORMAL;", 0, 0, 0);

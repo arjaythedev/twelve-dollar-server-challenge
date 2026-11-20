@@ -50,6 +50,23 @@ func dbStats() (walPages, walMax, checkpoints int) {
 	return int(a), int(b), int(c)
 }
 
+// dbWalWrites reports the write calls that reached the WAL file and the frames SQLite wrote,
+// since the last call.
+func dbWalWrites() (writes, frames int) {
+	var a, b C.long
+	C.db_wal_writes(&a, &b)
+	return int(a), int(b)
+}
+
+// dbWalCheck is for the test: true starts comparing what SQLite asks to be written to the
+// WAL with what reaches the file; false reports whether the two have been the same.
+func dbWalCheck(start bool) bool {
+	if start {
+		return C.db_wal_check(1) != 0
+	}
+	return C.db_wal_check(0) != 0
+}
+
 func dbPageMemory() (blockKB, hugeKB int) {
 	var a, b C.long
 	C.db_page_memory(&a, &b)

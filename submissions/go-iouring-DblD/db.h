@@ -25,6 +25,10 @@ int db_commit(void);
 // Checkpointing runs on a background thread started by db_open (see db.c). These numbers
 // are for logging: WAL size in pages now, the largest it has been, and checkpoint runs so far.
 void db_stats(int *wal_pages, int *wal_max, int *checkpoints);
+// Write calls that reached the WAL file and frames written, since the last call.
+void db_wal_writes(long *writes, long *frames);
+// Test only: 1 starts the byte-for-byte check of WAL writes, 0 reports its result (1 = equal).
+int db_wal_check(int on);
 
 // The write hold. A checkpoint can only finish, and the WAL only start over, if no commit
 // lands while it runs. When the WAL is large the loop calls db_urgent(1), stops committing

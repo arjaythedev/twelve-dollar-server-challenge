@@ -28,6 +28,7 @@ const (
 
 	setupCQSize       = 1 << 3  // we choose the completion queue size ourselves
 	setupSubmitAll    = 1 << 7  // keep submitting after one request fails
+	setupTaskrunFlag  = 1 << 9  // the kernel says in the submission ring's flags when completion work is waiting
 	setupSingleIssuer = 1 << 12 // promise: only one thread ever submits (lets the kernel skip locking)
 	setupDeferTaskrun = 1 << 13 // kernel does completion work only when we call enter, never by interrupting us
 
@@ -117,6 +118,7 @@ type ring struct {
 	ts  timespec
 
 	sqHead, sqTail *uint32
+	sqFlags        *uint32
 	sqMask         uint32
 	sqEntries      uint32
 	sqes           []sqe
@@ -140,7 +142,7 @@ func newRing(sqEntries, cqEntries uint32) (*ring, error) {
 	if unsafe.Sizeof(sqe{}) != 64 || unsafe.Sizeof(cqe{}) != 16 || unsafe.Sizeof(uringParams{}) != 120 {
 		panic("io_uring struct layout is wrong")
 	}
-	p := uringParams{cqEntries: cqEntries, flags: setupCQSize | setupSubmitAll | setupSingleIssuer | setupDeferTaskrun}
+	p := uringParams{cqEntries: cqEntries, flags: setupCQSize | setupSubmitAll | setupTaskrunFlag | setupSingleIssuer | setupDeferTaskrun}
 	fd, _, errno := syscall.Syscall(sysIoUringSetup, uintptr(sqEntries), uintptr(unsafe.Pointer(&p)), 0)
 	if errno != 0 {
 		return nil, fmt.Errorf("io_uring_setup: %w", errno)
@@ -160,6 +162,7 @@ func newRing(sqEntries, cqEntries uint32) (*ring, error) {
 	u32 := func(off uint32) *uint32 { return (*uint32)(unsafe.Add(base, off)) }
 
 	r.sqHead, r.sqTail, r.sqMask = u32(p.sqOff.head), u32(p.sqOff.tail), *u32(p.sqOff.ringMask)
+	r.sqFlags = u32(p.sqOff.flagsOrOverflow)
 	r.cqHead, r.cqTail, r.cqMask = u32(p.cqOff.head), u32(p.cqOff.tail), *u32(p.cqOff.ringMask)
 	r.cqes = unsafe.Slice((*cqe)(unsafe.Add(base, p.cqOff.droppedOrCqes)), p.cqEntries)
 
@@ -241,12 +244,38 @@ func (r *ring) wait(minComplete uint32, window time.Duration) {
 	r.enter(minComplete, enterGetEvents, window, true)
 }
 
-// poll collects whatever is ready without blocking. It asks for "as many as possible with
-// a zero timeout" rather than "zero": on Linux 6.8 a ring in deferred-work mode runs only
-// about 20 completions when asked for zero, which starves every ring but the one we wait on.
-// (Found the hard way by go-iouring-trungdlp (#343) and go-iouring-davidefrageri (#354); see
-// their READMEs. This call and the buffer-ring code below follow #354's uring.go.)
-func (r *ring) poll() { r.enter(uint32(len(r.cqes)), enterGetEvents, 0, true) }
+// poll collects whatever is ready without blocking.
+//
+// Asking for "as many as possible with a zero timeout" always collects everything, but when
+// fewer than that many are ready (always) the kernel goes on to wait: it arms a timer that
+// is already due and gives up the processor until it fires. Measured on the same kind of machine
+// as the scoring box, that is 3.5 µs per call for nothing, once per ring per pass. Asking
+// for none, with no timeout, has no wait in it (0.17 µs when nothing is ready). But on
+// Linux 6.8 a ring in deferred-work mode runs only about 20 completions when asked for zero,
+// which starves every ring but the one we wait on. (Found the hard way by
+// go-iouring-trungdlp (#343) and go-iouring-davidefrageri (#354); see their READMEs. The
+// timed call and the buffer-ring code below follow #354's uring.go.) Kernels differ in
+// this: 6.8.0-117 runs everything, Ubuntu's later 6.8 source runs what was waiting when
+// the call began and flags the rest, and a limit of 20 per call is what #343 and #354 saw.
+// So: ask for none, up to pollTries times while a call brings pollFew completions or more
+// or the kernel flags work as still waiting; if that has not emptied the ring, make the
+// timed call, which always does.
+func (r *ring) poll() {
+	for range pollTries {
+		before := atomic.LoadUint32(r.cqTail)
+		r.enter(0, enterGetEvents, 0, false)
+		if atomic.LoadUint32(r.cqTail)-before < pollFew && atomic.LoadUint32(r.sqFlags)&sqTaskrun == 0 {
+			return
+		}
+	}
+	r.enter(uint32(len(r.cqes)), enterGetEvents, 0, true)
+}
+
+const (
+	pollTries = 3
+	pollFew   = 16     // under the 20 a limited kernel runs per call
+	sqTaskrun = 1 << 2 // in the submission ring's flags: completion work is waiting
+)
 
 // submit hands over queued entries without collecting anything.
 func (r *ring) submit() {

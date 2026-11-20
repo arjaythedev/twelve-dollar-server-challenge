@@ -366,3 +366,53 @@ func BenchmarkYStrDate(b *testing.B) { benchStr(b, "2026-11-02T10:15:30.123Z") }
 func BenchmarkYStrBody(b *testing.B) {
 	benchStr(b, "a post of ordinary length, about as long as the load test writes them, 80 bytes.")
 }
+
+// The WAL file must receive exactly what SQLite writes: the same bytes at the same offsets in
+// the same order, only in fewer calls. db.c hashes both sides; after a commit nothing is
+// buffered and the hashes must be equal. Needs a database (BENCH_DB), like the benchmarks.
+func TestWALWritesUnchanged(t *testing.T) {
+	path := os.Getenv("BENCH_DB")
+	if path == "" {
+		t.Skip("BENCH_DB not set")
+	}
+	if !benchDBOpen {
+		if err := dbOpen(path); err != nil {
+			t.Fatal(err)
+		}
+		benchDBOpen = true
+	}
+	s, out, tok := benchServer(), make([]byte, 0, sendBufSize), benchToken()
+	create := benchHead("POST", "/posts", true)
+	dbWalWrites()
+	dbWalCheck(true)
+	commits := 0
+	for i := 0; i < 6000; i++ {
+		var r request
+		if i%7 == 0 {
+			r = s.parse(create, benchBody)
+		} else {
+			id := int64(uint64(i)*2654435761%100000) + 1
+			head := append(append(append(s.json[:0], "POST /posts/"...), strconv.AppendInt(nil, id, 10)...), "/like HTTP/1.1\r\nHost: 10.0.0.1\r\nAuthorization: Bearer "+tok+"\r\nContent-Length: 0\r\n\r\n"...)
+			r = s.parse(head, nil)
+		}
+		s.execute(out[:0], &r)
+		// Commits of very different sizes: one request, a handful, and one of 2,000.
+		if s.inTxn && (i < 50 || (i < 3000 && i%13 == 0) || i == 5000 || i == 5999) {
+			if !dbCommit() {
+				t.Fatal("commit failed: ", dbErr())
+			}
+			s.inTxn = false
+			commits++
+			if !dbWalCheck(false) {
+				t.Fatalf("after commit %d (request %d): the WAL file did not receive what SQLite wrote", commits, i)
+			}
+		}
+	}
+	writes, frames := dbWalWrites()
+	t.Logf("%d commits, %d frames, %d write calls on the WAL", commits, frames, writes)
+	// A commit that changed nothing (every like in it already existed, on a database this
+	// test has run on before) writes nothing, so write calls can be fewer than commits.
+	if frames == 0 || writes >= frames {
+		t.Errorf("%d write calls for %d commits and %d frames: the layer is not batching", writes, commits, frames)
+	}
+}

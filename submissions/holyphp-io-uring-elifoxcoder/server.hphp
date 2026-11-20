@@ -605,11 +605,21 @@ class Server {
          * the full reuseport group before the runtime arms its accept batch. */
         foreach ($this->listeners as $ls) {
             stream_set_nodelay($ls);
-            /* Keep idle keep-alives cheap in kernel memory. On Linux these
-             * listener settings are inherited by accepted direct sockets;
-             * Linux doubles the requested values for accounting. */
+            /* Receive buffer per accepted socket. On Linux these listener
+             * settings are inherited by accepted direct sockets; Linux doubles
+             * the requested values for accounting. 16 KiB keeps idle
+             * keep-alives cheap in kernel memory, while a 4 KiB cap made the
+             * kernel prune/collapse receive queues once a few small packets
+             * queued. HPHP_SOCKET_SNDBUF=0 (default) leaves the send buffer at
+             * the kernel default so it keeps autotuning. */
             if (getenv("HPHP_SOCKET_BUFFERS") != "0") {
-                if (!stream_set_socket_buffers($ls, 4096, 8192)) {
+                $rcvBuf = 16384;
+                $sndBuf = 0;
+                $rcvEnv = getenv("HPHP_SOCKET_RCVBUF");
+                if ($rcvEnv != "") { $rcvBuf = intval($rcvEnv); }
+                $sndEnv = getenv("HPHP_SOCKET_SNDBUF");
+                if ($sndEnv != "") { $sndBuf = intval($sndEnv); }
+                if (!stream_set_socket_buffers($ls, $rcvBuf, $sndBuf)) {
                     echo "warning: could not cap TCP socket buffers\n";
                 }
             }

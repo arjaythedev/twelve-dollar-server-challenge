@@ -230,6 +230,21 @@ from this round and changes two defaults in `start.sh`:
   connections (WSL), and about −10 % CPU for the same requests on the Ubuntu
   6.8 VM at 80k users. 42/42 Direct and 42/42 Classic pass.
 
+### Receive buffers like the 300k C entry
+
+Four box runs in a row (#490, #497, #510 and #481's loop aside) measured
+29 µs/request whatever changed in user space; the score moved only with the
+tail at 84–88 % CPU. The C entry c-iouring-jowinjestine went from 270k to
+300k at an unchanged 26 µs/request by setting a 16 KiB receive buffer on its
+listeners (#486). HolyPHP capped accepted sockets at 4 KiB receive / 8 KiB
+send, so a receive queue holding a few small packets already exceeded the
+buffer and the kernel pruned and collapsed it (seen as `PruneCalled` on the
+Ubuntu 6.8 VM). Defaults now: `HPHP_SOCKET_RCVBUF=16384` (Linux reports
+32 KiB) and `HPHP_SOCKET_SNDBUF=0`, which leaves the send buffer at the kernel
+default so it keeps autotuning; `stream_set_socket_buffers()` skips a size
+<= 0. `HPHP_SOCKET_RCVBUF=4096 HPHP_SOCKET_SNDBUF=8192` restores the previous
+caps. 42/42 Direct and 42/42 Classic pass.
+
 ### The allocation round (`2f8507b` … `d75dd29`)
 
 Instrumentation first: `runtime_stats()` exposes generic runtime counters

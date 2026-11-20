@@ -52,6 +52,11 @@ remembered.
 ## Optimizations
 
 - **Direct serving** (no Nginx), TCP_NODELAY on accepted sockets.
+- **Keep-alive retirement near the descriptor budget.** Open connections are counted through
+  axum's connect-info lease (an `Arc` drop decrements the counter). At 40,000 open connections —
+  or 128 fewer than a smaller inherited `nofile` — completed responses carry `Connection: close`,
+  so clients reconnect and the descriptor table turns over instead of filling to 65,535 and
+  parking users in the listen queue. Bodies are fully written before the connection is retired.
 - **Fat LTO**, one codegen unit, `panic=abort`, stripped symbols, `-C target-cpu=native`.
 - **Single database actor with batching** and group-committed writes (Phase 1).
 - **Hand-written compact JSON** into a reserved byte buffer, with field order fixed by the writer.
@@ -78,7 +83,9 @@ repository:
 
 - The single-actor SQLite design — one connection owner, a bounded request queue with oneshot
   replies, batches of up to 256 commands, and one `BEGIN IMMEDIATE` transaction per batch — is
-  modeled on [`rust-axum-tbsvttr`](../rust-axum-tbsvttr).
+  modeled on [`rust-axum-tbsvttr`](../rust-axum-tbsvttr). The connection-retirement scheme
+  (count connections through axum connect-info, then advertise `Connection: close` at the
+  budget) follows the same submission.
 - `install.sh` and the matching `PATH` handling in `build.sh` are adapted from
   [`rust-axum-DblD`](../rust-axum-DblD) and [`rust-axum-connorw-dev`](../rust-axum-connorw-dev),
   which install a pinned, checksum-verified standalone Rust toolchain under `/opt` so that the

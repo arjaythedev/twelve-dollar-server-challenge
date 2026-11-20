@@ -38,55 +38,93 @@ as -o "$DIR/build/server_bf.o" "$DIR/build/server_bf.s"
 # PROFILE-GUIDED OPTIMIZATION (PGO) PIPELINE
 # ==============================================================================
 PGO_DIR="$DIR/build/pgo"
-rm -rf "$PGO_DIR"
-mkdir -p "$PGO_DIR"
-
+SERVER="$DIR/build/server"
 SEED_DB="$DIR/../../seed/feed.db"
-SCRATCH_PGO_DB="/tmp/feed_pgo_scratch_$$.db"
-
-# Check for seed database in standard locations
-if [ ! -f "$SEED_DB" ]; then
-    if [ -f "$DIR/feed.db" ]; then
-        SEED_DB="$DIR/feed.db"
-    elif [ -f "/tmp/twelve-challenge/seed/feed.db" ]; then
-        SEED_DB="/tmp/twelve-challenge/seed/feed.db"
-    fi
+if [[ ! -f "$SEED_DB" && -f "$DIR/feed.db" ]]; then
+    SEED_DB="$DIR/feed.db"
 fi
 
-if [ -f "$SEED_DB" ]; then
-    echo "==> [PGO Stage 1] Building instrumented server for profile generation..."
-    if gcc -O3 -march=native -Wno-deprecated-declarations -fprofile-generate="$PGO_DIR" -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto 2>/dev/null; then
-        echo "==> [PGO Stage 2] Training profile on scratch database copy (Rule 10 compliant)..."
-        cp "$SEED_DB" "$SCRATCH_PGO_DB"
-        PORT=19860 SQLITE_PATH="$SCRATCH_PGO_DB" "$DIR/bin/server" >/dev/null 2>&1 &
-        PGO_PID=$!
-        sleep 0.8
-        AUTH_TOKEN="$(python3 -c "import hmac,hashlib,base64; h=base64.urlsafe_b64encode(b'{\"alg\":\"HS256\",\"typ\":\"JWT\"}').rstrip(b'='); p=base64.urlsafe_b64encode(b'{\"sub\":1,\"username\":\"alice\"}').rstrip(b'='); s=h+b'.'+p; sig=base64.urlsafe_b64encode(hmac.new(b'twelve-dollar-challenge', s, hashlib.sha256).digest()).rstrip(b'='); print((s+b'.'+sig).decode())" 2>/dev/null || true)"
-        for i in $(seq 1 40); do
-            curl -s "http://127.0.0.1:19860/feed" >/dev/null 2>&1 || true
-            curl -s "http://127.0.0.1:19860/health" >/dev/null 2>&1 || true
-            curl -s "http://127.0.0.1:19860/posts/1" >/dev/null 2>&1 || true
-            curl -s "http://127.0.0.1:19860/posts/250000" >/dev/null 2>&1 || true
-            if [ -n "$AUTH_TOKEN" ]; then
-                curl -s -X POST -H "Authorization: Bearer $AUTH_TOKEN" "http://127.0.0.1:19860/posts/1/like" >/dev/null 2>&1 || true
-                curl -s -X POST -H "Authorization: Bearer $AUTH_TOKEN" -H "Content-Type: application/json" -d '{"body":"PGO training post"}' "http://127.0.0.1:19860/posts" >/dev/null 2>&1 || true
-            fi
-        done
-        kill -INT "$PGO_PID" 2>/dev/null || true
-        wait "$PGO_PID" 2>/dev/null || true
-        rm -f "$SCRATCH_PGO_DB"*
-        echo "==> [PGO Stage 3] Recompiling final production server with profile feedback..."
-        gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -fprofile-use="$PGO_DIR" -fprofile-correction -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto || \
-            gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
-        rm -rf "$PGO_DIR"
+common=(-O3 -march=native -Wno-deprecated-declarations)
+sources=("$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto)
+final=(-flto -fno-plt -fno-semantic-interposition)
+profile=()
+
+train_profile() (
+    set -euo pipefail
+    scratch=$(mktemp -d "$DIR/build/pgo-training.XXXXXXXX")
+    pid=
+    cleanup_training() {
+        if [[ -n "$pid" ]]; then
+            kill -TERM "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+        python3 -c 'import shutil,sys; shutil.rmtree(sys.argv[1])' "$scratch"
+    }
+    trap cleanup_training EXIT
+    cp "$SEED_DB" "$scratch/feed.db" || return 1
+    PORT=0 HOST=127.0.0.1 JWT_SECRET=twelve-dollar-challenge SQLITE_PATH="$scratch/feed.db" \
+        "$SERVER" >"$scratch/server.log" 2>&1 &
+    pid=$!
+    local port=
+    for ((attempt = 0; attempt < 100; attempt++)); do
+        kill -0 "$pid" 2>/dev/null || return 1
+        port=$(sed -n 's/.*Server listening on port \([0-9]*\) with.*/\1/p' "$scratch/server.log")
+        if [[ -n "$port" ]] && curl -fsS --max-time 1 "http://127.0.0.1:$port/health" >/dev/null; then
+            break
+        fi
+        port=
+        sleep 0.05
+    done
+    [[ -n "$port" ]] || return 1
+    local token base="http://127.0.0.1:$port"
+    token=$(python3 - <<'TOKEN'
+import base64
+import hashlib
+import hmac
+import json
+import time
+
+def encode(data):
+    return base64.urlsafe_b64encode(data).rstrip(b"=")
+
+header = encode(b'{"alg":"HS256","typ":"JWT"}')
+claims = encode(json.dumps({"sub": 1, "username": "alice", "exp": int(time.time()) + 3600},
+                           separators=(",", ":")).encode())
+message = header + b"." + claims
+signature = hmac.digest(b"twelve-dollar-challenge", message, hashlib.sha256)
+print((message + b"." + encode(signature)).decode())
+TOKEN
+    ) || return 1
+    local -a http=(curl -fsS --max-time 2)
+    for ((i = 0; i < 40; i++)); do
+        "${http[@]}" "$base/feed" "$base/health" "$base/posts/1" >/dev/null || return 1
+        "${http[@]}" -X POST -H "Authorization: Bearer $token" "$base/posts/1/like" >/dev/null || return 1
+        "${http[@]}" -H "Authorization: Bearer $token" -H 'Content-Type: application/json' \
+            -d '{"body":"PGO training post"}' "$base/posts" >/dev/null || return 1
+    done
+    kill -TERM "$pid" || return 1
+    wait "$pid" || return 1
+    pid=
+    [[ -n "$(find "$PGO_DIR" -type f -name '*.gcda' -print -quit)" ]] || return 1
+)
+
+if [[ -f "$SEED_DB" ]]; then
+    echo "==> Training the instrumented server on a scratch copy of the seed..."
+    if gcc "${common[@]}" -fprofile-generate="$PGO_DIR" -o "$SERVER" "${sources[@]}" && train_profile; then
+        profile=(-fprofile-use="$PGO_DIR" -fprofile-correction -Werror=missing-profile)
     else
-        echo "==> Linking high-performance server binary (bin/server)..."
-        gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
+        echo "==> Profile training failed. Building without profile feedback." >&2
     fi
-else
-    echo "==> Linking high-performance server binary (bin/server)..."
-    gcc -O3 -flto -march=native -fno-plt -fno-semantic-interposition -Wno-deprecated-declarations -o "$DIR/bin/server" "$DIR/runtime/runtime.c" "$DIR/build/server_bf.o" -lsqlite3 -lcrypto
 fi
+
+echo "==> Linking the production server..."
+if (( ${#profile[@]} )) &&
+    gcc "${common[@]}" "${final[@]}" "${profile[@]}" -o "$SERVER" "${sources[@]}"; then
+    echo "==> Applied profile feedback."
+else
+    gcc "${common[@]}" "${final[@]}" -o "$SERVER" "${sources[@]}"
+fi
+mv "$SERVER" "$DIR/bin/server"
 
 cp "$DIR/build/stage1" "$DIR/bin/stage1"
 echo "==> Build complete! Outputs: bin/server, bin/stage1"

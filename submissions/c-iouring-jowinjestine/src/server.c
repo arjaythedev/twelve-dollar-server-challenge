@@ -1074,7 +1074,7 @@ int main(int argc, char **argv) {
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
-  poll_idle = env_long("IDLE_POLL", 0) != 0;
+  poll_idle = env_long("IDLE_POLL", 1) != 0;
   eventfd_wake = env_long("EVENTFD_WAKE", 0) != 0;
   recv_buf_size = (unsigned)env_long("RECV_SIZE", RECV_BUF_SIZE_DEFAULT);
   if (recv_buf_size < 256 || recv_buf_size > 2048 || (recv_buf_size & (recv_buf_size - 1))) {

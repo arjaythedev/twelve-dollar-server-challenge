@@ -1,0 +1,951 @@
+// Library.Arrays.ailang — Collections: Stack, Queue, SHash, IHash, List, Util
+// Array.* is provided by LibraryImport.Array (Library.Array.ailang)
+//
+// Copyright (c) 2025-2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License, as required for submissions to this challenge.
+
+LibraryImport.Arena
+LibraryImport.Array
+
+
+
+// ====================
+// Configuration & Constants
+// ====================
+FixedPool.Collections {
+    "XMAX_ARRAY_SIZE": Initialize=65536
+    "XMAX_HASH_BUCKETS": Initialize=127
+    "XSTACK_SIZE": Initialize=1024
+    "XQUEUE_SIZE": Initialize=1024
+    "XNULL": Initialize=-1
+    "XERROR": Initialize=-999999
+    "arena_initialized": Initialize=0
+}
+
+// ====================
+// Arena Initialization
+// ====================
+Function.Arrays_EnsureArena {
+    Body: {
+        IfCondition EqualTo(Collections.arena_initialized, 0) ThenBlock: {
+            Arena_Init()
+            Collections.arena_initialized = 1
+        }
+    }
+}
+
+// Helper to copy a string
+Function.Helpers.StringCopy {
+    Input: str: Address
+    Output: Address
+    Body: {
+        IfCondition EqualTo(str, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        len = StringLength(str)
+        new_str = Arena_Alloc(Add(len, 1))
+        idx = 0
+        WhileLoop LessThan(idx, len) {
+            WRMEM_8(new_str, idx, RDMEM_8(str, idx))
+            idx = Add(idx, 1)
+        }
+        WRMEM_8(new_str, len, 0)
+        ReturnValue(new_str)
+    }
+}
+
+// =============================================================================
+// DYNAMIC ARRAY OPERATIONS
+// =============================================================================
+
+// Create a dynamic array with metadata
+// Structure: [capacity:8, size:8, data_ptr:8] = 24 bytes
+// Remove first element and shift all others down (O(n) operation)
+// Find index of first occurrence of value
+// Copy an array
+// Insert element at specific index
+// Delete element at specific index
+// Address variants for storing pointers
+// =============================================================================
+// STACK OPERATIONS
+// =============================================================================
+
+Function.Stack.Create {
+    Input: capacity: Integer
+    Output: Address
+    Body: {
+        ReturnValue(Array.Create(capacity))
+    }
+}
+
+Function.Stack.Push {
+    Input: stack: Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        ReturnValue(Array.Push(stack, value))
+    }
+}
+
+Function.Stack.Pop {
+    Input: stack: Address
+    Output: Integer
+    Body: {
+        ReturnValue(Array.Pop(stack))
+    }
+}
+
+Function.Stack.Peek {
+    Input: stack: Address
+    Output: Integer
+    Body: {
+        size = Array.Size(stack)
+        IfCondition EqualTo(size, 0) ThenBlock: {
+            ReturnValue(Collections.XERROR)
+        }
+        ReturnValue(Array.Get(stack, Subtract(size, 1)))
+    }
+}
+
+Function.Stack.IsEmpty {
+    Input: stack: Address
+    Output: Integer
+    Body: {
+        ReturnValue(EqualTo(Array.Size(stack), 0))
+    }
+}
+
+// =============================================================================
+// QUEUE OPERATIONS
+// =============================================================================
+
+Function.Queue.Create {
+    Input: capacity: Integer
+    Output: Address
+    Body: {
+        Arrays_EnsureArena()
+        queue = Arena_Alloc64()
+        WRMEM_64(queue, capacity)
+        WRMEM_64(Add(queue, 8), 0)
+        WRMEM_64(Add(queue, 16), 0)
+        WRMEM_64(Add(queue, 24), 0)
+        data = Arena_ArrayCreate(capacity)
+        WRMEM_64(Add(queue, 32), data)
+        ReturnValue(queue)
+    }
+}
+
+Function.Queue.Enqueue {
+    Input: queue: Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        capacity = RDMEM_64(queue)
+        size = RDMEM_64(Add(queue, 8))
+        IfCondition GreaterEqual(size, capacity) ThenBlock: {
+            ReturnValue(0)
+        }
+        tail = RDMEM_64(Add(queue, 24))
+        data = RDMEM_64(Add(queue, 32))
+        ArraySet(data, tail, value)
+        new_tail = Modulo(Add(tail, 1), capacity)
+        WRMEM_64(Add(queue, 24), new_tail)
+        WRMEM_64(Add(queue, 8), Add(size, 1))
+        ReturnValue(1)
+    }
+}
+
+Function.Queue.Dequeue {
+    Input: queue: Address
+    Output: Integer
+    Body: {
+        size = RDMEM_64(Add(queue, 8))
+        IfCondition EqualTo(size, 0) ThenBlock: {
+            ReturnValue(Collections.XERROR)
+        }
+        capacity = RDMEM_64(queue)
+        head = RDMEM_64(Add(queue, 16))
+        data = RDMEM_64(Add(queue, 32))
+        value = ArrayGet(data, head)
+        new_head = Modulo(Add(head, 1), capacity)
+        WRMEM_64(Add(queue, 16), new_head)
+        WRMEM_64(Add(queue, 8), Subtract(size, 1))
+        ReturnValue(value)
+    }
+}
+
+Function.Queue.Destroy {
+    Input: queue: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(queue, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        data = RDMEM_64(Add(queue, 32))
+        Arena_ArrayDestroy(data)
+        Arena_Free64(queue)
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// HASH TABLE (Integer Keys)
+// =============================================================================
+
+Function.IHash.HashInt {
+    Input: key: Integer
+    Input: buckets: Integer
+    Output: Integer
+    Body: {
+        abs_key = key
+        IfCondition LessThan(key, 0) ThenBlock: {
+            abs_key = Subtract(0, key)
+        }
+        ReturnValue(Modulo(abs_key, buckets))
+    }
+}
+
+Function.IHash.Create {
+    Input: bucket_count: Integer
+    Output: Address
+    Body: {
+        Arrays_EnsureArena()
+        hash_table = Arena_Alloc(24)
+        WRMEM_64(hash_table, bucket_count)
+        WRMEM_64(Add(hash_table, 8), 0)
+        buckets = Arena_ArrayCreate(bucket_count)
+        idx = 0
+        WhileLoop LessThan(idx, bucket_count) {
+            ArraySet(buckets, idx, 0)
+            idx = Add(idx, 1)
+        }
+        WRMEM_64(Add(hash_table, 16), buckets)
+        ReturnValue(hash_table)
+    }
+}
+
+Function.IHash.Insert {
+    Input: hash_table: Address
+    Input: key: Integer
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        bucket_count = RDMEM_64(hash_table)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        hash = IHash.HashInt(key, bucket_count)
+        new_node = Arena_Alloc(24)
+        WRMEM_64(new_node, key)
+        WRMEM_64(Add(new_node, 8), value)
+        head = ArrayGet(buckets, hash)
+        WRMEM_64(Add(new_node, 16), head)
+        ArraySet(buckets, hash, new_node)
+        item_count = RDMEM_64(Add(hash_table, 8))
+        WRMEM_64(Add(hash_table, 8), Add(item_count, 1))
+        ReturnValue(1)
+    }
+}
+
+Function.IHash.Lookup {
+    Input: hash_table: Address
+    Input: key: Integer
+    Output: Integer
+    Body: {
+        bucket_count = RDMEM_64(hash_table)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        hash = IHash.HashInt(key, bucket_count)
+        current = ArrayGet(buckets, hash)
+        WhileLoop NotEqual(current, 0) {
+            node_key = RDMEM_64(current)
+            IfCondition EqualTo(node_key, key) ThenBlock: {
+                ReturnValue(RDMEM_64(Add(current, 8)))
+            }
+            current = RDMEM_64(Add(current, 16))
+        }
+        ReturnValue(Collections.XERROR)
+    }
+}
+
+Function.IHash.Destroy {
+    Input: hash_table: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(hash_table, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        buckets = RDMEM_64(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
+        idx = 0
+        WhileLoop LessThan(idx, bucket_count) {
+            current = ArrayGet(buckets, idx)
+            WhileLoop NotEqual(current, 0) {
+                next = RDMEM_64(Add(current, 16))
+                Arena_Free(current, 24)
+                current = next
+            }
+            idx = Add(idx, 1)
+        }
+        Arena_ArrayDestroy(buckets)
+        Arena_Free(hash_table, 24)
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// STRING HASH TABLE (XSHash)
+// =============================================================================
+
+Function.SHash.Create {
+    Input: bucket_count: Integer
+    Output: Address
+    Body: {
+        Arrays_EnsureArena()
+        hash_table = Arena_Alloc(24)
+        WRMEM_64(hash_table, bucket_count)
+        WRMEM_64(Add(hash_table, 8), 0)
+        buckets = Arena_ArrayCreate(bucket_count)
+        MemorySet(Add(buckets, 8), 0, Multiply(bucket_count, 8))
+        idx = 0
+        WhileLoop LessThan(idx, bucket_count) {
+            ArraySet(buckets, idx, 0)
+            idx = Add(idx, 1)
+        }
+        WRMEM_64(Add(hash_table, 16), buckets)
+        ReturnValue(hash_table)
+    }
+}
+
+Function.SHash.Insert {
+    Input: hash_table: Address
+    Input: key: Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        hash_value = 0
+        idx = 0
+        key_len = StringLength(key)
+        WhileLoop LessThan(idx, key_len) {
+            byte = RDMEM_8(key, idx)
+            hash_value = Add(Multiply(hash_value, 31), byte)
+            idx = Add(idx, 1)
+        }
+        IfCondition LessThan(hash_value, 0) ThenBlock: {
+            hash_value = Multiply(hash_value, -1)
+        }
+        bucket_count = RDMEM_64(hash_table)
+        bucket_idx = Modulo(hash_value, bucket_count)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        
+        current = ArrayGet(buckets, bucket_idx)
+        WhileLoop NotEqual(current, 0) {
+            stored_key = RDMEM_64(current)
+            cmp = StringCompare(stored_key, key)
+            IfCondition EqualTo(cmp, 0) ThenBlock: {
+                WRMEM_64(Add(current, 8), value)
+                ReturnValue(0)
+            }
+            current = RDMEM_64(Add(current, 16))
+        }
+        
+        new_node = Arena_Alloc(24)
+        key_copy = Helpers.StringCopy(key)
+        WRMEM_64(new_node, key_copy)
+        WRMEM_64(Add(new_node, 8), value)
+        head = ArrayGet(buckets, bucket_idx)
+        WRMEM_64(Add(new_node, 16), head)
+        ArraySet(buckets, bucket_idx, new_node)
+        item_count = RDMEM_64(Add(hash_table, 8))
+        WRMEM_64(Add(hash_table, 8), Add(item_count, 1))
+        ReturnValue(1)
+    }
+}
+
+Function.SHash.Lookup {
+    Input: hash_table: Address
+    Input: key: Address
+    Output: Integer
+    Body: {
+        hash_value = 0
+        idx = 0
+        key_len = StringLength(key)
+        WhileLoop LessThan(idx, key_len) {
+            byte = RDMEM_8(key, idx)
+            hash_value = Add(Multiply(hash_value, 31), byte)
+            idx = Add(idx, 1)
+        }
+        IfCondition LessThan(hash_value, 0) ThenBlock: {
+            hash_value = Multiply(hash_value, -1)
+        }
+        bucket_count = RDMEM_64(hash_table)
+        bucket_idx = Modulo(hash_value, bucket_count)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        current = ArrayGet(buckets, bucket_idx)
+        WhileLoop NotEqual(current, 0) {
+            stored_key = RDMEM_64(current)
+            cmp = StringCompare(stored_key, key)
+            IfCondition EqualTo(cmp, 0) ThenBlock: {
+                ReturnValue(RDMEM_64(Add(current, 8)))
+            }
+            current = RDMEM_64(Add(current, 16))
+        }
+        ReturnValue(Collections.XNULL)
+    }
+}
+
+Function.SHash.Exists {
+    Input: hash_table: Address
+    Input: key: Address
+    Output: Integer
+    Body: {
+        result = SHash.Lookup(hash_table, key)
+        ReturnValue(NotEqual(result, Collections.XNULL))
+    }
+}
+
+Function.SHash.Delete {
+    Input: hash_table: Address
+    Input: key: Address
+    Output: Integer
+    Body: {
+        hash_value = 0
+        idx = 0
+        key_len = StringLength(key)
+        WhileLoop LessThan(idx, key_len) {
+            byte = RDMEM_8(key, idx)
+            hash_value = Add(Multiply(hash_value, 31), byte)
+            idx = Add(idx, 1)
+        }
+        IfCondition LessThan(hash_value, 0) ThenBlock: {
+            hash_value = Multiply(hash_value, -1)
+        }
+        bucket_count = RDMEM_64(hash_table)
+        bucket_idx = Modulo(hash_value, bucket_count)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        current = ArrayGet(buckets, bucket_idx)
+        prev = 0
+        WhileLoop NotEqual(current, 0) {
+            stored_key = RDMEM_64(current)
+            cmp = StringCompare(stored_key, key)
+            IfCondition EqualTo(cmp, 0) ThenBlock: {
+                value = RDMEM_64(Add(current, 8))
+                next = RDMEM_64(Add(current, 16))
+                IfCondition EqualTo(prev, 0) ThenBlock: {
+                    ArraySet(buckets, bucket_idx, next)
+                } ElseBlock: {
+                    WRMEM_64(Add(prev, 16), next)
+                }
+                sk_len = StringLength(stored_key)
+                Deallocate(stored_key, Add(sk_len, 1))
+                Arena_Free(current, 24)
+                item_count = RDMEM_64(Add(hash_table, 8))
+                WRMEM_64(Add(hash_table, 8), Subtract(item_count, 1))
+                ReturnValue(value)
+            }
+            prev = current
+            current = RDMEM_64(Add(current, 16))
+        }
+        ReturnValue(Collections.XNULL)
+    }
+}
+
+Function.SHash.Keys {
+    Input: hash_table: Address
+    Output: Address
+    Body: {
+        keys = Array.Create(16)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
+        i = 0
+        WhileLoop LessThan(i, bucket_count) {
+            current = ArrayGet(buckets, i)
+            WhileLoop NotEqual(current, 0) {
+                key = RDMEM_64(current)
+                key_copy = Helpers.StringCopy(key)
+                Array.Push(keys, key_copy)
+                current = RDMEM_64(Add(current, 16))
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(keys)
+    }
+}
+
+Function.SHash.Destroy {
+    Input: hash_table: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(hash_table, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        buckets = RDMEM_64(Add(hash_table, 16))
+        bucket_count = RDMEM_64(hash_table)
+        idx = 0
+        WhileLoop LessThan(idx, bucket_count) {
+            current = ArrayGet(buckets, idx)
+            WhileLoop NotEqual(current, 0) {
+                next = RDMEM_64(Add(current, 16))
+                key = RDMEM_64(current)
+                key_len = StringLength(key)
+                Deallocate(key, Add(key_len, 1))
+                Arena_Free(current, 24)
+                current = next
+            }
+            idx = Add(idx, 1)
+        }
+        Arena_ArrayDestroy(buckets)
+        Arena_Free(hash_table, 24)
+        ReturnValue(1)
+    }
+}
+
+// Address variants for XSHash
+Function.SHash.InsertAddr {
+    Input: hash_table: Address
+    Input: key: Address
+    Input: value: Address
+    Output: Integer
+    Body: {
+        hash_value = 0
+        idx = 0
+        key_len = StringLength(key)
+        WhileLoop LessThan(idx, key_len) {
+            byte = RDMEM_8(key, idx)
+            hash_value = Add(Multiply(hash_value, 31), byte)
+            idx = Add(idx, 1)
+        }
+        IfCondition LessThan(hash_value, 0) ThenBlock: {
+            hash_value = Multiply(hash_value, -1)
+        }
+        bucket_count = RDMEM_64(hash_table)
+        bucket_idx = Modulo(hash_value, bucket_count)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        current = ArrayGet(buckets, bucket_idx)
+        WhileLoop NotEqual(current, 0) {
+            stored_key = RDMEM_64(current)
+            cmp = StringCompare(stored_key, key)
+            IfCondition EqualTo(cmp, 0) ThenBlock: {
+                WRMEM_64(Add(current, 8), value)
+                ReturnValue(0)
+            }
+            current = RDMEM_64(Add(current, 16))
+        }
+        new_node = Arena_Alloc(24)
+        key_copy = Helpers.StringCopy(key)
+        WRMEM_64(new_node, key_copy)
+        WRMEM_64(Add(new_node, 8), value)
+        head = ArrayGet(buckets, bucket_idx)
+        WRMEM_64(Add(new_node, 16), head)
+        ArraySet(buckets, bucket_idx, new_node)
+        item_count = RDMEM_64(Add(hash_table, 8))
+        WRMEM_64(Add(hash_table, 8), Add(item_count, 1))
+        ReturnValue(1)
+    }
+}
+
+Function.SHash.LookupAddr {
+    Input: hash_table: Address
+    Input: key: Address
+    Output: Address
+    Body: {
+        hash_value = 0
+        idx = 0
+        key_len = StringLength(key)
+        WhileLoop LessThan(idx, key_len) {
+            byte = RDMEM_8(key, idx)
+            hash_value = Add(Multiply(hash_value, 31), byte)
+            idx = Add(idx, 1)
+        }
+        IfCondition LessThan(hash_value, 0) ThenBlock: {
+            hash_value = Multiply(hash_value, -1)
+        }
+        bucket_count = RDMEM_64(hash_table)
+        bucket_idx = Modulo(hash_value, bucket_count)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        current = ArrayGet(buckets, bucket_idx)
+        WhileLoop NotEqual(current, 0) {
+            stored_key = RDMEM_64(current)
+            cmp = StringCompare(stored_key, key)
+            IfCondition EqualTo(cmp, 0) ThenBlock: {
+                ReturnValue(RDMEM_64(Add(current, 8)))
+            }
+            current = RDMEM_64(Add(current, 16))
+        }
+        ReturnValue(Collections.XNULL)
+    }
+}
+
+Function.SHash.ExistsAddr {
+    Input: hash_table: Address
+    Input: key: Address
+    Output: Integer
+    Body: {
+        result = SHash.LookupAddr(hash_table, key)
+        ReturnValue(NotEqual(result, Collections.XNULL))
+    }
+}
+
+Function.SHash.DeleteAddr {
+    Input: hash_table: Address
+    Input: key: Address
+    Output: Address
+    Body: {
+        hash_value = 0
+        idx = 0
+        key_len = StringLength(key)
+        WhileLoop LessThan(idx, key_len) {
+            byte = RDMEM_8(key, idx)
+            hash_value = Add(Multiply(hash_value, 31), byte)
+            idx = Add(idx, 1)
+        }
+        IfCondition LessThan(hash_value, 0) ThenBlock: {
+            hash_value = Multiply(hash_value, -1)
+        }
+        bucket_count = RDMEM_64(hash_table)
+        bucket_idx = Modulo(hash_value, bucket_count)
+        buckets = RDMEM_64(Add(hash_table, 16))
+        current = ArrayGet(buckets, bucket_idx)
+        prev = 0
+        WhileLoop NotEqual(current, 0) {
+            stored_key = RDMEM_64(current)
+            cmp = StringCompare(stored_key, key)
+            IfCondition EqualTo(cmp, 0) ThenBlock: {
+                value = RDMEM_64(Add(current, 8))
+                next = RDMEM_64(Add(current, 16))
+                IfCondition EqualTo(prev, 0) ThenBlock: {
+                    ArraySet(buckets, bucket_idx, next)
+                } ElseBlock: {
+                    WRMEM_64(Add(prev, 16), next)
+                }
+                sk_len = StringLength(stored_key)
+                Deallocate(stored_key, Add(sk_len, 1))
+                Arena_Free(current, 24)
+                item_count = RDMEM_64(Add(hash_table, 8))
+                WRMEM_64(Add(hash_table, 8), Subtract(item_count, 1))
+                ReturnValue(value)
+            }
+            prev = current
+            current = RDMEM_64(Add(current, 16))
+        }
+        ReturnValue(Collections.XNULL)
+    }
+}
+
+// =============================================================================
+// LINKED LIST
+// =============================================================================
+
+Function.List.Create {
+    Output: Address
+    Body: {
+        Arrays_EnsureArena()
+        list = Arena_Alloc(24)
+        WRMEM_64(list, 0)
+        WRMEM_64(Add(list, 8), 0)
+        WRMEM_64(Add(list, 16), 0)
+        ReturnValue(list)
+    }
+}
+
+Function.List.Append {
+    Input: list: Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        new_node = Arena_Alloc(24)
+        WRMEM_64(new_node, value)
+        WRMEM_64(Add(new_node, 8), 0)
+        head = RDMEM_64(list)
+        tail = RDMEM_64(Add(list, 8))
+        IfCondition EqualTo(head, 0) ThenBlock: {
+            WRMEM_64(list, new_node)
+            WRMEM_64(Add(list, 8), new_node)
+        } ElseBlock: {
+            WRMEM_64(Add(tail, 8), new_node)
+            WRMEM_64(Add(list, 8), new_node)
+        }
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Add(size, 1))
+        ReturnValue(1)
+    }
+}
+
+Function.List.Prepend {
+    Input: list: Address
+    Input: value: Integer
+    Output: Integer
+    Body: {
+        new_node = Arena_Alloc(24)
+        WRMEM_64(new_node, value)
+        head = RDMEM_64(list)
+        WRMEM_64(Add(new_node, 8), head)
+        WRMEM_64(list, new_node)
+        IfCondition EqualTo(head, 0) ThenBlock: {
+            WRMEM_64(Add(list, 8), new_node)
+        }
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Add(size, 1))
+        ReturnValue(1)
+    }
+}
+
+Function.List.PopFront {
+    Input: list: Address
+    Output: Integer
+    Body: {
+        head = RDMEM_64(list)
+        IfCondition EqualTo(head, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        value = RDMEM_64(head)
+        next_node = RDMEM_64(Add(head, 8))
+        WRMEM_64(list, next_node)
+        IfCondition EqualTo(next_node, 0) ThenBlock: {
+            WRMEM_64(Add(list, 8), 0)
+        }
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Subtract(size, 1))
+        Arena_Free(head, 24)
+        ReturnValue(value)
+    }
+}
+
+Function.List.PopBack {
+    Input: list: Address
+    Output: Integer
+    Body: {
+        tail = RDMEM_64(Add(list, 8))
+        IfCondition EqualTo(tail, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        head = RDMEM_64(list)
+        IfCondition EqualTo(head, tail) ThenBlock: {
+            value = RDMEM_64(tail)
+            Arena_Free(tail, 24)
+            WRMEM_64(list, 0)
+            WRMEM_64(Add(list, 8), 0)
+            WRMEM_64(Add(list, 16), 0)
+            ReturnValue(value)
+        }
+        current = head
+        WhileLoop NotEqual(RDMEM_64(Add(current, 8)), tail) {
+            current = RDMEM_64(Add(current, 8))
+        }
+        value = RDMEM_64(tail)
+        Arena_Free(tail, 24)
+        WRMEM_64(Add(current, 8), 0)
+        WRMEM_64(Add(list, 8), current)
+        size = RDMEM_64(Add(list, 16))
+        WRMEM_64(Add(list, 16), Subtract(size, 1))
+        ReturnValue(value)
+    }
+}
+
+Function.List.Size {
+    Input: list: Address
+    Output: Integer
+    Body: {
+        ReturnValue(RDMEM_64(Add(list, 16)))
+    }
+}
+
+Function.List.Destroy {
+    Input: list: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(list, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        head = RDMEM_64(list)
+        WhileLoop NotEqual(head, 0) {
+            next = RDMEM_64(Add(head, 8))
+            Arena_Free(head, 24)
+            head = next
+        }
+        Arena_Free(list, 24)
+        ReturnValue(1)
+    }
+}
+
+Function.List.DestroyDeep {
+    Input: list: Address
+    Output: Integer
+    Body: {
+        IfCondition EqualTo(list, 0) ThenBlock: {
+            ReturnValue(0)
+        }
+        head = RDMEM_64(list)
+        WhileLoop NotEqual(head, 0) {
+            next = RDMEM_64(Add(head, 8))
+            value = RDMEM_64(head)
+            IfCondition NotEqual(value, 0) ThenBlock: {
+                value_len = StringLength(value)
+                Deallocate(value, Add(value_len, 1))
+            }
+            Arena_Free(head, 24)
+            head = next
+        }
+        Arena_Free(list, 24)
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+Function.Util.BinarySearch {
+    Input: arr: Address
+    Input: target: Integer
+    Output: Integer
+    Body: {
+        size = Array.Size(arr)
+        left = 0
+        right = Subtract(size, 1)
+        WhileLoop LessEqual(left, right) {
+            mid = Divide(Add(left, right), 2)
+            mid_val = Array.Get(arr, mid)
+            IfCondition EqualTo(mid_val, target) ThenBlock: {
+                ReturnValue(mid)
+            }
+            IfCondition LessThan(mid_val, target) ThenBlock: {
+                left = Add(mid, 1)
+            } ElseBlock: {
+                right = Subtract(mid, 1)
+            }
+        }
+        ReturnValue(Collections.XNULL)
+    }
+}
+
+Function.Util.QuickSort {
+    Input: arr: Address
+    Input: low: Integer
+    Input: high: Integer
+    Output: Integer
+    Body: {
+        IfCondition LessThan(low, high) ThenBlock: {
+            pivot_index = Util.Partition(arr, low, high)
+            Util.QuickSort(arr, low, Subtract(pivot_index, 1))
+            Util.QuickSort(arr, Add(pivot_index, 1), high)
+        }
+        ReturnValue(1)
+    }
+}
+
+Function.Util.Partition {
+    Input: arr: Address
+    Input: low: Integer
+    Input: high: Integer
+    Output: Integer
+    Body: {
+        pivot = Array.Get(arr, high)
+        i = Subtract(low, 1)
+        j = low
+        WhileLoop LessThan(j, high) {
+            current = Array.Get(arr, j)
+            IfCondition LessEqual(current, pivot) ThenBlock: {
+                i = Add(i, 1)
+                temp = Array.Get(arr, i)
+                Array.Set(arr, i, current)
+                Array.Set(arr, j, temp)
+            }
+            j = Add(j, 1)
+        }
+        i = Add(i, 1)
+        temp = Array.Get(arr, i)
+        Array.Set(arr, i, pivot)
+        Array.Set(arr, high, temp)
+        ReturnValue(i)
+    }
+}
+
+Function.Util.FindMax {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        size = Array.Size(arr)
+        IfCondition EqualTo(size, 0) ThenBlock: {
+            ReturnValue(Collections.XERROR)
+        }
+        max_val = Array.Get(arr, 0)
+        i = 1
+        WhileLoop LessThan(i, size) {
+            current = Array.Get(arr, i)
+            IfCondition GreaterThan(current, max_val) ThenBlock: {
+                max_val = current
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(max_val)
+    }
+}
+
+Function.Util.FindMin {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        size = Array.Size(arr)
+        IfCondition EqualTo(size, 0) ThenBlock: {
+            ReturnValue(Collections.XERROR)
+        }
+        min_val = Array.Get(arr, 0)
+        i = 1
+        WhileLoop LessThan(i, size) {
+            current = Array.Get(arr, i)
+            IfCondition LessThan(current, min_val) ThenBlock: {
+                min_val = current
+            }
+            i = Add(i, 1)
+        }
+        ReturnValue(min_val)
+    }
+}
+
+Function.Util.Reverse {
+    Input: arr: Address
+    Output: Integer
+    Body: {
+        size = Array.Size(arr)
+        left = 0
+        right = Subtract(size, 1)
+        WhileLoop LessThan(left, right) {
+            left_val = Array.Get(arr, left)
+            right_val = Array.Get(arr, right)
+            Array.Set(arr, left, right_val)
+            Array.Set(arr, right, left_val)
+            left = Add(left, 1)
+            right = Subtract(right, 1)
+        }
+        ReturnValue(1)
+    }
+}
+
+// =============================================================================
+// STREAM OPERATIONS
+// =============================================================================
+
+Function.Stream.Destroy {
+    Input: stream: Address
+    Output: Integer
+    Body: {
+        IfCondition NotEqual(stream, 0) ThenBlock: {
+            size = Array.Size(stream)
+            i = 0
+            WhileLoop LessThan(i, size) {
+                entry = Array.Get(stream, i)
+                entry_size = Array.Size(entry)
+                j = 0
+                WhileLoop LessThan(j, entry_size) {
+                    field_or_value = Array.Get(entry, j)
+                    fv_len = StringLength(field_or_value)
+                    Deallocate(field_or_value, Add(fv_len, 1))
+                    j = Add(j, 1)
+                }
+                Array.Destroy(entry)
+                i = Add(i, 1)
+            }
+            Array.Destroy(stream)
+        }
+        ReturnValue(1)
+    }
+}
+

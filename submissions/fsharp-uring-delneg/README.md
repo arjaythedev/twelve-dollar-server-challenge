@@ -66,7 +66,9 @@
   pass to requests that were already late, at the peak, and made many more late.
 - **Checkpoints, and writes that don't wait for them.** SQLite's automatic checkpoints are off (a WAL hook counts
   frames). Every 16,000 new frames the loop asks the checkpoint thread for a PASSIVE checkpoint and learns it
-  finished from an eventfd its ring reads. Under steady writes a pass never ends with the WAL fully copied, so the WAL
+  finished from an eventfd its ring reads. While more than a pass of requests is waiting (the top of the ramp) the next
+  pass is put off, up to 64,000 uncopied frames: a pass costs the checkpoint thread 35-45 ms of CPU, and at nice 19 it
+  still gets some of the one CPU while the loop is short of it. Under steady writes a pass never ends with the WAL fully copied, so the WAL
   can't rewind unless writes stop for a pass. They used to: past 16,384 frames (64 MB), about every 3 s at 300k users,
   writes waited (reads went on) until a pass had copied everything. On the test box a pass was running 22 % of the
   time and each hold kept writes ~200 ms. With the server's disk writes capped at 25 MB/s (it writes ~21 MB/s at
@@ -231,7 +233,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `POSTRUN` (32), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `CKDEFER` (ms, 500; 0: passes never put off), `CKDEFERMAX` (passes, 4), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `POSTRUN` (32), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
 startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `STATS` (1: a line a second on stderr).

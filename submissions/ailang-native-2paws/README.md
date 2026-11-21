@@ -48,7 +48,7 @@ bash test/run.sh submissions/ailang-native-2paws
 AILANG is self-hosting and has no apt package. Its compiler is one static binary, `ailang.x`, published in the AILANG repository at [AiLang-Author/Ailang-Self-Hosting-](https://github.com/AiLang-Author/Ailang-Self-Hosting-) together with its source.
 
 - `install.sh` downloads `ailang.x` from that repository at a pinned commit (`0117d392`, branch `master`), checks its sha256 (`6e4f069f809f9b2bb3491bf0fb5d9f55f479417574874d60d947db9115b66daa`) and installs it to `/usr/local/bin/ailang.x`.
-- `build.sh` compiles the server with it. Set `AILANG_COMPILER` to use a different compiler.
+- `build.sh` compiles the server with it, with `-TS` (tree-shaking: only functions reachable from the server are emitted, 424 of 648, and the binary drops from 336 KB to 241 KB). Set `AILANG_COMPILER` to use a different compiler.
 - No compiler or server binary is committed here. The compiler belongs to the AILANG project and is not covered by this repository's MIT license.
 
 ## How it works

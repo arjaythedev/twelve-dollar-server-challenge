@@ -9,4 +9,5 @@ if [[ ! -x "$COMPILER" ]]; then
   exit 1
 fi
 export AILANG_LIB_PATH="$PWD/Librarys"
-"$COMPILER" feed_server.ailang -o feed_server.x
+# -TS: tree-shake, so only functions reachable from the server are emitted
+"$COMPILER" -TS feed_server.ailang -o feed_server.x

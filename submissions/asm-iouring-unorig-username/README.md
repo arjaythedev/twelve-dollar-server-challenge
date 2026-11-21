@@ -19,7 +19,7 @@ SQLite's public `sqlite3_*` API.
 
 | | |
 |---|---|
-| Language | x86-64 assembly, NASM 2.16 (Ubuntu 24.04 `nasm`), System V ABI throughout: `server.asm`, 6,087 lines |
+| Language | x86-64 assembly, NASM 2.16 (Ubuntu 24.04 `nasm`), System V ABI throughout: `server.asm`, 6,088 lines |
 | C | `shim.c` only, 253 lines: database glue around the amalgamation's internal B-tree calls (above), ported from the database section of our C entry's `server.c` |
 | SQLite | 3.54.1, the official amalgamation, unmodified, SHA-256 pinned in `build.sh`, compiled into the shim with `gcc -O3 -march=native` |
 | Linking | `gcc -no-pie` against glibc (`main` is the entry point, so SQLite's C runtime is set up); the assembly calls `malloc`/`realloc`/`free`, `time`, `clock_gettime`, `strtod` and `dprintf` |

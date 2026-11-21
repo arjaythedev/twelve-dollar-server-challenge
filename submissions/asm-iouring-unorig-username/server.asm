@@ -270,10 +270,12 @@ zeros128: times 128 db 0
 wait_ts:  dq 0, 2000000        ; __kernel_timespec: a busy pass waits at most 2 ms
 wait_arg: dq 0, 0, wait_ts     ; io_uring_getevents_arg: sigmask, sigmask_sz + pad, ts
 
+section .arena nobits alloc noexec write align=2097152
+arena:    resb BATCH_OUT            ; 2 MB aligned, so all of it can sit on huge pages
+
 section .bss
 alignb 16
 rings:    resb MAXRINGS*128
-arena:    resb BATCH_OUT
 segs:     resb MAXSEG*16        ; {who q, off d, len d}
 txtbuf:   resb MAXREQ           ; decoded body
 unamebuf: resb 1024
@@ -5976,9 +5978,8 @@ main:
   mov [started], rax
   mov [now_s], rax
   mov qword [awr], arena
-  lea rdi, [arena+0x1fffff] ; the arena on huge pages where it covers a whole one
-  and rdi, -0x200000
-  mov esi, 0x200000
+  lea rdi, [arena]           ; the arena on huge pages
+  mov esi, BATCH_OUT
   mov edx, 14
   mov eax, SYS_madvise
   syscall

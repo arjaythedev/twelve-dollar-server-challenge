@@ -32,13 +32,13 @@ namespace {
 
 constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
 constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-kensac #264 uses 16) */
-/* accept 在途总量（按存活 ring 数均分，再按 8 个 listener 均分）。2,048 是 5 个 ring 时
- * 每 listener 51 个，而 ring 表只有 65,535 项——ramp 期这些在途 accept 会提前把
- * open + kAcceptDepth 顶到表上限，让 accept 提前停摆。c-iouring-kensac #264 的
- * ACCEPT_DEPTH 是 512（每 ring）、每 listener 64，思路是「够用就少占」。这里取 1,024：
- * 5 个 ring 时每 listener 25，仍高于 arm_accept 的 16 下限，同时把预占的表项减半。 */
-constexpr uint32_t kAcceptDepth = 1024;
-constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
+/* accept 在途数：**每个 ring 固定 512**，不随 ring 数稀释。原来是「总 2048 除以 ring 数」，
+ * 而 ring 数正是随连接数增长的（300k 时约 10 个），于是每 listener 的在途 accept 从 51 掉到
+ * 32，ring 再多就会撞上 per<16 的下限而完全停投。c-iouring-kensac #264 与
+ * fsharp-uring-delneg #437 都是每 ring 512（每 listener 64），与 ring 数无关。
+ * 顺带把 full() 的阈值也放宽：现在要到 open + 512 才判定「满」，ring 顶端的 1,536 个槽位
+ * 不再被提前判掉——310k/320k 正卡在这个边界上。 */
+constexpr uint32_t kAcceptDepth = 512;
 
 // 同一端口上相互独立的 SO_REUSEPORT listener，由所有 ring 共享。每个 listener 有自己的
 // accept 队列（受 net.core.somaxconn 限制），所以 8 个 listener 在 ramp 期就是 8 条待建连接
@@ -62,7 +62,13 @@ constexpr size_t kDrainBudget = 2048;
 // 单个 pass 最多答多少个请求。读不受此限：超过上限的接收数据留在连接上，由后续 pass 按
 // 最老优先回答，所以一个繁忙的 pass 不会把它后面排队的所有请求一起拖慢
 // （rust-iouring-kensac #264 同样限制 2,048，并用就绪队列保序）。
-constexpr uint32_t kAnswersPerPass = 2048;
+/* 每 pass 答多少请求。2,048 是错的：一个请求 27 us，2,048 个就是 55 ms，pass 本身就长，
+ * 排队一叠加 p99 就失控（280k 探针 5.6 s）。fsharp-uring-delneg #437 的 ANSWERS 默认是 64，
+ * 一个 pass 约 1.7 ms，backlog 被摊平成很多短 pass。 */
+/* 每 pass 答多少请求。2,048 太长（一个 pass 55 ms，ramp 期 p99 失控）；64 让 pass 只有 1.7 ms，
+ * 但把 COMMIT 推到 391 次/秒（约 1.2% CPU）；256 是折中：pass 6.9 ms、COMMIT 98 次/秒，本地
+ * 20k 连接的 p99 从 64 时的 227 ms 降到 87.6 ms。 */
+constexpr uint32_t kAnswersPerPass = 256;
 constexpr uint32_t kIdleSeconds = 90;
 
 constexpr uint64_t kEvAccept = 1;
@@ -198,6 +204,11 @@ class Server {
           return false;
         }
         setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
+        /* 关掉 TCP_QUICKACK：连接建立后的第一个请求由响应顺带确认，而不是内核先补一个
+         * 单独的 bare ACK。ramp 期每个连接都能少一个包（fsharp-uring-delneg #437 的做法，
+         * 他们因此把 p95 从 154 ms 降到 16 ms 的尾部问题里也提到过；QUICKACK=1 恢复默认）。 */
+        int quickack = 0;
+        setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quickack, sizeof quickack);
         /* 接收缓冲上限设在 listener 上，accept 出来的连接会继承（c-iouring-jowinjestine #486
          * 就是这么做的：8 个 listener 一律 16 KiB，PSI 高压时再降到 8 KiB）。默认的自动调优
          * 会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上的。请求只有
@@ -482,9 +493,7 @@ class Server {
   }
 
   void arm_accept(Worker& w, uint32_t wi) {
-    uint32_t depth = static_cast<uint32_t>(kAcceptDepth / workers_.size());
-    if (depth < kAcceptsPerRing) depth = kAcceptsPerRing;
-    const uint32_t per = depth / kListeners;
+    const uint32_t per = kAcceptDepth / kListeners;
     if (per < 16) return;
     for (uint32_t li = 0; li < kListeners; li++) {
       const int fd = w.listeners()[li];

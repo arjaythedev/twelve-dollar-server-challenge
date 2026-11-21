@@ -12,6 +12,11 @@ struct dbx {
   sqlite3 *ckdb;
   Btree *bt;
   BtCursor *cur[4];
+  /* 作者查找每个槽位一个专属游标（fsharp-uring-delneg #437 的做法）。所有用户的 feed 读的是
+   * 同一批最近 20 个帖子及其作者，于是同一个 pass 里第 2 个请求调用 TableMoveto 时，游标已经
+   * 停在那一行，sqlite3BtreeTableMoveto 直接走 info.nKey==intKey 的快路径返回，不再从根下降。
+   * 50 万个请求/5 分钟里绝大多数都吃到这个路径。 */
+  BtCursor *acur[32];
   Pgno root[4];
   KeyInfo *ki_feed;
   KeyInfo *ki_likes;
@@ -23,6 +28,9 @@ struct dbx {
   _Atomic long long gate_since;
   unsigned char *rec;
   unsigned rec_cap;
+  /* checkpoint 把帧拷回主库之后，WAL 里那些页在内核页缓存里已经没用了；2 GB 的机器上它们
+   * 占的是常驻内存（fsharp-uring-delneg #437 每轮之后也会丢掉这些帧的缓存）。 */
+  int walfd;
 };
 
 static int fail(sqlite3 *db, char *err, int n, const char *what) {
@@ -175,6 +183,7 @@ static void shim_log(const char *fmt, ...) {
 static void close_cursors(struct dbx *h) {
   if (!h->in_tx) return;
   for (int i = 0; i < 4; i++) sqlite3BtreeCloseCursor(h->cur[i]);
+  for (int i = 0; i < 32; i++) sqlite3BtreeCloseCursor(h->acur[i]);
   h->in_tx = 0;
 }
 
@@ -197,7 +206,9 @@ void dbx_close(dbx *h) {
   if (h->ki_feed) sqlite3KeyInfoUnref(h->ki_feed);
   if (h->ki_likes) sqlite3KeyInfoUnref(h->ki_likes);
   for (int i = 0; i < 4; i++) sqlite3_free(h->cur[i]);
+  for (int i = 0; i < 32; i++) sqlite3_free(h->acur[i]);
   if (h->rec) sqlite3_free(h->rec);
+  if (h->walfd >= 0) close(h->walfd);
   if (h->ckdb) sqlite3_close(h->ckdb);
   sqlite3_close(h->db);
   sqlite3_free(h);
@@ -529,7 +540,7 @@ dbx *dbx_open(const char *path, char *err, int n) {
 
   static const char *pragmas[] = {
       "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL",
-      "PRAGMA temp_store = MEMORY", "PRAGMA cache_size = -16384",
+      "PRAGMA temp_store = MEMORY", "PRAGMA cache_size = -65536",
       "PRAGMA mmap_size = 0", "PRAGMA wal_autocheckpoint = 0",
       "SELECT count(*) FROM sqlite_schema",
   };
@@ -585,8 +596,11 @@ dbx *dbx_open(const char *path, char *err, int n) {
   h->st_begin = prep(h->db, "BEGIN");
   h->st_commit = prep(h->db, "COMMIT");
   h->st_rollback = prep(h->db, "ROLLBACK");
+  /* 显式绑定 created_at，不再让 SQLite 求值列默认值里的 strftime()，也不再走 RETURNING：
+   * 每插入一条都要跑一遍 strftime 求值加一次 RETURNING 取值（fsharp-uring-delneg #437 同样
+   * 自己算时间戳并用 sqlite3_last_insert_rowid 拿 id）。 */
   h->st_post = prep(h->db,
-                    "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at");
+                    "INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
   h->st_like = prep(h->db,
                     "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING");
   h->st_health = prep(h->db, "SELECT 1");
@@ -604,10 +618,25 @@ dbx *dbx_open(const char *path, char *err, int n) {
   }
   sqlite3_exec(h->ckdb, "SELECT * FROM sqlite_schema", 0, 0, 0);
   h->bt = h->db->aDb[0].pBt;
+  h->walfd = -1;
+  {
+    /* 只读打开 -wal，用于 checkpoint 之后 fadvise(DONTNEED)。打不开就跳过。 */
+    char wp[1024];
+    int wn = snprintf(wp, sizeof wp, "%s-wal", path);
+    if (wn > 0 && (size_t)wn < sizeof wp) h->walfd = open(wp, O_RDONLY | O_CLOEXEC);
+  }
   for (int i = 0; i < 4; i++) {
     h->cur[i] = (BtCursor *)sqlite3_malloc(sqlite3BtreeCursorSize());
     if (!h->cur[i]) {
       fail(h->db, err, n, "cursor");
+      dbx_close(h);
+      return 0;
+    }
+  }
+  for (int i = 0; i < 32; i++) {
+    h->acur[i] = (BtCursor *)sqlite3_malloc(sqlite3BtreeCursorSize());
+    if (!h->acur[i]) {
+      fail(h->db, err, n, "author cursor");
       dbx_close(h);
       return 0;
     }
@@ -638,6 +667,15 @@ int dbx_begin(dbx *h) {
     KeyInfo *ki = (i == DBX_FEED_IDX) ? h->ki_feed : (i == DBX_LIKES_IDX ? h->ki_likes : 0);
     if (sqlite3BtreeCursor(h->bt, h->root[i], 0, ki, h->cur[i]) != SQLITE_OK) {
       for (int j = 0; j < i; j++) sqlite3BtreeCloseCursor(h->cur[j]);
+      step_reset(h->st_rollback);
+      return -1;
+    }
+  }
+  for (int i = 0; i < 32; i++) {
+    sqlite3BtreeCursorZero(h->acur[i]);
+    if (sqlite3BtreeCursor(h->bt, h->root[DBX_USERS], 0, 0, h->acur[i]) != SQLITE_OK) {
+      for (int j = 0; j < 4; j++) sqlite3BtreeCloseCursor(h->cur[j]);
+      for (int j = 0; j < i; j++) sqlite3BtreeCloseCursor(h->acur[j]);
       step_reset(h->st_rollback);
       return -1;
     }
@@ -691,8 +729,13 @@ int dbx_checkpoint(dbx *h, int *copied) {
     return -1;
   }
   int done = (nlog == 0 || ndone >= nlog);
-  if (done && atomic_load_explicit(&h->wal_frames, memory_order_relaxed) <= nlog)
-    atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+  if (done) {
+    /* 帧已经安全落在主库里了：把 WAL 的这些页从内核页缓存丢掉，别让它们常驻。
+     * 数据已经写完，丢掉缓存不会读回任何东西；下一次写从第 1 帧重新开始。 */
+    if (h->walfd >= 0) posix_fadvise(h->walfd, 0, 0, POSIX_FADV_DONTNEED);
+    if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) <= nlog)
+      atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+  }
   return done ? 0 : 1;
 }
 
@@ -725,10 +768,10 @@ int dbx_wal_frames(dbx *h) {
  * "B-tree cursor reads are fine" ruling; this version only uses the cursor API. */
 int dbx_users_seek_many(dbx *h, const long long *ids, int n, unsigned char *buf, unsigned *lens) {
   if (n <= 0 || n > 32) return -1;
-  BtCursor *c = h->cur[DBX_USERS];
   for (int i = 0; i < n; i++) {
     lens[i] = 0;
     int res = 0;
+    BtCursor *c = h->acur[i];
     if (sqlite3BtreeTableMoveto(c, (i64)ids[i], 0, &res) != SQLITE_OK) return -1;
     if (res != 0 || sqlite3BtreeEof(c)) continue;
     u32 total = sqlite3BtreePayloadSize(c);
@@ -916,29 +959,36 @@ static void check_tx(struct dbx *h) {
   }
 }
 
+/* 与列默认值同格式：strftime('%Y-%m-%dT%H:%M:%fZ','now') → YYYY-MM-DDTHH:MM:SS.SSSZ */
+static int format_now(char *out) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  struct tm tmv;
+  gmtime_r(&ts.tv_sec, &tmv);
+  int n = snprintf(out, 32, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ", tmv.tm_year + 1900,
+                   tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                   ts.tv_nsec / 1000000L);
+  return n;
+}
+
 int dbx_insert_post(dbx *h, long long uid, const char *body, int len, long long *id, char *created,
                     int *clen) {
+  *clen = format_now(created);
+  if (*clen <= 0 || *clen > 31) return -1;
   sqlite3_bind_int64(h->st_post, 1, uid);
   sqlite3_bind_text(h->st_post, 2, body, len, SQLITE_STATIC);
+  sqlite3_bind_text(h->st_post, 3, created, *clen, SQLITE_STATIC);
   int rc = sqlite3_step(h->st_post);
-  if (rc != SQLITE_ROW) {
+  if (rc != SQLITE_DONE) {
     sqlite3_reset(h->st_post);
+    sqlite3_clear_bindings(h->st_post);
     check_tx(h);
     return -1;
   }
-  *id = sqlite3_column_int64(h->st_post, 0);
-  int n = sqlite3_column_bytes(h->st_post, 1);
-  const unsigned char *t = sqlite3_column_text(h->st_post, 1);
-  if (!t || n > 63) {
-    sqlite3_reset(h->st_post);
-    return -1;
-  }
-  memcpy(created, t, (size_t)n);
-  *clen = n;
-  rc = sqlite3_step(h->st_post);
+  *id = sqlite3_last_insert_rowid(h->db);
   sqlite3_reset(h->st_post);
   sqlite3_clear_bindings(h->st_post);
-  return rc == SQLITE_DONE ? 0 : -1;
+  return 0;
 }
 
 int dbx_insert_like(dbx *h, long long uid, long long pid) {

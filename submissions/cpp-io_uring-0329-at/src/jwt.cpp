@@ -1,5 +1,38 @@
 #include "jwt.hpp"
 
+/* SHA-256 的 64 轮压缩交给 libcrypto（fsharp-uring-delneg #437 也是调用 OpenSSL 的
+ * SHA-256）。SHA256_Transform 是导出的，而且只读写 ctx->h，而 h 是 SHA256_CTX 的第一个
+ * 成员，所以直接把自己的 8 字状态传进去即可，增量哈希与 HMAC 的结构完全不用改。
+ * 用 dlopen 解析：编译期不依赖 libssl-dev，也允许链接时没有 libcrypto；解析不到就用本文件
+ * 里的标量实现，行为完全一致。OpenSSL 内部的 CPU 派发会自己挑 AVX2/AVX-512/SHA-NI 路径。 */
+#if defined(__linux__)
+#include <dlfcn.h>
+#endif
+
+namespace {
+
+using sha256_transform_fn = void (*)(void*, const unsigned char*);
+sha256_transform_fn g_transform = nullptr;
+
+void resolve_transform() {
+#if defined(__linux__)
+  static bool tried = false;
+  if (tried) return;
+  tried = true;
+  void* lib = dlopen("libcrypto.so.3", RTLD_LAZY | RTLD_LOCAL);
+  if (!lib) lib = dlopen("libcrypto.so", RTLD_LAZY | RTLD_LOCAL);
+  if (!lib) return;
+  /* OpenSSL 3 的 CPU 派发在初始化时完成，先显式初始化一次再取符号。 */
+  using init_fn = int (*)(unsigned long long, const void*);
+  if (auto init = reinterpret_cast<init_fn>(dlsym(lib, "OPENSSL_init_crypto")))
+    init(0, nullptr);
+  g_transform = reinterpret_cast<sha256_transform_fn>(dlsym(lib, "SHA256_Transform"));
+#endif
+}
+
+}  // namespace
+
+
 #include <cstring>
 
 #include "json.hpp"
@@ -20,6 +53,10 @@ constexpr uint32_t kK[64] = {
 inline uint32_t rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
 
 void compress(uint32_t h[8], const uint8_t* block) {
+  if (g_transform) {
+    g_transform(h, block); /* OpenSSL 只读写这 8 个字，不碰 ctx 的其它字段 */
+    return;
+  }
   uint32_t w[64];
   for (int i = 0; i < 16; i++)
     w[i] = static_cast<uint32_t>(block[4 * i]) << 24 |
@@ -171,6 +208,7 @@ inline bool starts_with(const uint8_t* s, size_t n, const char* w) {
 }
 
 Sha256 Sha256::create() {
+  resolve_transform();
   Sha256 s{};
   s.h[0] = 0x6a09e667;
   s.h[1] = 0xbb67ae85;

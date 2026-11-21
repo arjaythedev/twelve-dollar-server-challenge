@@ -27,15 +27,17 @@
 
 **连接状态机。** 每个连接有两个正交的状态：`ReadState`（`Idle` 表示 multishot receive 已装好，`Queued` 表示等单发读，`Reading` 表示单发读在途）和 `WriteState`（`Idle`/`Sending`），加上 `open`/`closing`（关闭已提交）/`close_after`（待关闭）三个布尔。状态转移集中在 `drain` 的 switch 里，不再用位标志表达。
 
-**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 2,048 个请求**，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
+**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 256 个请求**（fsharp-uring-delneg #437 的 ANSWERS）：2,048 是错的——一个请求 27 µs，2,048 个就是 55 ms，pass 本身就长，排队一叠加 p99 就失控（280k 探针 5.6 s）；**256** 是折中：一个 pass 约 6.9 ms，COMMIT 从 64 时的 391 次/秒降到 98 次/秒，本地 20k 连接的 p99 从 227 ms 降到 87.6 ms，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
 
 **backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），**等过 16 秒的全部优先**（objc-uring-delneg #326 的第二级），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。
 
 **ring 模型。** ring **按需增长**：起步 1 个，最新一个的表**半满**时加下一个（一次补齐多个，ramp 不落后），上限 **16**。ring 数量按目标连接数推导：`ceil(400,000 / 每 ring 槽位)`。每 ring 的槽位上限是 262,144，但**实际取 `min(硬 RLIMIT_NOFILE, 262,144)`**——基准机 `LimitNOFILE=65535` 时就是 7 个 ring × 65,535 = **458,745 连接**，`NOFILE=1M` 时 2 个 ring × 262,144 = 524,288。表尺寸不按 `RLIMIT_NOFILE` 一次预分配：旧版按 RLIMIT 预分配 6 × 1 M 项曾让常驻内存多出 288 MB，在 2 GB 的机器上就是 300k 连接装不装得下的区别。每 pass 的 `io_uring_enter` 是 1 次/ring；非 0 号 ring 不设 `DEFER_TASKRUN`、只提交不取事件，所以环数增加几乎不加系统调用（3 ring 存活时实测 `enter[wait=1040 sqe=0 ring=66]`）。
 
-**listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时只停止投递 accept，不关闭共享 listener；**等 open 回落到「两个 margin」以下再恢复**（`open + 2*kAcceptDepth < slots`，kensac #264 的恢复条件）——早先只有停、没有恢复，一次短暂的表满就会永久拒绝新连接（270k/280k 的 connection refused）。
+**listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 **64** 个单发 accept 在途（每 ring 固定 512，**不按 ring 数稀释**——ring 数正是随连接数增长的，300k 时约 10 个，按总数除下去每 listener 会从 51 掉到 32，再多就撞上 `per<16` 的下限而停投）`full()` 的阈值也随之放宽到 `open + 512`，ring 顶端的 1,536 个槽位不再被提前判掉（310k/320k 正卡在这个边界）。ring 满时只停止投递 accept，不关闭共享 listener；**等 open 回落到「两个 margin」以下再恢复**（`open + 2*kAcceptDepth < slots`，kensac #264 的恢复条件）——早先只有停、没有恢复，一次短暂的表满就会永久拒绝新连接（270k/280k 的 connection refused）。
 
 **数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed 从 `posts_created_at_id_idx` 顺序取 20 个 id，再在 `posts`/`users` 里按 id 查找（20 个 id 跨度 < 512 时用一次 seek 加顺序扫描，否则退回逐个 seek；阈值与 rust-iouring-kensac #264 的 512 对齐）；like 计数沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），用 `c->ix` 推进后再交给 `sqlite3BtreeNext`，一次遍历统计全部 20 个；20 个作者用 20 次 `sqlite3BtreeTableMoveto`（按 rowid 升序，局部性最好）。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 16 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。
+
+**JWT 的 SHA-256 压缩调用 libcrypto。** `SHA256_Transform` 是 libcrypto 导出的符号，且只读写 `ctx->h`——而 `h` 是 `SHA256_CTX` 的第一个成员，所以把自己的 8 字状态直接传进去即可，增量哈希和 HMAC 的结构一行都不用改，OpenSSL 的 CPU 派发会自己挑 AVX2/AVX-512/SHA-NI 路径（fsharp-uring-delneg #437 同样是走 OpenSSL 的 SHA-256）。用 `dlopen("libcrypto.so.3")` 在第一次 `Sha256::create()` 时解析，所以**编译期不需要 libssl-dev、二进制也不链接 libcrypto**；解析不到就退回本文件的标量实现，行为一致。本地实测 JWT 验证 2.03 → 1.55 µs。
 
 **C++23 编译期计算。** 响应头由 `consteval` 在编译期拼成 `std::array`（状态行 + Content-Type + Content-Length 占位），运行时一次拷贝；JSON 转义表、base64url 表、两位数字表和 serial-type 长度表都是 `constexpr`；record 里的整数用 `std::byteswap` + 位运算解码，输入用 `std::string_view`/`std::span` 表达。
 
@@ -61,7 +63,7 @@
 - 事件循环的等待是有条件的：只要还有待发的读、待写的响应或上一 pass 收到的完成，就 `min_complete=0` 直接 `enter`，**不睡那 1 ms**；只有在完全没事干时才等（1 ms）。这一条是 220k 时 29% CPU 空转的来源。
 - 空闲连接清扫按时间切片（每 50 ms 扫一个 ring 的 1/32），不在 pass 里整表扫 6 M 个槽位——一次整扫在 1 vCPU 上是 25–70 ms，正好是 p99 悬崖。
 - **page cache 外面套一层 `SQLITE_CONFIG_PCACHE2` shim**（来自 #245）：`pcache1` 记住"曾经持有过的最大页号"且从不调低，而 B-tree split 会把一页临时改名到 lock-byte 页号再改回来，于是此后**每次 COMMIT** 的 `xTruncate` 都以为文件尾之外可能有页、把整个 hash 表扫一遍（#245 量到 ~350 µs、~30 次/秒）。shim 记录进入缓存的最大 key（停在 lock-byte 页号的页单独计数），确定不可能有越界页时直接跳过扫描。本地饱和 `/feed`：50.0 → **44.5 µs/请求（−11 %）**。
-- **页缓存 16 MB**（`cache_size=-16384`）：2 GB 机器上要给内核的 socket 内存留位置；16 MB 仍然装得下 feed 的工作集（users 表 + 最新的 posts 页）。64 MB 时的本地 5 分钟保持 p99 是 2.1 ms、16 MB 是 4.2 ms，都远在 1 s 阈值内，换来 RSS 少 14 MB。
+- **页缓存 16 MB**（`cache_size=-65536`）：2 GB 机器上要给内核的 socket 内存留位置；16 MB 仍然装得下 feed 的工作集（users 表 + 最新的 posts 页）。64 MB 时的本地 5 分钟保持 p99 是 2.1 ms、16 MB 是 4.2 ms，都远在 1 s 阈值内，换来 RSS 少 14 MB。
 - No `mmap`: reads go through SQLite's page cache (16 MB).
 
 ## 连接
@@ -69,6 +71,7 @@
 每个 k6 用户持有一个 keep-alive 连接，所以高分意味着在 `LimitNOFILE=65535` 下数十万个 socket。
 
 - 接受的 socket 是 io_uring **直接描述符**：它们位于 ring 的文件表，不占进程 fd 表。表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144），所以同一个二进制在 `NOFILE=65535` 的 CI runner 上会注册 65,535 项并正常起来，在基准机上拿满 262,144。
+- **listener 上关掉 `TCP_QUICKACK`**（接受连接继承）：连接建立后的第一个请求由响应顺带确认，而不是内核先补一个单独的 bare ACK，ramp 期每个连接少一个包（fsharp-uring-delneg #437）。
 - **listener 上设 `SO_RCVBUF=16384`**，accept 出来的连接继承（`ss -tin` 实测服务器侧 `rcv_space:16384`，客户端侧仍是默认值）。默认的自动调优会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上（c-iouring-jowinjestine #486 对同一件事的处理：平时 16 KiB；**PSI 高压时降到 8 KiB**——每 2 秒读一次 `/sys/fs/cgroup/memory.pressure` （full avg10 ≥ 2 % 或 some avg10 ≥ 10 %）与 cgroup 用量（>85 % 上限），连续两次高压才降、连续四次低压才恢复，且只影响**未来 accept** 的连接，绝不节流或关闭已有连接（c-iouring-jowinjestine #486 的迟滞规则）。请求只有一两百字节，16 KiB 放得下几十个；`RCVBUF=` 可覆盖。
 - 端口上是 **8 个共享的 `SO_REUSEPORT` listener**（固定 8 个，与 ring 数无关），每个有独立的 accept 队列；ring 按需增长（1 → 最多 16），每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时停止投递 accept，其他 ring 继续从全部 8 个 listener 接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.

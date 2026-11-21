@@ -30,44 +30,52 @@ static const char *cache_dir(void) {
     return dir;
 }
 
-static unsigned long simple_hash(const char *s) {
-    unsigned long h = 5381;
-    int c;
-    while ((c = (unsigned char)*s++)) h = ((h << 5) + h) + c;
+static unsigned long hash_bytes(unsigned long h, const void *data, size_t len) {
+    const unsigned char *p = data;
+    for (size_t i = 0; i < len; i++) h = ((h << 5) + h) + p[i];
     return h;
 }
 
-static char *hash_file(const char *path) {
+static void hash_key_part(unsigned long *key_hash, const char *path,
+                          unsigned long file_hash, long file_len) {
+    char digest[64];
+    if (file_len < 0) snprintf(digest, sizeof digest, "0");
+    else snprintf(digest, sizeof digest, "%lx_%ld", file_hash, file_len);
+    *key_hash = hash_bytes(*key_hash, path, strlen(path));
+    *key_hash = hash_bytes(*key_hash, ":", 1);
+    *key_hash = hash_bytes(*key_hash, digest, strlen(digest));
+    *key_hash = hash_bytes(*key_hash, ";", 1);
+}
+
+static void hash_file(const char *path, unsigned long *hash, long *length) {
     FILE *f = fopen(path, "rb");
-    if (!f) return xstrdup("0");
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return xstrdup("0"); }
-    long len = ftell(f);
-    if (len < 0) { fclose(f); return xstrdup("0"); }
-    fseek(f, 0, SEEK_SET);
-    char *buf = malloc((size_t)len + 1);
-    if (!buf) { fclose(f); return xstrdup("0"); }
-    fread(buf, 1, (size_t)len, f);
-    buf[len] = 0;
-    fclose(f);
+    if (!f) { *hash = 0; *length = -1; return; }
+
     unsigned long h = 0;
-    for (long i = 0; i < len; i++) h = ((h << 5) + h) + (unsigned char)buf[i];
-    free(buf);
-    char *out = malloc(32);
-    snprintf(out, 32, "%lx_%ld", h, len);
-    return out;
+    long len = 0;
+    unsigned char buf[16384];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) != 0) {
+        h = hash_bytes(h, buf, n);
+        len += (long)n;
+    }
+    if (ferror(f)) { h = 0; len = -1; }
+    fclose(f);
+    *hash = h;
+    *length = len;
 }
 
 char *cache_key_for_files(PtrVec *files, PtrVec *tools) {
-    char *key = malloc(8192);
-    key[0] = 0;
+    /* Hash the concatenated key as it is produced. This is byte-for-byte
+     * equivalent to building the old text key and hashing it afterwards,
+     * without its fixed-size limit or repeated strcat scans. */
+    unsigned long key_hash = 5381;
     for (size_t i = 0; i < files->len; i++) {
         const char *p = files->items[i];
-        char *h = hash_file(p);
-        strcat(key, p);
-        strcat(key, ":");
-        strcat(key, h);
-        strcat(key, ";");
-        free(h);
+        unsigned long file_hash;
+        long file_len;
+        hash_file(p, &file_hash, &file_len);
+        hash_key_part(&key_hash, p, file_hash, file_len);
     }
     /* The toolchain is an input as well: the compiler binary and the
      * runtime sources decide what the build produces. A key that leaves
@@ -76,48 +84,14 @@ char *cache_key_for_files(PtrVec *files, PtrVec *tools) {
     if (tools) {
         for (size_t i = 0; i < tools->len; i++) {
             const char *p = tools->items[i];
-            char *h = hash_file(p);
-            strcat(key, p);
-            strcat(key, ":");
-            strcat(key, h);
-            strcat(key, ";");
-            free(h);
-        }
-    }
-    /* An external static library is an input too. build.sh points
-     * HPHP_SQLITE_LIB at a freshly built SQLite; a cache key that ignores it
-     * hands back a binary linked against the system library instead. */
-    {
-        const char *slib = getenv("HPHP_SQLITE_LIB");
-        if (slib && *slib) {
-            char *h = hash_file(slib);
-            strcat(key, slib);
-            strcat(key, ":");
-            strcat(key, h);
-            strcat(key, ";");
-            free(h);
-        }
-    }
-    /* Compiler and link flags change both object code and linked images.
-     * Include them in the cache identity so switching between portable O2
-     * and target-tuned LTO builds cannot return a stale executable. */
-    unsigned long kh = simple_hash(key);
-    {
-        const char *names[] = {"HPHP_OPT", "HPHP_CFLAGS"};
-        for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
-            const char *v = getenv(names[i]);
-            if (v && *v) {
-                const char *parts[] = {names[i], "=", v, ";"};
-                for (size_t j = 0; j < sizeof parts / sizeof parts[0]; j++)
-                    for (const unsigned char *p = (const unsigned char *)parts[j];
-                         *p; p++)
-                        kh = ((kh << 5) + kh) + *p;
-            }
+            unsigned long file_hash;
+            long file_len;
+            hash_file(p, &file_hash, &file_len);
+            hash_key_part(&key_hash, p, file_hash, file_len);
         }
     }
     char *res = malloc(64);
-    snprintf(res, 64, "cache_%lx", kh);
-    free(key);
+    snprintf(res, 64, "cache_%lx", key_hash);
     return res;
 }
 

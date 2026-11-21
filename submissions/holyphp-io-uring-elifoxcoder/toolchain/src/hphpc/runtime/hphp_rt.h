@@ -7,6 +7,7 @@
 #define HPHP_RT_H
 
 #include <stdint.h>
+#include <stdatomic.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <setjmp.h>
@@ -23,22 +24,12 @@ typedef struct {
     size_t len, cap;
 } Buf;
 void hbuf_init(Buf *b);
-void hbuf_reserve(Buf *b, size_t n);
+void hbuf_putc(Buf *b, char c);
 void hbuf_grow_slow(Buf *b, size_t need);
-
-/* Inline fast path: every response byte goes through these, and a call plus a
- * capacity check per byte is measurable. */
-static inline void hbuf_need(Buf *b, size_t n) {
-    if (b->len + n + 1 > b->cap) hbuf_grow_slow(b, n);
-}
-static inline void hbuf_putc(Buf *b, char c) {
-    hbuf_need(b, 1);
-    b->data[b->len++] = c;
-    b->data[b->len] = 0;
-}
-/* Copy n bytes; short runs (JSON keys, numbers) use fixed-size, overlapping
- * moves that the compiler emits inline instead of a libc memcpy call. Every
- * access stays inside [s, s+n) and [d, d+n). */
+/* Copy n bytes with a few overlapping fixed-size moves the compiler emits
+ * inline instead of a libc memcpy call: response builders append many short
+ * pieces (keys, numbers, punctuation). Every access stays inside [s, s+n)
+ * and [d, d+n). */
 static inline void hbuf_copy(char *d, const char *s, size_t n) {
     if (n >= 8 && n <= 16) {
         uint64_t a, z;
@@ -55,29 +46,10 @@ static inline void hbuf_copy(char *d, const char *s, size_t n) {
     }
 }
 static inline void hbuf_write(Buf *b, const char *s, size_t n) {
-    hbuf_need(b, n);
+    if (b->len + n + 1 > b->cap) hbuf_grow_slow(b, n);
     hbuf_copy(b->data + b->len, s, n);
     b->len += n;
     b->data[b->len] = 0;
-}
-/* Decimal digits of v, written so they end at `end`; returns the first
- * character. `end` needs 20 bytes of room before it. Two digits per step. */
-static inline char *hp_fmt_i64(char *end, int64_t v) {
-    static const char d2[201] =
-        "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
-        "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
-        "8081828384858687888990919293949596979899";
-    uint64_t u = v < 0 ? (uint64_t)0 - (uint64_t)v : (uint64_t)v;
-    char *p = end;
-    while (u >= 100) {
-        unsigned r = (unsigned)(u % 100);
-        u /= 100;
-        p -= 2; memcpy(p, d2 + 2 * r, 2);
-    }
-    if (u >= 10) { p -= 2; memcpy(p, d2 + 2 * u, 2); }
-    else *--p = (char)('0' + u);
-    if (v < 0) *--p = '-';
-    return p;
 }
 void hbuf_puts(Buf *b, const char *s);
 void hbuf_printf(Buf *b, const char *fmt, ...);
@@ -95,65 +67,52 @@ void hbuf_free(Buf *b);
 #define buf_len   hbuf_len
 #define buf_free  hbuf_free
 
+/* ---------- 128-bit integers ----------
+ *
+ * `i128` is a primitive language type backed by gcc's __int128. It is a
+ * native C value everywhere (variables, fields, parameters, returns); it is
+ * NOT an hval payload, because hval's union holds 64 bits. Storing an i128
+ * into an array or a mixed slot is rejected by the compiler, and the few
+ * places that print a value convert it to a string first. */
+typedef __int128 hp_i128;
+typedef unsigned __int128 hp_u128;
+
 /* ---------- forward types ---------- */
 typedef struct hstr hstr;
 typedef struct harr harr;
 typedef struct hobj hobj;
 typedef struct hclosure hclosure;
 typedef struct hval hval;
-
-/* ---------- runtime counters (generic introspection) ----------
- * Plain adds: the VM is single-threaded. Exposed as a JSON object by the
- * runtime_stats() builtin; the indices are the key order. */
-enum {
-    HP_ST_REQ = 0,     /* request reads handed to the program */
-    HP_ST_ENTER,       /* io_uring enter syscalls issued */
-    HP_ST_SQE_SUB,     /* SQEs driven into the kernel in one enter */
-    HP_ST_SQE_PUSH,    /* SQEs accepted by the ring */
-    HP_ST_SQE_PARK,    /* pushes rejected because the ring was full */
-    HP_ST_CQE,         /* CQEs drained (incl. stale + cancels) */
-    HP_ST_CQE_RECV,
-    HP_ST_CQE_SEND,
-    HP_ST_CQE_POLL,
-    HP_ST_ARM_RECV,
-    HP_ST_ARM_SEND,
-    HP_ST_ARM_POLL,
-    HP_ST_ARM_FAIL,    /* an arm could not be queued (ring full / state) */
-    HP_ST_CLOSE,       /* stream_close calls (connection ends) */
-    HP_ST_ACCEPT,      /* accepted connections */
-    HP_ST_SEND_CHUNK,  /* send-payload copies queued (malloc per chunk) */
-    HP_ST_STR_NEW,     /* hstr allocations */
-    HP_ST_SCOPE_END,   /* poll cycles / memory scopes closed */
-    HP_ST_N
-};
-extern uint64_t hp_st[HP_ST_N];
+typedef struct hp_gc_node hp_gc_node;
+typedef struct hp_weak_ref hp_weak_ref;
 
 /* ---------- strings: length-prefixed, refcounted ---------- */
-/* hstr flags */
-#define HP_F_STATIC 1u  /* interned literal: lives in the literal table forever */
-#define HP_F_SCOPED 2u  /* owned by the current request scope: freed by hp_scope_end */
-#define HP_F_BORROWED 4u /* external buffer: valid only until its owner releases it */
-
 struct hstr {
     size_t len;         /* byte length (PHP-style byte strings) */
-    size_t cap;         /* allocated bytes incl. NUL; >= len+1 */
-    uint32_t hash;      /* 0 = not computed */
+    size_t cap;         /* allocated bytes incl. NUL; >= len+1, 0 for literals */
+    atomic_uint hash;   /* 0 = not computed; shared immutable strings may hash concurrently */
     uint32_t rc;
-    uint32_t flags;     /* HP_F_STATIC / HP_F_SCOPED / HP_F_BORROWED */
     char data[];        /* NUL-terminated for C interop */
 };
 
-
 hstr *hp_str_lit(const char *cstr);
-hstr *hp_char_str(unsigned char c);   /* shared 1-byte string (never freed) */
-hstr *hp_str_intern(const char *cstr);   /* cached literal, rc == 0 */
-/* Request scope: strings allocated between begin/end are released in one
- * shot by hp_scope_end(). Values that must outlive the scope are copied out
- * with hp_str_persist(). */
-void hp_scope_begin(void);
-void hp_scope_end(void);
-hstr *hp_str_persist(hstr *s);
+/* First use of a literal site: intern and publish (out of line, cold). */
+hstr *hp_str_lit_site_slow(_Atomic(hstr *) *slot, const char *cstr);
+/* Every string literal in generated code goes through here, so the hot path
+ * (already published) must inline to one load: GCC otherwise keeps an
+ * out-of-line copy because of the CAS. */
+#if defined(__GNUC__)
+__attribute__((always_inline))
+#endif
+static inline hstr *hp_str_lit_site(_Atomic(hstr *) *slot, const char *cstr) {
+    hstr *value = atomic_load_explicit(slot, memory_order_acquire);
+    if (__builtin_expect(value != NULL, 1)) return value;
+    return hp_str_lit_site_slow(slot, cstr);
+}
 hstr *hp_str_new(const char *bytes, size_t len);
+/* A fresh (refcounted) copy of a C string. Use this, not hp_str_lit, for
+ * runtime-computed text: hp_str_lit interns forever. */
+hstr *hp_str_cstr(const char *cstr);
 hstr *hp_str_copy(hstr *s);
 void hp_str_free(hstr *s);
 bool hp_str_eq(hstr *a, hstr *b);
@@ -172,6 +131,10 @@ hstr *hp_str_from_double(double v);
 hstr *hp_str_from_bool(bool b);
 int64_t hp_str_to_int(hstr *s);
 double hp_str_to_double(hstr *s);
+/* i128 <-> string: gcc's printf has no 128-bit conversion, so the decimal
+ * form is produced by hand (and handles the minimum value). */
+hstr *hp_i128_to_str(hp_i128 v);
+hp_i128 hp_str_to_i128(hstr *s);
 bool hp_str_is_numeric(hstr *s); /* PHP is_numeric() on a string value */
 uint32_t hp_str_hash(hstr *s);
 hstr *hp_str_toupper(hstr *s);
@@ -199,39 +162,18 @@ struct hval {
     } u;
 };
 
-hval hp_of_float(double f);
-hval hp_of_arr(harr *a);
-hval hp_of_ptr(void *p);
+/* Boxing helpers are inline: generated code boxes and unboxes on almost
+ * every builtin call, and an out-of-line call per box cost more than the
+ * work it wrapped (the challenge feed decoder spent ~10% of its CPU here). */
+static inline hval hp_of_int(int64_t i) { hval v = { HV_INT, { .i = i } }; return v; }
+static inline hval hp_of_float(double f) { hval v = { HV_FLOAT, { .f = f } }; return v; }
+static inline hval hp_of_bool(bool b) { hval v = { HV_BOOL, { .b = b } }; return v; }
+static inline hval hp_of_str(hstr *s) { hval v = { HV_STR, { .s = s } }; return v; }
+static inline hval hp_of_arr(harr *a) { hval v = { HV_ARR, { .a = a } }; return v; }
+static inline hval hp_of_ptr(void *p) { hval v = { HV_OBJ, { .p = p } }; return v; }
 hval hp_of_clo(hclosure *c);
-
-/* The hot boxing/unboxing paths are inline: every builtin call and every
- * array index goes through them, and a function call there shows up in the
- * profile. The slow cases live in hphp_rt.c. */
-static inline hval hp_of_int(int64_t i) {
-    hval v;
-    v.tag = HV_INT;
-    v.u.i = i;
-    return v;
-}
-static inline hval hp_of_bool(bool b) {
-    hval v;
-    v.tag = HV_BOOL;
-    v.u.i = 0;      /* the whole union, so no uninitialised bytes travel */
-    v.u.b = b;
-    return v;
-}
-static inline hval hp_of_str(hstr *s) {
-    hval v;
-    v.tag = HV_STR;
-    v.u.s = s;
-    return v;
-}
-int64_t hp_val_to_int_slow(hval v);
-static inline int64_t hp_val_to_int(hval v) {
-    if (v.tag == HV_INT) return v.u.i;
-    return hp_val_to_int_slow(v);
-}
 static inline hval hp_hv_id(hval v) { return v; }
+hval hp_of_i128_str(hp_i128 v);     /* box an i128 as its decimal string */
 #define hv(x) _Generic((x), \
     hval: hp_hv_id, \
     int: hp_of_int, \
@@ -241,6 +183,7 @@ static inline hval hp_hv_id(hval v) { return v; }
     unsigned int: hp_of_int, \
     double: hp_of_float, \
     bool: hp_of_bool, \
+    hp_i128: hp_of_i128_str, \
     hstr*: hp_of_str, \
     harr*: hp_of_arr, \
     hclosure*: hp_of_clo, \
@@ -252,9 +195,16 @@ harr *hp_null_arr(void);
 void hp_val_free(hval v);
 void hp_val_rc_inc(hval v);
 void hp_val_rc_dec(hval v);
+hval hp_assign_hval(hval *slot, hval value, bool retain_value);
+void *hp_assign_ptr(void **slot, void *value, HKind kind, bool retain_value);
+hval hp_arg_keep_hval(hval value, bool retain_value);
+void *hp_arg_keep_ptr(void *value, HKind kind, bool retain_value);
 const char *hp_kind_name(HKind k);
 hstr *hp_val_to_str(hval v);       /* PHP-style cast to string */
-int64_t hp_val_to_int(hval v);
+int64_t hp_val_to_int_slow(hval v);
+static inline int64_t hp_val_to_int(hval v) {
+    return v.tag == HV_INT ? v.u.i : hp_val_to_int_slow(v);
+}
 double hp_val_to_float(hval v);
 bool hp_val_to_bool(hval v);
 bool hp_val_eq(hval a, hval b);    /* == */
@@ -275,28 +225,59 @@ struct harr {
     uint32_t *index;    /* hash -> slot+1 table; NULL = not built */
     uint32_t icap;      /* power of two, or 0 */
     uint32_t ibudget;   /* inserts until full rebuild (tombstone pressure) */
+    hp_gc_node *gc;
 };
+
+/* Function-local arena used only for values proven not to escape. */
+typedef struct { void *blocks, *current, *tail, *active_tail; } hp_region;
+void hp_region_begin(hp_region *region);
+void hp_region_reset(hp_region *region);
+void hp_region_end(hp_region *region);
+harr *hp_region_arr_scalars(hp_region *region, size_t len, const hval *values);
+hstr *hp_region_str_copy(hp_region *region, const hstr *source);
 
 harr *hp_arr_new(void);
 harr *hp_arr_of(int n, const hval *vals);      /* counted hval array */
+harr *hp_arr_of_take(int n, const hval *vals); /* consumes one owner per element */
 harr *hp_map_of(int n, const hval *kvs);       /* k,v,k,v... counted */
+harr *hp_map_of_take(int n, const hval *kvs);  /* consumes k,v owners */
 harr *hp_arr_clone(harr *a);   /* deep copy */
 harr *hp_arr_cow(harr *a);     /* returns a writable version (COW) */
 void hp_arr_push(harr *a, hval v);
+void hp_arr_push_take(harr *a, hval v);
 hval hp_arr_push_v(harr *a, hval v);   /* PHP $a[] = v; returns the array ptr as hval */
+hval hp_arr_push_v_take(harr *a, hval v);
 harr *hp_val_to_arr(hval v);               /* PHP (array) cast */
 hval hp_arr_push_vv(hval container, hval v); /* append through a boxed (hval) container */
+hval hp_arr_push_vv_take(hval container, hval v);
 hval hp_val_clone_v(hval v);           /* value-semantics copy: deep-clones arrays */
 int64_t hp_pow_i(int64_t a, int64_t b); /* integer pow for ** on ints */
 hval hp_arr_pop(harr *a);
 hval hp_arr_shift(harr *a);
 void hp_arr_unshift(harr *a, hval v);
 hval hp_arr_get(harr *a, hval idx);
+hval hp_arr_get_unchecked(harr *a, int64_t idx); /* compiler-proven in-range access */
+hval hp_arr_take(harr *a, hval idx); /* remove and transfer one uniquely-owned element */
 hval hp_arr_get_v(hval container, hval idx); /* PHP-style: index any value */
-void hp_arr_set_v(hval container, hval idx, hval v); /* set on hval container */
+hval hp_arr_set_v(hval container, hval idx, hval v); /* set on hval container */
+hval hp_arr_set_take(harr *a, hval idx, hval v);
+hval hp_arr_set_v_take(hval container, hval idx, hval v);
 void hp_arr_set(harr *a, hval idx, hval v);
+hval hp_arr_set_owner(harr **owner, hval idx, hval v);
+hval hp_arr_set_hval_owner(hval *owner, hval idx, hval v);
+hval hp_arr_set_owner_take(harr **owner, hval idx, hval v);
+hval hp_arr_set_hval_owner_take(hval *owner, hval idx, hval v);
+hval hp_arr_path_set_owner_take(harr **owner, const hval *path, size_t path_len, hval v);
+void hp_arr_push_owner(harr **owner, hval v);
+void hp_arr_push_hval_owner(hval *owner, hval v);
+hval hp_arr_push_owner_take(harr **owner, hval v);
+hval hp_arr_push_hval_owner_take(hval *owner, hval v);
 bool hp_arr_has(harr *a, hval key);
 void hp_arr_unset(harr *a, hval key);
+hval hp_arr_unset_owner(harr **owner, hval key);
+hval hp_arr_unset_hval_owner(hval *owner, hval key);
+void *hp_move_ptr(void *slot); /* take a pointer-valued slot and clear it */
+hval hp_move_hval(hval *slot); /* take a boxed value and clear its slot */
 int64_t hp_arr_len(harr *a);
 harr *hp_arr_slice(harr *a, int64_t start, int64_t end);
 harr *hp_arr_keys(harr *a);
@@ -338,7 +319,6 @@ hval hp_divv(hval a, hval b);
 bool hp_streq(hval a, hval b);
 bool hp_ident_eq(hval a, hval b);
 hval hpbi_stream_socket_accept2(hval srv, hval timeout_ms);
-hval hpbi_accept_emfile(void);
 bool hp_lt(hval a, hval b);
 bool hp_gt(hval a, hval b);
 bool hp_le(hval a, hval b);
@@ -360,6 +340,65 @@ static inline bool hp_ge_f(double a, double b) { return a >= b; }
 static inline bool hp_lt_f(double a, double b) { return a < b; }
 static inline bool hp_gt_f(double a, double b) { return a > b; }
 static inline bool hp_eq_f(double a, double b) { return a == b; }
+
+/* i128 fast paths. Division and modulo throw the same errors as the int
+ * versions; comparison yields the PHP spaceship value. */
+static inline hp_i128 hp_i128_div(hp_i128 a, hp_i128 b) {
+    if (b == 0) hp_throw_str("Division by zero");
+    if (a == (hp_i128)((hp_u128)1 << 127) && b == -1) return a;
+    return a / b;
+}
+static inline hp_i128 hp_i128_from_u(hp_u128 value) {
+    return (hp_i128)value;
+}
+static inline hp_i128 hp_i128_add_wrap(hp_i128 a, hp_i128 b) {
+    return hp_i128_from_u((hp_u128)a + (hp_u128)b);
+}
+static inline hp_i128 hp_i128_sub_wrap(hp_i128 a, hp_i128 b) {
+    return hp_i128_from_u((hp_u128)a - (hp_u128)b);
+}
+static inline hp_i128 hp_i128_mul_wrap(hp_i128 a, hp_i128 b) {
+    return hp_i128_from_u((hp_u128)a * (hp_u128)b);
+}
+static inline hp_i128 hp_i128_neg_wrap(hp_i128 a) {
+    return hp_i128_from_u((hp_u128)0 - (hp_u128)a);
+}
+static inline hp_i128 hp_i128_shl_wrap(hp_i128 a, int n) {
+    if (n < 0 || n >= 128) return 0;
+    return hp_i128_from_u((hp_u128)a << n);
+}
+static inline hp_i128 hp_i128_shr_safe(hp_i128 a, int n) {
+    if (n < 0) return 0;
+    if (n >= 128) return a < 0 ? -1 : 0;
+    return a >> n;
+}
+static inline int64_t hp_i64_from_u(uint64_t value) {
+    return (int64_t)value;
+}
+static inline int64_t hp_i64_add_wrap(int64_t a, int64_t b) { return hp_i64_from_u((uint64_t)a + (uint64_t)b); }
+static inline int64_t hp_i64_sub_wrap(int64_t a, int64_t b) { return hp_i64_from_u((uint64_t)a - (uint64_t)b); }
+static inline int64_t hp_i64_mul_wrap(int64_t a, int64_t b) { return hp_i64_from_u((uint64_t)a * (uint64_t)b); }
+static inline int64_t hp_i64_neg_wrap(int64_t a) { return hp_i64_from_u((uint64_t)0 - (uint64_t)a); }
+static inline int64_t hp_i64_shl_wrap(int64_t a, int n) {
+    if (n < 0 || n >= 64) return 0;
+    return hp_i64_from_u((uint64_t)a << n);
+}
+static inline int64_t hp_i64_shr_safe(int64_t a, int n) {
+    if (n < 0) return 0;
+    if (n >= 64) return a < 0 ? -1 : 0;
+    return a >> n;
+}
+static inline hp_i128 hp_i128_mod(hp_i128 a, hp_i128 b) {
+    if (b == 0) hp_throw_str("Modulo by zero");
+    if (a == (hp_i128)((hp_u128)1 << 127) && b == -1) return 0;
+    return a % b;
+}
+static inline int64_t hp_i128_cmp(hp_i128 a, hp_i128 b) {
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+hp_i128 hp_i128_pow(hp_i128 a, hp_i128 b);
+hval hp_i128_var_dump(hp_i128 v);   /* var_dump in the int(…) shape */
+hstr *hp_i128_print_r(hp_i128 v);   /* print_r: prints and returns the text */
 int64_t hp_cmp(hval a, hval b);   /* spaceship on hvals */
 int64_t hp_mod(int64_t a, int64_t b);
 hval hp_powv(hval a, hval b);
@@ -378,6 +417,7 @@ typedef struct hp_try_frame {
     jmp_buf jmp;
     struct hp_try_frame *prev;
     bool caught;
+    void *cleanup_mark;
 } hp_try_frame;
 /* thread-local interpreter state: worker threads (hphp_thr.c) get their own
  * try-stack and exception slot, so throw/catch works inside workers */
@@ -386,6 +426,18 @@ extern HP_THREAD_QUAL hp_try_frame *hp_cur_try;
 extern HP_THREAD_QUAL hval hp_exception;
 void hp_try_push(hp_try_frame *f);
 void hp_try_pop(hp_try_frame *f);
+/* Scope marks are taken and popped around nearly every block, mostly with
+ * nothing registered in between: inline both, call out only to unwind. */
+extern HP_THREAD_QUAL size_t hp_cleanup_len;
+static inline void *hp_cleanup_mark(void) { return (void *)(uintptr_t)hp_cleanup_len; }
+void hp_cleanup_register_hval(hval *slot);
+void hp_cleanup_register_ptr(void **slot, HKind kind);
+void hp_cleanup_register_box(hval **slot);
+void hp_cleanup_register_region(hp_region *region);
+void hp_cleanup_pop_to_slow(void *mark);
+static inline void hp_cleanup_pop_to(void *mark) {
+    if ((size_t)(uintptr_t)mark != hp_cleanup_len) hp_cleanup_pop_to_slow(mark);
+}
 void hp_throw(hval v);
 void hp_throw_str(const char *msg);
 hstr *hp_exception_msg(void);
@@ -405,9 +457,13 @@ struct hclosure {
     hfn_t fn;
     uint32_t rc;
     size_t envsz;
+    void (*drop_env)(void *);
+    void (*trace_env)(void *);
+    hp_gc_node *gc;
     /* environment bytes follow */
 };
-hclosure *hpclosure_new(void *env, size_t envsz, void *fn);
+hclosure *hpclosure_new(void *env, size_t envsz, void *fn,
+                        void (*drop_env)(void *), void (*trace_env)(void *));
 void hpclosure_free(hclosure *c);
 void *hp_closure_env(void);                       /* env of the running closure */
 hval hp_closure_call_arr(hclosure *c, hval *args, int nargs);
@@ -417,18 +473,35 @@ hval hp_call_value(hval fn, int nargs, const hval *args);
 /* ---------- smart pointer support ---------- */
 void hp_rc_inc(void *p);
 void hp_rc_dec(void *p);
+void hp_gc_register(void *ptr, uint32_t *rc, hp_gc_node **slot,
+                    void (*trace)(void *), void (*clear)(void *),
+                    void (*destroy)(void *));
+void hp_gc_visit(hval value);
+void hp_gc_collect_now(void *ptr);
+void hp_runtime_thread_starting(void);
 
 /* ---------- objects ---------- */
+typedef void (*hp_drop_fn)(void *);
 struct hobj {
     uint32_t rc;
+    hp_drop_fn drop; /* invoked exactly once when the strong count reaches 0 */
+    void (*trace)(void *);
+    hp_gc_node *gc;
+    hp_weak_ref *weak_refs;
 };
+struct hp_weak_ref {
+    hobj *target;
+    hp_weak_ref *next;
+    hp_weak_ref **prev;
+};
+hval hp_weak_assign(hp_weak_ref **slot, hval value);
+hval hp_weak_get(const hp_weak_ref *weak);
+void hp_weak_free(hp_weak_ref *weak);
+void hp_weak_invalidate(hobj *object);
 
 void *hp_alloc(size_t n);
-void hp_free(void *p);           /* counterpart of hp_alloc: keeps the live counter honest */
-int64_t hp_live_allocs(void);   /* diagnostic: live hp_alloc blocks */
-int64_t hp_live_bytes(void);    /* diagnostic: glibc in-use heap bytes */
 void hp_echo(hval v);              /* PHP echo: print value */
-void hp_echo_newline(void);        /* terminate each echo statement */
+void hp_echo_newline(void);        /* HolyPHP echo statement terminator */
 
 /* ---------- builtin function entry points (hphp_std.c) ---------- */
 hval hpbi_strlen(hval s);
@@ -450,15 +523,6 @@ hval hpbi_substr(hval s, hval start, hval len);
 hval hpbi_strstr(hval h, hval n);
 hval hpbi_strchr(hval h, hval n);
 hval hpbi_strpos(hval h, hval n, hval off);
-hval hpbi_str_pos_ci(hval h, hval n, hval off);
-hval hpbi_str_prefix_ci(hval s, hval p);
-hval hpbi_str_int_range(hval s, hval a, hval b);
-hval hpbi_str_trim_range(hval s, hval a, hval b);
-hval hpbi_str_at_eq(hval s, hval start, hval len, hval lit);
-hval hpbi_str_to_int(hval s);
-hval hpbi_str_to_int_range(hval s, hval start, hval end);
-hval hpbi_http_request_bounds(hval s);
-hval hpbi_str_find_range(hval s, hval needle, hval start);
 hval hpbi_str_contains(hval h, hval n);
 hval hpbi_str_starts_with(hval h, hval n);
 hval hpbi_str_ends_with(hval h, hval n);
@@ -488,16 +552,6 @@ hval hpbi_preg_grep(hval pat, hval arr);
 /* ---- crypto ---- */
 hval hpbi_sha256(hval s);
 hval hpbi_hash_hmac(hval algo, hval data, hval key, hval raw_output);
-hval hpbi_jwt_verify(hval tok, hval secret, hval now);
-hval hpbi_jwt_verifier_new(hval secret);
-hval hpbi_jwt_verify_prepared(hval tok, hval prepared, hval now);
-hstr *hp_jwt_verify_t(hstr *tok, hstr *secret, int64_t now);
-hstr *hp_jwt_verifier_new_t(hstr *secret);
-hstr *hp_jwt_verify_prepared_t(hstr *tok, hstr *prepared, int64_t now);
-hval hpbi_json_str_field(hval j, hval k);
-hval hpbi_json_num_field(hval j, hval k);
-hstr *hp_json_str_field_t(hstr *j, hstr *key);
-int64_t hp_json_num_field_t(hstr *j, hstr *key);
 hval hpbi_password_hash(hval pw);
 hval hpbi_password_verify(hval pw, hval hash);
 hval hpbi_random_bytes(hval n);
@@ -526,32 +580,12 @@ hval hpbi_sha1(hval s, hval raw_output);  /* real SHA-1; raw=true -> 20 bytes */
 
 /* sockets (see hphp_std.c) — handles are integers, non-blocking by default */
 hval hpbi_stream_socket_server(hval addr);       /* "tcp://host:port" */
-hval hpbi_stream_socket_server_reuseport(hval addr); /* SO_REUSEPORT listener */
 hval hpbi_stream_socket_client(hval addr);
 hval hpbi_stream_socket_accept(hval srv);
 hval hpbi_stream_set_blocking(hval s, hval block);
-hval hpbi_stream_set_nodelay(hval s);
-hval hpbi_stream_set_socket_buffers(hval s, hval recv_bytes, hval send_bytes);
 hval hpbi_stream_recv(hval s, hval max);
-hval hpbi_stream_recv_release(hval s);
 hval hpbi_stream_send(hval s, hval data);
-hval hpbi_stream_send2(hval s, hval a, hval b);
-hval hpbi_stream_send_nb(hval s, hval data);
-hval hpbi_stream_send2_nb(hval s, hval a, hval b);
-hval hpbi_stream_send_sb(hval s, hval sb);
-hval hpbi_int_digits(hval n);
-hval hpbi_nofile_limit(void);
-hval hpbi_runtime_stats(void);
-hval hpbi_runtime_diag_write(hval message);
-hstr *hp_runtime_stats_t(void);
 hval hpbi_stream_ready(hval handles, hval timeout_ms);
-hval hpbi_stream_ready_into(hval out, hval handles, hval timeout_ms);
-hval hpbi_epoll_add(hval s);
-hval hpbi_epoll_del(hval s);
-hval hpbi_epoll_mod(hval s, hval mask);
-hval hpbi_epoll_wait2(hval in, hval out, hval timeout_ms);
-hval hpbi_epoll_wait_iarr2(hval in, hval out, hval timeout_ms);
-hval hpbi_epoll_wait_into(hval out, hval timeout_ms);
 hval hpbi_stream_eof(hval s);
 hval hpbi_stream_peer(hval s);
 hval hpbi_stream_close(hval s);
@@ -615,6 +649,7 @@ hval hpbi_array_key_exists(hval k, hval a);
 hval hpbi_isset(hval v);
 hval hpbi_isset_raw(harr **slot, hval key);
 hval hpbi_isset_val(hval *slot, hval key);
+hval hpbi_isset_index(hval container, hval key);
 hval hpbi_range(hval lo, hval hi);
 hval hpbi_array_map(hval fn, hval a);
 hval hpbi_array_filter(hval a, hval fn);
@@ -630,7 +665,9 @@ hval hpbi_end(hval a);
 hval hpbi_reset(hval a);
 hval hpbi_array_shift(hval a);
 hval hpbi_array_unshift(hval a, hval v);
-hval hpbi_array_splice(hval a, hval off, hval len);
+hval hpbi_array_splice(hval a, hval off, hval len, hval repl);
+hval hpbi_array_push_n(hval a, int64_t n, const hval *vals);
+hval hpbi_array_unshift_n(hval a, int64_t n, const hval *vals);
 hval hpbi_shuffle(hval a);
 hval hpbi_sort(hval a);
 hval hpbi_rsort(hval a);
@@ -654,7 +691,7 @@ hval hpbi_atan(hval v);
 hval hpbi_atan2(hval a, hval b);
 hval hpbi_asin(hval v);
 hval hpbi_acos(hval v);
-hval hpbi_log(hval v);
+hval hpbi_log(hval v, hval base);
 hval hpbi_log2(hval v);
 hval hpbi_log10(hval v);
 hval hpbi_exp(hval v);
@@ -681,16 +718,25 @@ hval hpbi_boolval(hval v);
 hval hpbi_gettype(hval v);
 hval hpbi_var_dump(hval v);
 hval hpbi_print_r(hval v);
-hval hpbi_var_export(hval v);
+hval hpbi_var_export(hval v, hval ret);
 hval hpbi_serialize(hval v);
 hval hpbi_unserialize(hval s);
 hval hpbi_readline(hval prompt);
+hval hpbi_readline_color(hval prompt, hval color);
+hval hpbi_print_color(hval text, hval color);
+hval hpbi_println_color(hval text, hval color);
 hval hpbi_rand(hval mn, hval mx);
 hval hpbi_mt_rand(hval mn, hval mx);
 hval hpbi_srand(hval seed);
 hval hpbi_mt_srand(hval seed);
 hval hpbi_random_int(hval mn, hval mx);
 hval hpbi_fgetc(hval stream);
+
+/* unsafe raw-memory builtins */
+hval hpbi_malloc(hval n);
+hval hpbi_free(hval p);
+hval hpbi_memcpy(hval dst, hval src, hval n);
+hval hpbi_memset(hval dst, hval byte, hval n);
 
 /* filesystem helpers */
 hval hpbi_getcwd(void);
@@ -722,6 +768,9 @@ hval hpbi_putenv(hval kv);
 hval hpbi_php_uname(void);
 hval hpbi_phpversion(void);
 hval hpbi_php_sapi_name(void);
+hval hpbi_php_sapi(void);
+hval hpbi_php_logo_guid(void);
+hval hpbi_sys_getloadavg(void);
 hval hpbi_microtime(void);
 hval hpbi_hrtime(hval as_number);
 hval hpbi_memory_get_usage(void);
@@ -1029,6 +1078,7 @@ hval hpbi_ui_theme(hval win, hval bg, hval surface, hval elevated, hval text,
 
 /* heap boxes for by-ref captures (use (&$x)) */
 hval *hp_box_new(void);
+void hp_box_retain(hval *b);
 void hp_box_free(hval *b);
 
 /* ---------- PHP 8 parity additions ---------- */
@@ -1106,179 +1156,8 @@ hval hpbi_passthru(hval cmd);
 hval hpbi_proc_open(hval cmd, hval cwd);
 hval hpbi_proc_get_status(hval h);
 hval hpbi_proc_kill(hval h);
-
-/* generic SQLite binding (hphp_std.c): open/prepare/bind/step/column */
-hval hpbi_scope_begin(void);
-hval hpbi_scope_end(void);
-hval hpbi_str_persist(hval s);
-hval hpbi_str_free(hval s);
-hval hpbi_live_bytes(void);
-hval hpbi_live_allocs(void);
-hval hpbi_arr_clear(hval a);
-hval hpbi_arr_free(hval a);
-hval hpbi_object_free(hval obj);
-hval hpbi_bt_root(hval db, hval name, hval is_index);
-hval hpbi_bt_open(hval db, hval name, hval is_index);
-hval hpbi_bt_close(hval h);
-hval hpbi_bt_first(hval h);
-hval hpbi_bt_last(hval h);
-hval hpbi_bt_next(hval h);
-hval hpbi_bt_prev(hval h);
-hval hpbi_bt_seek(hval h, hval rowid);
-hval hpbi_bt_rowid(hval h);
-hval hpbi_bt_payload_ptr(hval h);
-hval hpbi_bt_payload_size(hval h);
-hval hpbi_bt_payload_pin(hval h);
-hval hpbi_bt_page_release(hval pin);
-hval hpbi_bt_count_key(hval h, hval key);
-hval hpbi_bt_count_range(hval h, hval lo, hval hi, hval out);
-hval hpbi_bt_multi_seek(hval h, hval keys, hval count);
-hval hpbi_bt_tail(hval h, hval count);
-hval hpbi_bt_multi_payloads(hval result, hval out);
-hval hpbi_bt_multi_keys(hval result, hval out);
-hval hpbi_bt_multi_release(hval result);
-hval hpbi_iarr_new_uninit(hval size);
-hval hpbi_bt_read(hval h, hval out, hval cols);
-hval hpbi_sb_new(void);
-hval hpbi_sb_put(hval h, hval str);
-hval hpbi_sb_bytes(hval h, hval ptr, hval len);
-hval hpbi_sb_data_ptr(hval h);
-hval hpbi_sb_discard(hval h);
-hval hpbi_sb_int(hval h, hval n);
-hval hpbi_sb_json(hval h, hval ptr, hval len);
-hval hpbi_sb_json_str(hval h, hval str);
-hval hpbi_str_from_bytes(hval ptr, hval len);
-hval hpbi_sb_reserve(hval h, hval n);
-hval hpbi_sb_take(hval h);
-hval hpbi_iarr_new(hval size);
-hval hpbi_iarr_release(hval h);
-hval hpbi_iarr_get(hval h, hval i);
-hval hpbi_iarr_set(hval h, hval i, hval v);
-hval hpbi_iarr_data_ptr(hval h);
-hval hpbi_iarr_len(hval h);
-hval hpbi_sqlite_open(hval path);
-hval hpbi_sqlite_open_vfs(hval path, hval vfs);
-hval hpbi_sqlite_bg_checkpoint_start(hval db, hval path, hval frames, hval hold_ms);
-hval hpbi_sqlite_bg_checkpoint_hold(hval db);
-hval hpbi_sqlite_bg_checkpoint_tick(hval db);
-hval hpbi_sqlite_bg_checkpoint_active(hval db);
-hval hpbi_sqlite_close(hval db);
-hval hpbi_sqlite_exec(hval db, hval sql);
-hval hpbi_sqlite_status(hval db);
-hval hpbi_sqlite_prepare(hval db, hval sql);
-hval hpbi_sqlite_finalize(hval stmt);
-hval hpbi_sqlite_bind_int(hval stmt, hval idx, hval value);
-hval hpbi_sqlite_bind_text(hval stmt, hval idx, hval value);
-hval hpbi_sqlite_step(hval stmt);
-hval hpbi_sqlite_reset(hval stmt);
-hval hpbi_sqlite_clear_bindings(hval stmt);
-hval hpbi_sqlite_column_text(hval stmt, hval col);
-hval hpbi_sqlite_column_int(hval stmt, hval col);
-hval hpbi_sqlite_changes(hval db);
-hval hpbi_sqlite_last_insert_rowid(hval db);
-hval hpbi_sqlite_errmsg(hval db);
-hval hpbi_sqlite_extended_errcode(hval db);
-hval hpbi_sqlite_is_lock_error(hval db);
-hval hpbi_sqlite_busy_timeout(hval db, hval ms);
-
-/* ---- typed builtin fast paths (see hphp_std.c) ---- */
-/* String builder handle. head: free bytes in front of the contents, which
- * are b.data[head .. b.len) (see hp_sb_reserve_pooled in hphp_std.c). The
- * small appends are inline: generated code makes many of them per response. */
-typedef struct { Buf b; size_t head; } HpSb;
-int64_t hp_sb_new_t(void);
-bool hp_sb_reserve_t(int64_t h, int64_t n);
-static inline bool hp_sb_put_t(int64_t h, hstr *x) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    hbuf_write(&s->b, x->data, x->len);
-    return true;
-}
-static inline bool hp_sb_bytes_t(int64_t h, int64_t ptr, int64_t len) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    const char *p = (const char *)(intptr_t)ptr;
-    if (p && len > 0) hbuf_write(&s->b, p, (size_t)len);
-    return true;
-}
-static inline int64_t hp_sb_data_ptr_t(int64_t h) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    return s->b.data ? (int64_t)(intptr_t)(s->b.data + s->head) : 0;
-}
-bool hp_sb_discard_t(int64_t h);
-static inline int64_t hp_sb_len_t(int64_t h) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    return (int64_t)(s->b.len - s->head);
-}
-bool hp_sb_prepend_t(int64_t h, hstr *s);
-static inline bool hp_sb_int_t(int64_t h, int64_t n) {
-    HpSb *s = (HpSb *)(intptr_t)h;
-    char tmp[24];
-    char *p = hp_fmt_i64(tmp + sizeof tmp, n);
-    hbuf_write(&s->b, p, (size_t)(tmp + sizeof tmp - p));
-    return true;
-}
-bool hp_sb_json_t(int64_t h, int64_t ptr, int64_t len);
-bool hp_sb_json_str_t(int64_t h, hstr *s);
-hstr *hp_sb_take_t(int64_t h);
-int64_t hp_stream_send_sb_t(int64_t fd, int64_t sb);
-int64_t hp_int_digits_t(int64_t n);
-int64_t hp_iarr_new_t(int64_t n);
-int64_t hp_iarr_new_uninit_t(int64_t n);
-bool hp_iarr_release_t(int64_t h);
-int64_t hp_iarr_get_t(int64_t h, int64_t k);
-bool hp_iarr_set_t(int64_t h, int64_t k, int64_t v);
-int64_t hp_iarr_get_fast_t(int64_t h, int64_t k);
-bool hp_iarr_set_fast_t(int64_t h, int64_t k, int64_t v);
-int64_t hp_iarr_data_ptr_t(int64_t h);
-int64_t hp_iarr_len_t(int64_t h);
-bool hp_epoll_wait_iarr2_t(int64_t in, int64_t out, int64_t timeout_ms);
-int64_t hp_bt_last_t(int64_t h);
-int64_t hp_bt_first_t(int64_t h);
-int64_t hp_bt_prev_t(int64_t h);
-int64_t hp_bt_next_t(int64_t h);
-int64_t hp_bt_seek_t(int64_t h, int64_t rowid);
-int64_t hp_bt_rowid_t(int64_t h);
-int64_t hp_bt_payload_ptr_t(int64_t h);
-int64_t hp_bt_cols_t(int64_t h);
-int64_t hp_bt_col_off_t(int64_t i);
-int64_t hp_bt_col_len_t(int64_t i);
-int64_t hp_bt_col_int_t(int64_t i);
-int64_t hp_bt_col_int_at_t(int64_t h, int64_t col);
-int64_t hp_bt_read_t(int64_t h, int64_t out, int64_t cols);
-int64_t hp_bt_payload_size_t(int64_t h);
-int64_t hp_bt_payload_pin_t(int64_t h);
-bool hp_bt_page_release_t(int64_t pin);
-int64_t hp_bt_multi_seek_t(int64_t h, int64_t keys, int64_t count);
-int64_t hp_bt_tail_t(int64_t h, int64_t count);
-bool hp_bt_multi_payloads_t(int64_t result, int64_t out);
-int64_t hp_bt_multi_keys_t(int64_t result, int64_t out);
-bool hp_bt_multi_release_t(int64_t result);
-int64_t hp_stream_send_nb_t(int64_t fd, hstr *s);
-int64_t hp_stream_send2_nb_t(int64_t fd, hstr *a, hstr *b);
-bool hp_epoll_mod_t(int64_t fd, int64_t mask);
-int64_t hp_nofile_limit_t(void);
-bool hp_uring_active_t(void);
-bool hp_uring_direct_t(void);
-int64_t hp_uring_direct_slots_t(void);
-int64_t hp_strlen_t(hstr *s);
-int64_t hp_str_to_int_t(hstr *s);
-int64_t hp_str_to_int_range_t(hstr *s, int64_t start, int64_t end);
-int64_t hp_http_request_bounds_t(hstr *s);
-int64_t hp_str_find_range_t(hstr *s, hstr *needle, int64_t start);
-bool hp_str_at_eq_t(hstr *s, int64_t start, int64_t len, hstr *lit);
-hstr *hp_strtolower_t(hstr *s);
-hstr *hp_trim_t(hstr *s);
-hstr *hp_substr_t(hstr *s, int64_t start, int64_t len);
-hstr *hp_stream_recv_t(int64_t fd, int64_t maxn);
-int64_t hp_stream_recv_release_t(int64_t fd);
-bool hp_sqlite_bind_int_t(int64_t stmt, int64_t idx, int64_t v);
-bool hp_sqlite_bind_text_t(int64_t stmt, int64_t idx, hstr *s);
-int64_t hp_sqlite_step_t(int64_t stmt);
-int64_t hp_sqlite_reset_t(int64_t stmt);
-bool hp_sqlite_clear_bindings_t(int64_t stmt);
-hstr *hp_sqlite_column_text_t(int64_t stmt, int64_t col);
-int64_t hp_sqlite_column_int_t(int64_t stmt, int64_t col);
-int64_t hp_sqlite_changes_t(int64_t db);
-
+hval hpbi_holy_maxout_start(hval port, hval db_path);
+hval hpbi_holy_challenge_start(hval port, hval db_path);
 
 #ifdef __cplusplus
 }

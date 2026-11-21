@@ -39,6 +39,8 @@ static int wal_ra_on = 1;        /* WAL_READAHEAD=0: no read-ahead of the log be
  * 300k connections. 0 = off. Meant for TAIL_RESTART=0 (otherwise each cycle's cache drop would
  * read the hot pages back from the disk). */
 static long db_drop_ms = 2000;
+static int db_drop_pressure_only = 0; /* DB_DROP_PRESSURE_ONLY=1 */
+static long db_drop_pressure_kb = 65536; /* threshold for MemAvailable */
 static long wb_kick_ms = 250;    /* the bulk thread starts the log's writeback this often while idle (0: never) */
 #define CKPT_PASSES_MAX 8        /* bulk passes before the tail is taken regardless */
 #define CKPT_FORCE 1048576 /* last resort (4 GB): the loop checkpoints by itself only if the disk gave no restart for minutes */
@@ -405,6 +407,20 @@ static void wal_readahead(struct ck_thread *t) {
 }
 static void db_drop(struct ck_thread *t) {
   if (db_drop_ms <= 0 || t->urgent) return;
+  /* Only inspect procfs on the background worker, never on the request loop.
+   * Avoid fadvise churn when memory is plentiful. */
+  if (db_drop_pressure_only) {
+    FILE *mf = fopen("/proc/meminfo", "r");
+    if (mf) {
+      char line[128];
+      unsigned long available = 0;
+      while (fgets(line, sizeof line, mf)) {
+        if (sscanf(line, "MemAvailable: %lu kB", &available) == 1) break;
+      }
+      fclose(mf);
+      if (available && available > (unsigned long)db_drop_pressure_kb) return;
+    }
+  }
   uint64_t now = now_ns();
   if (now - t->dropped_at < (uint64_t)db_drop_ms * 1000000ULL) return;
   t->dropped_at = now;

@@ -28,6 +28,9 @@ struct dbx {
   _Atomic long long gate_since;
   unsigned char *rec;
   unsigned rec_cap;
+  /* checkpoint 把帧拷回主库之后，WAL 里那些页在内核页缓存里已经没用了；2 GB 的机器上它们
+   * 占的是常驻内存（fsharp-uring-delneg #437 每轮之后也会丢掉这些帧的缓存）。 */
+  int walfd;
 };
 
 static int fail(sqlite3 *db, char *err, int n, const char *what) {
@@ -205,6 +208,7 @@ void dbx_close(dbx *h) {
   for (int i = 0; i < 4; i++) sqlite3_free(h->cur[i]);
   for (int i = 0; i < 32; i++) sqlite3_free(h->acur[i]);
   if (h->rec) sqlite3_free(h->rec);
+  if (h->walfd >= 0) close(h->walfd);
   if (h->ckdb) sqlite3_close(h->ckdb);
   sqlite3_close(h->db);
   sqlite3_free(h);
@@ -614,6 +618,13 @@ dbx *dbx_open(const char *path, char *err, int n) {
   }
   sqlite3_exec(h->ckdb, "SELECT * FROM sqlite_schema", 0, 0, 0);
   h->bt = h->db->aDb[0].pBt;
+  h->walfd = -1;
+  {
+    /* 只读打开 -wal，用于 checkpoint 之后 fadvise(DONTNEED)。打不开就跳过。 */
+    char wp[1024];
+    int wn = snprintf(wp, sizeof wp, "%s-wal", path);
+    if (wn > 0 && (size_t)wn < sizeof wp) h->walfd = open(wp, O_RDONLY | O_CLOEXEC);
+  }
   for (int i = 0; i < 4; i++) {
     h->cur[i] = (BtCursor *)sqlite3_malloc(sqlite3BtreeCursorSize());
     if (!h->cur[i]) {
@@ -718,8 +729,13 @@ int dbx_checkpoint(dbx *h, int *copied) {
     return -1;
   }
   int done = (nlog == 0 || ndone >= nlog);
-  if (done && atomic_load_explicit(&h->wal_frames, memory_order_relaxed) <= nlog)
-    atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+  if (done) {
+    /* 帧已经安全落在主库里了：把 WAL 的这些页从内核页缓存丢掉，别让它们常驻。
+     * 数据已经写完，丢掉缓存不会读回任何东西；下一次写从第 1 帧重新开始。 */
+    if (h->walfd >= 0) posix_fadvise(h->walfd, 0, 0, POSIX_FADV_DONTNEED);
+    if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) <= nlog)
+      atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+  }
   return done ? 0 : 1;
 }
 

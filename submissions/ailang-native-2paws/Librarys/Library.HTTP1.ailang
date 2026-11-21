@@ -1490,7 +1490,14 @@ Function.HTTP1.Serve {
                 IoUring.Enter(IoUring.SqPending(), 0, IoUringEnter.GETEVENTS)
             } ElseBlock: {
                 IfCondition GreaterThan(HTTP1St.nring, 1) ThenBlock: {
-                    IoUring.EnterWait(IoUring.SqPending(), 1, 1000, HTTP1St.waitarg)
+                    // Other rings: the 1 ms cap stays (nothing on ring 0 wakes
+                    // for them), and the pass still batches HTTP_WAIT_MIN.
+                    // Waiting for one completion woke the loop on every one.
+                    mw = 1
+                    IfCondition GreaterThan(HTTP1St.wait_min, 1) ThenBlock: { mw = HTTP1St.wait_min }
+                    wus = 1000
+                    IfCondition And(GreaterThan(HTTP1St.wait_us, 0), LessThan(HTTP1St.wait_us, 1000)) ThenBlock: { wus = HTTP1St.wait_us }
+                    IoUring.EnterWait(IoUring.SqPending(), mw, wus, HTTP1St.waitarg)
                 } ElseBlock: {
                     IfCondition GreaterThan(HTTP1St.wait_min, 1) ThenBlock: {
                         IoUring.EnterWait(IoUring.SqPending(), HTTP1St.wait_min, HTTP1St.wait_us, HTTP1St.waitarg)

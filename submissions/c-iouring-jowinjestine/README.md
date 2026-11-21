@@ -80,10 +80,11 @@ mostly idle sockets under `LimitNOFILE=65535`.
 
 ## A batch
 
-1. Every completion is handled. Requests are answered straight into the arena, up to 384 a
-   batch: what arrived since the last batch first, then the requests earlier batches left
-   waiting, oldest first (see "Newest first" at the end); a connection gets at most one request
-   per batch (pipelined bytes wait for the send).
+1. Every completion is handled. Requests are answered straight into the arena: what arrived
+   since the last batch first, as much of it as can be answered within the kernel's 40 ms, then,
+   up to 8 ms of work in all, the requests earlier batches left waiting, oldest first (see
+   "Newest first" at the end); a connection gets at most one request per batch (pipelined bytes
+   wait for the send).
 2. All of the batch's reads and writes run in one SQLite transaction, begun lazily by the first of
    them (`BEGIN`, then the read transaction and four B-tree cursors). Reads see the batch's earlier
    writes.
@@ -246,7 +247,8 @@ column layout (schema metadata, read at open), and the HMAC key schedule.
 6. WAL + `synchronous=NORMAL`; group commit; each response waits for its batch's commit.
 7. Nothing detects the load test: every route works for any request, every request that is read
 is answered, and the server never closes a healthy connection and never looks at who is asking.
-The one limit is the box's memory: `CONN_LIMIT` connections at once (see the last section).
+The one limit is the box's memory: `CONN_LIMIT` connections at once, and a 503 for the next one
+(see the last section).
 8–9. Direct on `0.0.0.0:80`. Direct descriptors need no file descriptors beyond the listeners.
 10. Built from source on the box; SQLite 3.54.1 pinned by SHA-256; the PGO profile is produced
 during the build, nothing is committed but source.
@@ -462,8 +464,10 @@ checkpoint cycles, no periodic page drop or writeback kicks, a lower-priority ev
 ## Newest first (follow-up to #486)
 
 One change of order: **a pass answers what arrived since the last pass first, and the backlog
-with what is left** (`FRESH_FIRST`, on). It was the other way round, oldest first. Three small
-things go with it: a reply that is sent late puts its socket back into delayed-ACK mode
+with what is left** (`FRESH_FIRST`, on). It was the other way round, oldest first. Two rules make
+it exact: a pass takes the arrivals that can still be answered within the kernel's 40 ms, however
+many that is, and the backlog waits while arrivals are still being sent to it. Three small things
+go with it: a reply that is sent late puts its socket back into delayed-ACK mode
 (`DELACK_RESTORE`, on), the listeners start in that mode (`QUICKACK_OFF`, on, as in
 fsharp-uring-delneg #437), and the number of connections is limited by the box's memory
 (`CONN_LIMIT`). No request is dropped: every one that is read is answered.
@@ -484,13 +488,25 @@ after it (the second ACKs).
 
 Newest first, a pause costs the requests that were waiting when it ended, and no others:
 
-- A pass takes at most `ANSWERS_PER_PASS` requests (384, ~10 ms of work, so that what arrives
-  during a pass is answered inside the 40 ms by the next one). An arrival stays in its receive
-  buffer on its ring's "fresh" list until the pass has seen every ring; if there are more than
-  the pass can take, each ring's newest go first, in proportion, and the older ones move to the
-  backlog in arrival order.
-- The backlog is answered oldest first with the rest of the pass, at least `FRESH_RESERVE` (24)
-  requests each pass, so it always moves.
+- A pass is sized by that deadline, not by a count. The loop measures what an answer costs it (a
+  pass and its enter, per answer: 25-30 µs at 300k users). A pass's n arrivals are spread over
+  the time since the last pass, its `age`; the newest k of them all leave within `DEADLINE_MS`
+  (32, the 40 ms with a margin) if `age * k / n + k * cost` fits in it. That many are answered
+  now, all of them if it holds for n. An arrival stays in its receive buffer on its ring's
+  "fresh" list until the pass has seen every ring; the ones that cannot make it move to the
+  backlog in arrival order, from each ring in proportion. (The first version of this PR took 384
+  a pass whatever they cost, `ANSWERS_PER_PASS=384`: a pass that started 3 ms late sent the tail
+  of its arrivals to the backlog though they could still have been answered in time.)
+- The backlog is answered oldest first with what the arrivals leave of a pass of `PASS_MS` (8 ms
+  of work: half of what the deadline would allow, so that a pass that starts late still answers
+  its arrivals in time), and only once no arrival has gone to it for `BACKLOG_QUIET_MS` (30).
+  While arrivals do not fit their passes, a request answered from the backlog sends an arrival
+  there in its place, in that pass or the next: the backlog is no shorter, one more request is
+  late, and one more delayed ACK is paid. (The first version gave the backlog 24 answers of
+  every pass: in the last seconds of the ramp at 320k, 92,000 requests went through a backlog
+  that never held more than 36,000.) A lasting overload cannot starve it: once its oldest
+  request has waited `BACKLOG_AGE_MS` (20 s) it gets `FRESH_RESERVE` (24) answers of every pass,
+  and half of every pass after twice that, so nothing comes near a client's timeout.
 - Backlog replies, writes released from a checkpoint hold, and everything a pass answers after
   the loop was away for more than `LATE_MS` (20) get one more operation behind their send:
   `setsockopt(TCP_QUICKACK, 0)` through `IORING_OP_URING_CMD` (a direct descriptor has no file
@@ -500,16 +516,19 @@ Newest first, a pause costs the requests that were waiting when it ended, and no
   less per new connection, ~5,000 a second at the end of the ramp.
 - With passes this short nothing needs reaping or entering mid-pass: `ENTER_EVERY` is off in
   this mode (`SUBMIT_CHUNK=128` stays).
+- A waiting request keeps a 128-byte buffer, not 512 (a GET is ~100 bytes): with every
+  connection waiting, that was 170 MB the box does not have (see `CONN_LIMIT` below).
 
 This is the "adaptive LIFO" of overloaded request queues (Maurer, *Fail at Scale*, ACM Queue
 2015), with the kernel's delayed-ACK timer as the deadline.
 
-Measured on that box, whole-run percentiles like k6's thresholds:
+Measured on that box with the first version (`1ac444a`: 384 answers a pass, 24 of them for the
+backlog), whole-run percentiles like k6's thresholds:
 
 | 300k users, 60 s ramp + 4 min; the server process stopped (SIGSTOP) for 150 ms at 150 s and for 300 ms at 220 s | p95 | p99 | 10-second windows after the 300 ms pause (p95) |
 |---|---|---|---|
 | #505 (`29cfa02`, oldest first) | 221.5 ms | 732.8 ms | 678 ms, 1,008 ms, 189 ms, 325 ms, then normal; again 332 ms 80 s later |
-| **this PR** | 10.8 ms | 33.4 ms | 21 ms, 163 ms, 15 ms, then normal |
+| first version | 10.8 ms | 33.4 ms | 21 ms, 163 ms, 15 ms, then normal |
 
 The pause leaves ~15,000 requests waiting; here they are answered within 2 s and nobody else
 waits, there every request of the next 40 s waited behind them. The end of the ramp, a pause of
@@ -518,23 +537,91 @@ its own kind, went from p95 198-329 ms for 20 s to 17 ms.
 | 320k users, 60 s ramp + 5 min + 30 s down | p95 | p99 | max | failed |
 |---|---|---|---|---|
 | #505 | 3.7 s | 5.5 s | | 0 |
-| **this PR** | 17.5 ms | 404.5 ms | 5.7 s | 0 |
+| first version | 17.5 ms | 404.5 ms | 5.7 s | 0 |
 
 That run is the first 320k one this entry has passed on that box. What is left in it is the last
 ten seconds of the ramp, where the new connections (~5,300 a second) and the requests together
-need more than the CPU: ~24,000 requests wait there, up to 5.7 s, and the hold is clean.
+need more than the CPU: the backlog reaches 36,000 there, requests wait up to 5.7 s, and the hold
+is clean. Those seconds are what the two rules above (passes sized by the deadline, a backlog
+that waits) are for: they cost 92,000 late requests where 36,000 would have paid the same debt,
+and a 2-minute probe at 320k has room for ~57,000 requests over 1 s before its p99 fails.
 
-`CONN_LIMIT`: the same box at 340k stopped answering on the network 200 s into the run and had to
-be restarted, most likely out of memory: 340,000 connections are ~1.5 GB of kernel memory, 4.2 KB
-each for the TCP socket, its inode and file, on 1,967 MB (320,000 left 458 MB available). No
-server setting changes what a connection costs the kernel, so the server now holds at most
-(MemTotal - 600 MB) / 4.25 KB connections, 329,000 on that box. At the limit a new connection is
-closed at once (its client learns it now, not from a timeout) and the listen queues are
-shortened so that the kernel does not keep thousands of established sockets nobody will accept;
-both end when ~1.5 % of the limit has closed. Checked with a limit of 50 and 120 clients: 50
-served, 70 closed, and 30 new ones served after 30 of the first left.
+That box has been down since the 340k run below, so the two rules were measured on a KVM guest on
+my PC instead: the benchmark box's kernel (6.8.0-117) and memory (1,967 MB), one vCPU capped at a
+share of a host core (68 % puts 320k users at ~85 % of it), load from the host over a tap device,
+a fresh boot before every run, the versions interleaved. "First version" is the first commit's
+behaviour (`ANSWERS_PER_PASS=384 BACKLOG_AGE_MS=0 BACKLOG_QUIET_MS=0`). All runs are 320k users,
+60 s ramp + 2 min + 30 s down, the shape of a probe.
 
-As in the section above, that box is harsher than the benchmark box and the numbers are a
-comparison, not a prediction. `FRESH_FIRST=0` restores the old order (with
-`ANSWERS_PER_PASS=2048` and `ENTER_EVERY=128`), `DELACK_RESTORE=0`, `QUICKACK_OFF=0` and
-`CONN_LIMIT=0` the other three.
+Nothing injected; what goes wrong is the end of the ramp and the guest's own hiccups:
+
+| cap | | p95 | p99 | requests over 1 s | sent to the backlog | delayed ACKs |
+|---|---|---|---|---|---|---|
+| 68 % | first version | 20.3 ms | 746 ms | 37,824 | 129,687 | 162,788 |
+| 68 % | **this PR** | 10.7 ms | 20.4 ms | 0 | 1,555 | 52,263 |
+| 64 % | first version | 19.3 / 14.3 ms | 206 / 29 ms | 11,701 / 0 | 115,383 / 44,615 | 145,035 / 68,188 |
+| 64 % | **this PR**, `PASS_MS=16` | 16.5 / 16.7 ms | 39 / 38 ms | 0 / 0 | 17,835 / 17,678 | 76,359 / 81,799 |
+
+An overload made on purpose 35 s into the hold (the cap drops from 68 %):
+
+| the cap drops to | | p99 | requests over 1 s | sent to the backlog | |
+|---|---|---|---|---|---|
+| 50 % for 10 s | first version, four runs | 2.5-4.6 s | 118,165-234,363 | 181,855-318,629 | all fail |
+| 50 % for 10 s | **this PR**, two runs | 236 / 514 ms | 52,418 / 55,541 | 59,939 / 59,756 | both pass |
+| 54 % for 6 s | first version, two runs | 225 / 692 ms | 59 / 30,567 | 104,171 / 129,805 | both pass |
+| 54 % for 6 s | **this PR**, `PASS_MS=16`, two runs | 39 / 40 ms | 6,348 / 2,168 | 28,296 / 24,395 | both pass |
+
+The first version turns a small backlog over fast enough to keep most of it under a second, at
+the price of four times as many late requests; past a certain depth that stops working and the
+late requests are all it has to show. This PR pays the debt once.
+
+And an overload that lasts, 320k at a cap of 46 %, a quarter more than the guest can serve, for
+the whole run (`PASS_MS=16`): no request failed or timed out with either version. The first
+version answered 24 % of the requests after more than 1 s (longest wait 15.9 s), this one 16 %
+(22.1 s), with 60,000-80,000 requests waiting at any moment and ~200 MB of page cache left
+throughout.
+
+Not every run went well. The guest has pauses of its own, 0.5-2 s in which the server gets no
+CPU, in some runs and not in others; they are why single runs differ so much. In one run of this
+PR such a pause, 18 s after the ramp, left more requests unread than the guest's memory holds,
+and the kernel ended the server (the collapse described under `CONN_LIMIT` below). The first
+version met pauses as long in other runs and came through. One case in eleven runs against none
+in twelve: I cannot tell whether that is chance, and say it for that reason.
+
+`CONN_LIMIT`: the test box at 340k stopped answering on the network 200 s into the run and had to
+be restarted. The guest shows why. A connection costs the kernel 4.13 KB (the TCP socket, its
+inode, dentry and file, the armed receive), so 340,000 are 1.4 GB on 1,967 MB, and what is left
+is ~100 MB free and ~150 MB of page cache. That is enough for a quiet run (340k at a reduced
+request rate held for four minutes) and not for a burst. A request that arrives while the server
+is not running waits in its socket and pins ~3.5 KB there (its slice of one of the network
+driver's 32 KB receive pages), so at 320k the box has room for about two seconds' worth of
+requests, and at 340k for one. Past that the kernel's OOM killer ends the server; if packets
+keep coming it ends every other process next and then gives up ("Kernel panic - not syncing:
+System is deadlocked on memory"), which from outside is a box that no longer answers. The end of
+a run is such a burst too, every connection closing at once with an unread FIN in each: on the
+guest the server was killed there, after the measurement, in the runs at 320k and above, and not
+at 310k.
+
+No server setting changes what a connection or an unread request costs the kernel, so the server
+holds at most (MemTotal - 600 MB) / 4.25 KB connections, 329,000 on that box. At the limit a new
+connection is answered `503` and closed at once, so that its client has a failed request to count
+and not a wait in `connect()` that nobody counts. `REFUSE_PER_S` (1,000) bounds what that costs:
+past it the listen queues go down to one entry and the kernel drops the rest's SYNs until the
+allowance is back. Checked with a limit of 50 and 120 clients: 50 served, 70 answered 503, and
+30 new ones served after 30 of the first left.
+
+**What the limit does not do.** On the guest (cap 66 %) I rehearsed the probes that would follow
+a passed 320k. A little over the limit, 340k, the server stays up. At 400k and 640k, with 330,000
+connections held and tens or hundreds of thousands of users retrying, packet processing takes the
+CPU, the server gets none for seconds at a time, memory runs out as described above, and in all
+five rehearsals the kernel ended the server; in three of them (400k once, 640k twice) it then
+ended everything else and panicked. A server that held few enough connections to live through
+that, ~240,000 on this memory, could not hold 320,000 in the probe before it. So if 320k passes
+on the benchmark box, the probes far above it may take the box down, with this server or any
+other that holds that many connections.
+
+As in the section above, the test box and the guest are harsher than the benchmark box and the
+numbers are a comparison, not a prediction. `FRESH_FIRST=0` restores the old order (with
+`ANSWERS_PER_PASS=2048` and `ENTER_EVERY=128`); `ANSWERS_PER_PASS=384 BACKLOG_AGE_MS=0
+BACKLOG_QUIET_MS=0` is the first version of this PR; `DELACK_RESTORE=0`, `QUICKACK_OFF=0` and
+`CONN_LIMIT=0` turn off the other three.

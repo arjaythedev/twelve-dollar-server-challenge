@@ -105,11 +105,20 @@ static unsigned ring_slots, accept_next, accept_stop, recv_bufs;
  * socket, its inode and file), so the memory, not the server, decides how many there can be. On a
  * box like the benchmark one 320,000 left 458 MB available, and 340,000 ended with the box out of
  * memory and off the network. At the limit a new connection is closed at once, so its client
- * learns it now instead of timing out, and the listen queues are shortened so that the kernel does
- * not keep thousands of sockets nobody will accept. */
+ * learns it now instead of timing out (refuse_per_s below bounds what that costs). */
 static unsigned conn_limit, open_total;
 static int listen_short;
 static uint64_t refused_total;
+/* A client refused at the limit must learn it, as an error it counts; but accepting a connection
+ * to close it costs what accepting it to serve it costs. So REFUSE_PER_S (1000; 0: no bound) a
+ * second are answered 503 and closed at once, and past that the listen queues go down to one entry:
+ * the kernel drops the SYNs of the rest, who wait in connect() until the allowance is back. (With
+ * the queues that short the whole time, a run 3 % over the limit went by with 0.35 % errors: the
+ * users over the limit sat in connect(), which a load test does not count as a failed request.) */
+static long refuse_per_s = 1000;
+static double refuse_allow = 200.0; /* refusals that may still be made */
+static uint64_t refuse_t;           /* when the allowance was last topped up */
+static int limit_said;
 static int ring_grow_failed;
 static int LFD[NLISTEN];
 static struct app A;
@@ -139,6 +148,35 @@ static unsigned answers_left;
  * has seen every ring; one that does not make the pass moves to pend and the ready list. */
 static int fresh_first = 1;
 static unsigned fresh_reserve = 24;
+/* How much a pass takes (ANSWERS_PER_PASS=0, the default: sized by time; a number: that many).
+ * A reply must leave within the kernel's 40 ms; DEADLINE_MS (32) is that with a margin. The loop
+ * measures what an answer costs it (pass plus enter, per answer, over the passes that did not
+ * wait): cost_ns. With n arrivals spread over the `age` since the last pass, the newest k all
+ * leave in time if age * k / n + k * cost <= deadline: that many are answered now, all of them
+ * if that holds for n. What the pass then takes from the backlog fills it to PASS_MS (8) of work
+ * and no more: after a pass of P the next one finds P of arrivals and needs about P to answer
+ * them, so 8 leaves half the deadline for a pass that starts late (at 16, any hiccup while a
+ * backlog was being answered sent arrivals to it again). A fixed count spilled
+ * arrivals that could still have made it (384 was ~11 ms of arrivals at 30k requests a second,
+ * so any pause over 12 ms sent requests to the backlog and so to a delayed ACK each). */
+static uint64_t deadline_ns = 32000000ULL, pass_ns = 8000000ULL;
+static double cost_ns = 30000.0;
+static unsigned pass_answers; /* answers produced by the current pass */
+static unsigned fresh_min = 32;
+/* When the backlog is answered. While arrivals do not fit their passes, a request answered from
+ * the backlog sends an arrival there in its place, in that pass or the next: the backlog is no
+ * shorter, one more request is late and one more delayed ACK is paid. In the last seconds of the
+ * ramp at 320k on the test box, 92,000 requests went through a backlog that never held more than
+ * 36,000. So the backlog waits until no arrival has been sent to it for BACKLOG_QUIET_MS (30; 0:
+ * it takes what every pass leaves), and then takes what the arrivals leave. A lasting overload
+ * cannot starve it: once its oldest request has waited BACKLOG_AGE_MS (20 s; 0: always) it gets
+ * FRESH_RESERVE answers of every pass, and half the pass once that request has waited twice as
+ * long, so nothing comes near a client's timeout. */
+static unsigned backlog_age_ms = 20000, backlog_quiet_ms = 30;
+static uint32_t now_ms;       /* when this pass started, ms (ages are differences: the wrap is harmless) */
+static uint32_t spill_ms;     /* when an arrival last went to the backlog */
+static unsigned pass_reserve; /* the backlog's share of this pass */
+static int backlog_parked;    /* the last pass left the backlog alone: it is no reason not to wait for completions */
 static unsigned late_ms = 20; /* LATE_MS: a pass that starts this long after the last one answers late */
 static int delack_restore = 1; /* DELACK_RESTORE: a late answer puts its socket back into delayed-ACK mode */
 struct fresh { uint32_t slot, len; uint16_t gen, bid; };
@@ -146,7 +184,7 @@ static struct fresh *FR[MAX_RINGS];
 static unsigned fr_head[MAX_RINGS], fr_n[MAX_RINGS], fr_cap;
 static int collecting; /* inside the pass's reap: arrivals go to the fresh lists */
 static int feed_late;  /* the answers being produced are late */
-static struct { uint64_t fresh, spilled, late_passes, restores, restore_err; } FS;
+static struct { uint64_t fresh, spilled, late_passes, restores, restore_err, reserved; } FS;
 
 static struct {
   uint64_t batches, cqes, reqs, accepts, closes, enobufs, reads, deferred, rq_max, ready_max, max_batch, cq_overflow, cancels;
@@ -291,7 +329,7 @@ static inline void queue_read(unsigned ri, uint32_t slot, struct conn *c) {
 
 static void pend_append(struct conn *c, const uint8_t *p, uint32_t n) {
   if (c->pend_len + n > c->pend_cap) {
-    uint32_t cap = c->pend_cap ? c->pend_cap : 512;
+    uint32_t cap = c->pend_cap ? c->pend_cap : 128; /* a GET is ~100 bytes: 512 each was 170 MB with every connection waiting */
     while (cap < c->pend_len + n) cap *= 2;
     uint8_t *np = realloc(c->pend, cap);
     if (!np) { perror("realloc pend"); exit(1); }
@@ -363,6 +401,7 @@ static void conn_feed(unsigned ri, uint32_t slot, struct conn *c, const uint8_t 
     c->flags |= CF_REPLIED;
     if (rp.close) c->flags |= CF_CLOSE_AFTER;
     S.reqs++;
+    pass_answers++;
   }
   stash(c, buf, n);
 }
@@ -371,6 +410,7 @@ static void defer_bytes(unsigned ri, uint32_t slot, struct conn *c, const uint8_
   pend_append(c, p, n);
   if (!(c->flags & (CF_READY | CF_HELD))) {
     c->flags |= CF_READY;
+    c->pad = now_ms; /* since when it waits (pad is the fresh-list place only while CF_FRESH) */
     list_push(&ready, &nready, &ready_cap, REF(ri, c->gen, slot));
   }
   S.deferred++;
@@ -394,6 +434,7 @@ static void fresh_spill(unsigned ri, struct fresh *f) {
     if ((c->flags & (CF_OPEN | CF_CLOSING)) == CF_OPEN) {
       defer_bytes(ri, f->slot, c, ring_buf_ptr(&rs->r, f->bid), f->len);
       FS.spilled++;
+      spill_ms = now_ms;
       if (c->flags & CF_EOF) { c->flags &= (uint16_t)~CF_EOF; finish_conn(ri, f->slot, c); }
     }
   }
@@ -423,7 +464,7 @@ static int received(unsigned ri, uint32_t slot, struct conn *c, unsigned bid, ui
     c->flags |= CF_FRESH;
     return 1;
   }
-  if (answers_left == 0) { defer_bytes(ri, slot, c, p, n); return 0; }
+  if (answers_left == 0) { defer_bytes(ri, slot, c, p, n); spill_ms = now_ms; return 0; }
   answers_left--;
   conn_feed(ri, slot, c, p, n);
   return 0;
@@ -431,12 +472,19 @@ static int received(unsigned ri, uint32_t slot, struct conn *c, unsigned bid, ui
 
 /* Answers this pass's arrivals: all of them if the pass has room, otherwise each ring's newest in
  * proportion, the older ones going to the backlog first so that it stays in arrival order. */
-static void fresh_run(void) {
+static void fresh_run(uint64_t age_ns) {
   unsigned total = 0, take[MAX_RINGS];
   for (unsigned i = 0; i < NR; i++) total += fr_n[i];
   if (!total) return;
-  unsigned budget = answers_left;
-  if (nready) budget = budget > fresh_reserve ? budget - fresh_reserve : 0;
+  unsigned budget;
+  if (answers_per_pass) { /* a fixed count */
+    budget = answers_left;
+    if (pass_reserve) budget = budget > pass_reserve ? budget - pass_reserve : 0;
+  } else { /* the newest that can still leave within the deadline */
+    double need = (double)age_ns + (double)total * cost_ns;
+    budget = need <= (double)deadline_ns ? total : (unsigned)((double)deadline_ns * (double)total / need);
+    if (budget < fresh_min) budget = fresh_min;
+  }
   for (unsigned i = 0; i < NR; i++) take[i] = total <= budget ? fr_n[i] : (unsigned)((uint64_t)fr_n[i] * budget / total);
   for (unsigned i = 0; i < NR; i++)
     for (; fr_n[i] > take[i]; fr_n[i]--) {
@@ -527,10 +575,21 @@ static void cancel_accepts(unsigned ri) {
  * kernel then drops it. */
 static void accept_policy(void) {
   if (conn_limit) {
-    int full = open_total >= conn_limit;
-    if (full != listen_short && (full || open_total + conn_limit / 64 < conn_limit)) {
-      listen_short = full;
-      for (unsigned l = 0; l < NLISTEN; l++) listen(LFD[l], full ? 1 : LISTEN_BACKLOG);
+    /* the listen queues: full size until the last 1.5 % under the limit; from there on 64 entries
+     * (a burst of connections is then at most a few hundred to refuse), and one entry while the
+     * allowance for refusals is used up (see refuse_per_s) */
+    uint64_t tn = now_ns();
+    if (refuse_t) refuse_allow += (double)(tn - refuse_t) * 1e-9 * (double)refuse_per_s;
+    if (refuse_allow > 200.0) refuse_allow = 200.0;
+    refuse_t = tn;
+    int full = open_total >= conn_limit, near = open_total + conn_limit / 64 >= conn_limit;
+    int want = !near ? 0 : refuse_per_s && refuse_allow <= 0.0 ? 2 : !refuse_per_s || refuse_allow >= 100.0 || !listen_short ? 1 : listen_short;
+    if (want != listen_short) {
+      listen_short = want;
+      for (unsigned l = 0; l < NLISTEN; l++) listen(LFD[l], want == 2 ? 1 : want ? 64 : LISTEN_BACKLOG);
+    }
+    if (full != limit_said && (full || open_total + conn_limit / 64 < conn_limit)) {
+      limit_said = full;
       fprintf(stderr, "connection limit %u %s: %u open, %llu refused so far\n", conn_limit, full ? "reached" : "cleared",
               open_total, (unsigned long long)refused_total);
     }
@@ -550,6 +609,12 @@ static void accept_policy(void) {
 
 /* ---------- completions ---------- */
 
+/* What a connection over the limit gets: an answer any HTTP client counts as a failed request. A
+ * bare close is an EOF on a connection that has not answered yet, which some clients retry on a
+ * new connection without counting anything. */
+static const char R_503[] = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nContent-Length: 30\r\n"
+                            "Connection: close\r\n\r\n{\"error\":\"server at capacity\"}";
+
 static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   struct rs *rs = &R[ri];
   if (!(cqe->flags & IORING_CQE_F_MORE)) rs->accept_armed &= (uint8_t)~(1u << UD_SLOT(cqe->user_data));
@@ -562,13 +627,17 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
   if (slot >= rs->r.nslots) { fprintf(stderr, "accept: slot %u out of range\n", slot); return; }
   struct conn *c = &rs->conns[slot];
   if (c->flags & CF_OPEN) { fprintf(stderr, "accept: slot %u still open\n", slot); return; }
-  if (conn_limit && open_total >= conn_limit) { /* full: closed at once (see conn_limit) */
+  if (conn_limit && open_total >= conn_limit) { /* full: a 503 and the close, at once (see conn_limit) */
     struct io_uring_sqe *q = ring_sqe(&rs->r);
+    sqe_send(q, slot, R_503, sizeof R_503 - 1, UD(UD_CANCEL, ri, 0, slot));
+    q->flags |= IOSQE_IO_HARDLINK | IOSQE_CQE_SKIP_SUCCESS;
+    q = ring_sqe(&rs->r);
     q->opcode = IORING_OP_CLOSE;
     q->flags = IOSQE_CQE_SKIP_SUCCESS;
     q->file_index = slot + 1;
     q->user_data = UD(UD_CANCEL, ri, 0, slot);
     refused_total++;
+    refuse_allow -= 1.0;
     return;
   }
   c->flags = CF_OPEN;
@@ -899,7 +968,7 @@ static void stats(uint64_t dt_ns) {
           "bulk_max=%.0fms hold_max=%.1fms hold_total=%.1fms hold_timeouts=%llu tail_frames_max=%llu tail_short=%llu passes_max=%llu "
           "wait_max=%.1fms majflt=%ld tail_restarts=%llu begin_busy=%llu heap=%zuMB heap_free=%zuMB arenas=%u trims=%llu slices=%llu "
           "poll_events=%llu poll_ends=%llu poll_rearms=%llu eventfd_events=%llu "
-          "fresh=%llu spilled=%llu late_passes=%llu delack_restores=%llu restore_err=%llu refused=%llu\n",
+          "fresh=%llu spilled=%llu late_passes=%llu delack_restores=%llu restore_err=%llu refused=%llu cost_us=%.1f reserve_passes=%llu\n",
           (unsigned long long)T_reqs, (double)S.reqs / dt, (double)S.batches / dt, S.batches ? (double)S.cqes / (double)S.batches : 0.0,
           (unsigned long long)S.max_batch, (unsigned long long)S.accepts, (unsigned long long)S.closes, (unsigned long long)S.enobufs,
           (unsigned long long)S.reads, (unsigned long long)S.deferred, (unsigned long long)S.rq_max, (unsigned long long)S.ready_max,
@@ -914,7 +983,7 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)S.poll_ends, (unsigned long long)S.poll_rearmed,
           (unsigned long long)S.eventfd_events, (unsigned long long)FS.fresh, (unsigned long long)FS.spilled,
           (unsigned long long)FS.late_passes, (unsigned long long)FS.restores, (unsigned long long)FS.restore_err,
-          (unsigned long long)refused_total);
+          (unsigned long long)refused_total, cost_ns / 1000.0, (unsigned long long)FS.reserved);
   memset(&FS, 0, sizeof FS);
   if (MG.enabled) fprintf(stderr,
       " tcp_memgov rcvbuf=%d pressure=%d psi_some10=%.2f psi_full10=%.2f cg_mem=%lluMB cg_max=%lluMB cg_sock=%lluMB tcp_mem_pages=%lu changes=%llu samples=%llu\n",
@@ -1226,17 +1295,24 @@ int main(int argc, char **argv) {
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   fresh_first = env_long("FRESH_FIRST", 1) != 0;
   fresh_reserve = (unsigned)env_long("FRESH_RESERVE", 24);
+  backlog_age_ms = (unsigned)env_long("BACKLOG_AGE_MS", 20000);
+  backlog_quiet_ms = (unsigned)env_long("BACKLOG_QUIET_MS", 30);
+  refuse_per_s = env_long("REFUSE_PER_S", 1000);
   late_ms = (unsigned)env_long("LATE_MS", 20);
   delack_restore = env_long("DELACK_RESTORE", 1) != 0;
   quickack_off = env_long("QUICKACK_OFF", 1) != 0;
   /* newest first: a pass is ~10 ms of work, so what arrives during it is answered inside the
    * delayed-ACK window by the next one, and it needs no reaping or entering mid-pass */
-  answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", fresh_first ? 384 : 2048);
+  answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", fresh_first ? 0 : 2048);
+  deadline_ns = (uint64_t)env_long("DEADLINE_MS", 32) * 1000000ULL;
+  pass_ns = (uint64_t)env_long("PASS_MS", 8) * 1000000ULL;
   reap_every = (unsigned)env_long("REAP_EVERY", fresh_first ? 0 : 512);
   enter_every = (unsigned)env_long("ENTER_EVERY", fresh_first ? 0 : 128);
   if (enter_every) reap_every = enter_every;
-  if (fresh_reserve > answers_per_pass / 2) fresh_reserve = answers_per_pass / 2;
-  fr_cap = answers_per_pass < 64 ? 64 : answers_per_pass;
+  if (answers_per_pass && fresh_reserve > answers_per_pass / 2) fresh_reserve = answers_per_pass / 2;
+  fr_cap = answers_per_pass ? (answers_per_pass < 64 ? 64 : answers_per_pass) : 4096;
+  if (fr_cap > recv_bufs / 2) fr_cap = recv_bufs / 2; /* arrivals stay in their receive buffers until the pass has seen every ring */
+  if (fr_cap < 64) fr_cap = 64;
   submit_chunk = (unsigned)env_long("SUBMIT_CHUNK", 128);
   poll_idle = env_long("IDLE_POLL", 0) != 0;
   eventfd_wake = env_long("EVENTFD_WAKE", 0) != 0;
@@ -1301,8 +1377,9 @@ int main(int argc, char **argv) {
   while (NR < NR_MAX && (long)NR * (long)nslots < pre && ring_create(NR) == 0) NR++;
   prewarm();
   fprintf(stderr, "experiment: idle_poll=%d eventfd_wake=%d recv_size=%u backlog_slice_us=%u pre_conns=%ld "
-          "fresh_first=%d answers_per_pass=%u fresh_reserve=%u late_ms=%u delack_restore=%d quickack_off=%d conn_limit=%u\n",
-          poll_idle, eventfd_wake, recv_buf_size, backlog_slice_us, pre, fresh_first, answers_per_pass, fresh_reserve,
+          "fresh_first=%d answers_per_pass=%u deadline_ms=%u pass_ms=%u fresh_reserve=%u backlog_age_ms=%u backlog_quiet_ms=%u late_ms=%u delack_restore=%d quickack_off=%d conn_limit=%u\n",
+          poll_idle, eventfd_wake, recv_buf_size, backlog_slice_us, pre, fresh_first, answers_per_pass,
+          (unsigned)(deadline_ns / 1000000ULL), (unsigned)(pass_ns / 1000000ULL), fresh_reserve, backlog_age_ms, backlog_quiet_ms,
           late_ms, delack_restore, quickack_off, conn_limit);
   fprintf(stderr, "listening on %s:%s: up to %u rings x %u direct descriptors; cache %d KiB; code locked %zu KiB\n", host, port, NR_MAX,
           nslots, cache_kib, lock_code() >> 10);
@@ -1315,10 +1392,10 @@ int main(int argc, char **argv) {
     for (unsigned i = 1; i < NR; i++)
       if (!eventfd_wake || ring_pending_submit(&R[i].r)) ring_enter(&R[i].r, 0, 0);
     /* 2. ring 0 waits (unless work is already queued): bigger batches share one commit */
-    int busy = nready || (nrq > rq_head) || (nheld && !A.db.writes_held);
+    int busy = (nready && !backlog_parked) || (nrq > rq_head) || (nheld && !A.db.writes_held);
     long rc;
     if (busy) rc = ring_enter(&R[0].r, 0, 0);
-    else rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, last_cqes ? wait_ns : IDLE_NS);
+    else rc = ring_enter(&R[0].r, last_cqes >= 16 ? wait_min : 1, last_cqes || nready ? wait_ns : IDLE_NS); /* a backlog that waits is looked at again soon */
     if (rc < 0 && rc != -ETIME && rc != -EINTR && rc != -EBUSY && rc != -EAGAIN) {
       fprintf(stderr, "io_uring_enter: %s\n", strerror((int)-rc));
       return 1;
@@ -1329,23 +1406,61 @@ int main(int argc, char **argv) {
     A.now = (int64_t)time(NULL);
     writes_ok = !A.db.writes_held;
     if (writes_ok && db_begin_write(&A.db) < 0) writes_ok = 0; /* the tail thread is restarting the log: this batch reads only */
-    answers_left = answers_per_pass;
+    if (fresh_first && !answers_per_pass) {
+      /* what an answer costs: the last pass and its enter, if this enter did not wait (it does not
+       * when there is work queued, nor while arrivals are going to a backlog that waits) */
+      if ((busy || (backlog_parked && now_ms - spill_ms < backlog_quiet_ms)) && te_prev && pass_answers >= 64) {
+        double c = (double)(t - t_reap) / (double)pass_answers;
+        if (c > 2.0 * cost_ns) c = 2.0 * cost_ns; /* a pause inside the cycle is not what answers cost */
+        cost_ns += (c - cost_ns) * 0.125;
+        if (cost_ns < 8000.0) cost_ns = 8000.0;
+        if (cost_ns > 120000.0) cost_ns = 120000.0;
+      }
+      double n = (double)pass_ns / cost_ns;
+      answers_left = n < 128.0 ? 128 : n > 4096.0 ? 4096 : (unsigned)n;
+    } else {
+      answers_left = answers_per_pass;
+    }
+    pass_answers = 0;
     unsigned ncq;
     if (fresh_first) {
       /* this pass's arrivals first (see fresh_first). They are late if the loop was away too long:
        * the last pass, plus whatever the enters took beyond the wait that was asked for */
-      uint64_t asked = busy ? 0 : (last_cqes ? wait_ns : IDLE_NS), out = t - te_prev;
-      int late = te_prev && (te_prev - t_reap) + (out > asked ? out - asked : 0) > (uint64_t)late_ms * 1000000ULL;
+      uint64_t asked = busy ? 0 : (last_cqes || nready ? wait_ns : IDLE_NS), out = t - te_prev;
+      uint64_t away = te_prev ? (te_prev - t_reap) + (out > asked ? out - asked : 0) : 0;
+      int late = away > (uint64_t)late_ms * 1000000ULL;
       t_reap = t;
       if (late) FS.late_passes++;
+      now_ms = (uint32_t)(t / 1000000ULL);
       collecting = 1;
       ncq = reap_all();
       collecting = 0;
+      /* the backlog's share, if its oldest request has waited long enough (see backlog_age_ms); a
+       * head that is no longer waiting counts as old, so that run_ready clears it away */
+      pass_reserve = 0;
+      if (nready && fresh_reserve) {
+        struct conn *h = ref_conn(ready[0]);
+        int gone = h->gen != UD_GEN(ready[0]) || !(h->flags & CF_READY);
+        uint32_t age = gone ? 0 : now_ms - h->pad;
+        if (!backlog_age_ms || gone || age >= backlog_age_ms) {
+          pass_reserve = backlog_age_ms && age >= 2 * backlog_age_ms && answers_left / 2 > fresh_reserve ? answers_left / 2 : fresh_reserve;
+          FS.reserved++;
+        }
+      }
       feed_late = late;
-      fresh_run();
+      fresh_run(away);
       feed_late = 1; /* whatever waited a pass or more */
-      if (nready && answers_left < fresh_reserve) answers_left = fresh_reserve;
-      run_ready();
+      {
+        /* the backlog: what the arrivals left, if none of them is still going there (see
+         * backlog_quiet_ms), and its share in any case; what it does not use stays for the reads */
+        unsigned for_backlog = backlog_quiet_ms && now_ms - spill_ms < backlog_quiet_ms ? 0 : answers_left;
+        if (for_backlog < pass_reserve) for_backlog = pass_reserve;
+        unsigned rest = answers_left > for_backlog ? answers_left - for_backlog : 0;
+        backlog_parked = nready && !for_backlog;
+        answers_left = for_backlog;
+        run_ready();
+        answers_left += rest;
+      }
       feed_late = late;
       ncq += read_rounds();
       feed_late = 1;

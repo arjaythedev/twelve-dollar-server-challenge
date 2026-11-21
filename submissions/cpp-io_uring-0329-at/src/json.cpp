@@ -470,7 +470,15 @@ void escape_into(ByteBuf& out, const uint8_t* s, size_t n) {
       i += 8;
     }
   }
-  if (clean) {
+  if (clean && n >= 8) {
+    /* 尾部不足 8 字节，用它前面重叠的那 8 字节一起判定——[i,n) 一定落在 [n-8,n) 里，
+     * 而 [0,i) 已经查过了，重复检查无害。原来这里逐字节查表，用户名只有 15 字节，
+     * AVX2/SSE2 都跳过、8 字节循环只走一次，剩下的 7 个字节要走 7 次表查找。 */
+    uint64_t w;
+    std::memcpy(&w, s + n - 8, 8);
+    if (word_needs_escape(w) != 0) clean = false;
+  }
+  if (clean && n < 8) {
     for (size_t j = i; j < n; j++) {
       if (kEsc.t[s[j]]) {
         clean = false;

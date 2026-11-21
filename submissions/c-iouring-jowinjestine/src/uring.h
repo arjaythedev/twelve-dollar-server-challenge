@@ -335,6 +335,23 @@ static inline void sqe_recv_once(struct io_uring_sqe *s, unsigned slot, uint64_t
   s->msg_flags = MSG_DONTWAIT;
   s->user_data = ud;
 }
+/* setsockopt(TCP_QUICKACK, 0) on a direct descriptor (IORING_OP_URING_CMD on a socket, 6.7+):
+ * the socket goes back to delayed-ACK ("pingpong") mode. A success posts no completion. */
+#ifndef SOCKET_URING_OP_SETSOCKOPT
+#define SOCKET_URING_OP_SETSOCKOPT 3
+#endif
+#define OP_URING_CMD 46 /* IORING_OP_URING_CMD, as a number: older headers lack the socket fields */
+static const int quickack_zero = 0;
+static inline void sqe_delack_mode(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
+  s->opcode = OP_URING_CMD;
+  s->flags = IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
+  s->fd = (int)slot;
+  s->off = SOCKET_URING_OP_SETSOCKOPT;                          /* cmd_op */
+  s->addr = ((uint64_t)TCP_QUICKACK << 32) | (uint32_t)SOL_TCP; /* level, optname */
+  s->splice_fd_in = (int32_t)sizeof quickack_zero;              /* optlen */
+  s->addr3 = (uint64_t)(uintptr_t)&quickack_zero;               /* optval */
+  s->user_data = ud;
+}
 /* MSG_WAITALL: io_uring retries a short send itself, so the completion means all or nothing. */
 static inline void sqe_send(struct io_uring_sqe *s, unsigned slot, const void *p, unsigned n, uint64_t ud) {
   s->opcode = IORING_OP_SEND;

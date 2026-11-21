@@ -142,6 +142,15 @@ extern int sqlite3BtreeNext(nativeint cur, int flags)
 [<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
 extern int sqlite3BtreeEof(nativeint cur)
 
+[<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
+extern int sqlite3BtreePrevious(nativeint cur, int flags)
+
+[<DllImport(L, EntryPoint = "sqlite3BtreeLast", ExactSpelling = true); SuppressGCTransition>]
+extern int btLast(nativeint cur, nativeint res)
+
+[<DllImport(L, ExactSpelling = true); SuppressGCTransition>]
+extern int64 sqlite3BtreeIntegerKey(nativeint cur)
+
 [<DllImport(L, EntryPoint = "sqlite3BtreeTableMoveto", ExactSpelling = true); SuppressGCTransition>]
 extern int btTableMoveto(nativeint cur, int64 key, int bias, nativeint res)
 
@@ -162,6 +171,7 @@ extern nativeint sqlite3KeyInfoAlloc(nativeint db, int n, int x)
 // signatures for the callers (the out values are always stack locals).
 let inline sqlite3BtreeGetMeta (bt: nativeint, idx: int, value: byref<uint32>) = btGetMeta (bt, idx, NativePtr.toNativeInt &&value)
 let inline sqlite3BtreeFirst (cur: nativeint, res: byref<int>) = btFirst (cur, NativePtr.toNativeInt &&res)
+let inline sqlite3BtreeLast (cur: nativeint, res: byref<int>) = btLast (cur, NativePtr.toNativeInt &&res)
 let inline sqlite3BtreeTableMoveto (cur: nativeint, key: int64, bias: int, res: byref<int>) = btTableMoveto (cur, key, bias, NativePtr.toNativeInt &&res)
 let inline sqlite3BtreeIndexMoveto (cur: nativeint, unpacked: nativeint, res: byref<int>) = btIndexMoveto (cur, unpacked, NativePtr.toNativeInt &&res)
 let inline sqlite3BtreePayloadFetch (cur: nativeint, amt: byref<uint32>) = btPayloadFetch (cur, NativePtr.toNativeInt &&amt)

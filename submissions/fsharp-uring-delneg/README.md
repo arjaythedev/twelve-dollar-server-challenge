@@ -26,6 +26,11 @@
   completes (`DEFACC=1` sets `TCP_DEFER_ACCEPT`, which keeps it out of the queue until its first request arrives). The
   listeners have `TCP_QUICKACK` off, and accepted sockets inherit it, so a connection's first request is acknowledged
   by its response instead of by a bare ACK of its own (`QUICKACK=1` restores the kernel default).
+  An answer that leaves more than 40 ms after its request was acknowledged by the kernel's delayed-ACK timer, which
+  also takes the connection out of that mode: its next request would get a bare ACK at once. So an answer that is
+  `LATEACK` ms late (30; 0: off) sets `TCP_QUICKACK` off on its connection again, with a socket command in the ring
+  (kernel 6.7; on an older kernel the first failure turns it off). Test box, 2,000 connections, one late answer each,
+  then one request each: 1,935 bare ACKs for those requests without it, 320 with it.
 - **Receives.** Each connection has a multishot receive into its ring's provided-buffer ring (1,024 × 1 KB), so an
   idle connection holds no buffer and a request costs one completion. A burst can empty the buffer ring and end every
   other receive with `ENOBUFS`; those connections are re-armed oldest first, at most 2,048 per ring per pass, so the
@@ -54,11 +59,16 @@
   then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
-  first, keeping each connection's order, and the oldest get a growing share of each pass from 8 s on, so no request
-  waits without bound.
+  first, keeping each connection's order, and the oldest get a share of each pass only from 20 s on (half, and all of
+  it from 40 s; `LIFOAGE`, ms), so no request waits without bound. The load is closed-loop: a request that waits holds
+  its client, so under a short overload of x % newest-first leaves about x % of the clients waiting, the same ones
+  until it ends. With the share starting at 8 s, as before, a ramp-top overload longer than that sent half of every
+  pass to requests that were already late, at the peak, and made many more late.
 - **Checkpoints, and writes that don't wait for them.** SQLite's automatic checkpoints are off (a WAL hook counts
   frames). Every 16,000 new frames the loop asks the checkpoint thread for a PASSIVE checkpoint and learns it
-  finished from an eventfd its ring reads. Under steady writes a pass never ends with the WAL fully copied, so the WAL
+  finished from an eventfd its ring reads. While more than a pass of requests is waiting (the top of the ramp) the next
+  pass is put off, up to 64,000 uncopied frames: a pass costs the checkpoint thread 35-45 ms of CPU, and at nice 19 it
+  still gets some of the one CPU while the loop is short of it. Under steady writes a pass never ends with the WAL fully copied, so the WAL
   can't rewind unless writes stop for a pass. They used to: past 16,384 frames (64 MB), about every 3 s at 300k users,
   writes waited (reads went on) until a pass had copied everything. On the test box a pass was running 22 % of the
   time and each hold kept writes ~200 ms. With the server's disk writes capped at 25 MB/s (it writes ~21 MB/s at
@@ -72,16 +82,43 @@
   and a pass writes each page once however many of its frames hold it, so a pass over 16,000 frames writes fewer
   pages per frame than one over 4,000: the disk got 4-5 times fewer write requests under the cap (26,091-28,911 a run
   against 145,203-154,034).
-  The WAL has a bound: 4 GB, or half of the free space on the database's disk at startup if that is less (the startup
-  line says which). Near it the passes follow one another, each a little shorter, and the checkpoint thread also
+  The WAL has a bound: 8.6 GB, or half of the free space on the database's disk at startup if that is less (the
+  startup line says which). Near it the passes follow one another, each a little shorter, and the checkpoint thread also
   syncs the database file after each (while writes flow); when a pass leaves at most 2,000 frames, writes wait for one
   more, short pass (up to 1.5 s, `HOLDRIDE`; SQLite's own sync at its end has only that pass's pages left), and the
-  first write after it rewinds the WAL, alone in its commit. At 300k users the WAL grows about 16 MB a second, so
-  with 4 GB that is once in four minutes; under the 25 MB/s cap such a hold kept writes 0.2 to 1.4 s. A WAL
+  first write after it rewinds the WAL, alone in its commit. At 300k users the WAL grows about 16 MB a second. The
+  bound was 4.3 GB, which came up once in four and a half minutes: inside every 5-minute hold at 300k and above, and
+  never in a 2-minute probe (two heads of this entry passed a probe and then failed the hold at the same load). With
+  8.6 GB it comes up once in nine minutes, when the disk has 17 GB free. Under the 25 MB/s cap such a hold kept writes
+  0.2 to 1.4 s. A WAL
   left by an earlier run is copied into the database and emptied at startup (`wal_checkpoint(TRUNCATE)`), so every
   run starts at zero. After each pass the thread drops the WAL's copied frames from the kernel's cache (no reader
   goes back to them), so the file's length doesn't cost memory. The database file's pages go too, after the pass
-  that syncs the file (the held one).
+  that syncs the file (the held one), and once at startup, by the checkpoint thread before its first pass
+  (`fdatasync`, then `POSIX_FADV_DONTNEED`; `DROPDB=0` leaves that out). The seed is 250 MB that the kernel has just
+  written or read, and the server reads through its own page cache. Since writes stopped waiting for checkpoints, no
+  pass copies the whole WAL before it reaches its bound, minutes into a run, so nothing gave those pages back in time, and on a 2 GB box they are what
+  reclaim has to take when the sockets have filled memory. A connection holds 3.9 KB of kernel memory (on the test
+  box, from `/proc/slabinfo` at 300k: TCP socket 2,368 bytes, socket inode 832, file 256, dentry 192, the armed
+  receive's request 256, LSM 32): 1.2 GB at 300k, +39 MB per 10,000 users, beside the process's 165 MB and the
+  system. With the test box's memory filled to match, free memory ran out at the top of the ramp, when the load is
+  also at its heaviest (new connections still arriving, every client's first feed), and kswapd scanned 9,000 to
+  91,000 pages from there on; with the drop it scanned none in the same runs and the box kept 120 MB more free at
+  its lowest point.
+- **WAL writeback.** A commit leaves its WAL pages dirty in the kernel's cache, and SQLite syncs the WAL only when
+  a checkpoint pass starts (every 16,000 frames, 62 MB). The database pages a pass writes stay dirty too: SQLite
+  syncs the database only after a pass that copied the whole WAL. The kernel starts its flusher at 10 % and makes
+  writers wait at 20 % of free memory plus file cache, which is about 40 and 80 MB on a 2 GB box holding 320k
+  sockets. So the WAL's sawtooth alone kept dirty memory at the first threshold: the flusher ran most of the time,
+  at normal priority on the one CPU, and each time it also wrote the database's dirty pages out again. Now, every
+  8 MB of new WAL (`WALKICK_MB`), the loop queues a `sync_file_range(SYNC_FILE_RANGE_WRITE)` for those pages on its
+  ring. io_uring runs it on a kernel worker thread of the process, so the loop never waits for it; it starts the
+  writes and waits for nothing. Durability is as before (a 201 follows its commit's `write()` to the WAL; the
+  checkpoint thread's syncs are unchanged). Test box with the thresholds set to 40/80 MB, 320k users, two runs
+  each way: 47,014 and 52,598 disk write requests a run before, 22,843 and 19,545 now (108 and 93 MB written per
+  5 s); the flusher's 1.1 s of CPU a run gone, the checkpoint thread 1.0 s lighter, the worker thread 1.2 s; requests
+  over 1 s 16,050 and 756 before, 2,955 and 163 now; CPU per request unchanged (13.5 and 13.6 µs before, 13.6 and
+  13.1 now).
 - **SQLite.** Opened through the `unix-excl` VFS: the process holds the file's lock for its life and the WAL index
   lives in its memory, shared by its two connections. 64 MB page cache, no mmap, statements prepared once. Startup
   reads the indexes that writes touch into the page cache. The pages the load keeps coming back to are about 40 MB
@@ -139,11 +176,29 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 
 - **Feed:** the first 20 entries of `posts_created_at_id_idx` (`created_at DESC, id DESC`, so exactly the spec's
   order), then each post and its author. The n-th post and its author are read through cursors of their own, so when
-  requests in a pass ask for the same rows, SQLite's move returns at once from a cursor already there; every request
-  still decodes the rows from SQLite's pages. Like counts take one range walk of `likes_post_id_idx` when the 20 ids
-  lie within 512 of each other, a seek per post otherwise.
+  requests in a transaction ask for the same rows the cursor is already there: the server keeps the rowid it put
+  each cursor on and doesn't send it to search for the row it is on (`sqlite3BtreeTableMoveto` would return at
+  once); every request still decodes the rows from SQLite's pages. Like counts take one range walk of
+  `likes_post_id_idx` when the 20 ids lie within 512 of each other, a seek per post otherwise.
+- **Post:** `GET /posts/:id` reads post X through one of 64 posts cursors, each serving a run of 32 consecutive ids
+  (`POSTRUN`; 0: cursor X mod 32, searched from the root each time), and its author through users cursor X mod 32
+  (`POSTSLOTS`, 0 for one shared pair). Under load the posts asked for are the ones feeds listed in the last seconds,
+  a thousand or more of the newest: an id rarely comes twice in one transaction, a neighbour's mostly does. From a
+  row of its run the cursor steps to the one asked for (`sqlite3BtreeNext`/`Previous`, mostly inside one leaf) and
+  the key it lands on is checked; only the first request of a run in a transaction searches from the root. The row
+  and its like count are read for every request.
+- **Fewer searches from the root.** A search costs a page lookup and a binary search per level on memory the network
+  path has pushed out of the CPU's caches: the profile had about 9 % of the loop thread in them, 2.7 a request. Two
+  more are spared besides the post's. A feed that read 20 index entries leaves that cursor on the 20th; the next feed of
+  the transaction reads them from there back to the first, and its step before the first must find the start of the
+  index, so every second feed does without the walk from the root. The 20 newest posts mostly have no like yet: a
+  cursor that stays on the last entry of `likes_post_id_idx` shows that in one read (`sqlite3BtreeLast` returns at
+  once from a cursor already there), and the range walk runs only when that entry is for one of them or a newer
+  post. Test box, 160,000 users, 30 s of the hold (counted with uprobes): 28,900 searches from the root a second
+  against 46,600, 1.7 a request against 2.7. At 320,000 users the difference in CPU per request stayed inside the test
+  box's run-to-run spread.
 - **Live reads:** every request reads its rows while it is served (rule 5). Only prepared statements, cursors, key
-  descriptions and the four root pages are kept, and the schema cookie is checked on every read. A read transaction
+  descriptions and the four root pages are kept, and the schema cookie is checked once per transaction. A read transaction
   that read-only passes share always sees the latest commit: only the loop writes, and a pass that writes commits.
 - **Fallbacks to SQL:** a row the decoder doesn't cover (a record spilling onto overflow pages, an unexpected type, a
   post without its user) is read with the reference SQL query. At startup the server checks the column order of each
@@ -178,9 +233,10 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 1048576), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `CKDEFER` (ms, 500; 0: passes never put off), `CKDEFERMAX` (passes, 4), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `POSTRUN` (32), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
-process's file-backed pages stay file-backed), `STATS` (1: a line a second on stderr).
+process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
+startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `STATS` (1: a line a second on stderr).
 
 ## Credits
 

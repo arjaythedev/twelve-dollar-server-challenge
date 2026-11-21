@@ -1,0 +1,106 @@
+# yaml-language-server: $schema=../schema/test.schema.json
+steps:
+  - name: user for this VU
+    use: std/pick@v1
+    with:
+      file: "${{ env.TOKENS }}"
+      index: "${{ __vu__ }}"
+      index_offset: -1
+    outputs: user
+
+  - name: initial delay roll
+    use: std/random@v1
+    when: "${{ __iter__ }} == 0"
+    with: { type: float, min: 0, max: 5 }
+    outputs: initial_delay
+
+  - name: initial delay
+    use: std/sleep@v1
+    when: "${{ __iter__ }} == 0"
+    with: { seconds: "${{ initial_delay }}" }
+
+  - name: feed
+    use: std/http@v1
+    with:
+      url: "${{ env.BASE_URL }}/feed"
+    outputs: feed
+    check: { status: 200 }
+
+  - name: random post index
+    use: std/random@v1
+    with: { type: integer, min: 0, max: 19 }
+    outputs: post_index
+
+  - name: random post
+    use: std/pick@v1
+    with:
+      from: "${{ feed.body.posts }}"
+      index: "${{ post_index }}"
+    outputs: post
+
+  - name: think after feed roll
+    use: std/random@v1
+    with: { type: float, min: 3, max: 7 }
+    outputs: think_after_feed
+
+  - name: think after feed
+    use: std/sleep@v1
+    with: { seconds: "${{ think_after_feed }}" }
+
+  - name: get post
+    use: std/http@v1
+    with:
+      url: "${{ env.BASE_URL }}/posts/${{ post.id }}"
+    outputs: post_response
+    check: { status: 200 }
+
+  - name: think after post roll
+    use: std/random@v1
+    with: { type: float, min: 3, max: 8 }
+    outputs: think_after_post
+
+  - name: think after post
+    use: std/sleep@v1
+    with: { seconds: "${{ think_after_post }}" }
+
+  - name: like roll
+    use: std/random@v1
+    with: { type: float, min: 0, max: 1 }
+    outputs: like_roll
+
+  - name: like
+    use: std/http@v1
+    when: "${{ like_roll }} < 0.15"
+    with:
+      method: POST
+      url: "${{ env.BASE_URL }}/posts/${{ post.id }}/like"
+      headers:
+        Authorization: "Bearer ${{ user.token }}"
+        Content-Type: application/json
+
+  - name: post roll
+    use: std/random@v1
+    with: { type: float, min: 0, max: 1 }
+    outputs: post_roll
+
+  - name: create post
+    use: std/http@v1
+    when: "${{ post_roll }} < 0.02"
+    with:
+      method: POST
+      url: "${{ env.BASE_URL }}/posts"
+      headers:
+        Authorization: "Bearer ${{ user.token }}"
+        Content-Type: application/json
+      body:
+        body: "${{ user.username }} says hi at ${now_iso} (VU ${{ __vu__ }}, iter ${{ __iter__ }})"
+    check: { status: 201 }
+
+  - name: final think roll
+    use: std/random@v1
+    with: { type: float, min: 5, max: 15 }
+    outputs: final_think
+
+  - name: final think
+    use: std/sleep@v1
+    with: { seconds: "${{ final_think }}" }

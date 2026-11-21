@@ -637,6 +637,13 @@ static unsigned read_rounds(void) {
  * each socket holding one counted a page against tcp_mem: past ~30k of them TCP went into memory
  * pressure and pruned queues (CPU, drops, retransmits) until the OOM killer ended it at 285k. */
 static unsigned reap_every = 512;
+/* ENTER_EVERY (default 128, 0: off): a long pass also enters every ring each time it reaps. With
+ * DEFER_TASKRUN a ring's receive work only runs inside io_uring_enter, and 6.8 runs all of it in
+ * one call: a pass that does not enter leaves every request that arrives meanwhile in its socket
+ * (a 4 KB page against tcp_mem each; ~30k of them put TCP into memory pressure, whose queue pruning
+ * froze the box for seconds), and the next enter then runs thousands of receives in one
+ * unpreemptible call (one took 411 ms). Small, frequent enters keep both short. */
+static unsigned enter_every = 128;
 static void run_ready(void) {
   unsigned n = nready, i = 0, since = 0;
   /* Only time-slice an established backlog. Normal batches follow the original fast path. */
@@ -653,6 +660,8 @@ static void run_ready(void) {
       since = 0;
       unsigned keep = answers_left;
       answers_left = 0;
+      if (enter_every)
+        for (unsigned r = 0; r < NR; r++) ring_enter(&R[r].r, 0, 0);
       reap_all();
       answers_left = keep;
     }
@@ -1074,6 +1083,9 @@ int main(int argc, char **argv) {
   recv_bufs = (unsigned)env_long("RECV_BUFS", 8192);
   answers_per_pass = (unsigned)env_long("ANSWERS_PER_PASS", 2048);
   reap_every = (unsigned)env_long("REAP_EVERY", 512);
+  enter_every = (unsigned)env_long("ENTER_EVERY", 128);
+  if (enter_every) reap_every = enter_every;
+  submit_chunk = (unsigned)env_long("SUBMIT_CHUNK", 128);
   poll_idle = env_long("IDLE_POLL", 0) != 0;
   eventfd_wake = env_long("EVENTFD_WAKE", 0) != 0;
   recv_buf_size = (unsigned)env_long("RECV_SIZE", RECV_BUF_SIZE_DEFAULT);

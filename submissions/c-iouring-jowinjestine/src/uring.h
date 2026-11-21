@@ -240,11 +240,23 @@ static inline unsigned ring_pending_submit(const struct ring *r) { return r->sq_
 
 /* Publishes the SQEs written so far and enters the kernel: submits them, runs the ring's
  * deferred task work (GETEVENTS), and waits for min completions or timeout_ns (0: no wait). */
+/* Most SQEs one io_uring_enter submits (SUBMIT_CHUNK; 0: all of them). The box's kernel is
+ * PREEMPT_VOLUNTARY: a system call is only preempted where it chooses to be, and submitting a
+ * batch's thousand sends in one call keeps ksoftirqd, which refills the NIC's receive ring, off
+ * the only CPU for milliseconds. The 1,024-slot ring then overflows on the host side, the packets
+ * are lost without a trace in the guest, and clients wait out retransmission timeouts (200 ms,
+ * then 400, 800...). Back in user space between pieces, the scheduler can run it. */
+static unsigned submit_chunk = 128;
 static long ring_enter(struct ring *r, unsigned min, uint64_t timeout_ns) {
   unsigned n = r->sq_local - r->sq_pushed;
   if (n) {
     STORE_REL(r->sq_tail, r->sq_local);
     r->sq_pushed = r->sq_local;
+  }
+  while (submit_chunk && n > submit_chunk) {
+    long k = sys_io_uring_enter(r->fd, submit_chunk, 0, 0, NULL, 0);
+    if (k <= 0) break; /* the call below reports the error */
+    n -= (unsigned)k;
   }
   long rc;
   if (timeout_ns) {

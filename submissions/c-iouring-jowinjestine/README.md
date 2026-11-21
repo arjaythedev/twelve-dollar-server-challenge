@@ -407,3 +407,51 @@ seed and PGO binary, preferably from a separate k6 host, and collect
 p95/p99, errors, CPU/request, RAM, `enobufs`, retransmissions and TCP
 memory. A smaller receive window may hurt throughput, so **do not enable
 without an A/B win**. No performance claim until the official benchmark.
+
+## Short kernel calls (follow-up to #486)
+
+Two switches, both on: **`SUBMIT_CHUNK=128`** (a ring submits its queued operations at most 128 per
+`io_uring_enter`) and **`ENTER_EVERY=128`** (a long pass enters every ring each 128 answers). Both are
+there for one property of the box: its kernel is `PREEMPT_VOLUNTARY` ("Dynamic Preempt: voluntary"),
+so a system call runs until it decides to stop, and on one vCPU everything else waits for it,
+including ksoftirqd, which refills the NIC's 1,024-slot receive ring.
+
+What that did at 300k, measured second by second on a box like the benchmark one (below):
+
+- A batch's replies went to the kernel in one call per ring, and with `DEFER_TASKRUN` a ring's
+  receives only run inside `io_uring_enter`, all of them in one call on 6.8. After any hiccup (the
+  last seconds of the ramp, a checkpoint) those calls grew: the gap between two batches, normally
+  ~6 ms, went to 77 ms, then 411 ms with 11,203 completions in one batch, and in #486's 5-minute
+  runs up to 3.0-3.2 s.
+- Meanwhile the receive ring overflowed on the host side, invisible to the guest, and clients lost
+  packets: up to 109,000 retransmission timeouts per run on the load host (200 ms, 400, 800...).
+- Requests that arrived during a long pass stayed in their sockets, each a 4 KB page against
+  `tcp_mem`; past ~30,000 of them TCP went into memory pressure, and its queue pruning took the
+  whole CPU for 5-10 s (the box stopped answering, even the 1-second sampler skipped seconds), with
+  a 190,000-request backlog behind it.
+- Every request answered more than 40 ms late also costs a delayed ACK from the kernel (20-38k per
+  second during a stall, ~10 us each), which keeps the CPU saturated: the stall feeds itself.
+
+With both switches the same hiccups stay hiccups: no call runs long and receives leave the
+sockets every 128 answers. What is left is plain overload at the end of the ramp (~5,000 new
+connections a second on top of the requests): a queue that drains as soon as the ramp ends,
+without the freezes.
+
+| 300k users, 60 s ramp + 5 min + 30 s down, p95 / p99 / max over the whole run | runs | p95 | p99 | max |
+|---|---:|---|---|---|
+| #486 (`5b6bfd3`) | 3 | 2.6-4.1 s | 6.6-7.6 s | 10.4-17.0 s |
+| `ENTER_EVERY=128` only | 1 | 2.2 s | 3.4 s | 4.0 s |
+| **both (this PR)** | 4 | 0.57-1.48 s | 0.99-2.65 s | 1.3-3.8 s |
+
+The box: a Synteq 1 vCPU / 2 GB VPS like the benchmark one (Xeon Platinum 8260, Ubuntu 24.04,
+kernel 6.8.0-117, 1,967 MB, no swap, no firewall), the app started by systemd as `deploy` with
+`LimitNOFILE=65535` on a fresh copy of the seed for every run. The load came from a separate 4-vCPU
+box in the same datacenter (0.18 ms) running a C port of `bench/load.js` (one keep-alive connection
+per user, the same think times and request mix) over six address pairs. This box is harsher than
+the benchmark box: #486 held 300,000 there but fails it here every time, so the absolute numbers
+are not a prediction, only the difference is. Both switches can be turned off (`=0`).
+
+Things measured on the way that did not help and are not in this PR: answering this batch's
+arrivals before an existing backlog (fewer stalled seconds, but the backlog's own requests waited
+up to 20 s), smaller pieces (`SUBMIT_CHUNK=32`, `ENTER_EVERY=64`), no 64 MB log read-ahead, 16 MB
+checkpoint cycles, no periodic page drop or writeback kicks, a lower-priority event loop (nice 5/10).

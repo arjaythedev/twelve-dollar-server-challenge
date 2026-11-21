@@ -32,8 +32,13 @@ namespace {
 
 constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
 constexpr uint32_t kMaxRingsLimit = 16;    /* hard cap on rings (rust-iouring-kensac #264 uses 16) */
-constexpr uint32_t kAcceptDepth = 2048;   /* total, divided by the live ring count */
-constexpr uint32_t kAcceptsPerRing = 256; /* floor, so 16 rings still keep 256 each */
+/* accept 在途数：**每个 ring 固定 512**，不随 ring 数稀释。原来是「总 2048 除以 ring 数」，
+ * 而 ring 数正是随连接数增长的（300k 时约 10 个），于是每 listener 的在途 accept 从 51 掉到
+ * 32，ring 再多就会撞上 per<16 的下限而完全停投。c-iouring-kensac #264 与
+ * fsharp-uring-delneg #437 都是每 ring 512（每 listener 64），与 ring 数无关。
+ * 顺带把 full() 的阈值也放宽：现在要到 open + 512 才判定「满」，ring 顶端的 1,536 个槽位
+ * 不再被提前判掉——310k/320k 正卡在这个边界上。 */
+constexpr uint32_t kAcceptDepth = 512;
 
 // 同一端口上相互独立的 SO_REUSEPORT listener，由所有 ring 共享。每个 listener 有自己的
 // accept 队列（受 net.core.somaxconn 限制），所以 8 个 listener 在 ramp 期就是 8 条待建连接
@@ -488,9 +493,7 @@ class Server {
   }
 
   void arm_accept(Worker& w, uint32_t wi) {
-    uint32_t depth = static_cast<uint32_t>(kAcceptDepth / workers_.size());
-    if (depth < kAcceptsPerRing) depth = kAcceptsPerRing;
-    const uint32_t per = depth / kListeners;
+    const uint32_t per = kAcceptDepth / kListeners;
     if (per < 16) return;
     for (uint32_t li = 0; li < kListeners; li++) {
       const int fd = w.listeners()[li];

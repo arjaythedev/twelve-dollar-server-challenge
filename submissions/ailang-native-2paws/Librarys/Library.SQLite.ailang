@@ -262,6 +262,17 @@ FixedPool.SQLiteURow {
     "ncells": Initialize=0, CanChange=True
 }
 
+// Username cache: uid -> (arena offset << 8 | length + 1), 0 when not cached.
+// Usernames never change and no endpoint writes users, so an entry stays
+// valid. Only found rows are cached; a full arena stops adding.
+FixedPool.SQLiteUName {
+    "idx": Initialize=0, CanChange=True
+    "cap": Initialize=131072, CanChange=True
+    "arena": Initialize=0, CanChange=True
+    "used": Initialize=0, CanChange=True
+    "acap": Initialize=4194304, CanChange=True
+}
+
 FixedPool.SQLiteUDirOff {
     "FIRST": Initialize=0
     "LAST": Initialize=8
@@ -1440,6 +1451,16 @@ Function.SQLite.UserName {
         SQLitePost.author_n = 0
         SQLiteRow.key = uid
         IfCondition LessThan(SQLiteRow.key, 1) ThenBlock: { ReturnValue(0) }
+        cached = 0
+        IfCondition LessThan(uid, SQLiteUName.cap) ThenBlock: {
+            IfCondition NotEqual(SQLiteUName.idx, 0) ThenBlock: {
+                cached = RDMEM_64(Add(SQLiteUName.idx, Multiply(uid, 8)))
+            }
+        }
+        IfCondition NotEqual(cached, 0) ThenBlock: {
+            SQLitePost.author_n = Subtract(BitwiseAnd(cached, 255), 1)
+            ReturnValue(Add(SQLiteUName.arena, RightShift(cached, 8)))
+        }
         rec = 0
         IfCondition NotEqual(SQLiteURow.leaf, 0) ThenBlock: {
             IfCondition GreaterEqual(SQLiteRow.key, SQLiteURow.first) ThenBlock: {
@@ -1457,8 +1478,38 @@ Function.SQLite.UserName {
             SQLite.SaveURow()
         }
         s = SQLite.ColTextAt(rec, 1)
-        SQLitePost.author_n = SQLiteV.len
+        n = SQLiteV.len
+        SQLitePost.author_n = n
+        SQLite.UNamePut(uid, s, n)
         ReturnValue(s)
+    }
+}
+
+Function.SQLite.UNamePut {
+    Input: uid: Integer
+    Input: s: Address
+    Input: n: Integer
+    Body: {
+        IfCondition GreaterEqual(uid, SQLiteUName.cap) ThenBlock: { ReturnValue(0) }
+        IfCondition Or(EqualTo(s, 0), GreaterThan(n, 254)) ThenBlock: { ReturnValue(0) }
+        IfCondition GreaterThan(Add(SQLiteUName.used, n), SQLiteUName.acap) ThenBlock: { ReturnValue(0) }
+        // mmap, not Allocate: the first fill can run while the request
+        // scratch arena is on, and that memory is reused after the request.
+        // Anonymous pages start zeroed.
+        IfCondition EqualTo(SQLiteUName.idx, 0) ThenBlock: {
+            ui = SystemCall(9, 0, Multiply(SQLiteUName.cap, 8), 3, 34, -1, 0)
+            ua = SystemCall(9, 0, SQLiteUName.acap, 3, 34, -1, 0)
+            IfCondition Or(LessThan(ui, 4096), LessThan(ua, 4096)) ThenBlock: {
+                SQLiteUName.cap = 0
+                ReturnValue(0)
+            }
+            SQLiteUName.idx = ui
+            SQLiteUName.arena = ua
+        }
+        off = SQLiteUName.used
+        IfCondition GreaterThan(n, 0) ThenBlock: { MemoryCopy(Add(SQLiteUName.arena, off), s, n) }
+        SQLiteUName.used = Add(off, n)
+        WRMEM_64(Add(SQLiteUName.idx, Multiply(uid, 8)), BitwiseOr(LeftShift(off, 8), Add(n, 1)))
     }
 }
 

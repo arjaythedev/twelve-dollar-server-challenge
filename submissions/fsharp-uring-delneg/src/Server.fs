@@ -26,15 +26,27 @@ let private wwin = uint32 (env "WWIN" 20) // ms: writes commit at most once per 
 let private lifoOn = env "LIFO" 1 = 1
 let private lifoCap = env "LIFOCAP" 4
 let private lifoMin = env "LIFOMIN" 0
-let private lifoAge = uint32 (env "LIFOAGE" 8000)
+// The old end's share starts late. The load is closed-loop: a waiting request holds its client, so under an overload
+// of x % newest-first leaves about x % of the clients waiting, the same ones until it ends. A share for the old end
+// while the overload lasts takes capacity from fresh requests to answer ones that are already late, and makes more
+// requests late. 20 s is longer than a ramp's peak and, doubled, inside a client timeout of 60 s.
+let private lifoAge = uint32 (env "LIFOAGE" 20000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
-/// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 4 GB of them, or half of the
-/// free space on the database's disk at startup when that is less.
+// While the loop has more than a pass of requests waiting (and for CKDEFER ms after), the next pass is put off, up to
+// CKDEFERMAX passes' worth of frames: see ckAfterFlush.
+let private ckDefer = uint32 (env "CKDEFER" 500)
+let private ckDeferMax = env "CKDEFERMAX" 4
+// The WAL's new pages are started for the disk every this many MB (0: left to the checkpoint thread's sync and to the
+// kernel's flusher): see the end of `flush`.
+let private walKickBytes = int64 (env "WALKICK_MB" 8) <<< 20
+/// The most frames the WAL may hold before writes wait for a pass so that it can rewind: 8.6 GB of them, or half of the
+/// free space on the database's disk at startup when that is less. At 16-17 MB of WAL a second (300-320k users) 4.3 GB
+/// came up once in a 5-minute hold, never in a 2-minute probe; 8.6 GB is nine minutes of writes.
 let walCap =
-    let want = env "HOLDMAX" 1048576
+    let want = env "HOLDMAX" 2097152
     try
         let dir = IO.Path.GetDirectoryName(IO.Path.GetFullPath(Environment.GetEnvironmentVariable "SQLITE_PATH"))
         max 16384 (int (min (int64 want) (IO.DriveInfo(dir).AvailableFreeSpace / 2L / 4120L)))
@@ -60,6 +72,12 @@ let private holdRideMs = int64 (env "HOLDRIDE" 1500)
 let private holdYieldUs = uint32 (env "HOLDYIELD" 200)
 let private holdYieldAfter = int64 (env "HOLDYIELDAFTER" 20)
 let private carryOn = env "CARRY" 1 = 1 // a pass that wrote nothing leaves its transaction open for the next one
+// A request answered more than 40 ms after it arrived was acknowledged by the kernel's delayed-ACK timer, and that takes
+// the connection out of the mode in which a request's ACK waits for its answer (TCP_QUICKACK 0, set on the listener):
+// its next request, seconds later, is acknowledged at once by a bare ACK, one more packet to send. So an answer that is
+// LATEACK ms late (the kernel got the request up to a pass before the loop stamped it) sets TCP_QUICKACK 0 on the
+// connection again, in the ring (0: off)
+let private lateAckMs = uint32 (env "LATEACK" 30)
 
 // ---------- user_data: type << 56 | gen << 32 | slot ----------
 
@@ -69,6 +87,8 @@ let UdSend = 3UL
 let UdClose = 4UL
 let UdCkpt = 6UL
 let UdIgnore = 7UL
+let UdOpt = 8UL
+let UdKick = 9UL
 let NoGen = 0xFFFFFFu
 
 let inline private ud (t: uint64) (slot: int) (gen: uint32) =
@@ -310,6 +330,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable warena = GC.AllocateUninitializedArray<byte>(1 <<< 16, pinned = true)
     let mutable warenaLen = 0
     let dirty = List<int>(1024)
+    let mutable lateAck = lateAckMs > 0u
+    let zeroInt = NativeMemory.AllocZeroed(unativeint 4) |> NativePtr.ofVoidPtr<byte> |> NativePtr.toNativeInt
     // request strings (new posts' text, token usernames) for the requests in the batch
     let mutable arena = GC.AllocateUninitializedArray<byte>(1 <<< 20, pinned = true)
     let mutable arenaLen = 0
@@ -317,8 +339,14 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let hdr = Array.zeroCreate<byte> 160
     let mutable nrearm = 0
     let mutable passMs = 0u
+    let mutable lastLifoMs = 0u // the last pass that had more than a pass of requests waiting
     let mutable lastWriteMs = 0u
     let mutable nHeldNow = 0
+    // the WAL's bytes below this offset have been started for the disk; the descriptor the kernel worker gets
+    let mutable kickedTo = 0L
+    let mutable kickFd = -1
+    let mutable kickOn = walKickBytes > 0L
+    let frameBytes = int64 (Db.walFrameBytes ())
     let mutable now = 0L
     let mutable uptime = 0L
     // checkpointer state
@@ -344,6 +372,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let mutable stWalk = 0L
     let mutable stCommitUs = 0L
     let mutable stCommitMax = 0L
+    let mutable stKicks = 0L
     let mutable stCommits = 0L
     let mutable lastStats = 0L
     let mutable lastUtc = 0L
@@ -468,7 +497,14 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 // passes run without holding writes until one leaves at most holdRem frames uncopied; ckDone then holds
                 // writes for one short pass that copies the rest, and the WAL rewinds
                 // (not while a rewind is due: a pass running when the next write begins would keep it from rewinding)
-                if not ckHold && not ckBusy && not ckRewind && (f - ckBackfilled >= ckPass || f >= ckHoldAt) then ckRequest ()
+                // A pass takes 35-45 ms of CPU from the checkpoint thread, which runs at nice 19 but still gets some of
+                // the one CPU while the loop has requests waiting: at the top of the ramp, where the loop is short of
+                // CPU and each 1 % it lacks leaves about 1 % of the clients waiting (the load is closed-loop). So while
+                // requests are waiting the pass is put off, until ckDeferMax passes' worth of frames are uncopied. Reads
+                // look up uncopied frames in the WAL index, one 4,096-frame block more per 4,096 frames, only for pages
+                // not in SQLite's cache; and the WAL is nowhere near its bound then.
+                let due = f - ckBackfilled >= ckPass && (passMs - lastLifoMs > ckDefer || f - ckBackfilled >= ckPass * ckDeferMax)
+                if not ckHold && not ckBusy && not ckRewind && (due || f >= ckHoldAt) then ckRequest ()
             elif not ckHold && f >= ckHoldAt then
                 ckHold <- true
                 ckClock.Restart()
@@ -834,6 +870,8 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         if conns.[cid].Fl &&& DIRTY = 0uy then
             conns.[cid].Fl <- conns.[cid].Fl ||| DIRTY
             dirty.Add cid
+        if lateAck && passMs - r.Ms >= lateAckMs && not r.Close then
+            (ringOf cid).SetSockOptInt(fslot cid, 6u, 12u, zeroInt, ud UdOpt cid NoGen) // TCP_QUICKACK 0
 
     /// Moves a request to the held queue: a write waiting out a hold, or a later request on a connection that has one
     /// there (a connection's requests keep their order). A new post's strings move to the queue's own arena, so the
@@ -887,6 +925,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             // newest go first; the old end gets a share of the pass from lifoAge on (all of it at twice that age), so
             // waiting has a bound. A connection's own requests keep their order.
             let lifo = lifoOn && nreq - first > budget
+            if nreq - first > budget then lastLifoMs <- passMs
             let mutable oldShare = budget
             if lifo then
                 let age = passMs - reqs.[first].Ms
@@ -1000,6 +1039,26 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 stCommits <- stCommits + 1L
                 if us > stCommitMax then stCommitMax <- us
             elif not txn && not (Db.carrying ()) then Db.rollback () // closes cursors (and an implicit read) when no BEGIN ran
+            if wrote && ok && kickOn then
+                // A commit leaves its WAL pages dirty in the kernel's cache. Until now they stayed so until the checkpoint
+                // thread's next sync, 60 MB or more later (longer when that thread, at nice 19, gets no CPU), and the
+                // kernel's dirty thresholds are 10 % and 20 % of what is free or file cache: a few tens of MB on a
+                // 2 GB box full of sockets. Past them the kernel makes whoever dirties pages wait inside write(), and
+                // here that is the loop. So every WALKICK_MB the new pages are started for the disk
+                // (sync_file_range with SYNC_FILE_RANGE_WRITE: it starts the writes and waits for nothing), through
+                // io_uring, which runs it on a kernel worker thread of the process, never in the loop. Whole pages only:
+                // the last one is still filling.
+                let fin = (32L + int64 Db.walFrames * frameBytes) &&& ~~~4095L
+                if fin < kickedTo then kickedTo <- 0L // the WAL was rewound
+                if fin - kickedTo >= walKickBytes then
+                    if kickFd < 0 then
+                        kickFd <- Native.``open`` (Sqlite.z (Environment.GetEnvironmentVariable "SQLITE_PATH" + "-wal"), 0x80000) // O_RDONLY | O_CLOEXEC
+                        if kickFd < 0 then kickOn <- false
+                    if kickFd >= 0 then
+                        let n = min (fin - kickedTo) (1L <<< 30)
+                        R.[0].Ring.SyncFileRange(kickFd, kickedTo, uint32 n, 2u, ud UdKick 0 NoGen) // SYNC_FILE_RANGE_WRITE
+                        kickedTo <- kickedTo + n
+                        stKicks <- stKicks + 1L
             if not ok && wrote then
                 // never acknowledge an uncommitted write: every connection of this pass closes without an answer
                 for d in 0 .. dirty.Count - 1 do
@@ -1124,6 +1183,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 rs.Full <- false
                 if rs.High && rs.Live + lowGap < highWater then rs.High <- false
         | 6UL -> ckDone res
+        | 8UL -> if res = -22 || res = -95 then lateAck <- false // a kernel without the command: EINVAL, EOPNOTSUPP
+        | 9UL -> // a kernel or a file system that can't: no more asking
+            if kickOn then eprintfn "sync_file_range: %d" res
+            kickOn <- false
         | _ -> ()
 
     let reap (k: int) =
@@ -1140,10 +1203,10 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
         for k in 0 .. nrings - 1 do
             live <- live + R.[k].Live
             ovf <- ovf + R.[k].Ring.CqOverflow
-        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d yields=%d"
+        eprintfn "stats t=%d live=%d accErr=%d last=%d cqDropped=%d nobufs=%d rq=%d maxBatch=%d pool=%d cacheKB=%d passes=%d ans=%d wal=%d gc0=%d gc2=%d heapMB=%d walk=%d held=%d commits=%d commitMs=%d commitMaxUs=%d gathered=%d through=%d late=%d parked=%d yields=%d kicks=%d"
             (now - started) live accErr lastAccErr ovf nobufs nrearm maxBatch pool.Count (Db.cacheKB ()) stPasses stAns
             Db.walFrames (GC.CollectionCount 0) (GC.CollectionCount 2) (GC.GetTotalMemory false >>> 20) stWalk wqLen
-            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked stYields
+            stCommits (stCommitUs / 1000L) stCommitMax Vfs.gathered Vfs.through Vfs.late Pcache.parked stYields stKicks
         stCommits <- 0L
         stCommitUs <- 0L
         stCommitMax <- 0L

@@ -8,4 +8,7 @@ NISH="${NISH:-/opt/nish/bin/nish}"
 [ -x "$NISH" ] || NISH=nish   # local development: nish on PATH
 export CC="${CC:-clang-18}"
 mkdir -p bin build
-"$NISH" src/main.ts -o build/ --link bin/feed
+# --allow-panics: since 0.44.0 the compiler refuses a site it cannot prove
+# never panics (an index, an overflow); with the flag such a site is checked at
+# run time, as every earlier release did.
+"$NISH" --allow-panics src/main.ts -o build/ --link bin/feed

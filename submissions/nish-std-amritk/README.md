@@ -2,7 +2,7 @@
 
 Front: **direct** (serves `HOST:PORT` itself, `0.0.0.0:80` on the benchmark box)
 
-Nish 0.41.0 (a statically typed TypeScript subset compiled to native code
+Nish 0.44.0 (a statically typed TypeScript subset compiled to native code
 through LLVM), built with clang-18 and lld-18 from LLVM 18. The compiler runs
 on Node.js 22.18.0 at build time only; the server is one native binary. Every
 import is Nish's own standard library: `nish/net/http1-server` for HTTP/1.1,
@@ -19,13 +19,21 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 
 ## Design
 
-- **Processes.** A supervisor starts `WORKERS` (5) serving processes and one
-  checkpointer, and restarts none of them. Serving direct, every k6 user holds
-  a keep-alive connection, and `LimitNOFILE=65535` caps one process's
-  descriptors, so each serving process holds at most `SLOTS` (60,000)
-  connections and five hold 300,000. Each binds `HOST:PORT` with
-  `SO_REUSEPORT` and `TCP_NODELAY` and runs one single-threaded epoll loop
-  with its own SQLite connection. Nothing else is shared between them.
+- **Processes and io_uring.** Serving direct, every k6 user holds a
+  keep-alive connection, and `LimitNOFILE=65535` caps one process's
+  descriptors. So the listener accepts into io_uring ring slots
+  (`NET_LISTEN_RING` in `nish:net`) rather than descriptors: a connection is a
+  slot in a ring's file table, and one serving process holds up to `SLOTS`
+  (400,000) of them in a few dozen descriptors. Its receives are multishot and
+  its sends are queued and submitted together. A supervisor starts that
+  process and one checkpointer, and restarts neither.
+- **Fallback.** Before any worker starts, a probe child opens a ring listener
+  on a loopback port. Where the kernel refuses rings (Docker's default seccomp
+  profile, a kernel without io_uring), or with `RING=0`, the supervisor starts
+  `WORKERS` (5) processes on descriptors instead, each holding at most `SLOTS`
+  (60,000), five holding 300,000. Either way each serving process binds
+  `HOST:PORT` with `SO_REUSEPORT` and `TCP_NODELAY` and runs one
+  single-threaded loop with its own SQLite connection; nothing else is shared.
 - **HTTP/1.1** through `nish/net/http1-server`'s sans-IO connections. An idle
   keep-alive connection holds no input buffer (`idleInput`), about 1.2 KiB of
   server memory. A response is its head and body in one `writev`.
@@ -78,11 +86,16 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
   request allocates nothing: the server's RSS stays flat over millions of
   requests.
 
+Built with `--allow-panics`: Nish 0.44.0 refuses by default any index or
+arithmetic it cannot prove in range, and with the flag those sites keep the
+run-time check every earlier release compiled.
+
 No caches of responses, rows or tokens; no schema, kernel or CPU tuning. The
 process only raises its own soft descriptor limit to the hard one.
 
-Optional settings, with their defaults: `WORKERS` (5), `SLOTS` (60000) per
-process, `CACHE_KIB` (16384) SQLite page cache per process, `MMAP_MIB` (0),
+Optional settings, with their defaults: `RING` (1; 0 keeps descriptors),
+`WORKERS` (1 on rings, 5 on descriptors), `SLOTS` (400000 on rings, 60000 on
+descriptors) per process, `CACHE_KIB` (16384) SQLite page cache per process, `MMAP_MIB` (0),
 `IDLE_TIMEOUT_MS` (600000), `CHECKPOINT_MS` (50), `RESTART_FRAMES` (2048),
 `AUTOCHECKPOINT` (16384).
 
@@ -97,18 +110,28 @@ the other three. CPU is the user and system time of every server process from
 20,000 descriptors, so a test with many connections uses five wrk processes on
 five loopback addresses.
 
-| Load | req/s | server CPU | CPU / req | p99 |
-| --- | ---: | ---: | ---: | ---: |
-| 256 connections, no think time, 1 worker | 39,600 | 99% | 25.0 µs | 11 ms |
-| 90,000 connections, 9.4 s per request each (as k6 users), 5 workers | 7,600 | 43% | 56 µs | 6.4 ms |
-| 90,000 connections, 4 s per request each, 5 workers | 17,500 | 83% | 47.5 µs | 15 ms |
-| 90,000 connections, 3 s per request each, 5 workers | 24,000 | 97% | 40 µs | 660 ms |
+Nish 0.44.0, three interleaved rounds of each 90,000-connection design (100 s
+each, the first 20 s not counted), median with the range:
 
-At 90,000 connections the server held about 230 MB of RSS (all six
-processes), and the kernel about 3.9 KB per socket. Per route, at saturation
-on one worker: `GET /feed` 39.7 µs, `GET /posts/:id` 8.5 µs, a 404 that
-touches no database 5.1 µs; a new like 28 µs batched (59 µs alone), a new post
-44 µs (84 µs alone).
+| Load | Design | req/s | CPU / req | p99 | server PSS |
+| --- | --- | ---: | ---: | ---: | ---: |
+| 256 connections, no think time | 1 process on rings | 43,000 | 22.8 µs (22.5–23.8) | 63–81 ms | 14 MB |
+| 90,000 connections, 4 s per request each | 1 process on rings | 21,200 | 37.0 µs (35.5–41.7) | 118–220 ms | 45 MB |
+| 90,000 connections, 4 s per request each | 5 processes on descriptors (`RING=0`) | 21,100 | 42.2 µs (40.6–43.1) | 45–124 ms | 17 MB |
+
+Rings cost about 12% less CPU a request at 90,000 connections, one process
+doing the work of five. Their tail is longer: with one process, a request
+waits behind the burst ahead of it on the one core, where five processes
+interleave. Both stay well inside k6's thresholds (p95 < 500 ms,
+p99 < 1 s) at this load. PSS is the server's processes alone; the kernel holds
+about 3.9 KB more a socket. With Nish 0.41.0 on descriptors, per route at
+saturation on one worker: `GET /feed` 39.7 µs, `GET /posts/:id` 8.5 µs, a 404
+that touches no database 5.1 µs; a new like 28 µs batched (59 µs alone), a
+new post 44 µs (84 µs alone).
+
+A profile-guided build (`nish --pgo-generate`, trained on this mix, then
+`--pgo-use`) measured 23.1 µs against 22.7 µs at saturation over three rounds
+each, no gain, so the build does not use it.
 
 All 42 checks of `test/test.sh` pass.
 

@@ -319,10 +319,8 @@ func (s *server) auth(head []byte) (uid int64, username []byte, errMsg string) {
 		return 0, nil, "invalid or expired token"
 	}
 	claims := v.claims[:nc]
-	expRaw, expIsString, ok1 := flatField(claims, "exp")
-	sub, subIsString, ok2 := flatField(claims, "sub")
-	name, nameIsString, ok3 := flatField(claims, "username")
-	if !ok1 || !ok2 || !ok3 || expIsString || !subIsString || !nameIsString {
+	expRaw, sub, name, okClaims := flatClaims(claims)
+	if !okClaims {
 		return s.authSlow(tok) // a field missing, of another type, or an object the scanner does not read
 	}
 	exp, okExp := parseID(expRaw)
@@ -375,84 +373,135 @@ func newVerifier(secret []byte) verifier {
 	return verifier{h: sha256.New(), inner: state(0x36), outer: state(0x5c)}
 }
 
-// flatField finds key in a JSON object whose values are all strings without escapes or
-// non-negative whole numbers, and returns the value's bytes (a string without its quotes).
-// ok is false if the key is absent or the object is anything this scanner does not read, in
-// which case the caller uses the standard decoder instead.
-func flatField(obj []byte, key string) (val []byte, isString, ok bool) {
-	i := skipSpace(obj, 0)
+// The two JSON objects of a token are read by flatPair: one key and value of an object whose
+// values are all strings without escapes or non-negative whole numbers. Anything else makes
+// ok false, and the caller uses the standard decoder instead.
+
+// flatOpen returns the index of the first key of a non-empty object.
+func flatOpen(obj []byte) (i int, ok bool) {
+	i = skipSpace(obj, 0)
 	if i >= len(obj) || obj[i] != '{' {
-		return nil, false, false
+		return 0, false
 	}
 	i = skipSpace(obj, i+1)
-	if i < len(obj) && obj[i] == '}' {
-		return nil, false, false
+	return i, i >= len(obj) || obj[i] != '}'
+}
+
+// flatPair reads the key and value at obj[i] (a string's bytes come without its quotes).
+// more says whether another pair follows, at next; without one, the object has ended and
+// nothing but white space came after it.
+func flatPair(obj []byte, i int) (k, v []byte, isString bool, next int, more, ok bool) {
+	k, next, ok = flatString(obj, i)
+	if !ok {
+		return
 	}
-	for {
-		k, next, kok := flatString(obj, i)
-		if !kok {
-			return nil, false, false
+	i = skipSpace(obj, next)
+	if i >= len(obj) || obj[i] != ':' {
+		return nil, nil, false, 0, false, false
+	}
+	i = skipSpace(obj, i+1)
+	if i < len(obj) && obj[i] == '"' {
+		if v, next, ok = flatString(obj, i); !ok {
+			return
 		}
-		i = skipSpace(obj, next)
-		if i >= len(obj) || obj[i] != ':' {
-			return nil, false, false
+		isString = true
+	} else {
+		next = i
+		for next < len(obj) && obj[next] >= '0' && obj[next] <= '9' {
+			next++
 		}
-		i = skipSpace(obj, i+1)
-		var v []byte
-		str := false
-		if i < len(obj) && obj[i] == '"' {
-			var vok bool
-			if v, next, vok = flatString(obj, i); !vok {
-				return nil, false, false
-			}
-			str = true
-		} else {
-			next = i
-			for next < len(obj) && obj[next] >= '0' && obj[next] <= '9' {
-				next++
-			}
-			if next == i {
-				return nil, false, false
-			}
-			v = obj[i:next]
+		if next == i {
+			return nil, nil, false, 0, false, false
+		}
+		v = obj[i:next]
+	}
+	i = skipSpace(obj, next)
+	switch {
+	case i >= len(obj):
+		return nil, nil, false, 0, false, false
+	case obj[i] == '}':
+		return k, v, isString, 0, false, skipSpace(obj, i+1) == len(obj)
+	case obj[i] == ',':
+		return k, v, isString, skipSpace(obj, i+1), true, true
+	}
+	return nil, nil, false, 0, false, false
+}
+
+// flatField finds key in a flat object and returns the value's bytes. ok is false if the
+// key is absent, or present twice, or present in another case (which the standard decoder
+// also matches when it fills a struct): the standard decoder then decides.
+func flatField(obj []byte, key string) (val []byte, isString, ok bool) {
+	i, more := flatOpen(obj)
+	for more {
+		var k, v []byte
+		var str, pok bool
+		if k, v, str, i, more, pok = flatPair(obj, i); !pok {
+			return nil, false, false
 		}
 		switch found := string(k) == key; {
 		case found && !ok:
 			val, isString, ok = v, str, true
 		case found, strings.EqualFold(string(k), key):
-			// A repeated key, or the same key in another case (which the standard decoder
-			// also matches when it fills a struct): let the standard decoder decide.
 			return nil, false, false
 		}
-		i = skipSpace(obj, next)
-		if i >= len(obj) {
-			return nil, false, false
-		}
-		if obj[i] == '}' {
-			if skipSpace(obj, i+1) != len(obj) {
-				return nil, false, false
-			}
-			return val, isString, ok
-		}
-		if obj[i] != ',' {
-			return nil, false, false
-		}
-		i = skipSpace(obj, i+1)
 	}
+	return val, isString, ok
+}
+
+// flatClaims reads the three claims the server uses in one pass over the object: exp as a
+// number, sub and username as strings. ok is false in every case in which flatField would
+// have said so for one of the three, or one of them has the other type.
+func flatClaims(obj []byte) (exp, sub, name []byte, ok bool) {
+	var haveExp, haveSub, haveName bool
+	i, more := flatOpen(obj)
+	for more {
+		var k, v []byte
+		var str, pok bool
+		if k, v, str, i, more, pok = flatPair(obj, i); !pok {
+			return nil, nil, nil, false
+		}
+		switch string(k) {
+		case "exp":
+			if haveExp || str {
+				return nil, nil, nil, false
+			}
+			exp, haveExp = v, true
+		case "sub":
+			if haveSub || !str {
+				return nil, nil, nil, false
+			}
+			sub, haveSub = v, true
+		case "username":
+			if haveName || !str {
+				return nil, nil, nil, false
+			}
+			name, haveName = v, true
+		default:
+			if strings.EqualFold(string(k), "exp") || strings.EqualFold(string(k), "sub") || strings.EqualFold(string(k), "username") {
+				return nil, nil, nil, false
+			}
+		}
+	}
+	return exp, sub, name, haveExp && haveSub && haveName
 }
 
 // flatString reads a JSON string with no escapes and no control characters starting at the
-// quote at b[i]. It returns the contents and the index after the closing quote.
+// quote at b[i]. It returns the contents and the index after the closing quote. The string
+// must be valid UTF-8 (the standard decoder would replace what is not); that is checked
+// only when the string has a byte outside ASCII.
 func flatString(b []byte, i int) (s []byte, next int, ok bool) {
 	if i >= len(b) || b[i] != '"' {
 		return nil, 0, false
 	}
+	var high byte
 	for j := i + 1; j < len(b); j++ {
 		switch c := b[j]; {
 		case c == '"':
-			return b[i+1 : j], j + 1, utf8.Valid(b[i+1 : j])
+			return b[i+1 : j], j + 1, high < 0x80 || utf8.Valid(b[i+1:j])
 		case c == '\\' || c < 0x20:
 			return nil, 0, false
+		default:
+			high |= c
 		}
 	}
 	return nil, 0, false

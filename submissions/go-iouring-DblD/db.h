@@ -25,6 +25,10 @@ int db_commit(void);
 // Checkpointing runs on a background thread started by db_open (see db.c). These numbers
 // are for logging: WAL size in pages now, the largest it has been, and checkpoint runs so far.
 void db_stats(int *wal_pages, int *wal_max, int *checkpoints);
+// Write calls that reached the WAL file and frames written, since the last call.
+void db_wal_writes(long *writes, long *frames);
+// Test only: 1 starts the byte-for-byte check of WAL writes, 0 reports its result (1 = equal).
+int db_wal_check(int on);
 
 // The write hold. A checkpoint can only finish, and the WAL only start over, if no commit
 // lands while it runs. When the WAL is large the loop calls db_urgent(1), stops committing
@@ -41,6 +45,10 @@ int db_reads_direct(void);
 // pages, both in kB (0 and 0 if the block could not be set up). For the startup log.
 void db_page_memory(long *block_kb, long *huge_kb);
 
+// The program text that was moved onto anonymous memory at startup: its size and how much of
+// it is on 2 MB pages, both in kB. Returns "" if it was moved, otherwise why it was not.
+const char *db_text_memory(long *moved_kb, long *huge_kb);
+
 // 1 if `SELECT 1` works.
 int db_health(void);
 
@@ -55,6 +63,7 @@ int db_post(int64_t id, uint8_t *out, int cap);
 // asks for up to 26 bytes more room than the result needs.
 // (Used by db_feed and db_post; exported so a test can hold it to the Go version.)
 int db_json_string(const uint8_t *s, int n, uint8_t *out, int cap);
+int db_json_int(int64_t v, uint8_t *out, int cap);
 
 // 1 if the post exists, 0 if not, -1 on error.
 int db_post_exists(int64_t id);

@@ -45,6 +45,13 @@ roughly 250–290k on the benchmark box. See "Running locally" for how that was 
 - No memory map for the database (`mmap_size=0`): SQLite reads pages through its own 64 MB cache. At the
   same request rate, CPU 79–80% → 74–79% at 200k users (3 alternating pairs, lower in each) and 94.5% →
   91% at 240k, p95 8.7–9.8 → 5.9–6.2 ms, p99 109–120 → 139–141 ms.
+- SQLite is compiled with `-fno-semantic-interposition`: calls between its exported functions inside the
+  shared library go direct (no PLT) and can be inlined. At 200k users, user-mode cycles per request
+  80–82k → 75–76k (`perf stat`, 2 alternating pairs, lower in each).
+- Profile-guided SQLite: `build.sh` compiles it with profiling, runs this server's statements on a
+  synthetic database (`csrc/sqlite-train.c`, made and deleted during the build; no benchmark data), and
+  compiles again with the profile. At 200k users, user-mode cycles per request 73–76k → 68–69k, p99
+  88–92 → 58–64 ms (2 alternating pairs, lower in each).
 - GET /feed: when the 20 newest posts have consecutive ids (the usual case), their like counts come from
   one range scan instead of 20 lookups; otherwise the plain query. Same JSON, live data on every request.
   Blast ~+12% req/s; at 200k users p95 fell from 12–43 ms to 4–18 ms.
@@ -61,7 +68,8 @@ The code is our own, in Julia, but most of the design follows what other entries
   holding writes (reads go on) once the WAL reaches 15,000 frames, letting that thread restart the WAL so
   the header `fsync` stays off the loop, and the Ubuntu 6.8.0-147 workaround for
   `IORING_REGISTER_PBUF_RING` (retry with `resv[0]=1`). Also `mmap_size=0`: SQLite reads pages through
-  its own cache, not a memory map.
+  its own cache, not a memory map. And for the SQLite build: `-fno-semantic-interposition`, and the profile-guided build with a training
+  run of the server's statements (their `sqlite-train.c`; ours is `csrc/sqlite-train.c`).
 - **[rust-epoll-scooter1337](../rust-epoll-scooter1337/)**: the feed range scan: find the 20 newest ids,
   fetch rows and like counts with range scans when they are close together, and fall back to the plain
   query otherwise. Ours is a narrower variant (only consecutive ids; the counts come from one scan).
@@ -210,7 +218,7 @@ blocked for 1–4 s while the whole host stalled), not steady overload.
 ### Tried and dropped
 
 Measured one at a time, kept only if they helped: SQLite at `-O3`, `-march=x86-64-v3`, extra
-`SQLITE_OMIT_*` options, SQLite PGO (0–7% even as an upper bound), a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
+`SQLITE_OMIT_*` options, a larger page cache, a smaller write-hold threshold (4,000 WAL pages: 3× the holds, worse
 everywhere), restarting the WAL from the checkpoint thread after every catch-up (more fsyncs, worse
 latency), prefaulting buffers (moves page faults, doesn't remove them). A writer thread (a C pthread with
 its own connection commits the POSTs in batches while the loop keeps serving reads; replies still wait for
@@ -276,4 +284,17 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | cache 32MB | – | 200,000 (185 MB) | – |
 | NBUF 16384 (default) | – | 200,000 (177 MB) | – |
 | NBUF 8192 | – | 200,000 (142 MB) | – |
+| perf probe | – | – | – |
+| perf ours | – | – | – |
+| plain ours | – | 200,000 (188 MB) | – |
+| perf liteours | – | 200,000 (182 MB) | – |
+| perf recours | – | 200,000 (177 MB) | – |
+| perf base1 | – | 200,000 (182 MB) | – |
+| perf fnsi1 | – | 200,000 (180 MB) | – |
+| perf base2 | – | 200,000 (191 MB) | – |
+| perf fnsi2 | – | 200,000 (183 MB) | – |
+| perf nopgo1 | – | 200,000 (186 MB) | – |
+| perf pgo1 | – | 200,000 (180 MB) | – |
+| perf nopgo2 | – | 200,000 (175 MB) | – |
+| perf pgo2 | – | 200,000 (181 MB) | – |
 <!-- results:end -->

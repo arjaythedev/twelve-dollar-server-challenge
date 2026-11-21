@@ -32,7 +32,7 @@
 #      NBUF (provided receive buffers per ring, power of two, A/B; default 16384),
 #      READTXN (off: one autocommit read transaction per statement, for A/B; default: reads share the pass's transaction),
 #      PROFILE ("<start s>,<seconds>": sample the event loop then, table in server.log; src/prof.jl),
-#      SQLITE_OPT (C flags for SQLite, A/B), PRAGMAS (extra SQLite statements at open, A/B),
+#      SQLITE_OPT (C flags for SQLite, A/B), PGO (0: no profile-guided SQLite build, A/B), PRAGMAS (extra SQLite statements at open, A/B),
 #      ENTRY (another submission folder, run with this harness to calibrate against the leaderboard; rows go to calibration.csv),
 #      DATA (volume: the DB copy on a per-run podman volume on the host's disk; overlay: on the container's
 #      fuse-overlayfs, as before 2026-11-08, which blocks the loop on every write),
@@ -172,7 +172,7 @@ stress_run() { # stress_run <n> <duration>
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1 || true" EXIT
   trap "podman rm -f $name $gname >/dev/null 2>&1; podman volume rm -f $vol >/dev/null 2>&1; exit 130" INT TERM HUP PIPE
   BOX_RM=()    # keep the server container until we have its log, also when it dies at startup
-  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" -e JR_READTXN="${READTXN:-}" -e JR_NBUF="${NBUF:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" -e JR_PROFILE="${PROFILE:-}" -e JR_FEED="${FEED:-}" -e JR_ENTRY="$ENTRY" -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_PRAGMAS="${PRAGMAS:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
+  box -d --name "$name" "${dataopt[@]}" -e JR_DEBUG="$DEBUG" -e JR_TRANSPORT="${TRANSPORT:-}" -e JR_CKPT="${CKPT:-}" -e JR_HOLD_PAGES="${HOLD_PAGES:-}" -e JR_RESTART="${RESTART:-}" -e JR_GROUP="${GROUP:-}" -e JR_READTXN="${READTXN:-}" -e JR_NBUF="${NBUF:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" -e JR_PROFILE="${PROFILE:-}" -e JR_FEED="${FEED:-}" -e JR_ENTRY="$ENTRY" -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_PGO="${PGO:-}" -e JR_PRAGMAS="${PRAGMAS:-}" --sysctl net.ipv4.ip_local_port_range="1024 65535" \
     "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh serve >/dev/null
   for _ in $(seq 600); do
     podman exec "$name" curl -sf http://127.0.0.1:3000/health >/dev/null 2>&1 && break
@@ -196,7 +196,7 @@ stress_run() { # stress_run <n> <duration>
   commit="$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo none)"
   git -C "$HERE" status --porcelain -- . 2>/dev/null | grep -q . && commit="$commit+dirty"
   RUN_PASS=0
-  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}${WRITER:+; WRITER=$WRITER}${HMAC:+; HMAC=$HMAC}${AOT:+; AOT=$AOT}${PROFILE:+; PROFILE=$PROFILE}${FEED:+; FEED=$FEED}${ENTRY:+; ENTRY=$ENTRY}${SQLITE_OPT:+; SQLITE_OPT=$SQLITE_OPT}${PRAGMAS:+; PRAGMAS=$PRAGMAS}"
+  local notes="${NOTES:+$NOTES; }DATA=$DATA${CKPT:+; CKPT=$CKPT}${HOLD_PAGES:+; HOLD_PAGES=$HOLD_PAGES}${RESTART:+; RESTART=$RESTART}${GROUP:+; GROUP=$GROUP}${WRITER:+; WRITER=$WRITER}${HMAC:+; HMAC=$HMAC}${AOT:+; AOT=$AOT}${PROFILE:+; PROFILE=$PROFILE}${FEED:+; FEED=$FEED}${ENTRY:+; ENTRY=$ENTRY}${SQLITE_OPT:+; SQLITE_OPT=$SQLITE_OPT}${PGO:+; PGO=$PGO}${PRAGMAS:+; PRAGMAS=$PRAGMAS}"
   DEBUG="$DEBUG" GEN="$GEN" LABEL="${LABEL//,/;}" NOTES="${notes//,/;}" CPUS="$CPUS" MEM="$MEM" VUS="$n" RAMP="$RAMP_UP" \
     DUR="$dur" COMMIT="$commit" tools record "$out" "$rc" "$CSV" && RUN_PASS=1
   true
@@ -237,7 +237,7 @@ elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur
 else def_n=1000 def_start=2500 def_max=320000 def_dur=1m; fi
 case "$cmd" in
   image) image; echo "$IMAGE" ;;
-  build|test|feedbench|feedbench-pgo|jwtbench) image; box -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_READTXN="${READTXN:-}" -e JR_PRAGMAS="${PRAGMAS:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
+  build|test|feedbench|feedbench-pgo|jwtbench) image; box -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_PGO="${PGO:-}" -e JR_READTXN="${READTXN:-}" -e JR_PRAGMAS="${PRAGMAS:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" "$IMAGE" bash /src/submissions/julia-iouring-amanica/dev/in-container.sh "$cmd" ;;
   shell) image; box -it "$IMAGE" bash ;;
   stress) only_run; image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
   ladder) only_run; image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;

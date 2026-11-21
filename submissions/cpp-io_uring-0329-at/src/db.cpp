@@ -24,40 +24,17 @@ namespace {
 // 这种抢占直接体现在 p95 上（c-iouring-public #158 实测：nice 0 时 3 次 hold 有 2 次
 // 失败，nice 19 时 3 次全过）。
 /* 单调时钟，纳秒。用于给 hold 期间的检查点循环设时间上限。 */
-static long long mono_ns() {
-  struct timespec ts {};
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return static_cast<long long>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-}
 
-void checkpoint_loop(dbx* h, CkState* st) {
-  setpriority(PRIO_PROCESS, 0, 19);
+void checkpoint_loop(dbx* h, CkState* st, bool tail) {
+  if (!tail) setpriority(PRIO_PROCESS, 0, 19);
   std::unique_lock<std::mutex> lk(st->mu);
   while (!st->stop.load()) {
-    st->cv.wait_for(lk, std::chrono::milliseconds(50), [st] { return st->stop.load(); });
+    st->cv.wait(lk, [&] { return st->stop.load() || dbx_ck_wants(h, tail); });
     if (st->stop.load()) break;
     lk.unlock();
-    // PASSIVE 检查点从不等主循环的读者：能拷多少拷多少，全部帧拷完后闸门打开，
-    // 下一次写让日志从第 1 帧重新开始（不需要 truncate）。闸门挂起期间，只在每次 pass
-    // 确实拷到东西时继续：一个什么都没拷到的 pass（主循环的读者还挡着）不能循环重试，
-    // 否则线程会白白烧掉这颗唯一的核。
-    if (dbx_wal_frames(h) >= 1024) {
-      int copied = 0;
-      int r = dbx_checkpoint(h, &copied);
-      int last = copied;
-      /* 闸门挂起期间一直拷，直到拷完或者 hold 快到期。没拷动时让出 50 µs 再试，而不是立刻
-       * 放弃：PASSIVE 遇到主循环的写锁会返回 BUSY，让出一下就能在下一次 COMMIT 之间拿到。
-       * 原来的写法是「没进展就 break」，于是同一次积压要等 50 ms 后的下一轮，写请求便一次次
-       * 被 hold。 */
-      const long long t0 = mono_ns();
-      while (r == 1 && dbx_writes_held(h) && mono_ns() - t0 < 200000000LL) {
-        r = dbx_checkpoint(h, &copied);
-        if (copied == last) {
-          usleep(50);
-        }
-        last = copied;
-      }
-    }
+    /* 一次唤醒做一次：「大块」线程连着做几次 PASSIVE 直到落后不超过 64 帧；「尾段」线程
+     * 只拷最后几十帧。状态由主循环的 dbx_ck_kick 推进。 */
+    dbx_ck_run(h, tail);
     lk.lock();
   }
 }
@@ -153,7 +130,8 @@ bool Db::open(const char* path, std::string& err) {
   order_.reserve(kFeedLen);
   ck_ = std::make_unique<CkState>();
   dbx* h = h_;
-  ck_->th = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st); });
+  ck_->th_bulk = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st, false); });
+  ck_->th_tail = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st, true); });
   return true;
 }
 
@@ -171,7 +149,8 @@ Db::~Db() {
   if (ck_) {
     ck_->stop.store(true);
     ck_->cv.notify_all();
-    if (ck_->th.joinable()) ck_->th.join();
+    if (ck_->th_bulk.joinable()) ck_->th_bulk.join();
+    if (ck_->th_tail.joinable()) ck_->th_tail.join();
   }
   if (h_) dbx_close(h_);
 }
@@ -189,6 +168,14 @@ void Db::begin() {
 bool Db::commit() { return dbx_commit(h_) == 0; }
 
 void Db::tick() {}
+
+void Db::ck_kick() {
+  /* 状态是原子的，但「检查条件 → 进入等待」必须和状态的修改用同一把锁，否则会丢唤醒：
+   * 线程刚判完「没活」、还没睡下去时主循环把状态改成 CK_BULK 并 notify，通知就丢了，
+   * 于是一次挂写要等到 hold 上限（400 ms）才松开。锁的开销是每 pass 一次 unlock/lock。 */
+  std::lock_guard<std::mutex> lk(ck_->mu);
+  if (dbx_ck_kick(h_)) ck_->cv.notify_all();
+}
 
 bool Db::writes_held() const { return dbx_writes_held(h_) != 0; }
 
@@ -268,7 +255,10 @@ bool Db::post_exists(int64_t id) {
 
 void Db::feed(ByteBuf& out) {
   begin();
-  feed_rows();
+  /* feed_rows() 只有在数据不符合 B-tree 计划的假设时才返回 false（例如 posts 指向的 user
+   * 行不存在：参考 SQL 的 JOIN 会把这一行丢掉）。这里绝不能拿半填的 rows_ 去拼 JSON——
+   * 那会输出 body/author 为空、like_count 为 0 的坏数据；按 SPEC「其它情况 500」处理。 */
+  if (!feed_rows()) throw DbError{};
   feed_json(out);
 }
 

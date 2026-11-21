@@ -27,7 +27,9 @@
 
 **连接状态机。** 每个连接有两个正交的状态：`ReadState`（`Idle` 表示 multishot receive 已装好，`Queued` 表示等单发读，`Reading` 表示单发读在途）和 `WriteState`（`Idle`/`Sending`），加上 `open`/`closing`（关闭已提交）/`close_after`（待关闭）三个布尔。状态转移集中在 `drain` 的 switch 里，不再用位标志表达。
 
-**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → 给排队的连接发单发读 → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 256 个请求**（fsharp-uring-delneg #437 的 ANSWERS）：2,048 是错的——一个请求 27 µs，2,048 个就是 55 ms，pass 本身就长，排队一叠加 p99 就失控（280k 探针 5.6 s）；**256** 是折中：一个 pass 约 6.9 ms，COMMIT 从 64 时的 391 次/秒降到 98 次/秒，本地 20k 连接的 p99 从 227 ms 降到 87.6 ms，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。
+**批处理。** 一个 pass 是：对每个 ring 提交并收集完成（ring 0 在无积压时等 256 个完成或 1 ms，有积压时非阻塞；其余 ring 只提交、不进入内核）→ 每个 ring 最多处理 **2,048** 个完成（读远多于答：读一个请求的成本是它那么大的一次拷贝，留在 socket 里要占 3–4 KB 内核缓冲，所以 socket 要尽早抽干，超出的回答进就绪队列；rust-iouring-kensac #264 与 c-iouring-jowinjestine #404 的读配额都是 16,384 配 2,048 的答案） → **同一 pass 内把排队的单发读「发出去 → 收回来 → 答掉」**（最多 4 轮，且只发本 pass 还答得掉的个数） → `Db::commit()` → 把这一批的响应交给 io_uring 发送。看见本 pass 写入的读也等 COMMIT；commit 失败时整批响应替换成 500。**一个 pass 最多回答 256 个请求**（fsharp-uring-delneg #437 的 ANSWERS）：2,048 是错的——一个请求 27 µs，2,048 个就是 55 ms，pass 本身就长，排队一叠加 p99 就失控（280k 探针 5.6 s）；**256** 是折中：一个 pass 约 6.9 ms，COMMIT 从 64 时的 391 次/秒降到 98 次/秒，本地 20k 连接的 p99 从 227 ms 降到 87.6 ms，超出的连接连同已读字节留在自己的 `part` 缓冲里、进就绪队列；读本身不受此限，socket 还是要尽快抽干。`ANSWERS=` 可以覆盖这个上限（310,000 那次保持用的是 2,048，见下文「本地验证」）。
+
+**同一 pass 收读（read rounds）。** 单发读不再在 pass 末尾发出去等下一个 pass 才收：每轮「给排队的连接各发一个 `MSG_DONTWAIT` 读 → 非阻塞 `io_uring_enter` → `drain`」，最多 4 轮。只发本 pass 还答得掉的个数（`reads_budget_ = answers_left_`），所以多读进来的数据一定答得掉，不会被 `defer` 成一块 `part` 缓冲。原来那版每个走单发读的连接都要多等一个完整 pass（低负载 1 ms 的等待，突发时是整个 backlog 的长度）；c-iouring-pavlyhalim #245 量过两者的差别：*在批末尾发出去的读要多等一批加最多 2 ms：p95 4.7 对 2.7 ms（20,000 用户）*，kensac #264 的 `read_rounds` 是同一形状，他们把它记成 270k → 310k 的那一步。
 
 **backlog 的顺序。** 就绪队列是 **LIFO**：刚被延后的连接下一个 pass 先答，所以大量请求保持快。等过 **8 秒**的请求**拿一半的额度**（从队尾取最老的），**等过 16 秒的全部优先**（objc-uring-delneg #326 的第二级），没人被饿死；**不能整批取队尾**——backlog 持续时队尾会一直处于老化状态，全取队尾就退化成最老优先，新请求又被拖慢（objc-uring-delneg #326 的原话是 *the oldest get half of each pass*，基准机 230k 探针 p99 3.08 s 正是整批 FIFO 的形状）。这条来自 #326 的论证——回复晚于请求 40 ms 要多一个 bare ACK、约每请求 +20% CPU，而最老优先会把这个代价摊给每个新请求，多出的 CPU 又帮着把 backlog 撑住；230k ramp 期所有新连接同时发第一个请求，那正是「p99 数秒、0 错误」的形状。
 
@@ -45,7 +47,7 @@
 
 **微架构与构建。** 编译用 `-O3 -march=native -fno-plt -fno-semantic-interposition -flto`，另加 `-falign-functions=32 -falign-loops=32`、`-fipa-pta`、`-flto-partition=one`；io_uring 的 ring 启用 `COOP_TASKRUN`/`TASKRUN_FLAG`，连接表和接收缓冲用 `MADV_HUGEPAGE` + `MADV_POPULATE_READ` 预触；有 mold 时用 `-fuse-ld=mold` 并行链接。
 
-**来源说明。** io_uring 的 multishot receive 与 ring 模型参考了 rust-iouring-kensac (#264) 的实现思路；**direct-descriptor 表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144）也是 #264 的做法**——固定大表在 `NOFILE` 较小的 CI runner 上会被 `io_uring_register_files_sparse` 以 `EMFILE` 拒绝，这一点是照着他们改的。**8 个共享 `SO_REUSEPORT` listener 同样来自 #264**（`LISTENERS = 8`，与 ring 数无关）。**backlog 的 LIFO + 8 秒老化来自 objc-uring-delneg (#326)** 的论证（他们记的是每请求 +20% CPU 的 bare ACK 代价），不是 #264 的最老优先。数据层只用 B-tree 游标 API（`sqlite3BtreeFirst/Next/TableMoveto/IndexMoveto/Payload*`）；like 计数的页级 cell 扫描与 #264 的 `td_count_likes` 同形（读游标持有的页，不自己获取/释放页面），此前那版批量作者 seek（每层共享页、页内插值二分）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`，因为走的是 SQLite 内部页函数、落在「B-tree cursor reads are fine」这条裁定之外，已经删掉换成 20 次 `TableMoveto`（实测 handler 8.86 → 8.34 µs，反而更快）。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）与 page-cache 的 `SQLITE_CONFIG_PCACHE2` shim（`wc_*`）同样改写自 #245 的 `src/db.h`（同一段代码，改了命名），`WAL_COALESCE=0` 可关掉 VFS 做 A/B（仅供测试，规则里没这条）。record 的变长整数与列头解码沿用 #245 的写法。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
+**来源说明。** io_uring 的 multishot receive 与 ring 模型参考了 rust-iouring-kensac (#264) 的实现思路；**direct-descriptor 表大小跟随硬 `RLIMIT_NOFILE`（上限 262,144）也是 #264 的做法**——固定大表在 `NOFILE` 较小的 CI runner 上会被 `io_uring_register_files_sparse` 以 `EMFILE` 拒绝，这一点是照着他们改的。**8 个共享 `SO_REUSEPORT` listener 同样来自 #264**（`LISTENERS = 8`，与 ring 数无关）。**backlog 的 LIFO + 8 秒老化来自 objc-uring-delneg (#326)** 的论证（他们记的是每请求 +20 % CPU 的 bare ACK 代价），不是 #264 的最老优先。**drain 中途 publish 接收缓冲、以及「发读 → 收读」在同一 pass 内按轮完成**改写自 c-iouring-jowinjestine (#486/#404) 的中途 `ring_buf_publish`/`reap_all` 与 rust-iouring-kensac (#264) 的 `read_rounds`；后者的 270k → 310k 就是这一步。**两段式检查点**（先不挂写拷大块、只剩尾段才挂写、尾段用普通优先级线程、超过 65,536 帧由循环兜底）同时见于 #264 与 #404/#486，hold 上限 400 ms 取自 #486。`MSG_WAITALL` 发送取自 #486/#245。数据层只用 B-tree 游标 API（`sqlite3BtreeFirst/Next/TableMoveto/IndexMoveto/Payload*`）；like 计数的页级 cell 扫描与 #264 的 `td_count_likes` 同形（读游标持有的页，不自己获取/释放页面），此前那版批量作者 seek（每层共享页、页内插值二分）改写自 c-iouring-pavlyhalim (#245) 的 `src/btree.h`，因为走的是 SQLite 内部页函数、落在「B-tree cursor reads are fine」这条裁定之外，已经删掉换成 20 次 `TableMoveto`（实测 handler 8.86 → 8.34 µs，反而更快）。WAL 写合并 VFS（`src/shim.c` 的 `wf_*`/`wv_*`）与 page-cache 的 `SQLITE_CONFIG_PCACHE2` shim（`wc_*`）同样改写自 #245 的 `src/db.h`（同一段代码，改了命名），`WAL_COALESCE=0` 可关掉 VFS 做 A/B（仅供测试，规则里没这条）。record 的变长整数与列头解码沿用 #245 的写法。除此之外的事件循环、状态机、批处理、事务与 checkpoint 策略、HTTP/JSON/SHA-256 协议层是本实现独立编写的。
 
 ## 读取走 SQLite 的 B-tree，而不是 SQL 引擎
 
@@ -59,7 +61,10 @@
 
 - WAL + `synchronous=NORMAL`，通过 `unix-excl` VFS 打开；WAL 索引在进程内共享，没有 `-shm` 文件。WAL 文件上再套一层写合并 shim：帧头和页连续写时先攒进缓冲，commit 帧的页到达时一次 `pwrite` 落地（写序不变，commit 帧在 COMMIT 返回前已在内核里）。本地 A/B 里它没量出差别（本实现已按 pass 组提交，每请求 WAL 写只有 ~0.2 次，合并的理论收益约 0.6%），保留是因为它已被 #245 在基准机上量到 0.24 → 0.095 pwrite/请求。
 - 每个事件循环 pass 是一个 SQLite 事务：读共享快照，写入组提交（规则 6）。**COMMIT 返回之前，pass 的任何响应都不会交给内核。** commit 失败时该 pass 的每个响应都变成 500。
-- Auto-checkpoint 关掉。WAL 到 **4,096 帧（16 MB）**时**只挂写、不挂循环**：写请求的响应留到下一个 pass（请求字节留在连接上，最多重放 1,024 个），读照常答；独立的 nice 19 线程在自己的连接上做 `PASSIVE` 检查点，把帧拷回主库（`PASSIVE` 从不等读者，所以它不会把循环挡住）。**闸门挂起期间线程一直拷到拷完或 hold 快到期**：没拷动时让出 50 µs 再试（`PASSIVE` 撞上主循环的写锁会返回 BUSY，让一下就能在下一次 COMMIT 之间拿到），原来的写法是「没进展就停手、等 50 ms 后的下一轮」，于是同一次积压要经过好几轮 hold——基准机 220k 的 p99 4.28 s 就是这个形状：写请求被一次次数百毫秒地挂起，而 k6 的 VU 是串行的，同连接的后续请求跟着一起等。**每一帧都拷完之后**下一次写会让日志从第 1 帧重新开始，文件就停在那里——不需要 `TRUNCATE`，也不需要 `RESTART`。线程连不上的兜底是 **hold 上限 250 ms**（与 rust-iouring-kensac #264 一致），到点就放行、让日志长大一点，下一轮再收。
+- Auto-checkpoint 关掉。检查点是**两段式**的（`src/shim.c` 的 `CK_*` 状态机，结构照 c-iouring-jowinjestine #404/#486 与 rust-iouring-kensac #264）：
+  1. **BULK**：WAL 到 **4,096 帧（16 MB）**时**不挂写**，nice 19 的线程连着做 `PASSIVE`，每次拷的是「上一次 pass 之后又写进来的帧」，直到落后不超过 **64 帧**；
+  2. **TAIL**：这时才挂写（写请求留在连接上，读照常答），由**普通优先级**的线程把剩下的几十帧拷完，几毫秒结束；全部拷完之后下一次写让日志从第 1 帧重新开始，文件就停在那里——不需要 `TRUNCATE`，也不需要 `RESTART`。
+  旧做法是「WAL 一过 4,096 帧就挂写，再由同一个 nice 19 线程把整段 16 MB 以上的积压拷完」，一次 hold 就是几百毫秒——而基准机上 300k/320k 的探针正是「0 错误、p99 4.45 s」的形状：写请求被一次次数百毫秒地挂起，k6 的 VU 是串行的，同连接的后续请求跟着一起等。现在**挂写的时间从「整个 16 MB 的拷贝」缩到「尾段」**，而尾段线程和主循环同优先级，不会被 nice 19 拖长。local hold 上限 **400 ms**（日志超过 32,768 帧时放宽到 800 ms）；超过 **65,536 帧**属于线程追不上的情况，事件循环自己拷一次兜底。**拷之前给整段日志做 `readahead`、以及拷完之后 `fadvise(DONTNEED)` 丢掉 WAL 的页缓存，这两个都试过并在本地成对 A/B 里被否掉**：日志帧本来就在页缓存里，readahead 白走一遍 16 MB 范围把吞吐从 9.9k 压到 8.9k；DONTNEED 让下一次检查点重新从磁盘读，尾段反而变长（16 MB 的页缓存对 2 GB 的机器也不值得省）。本地 8,000 VUs 混合负载（7 % 写）：COMMIT 占总循环时间从 38–58 % 降到 **4–8 %**，单次 COMMIT 最大值从 20–74 ms 降到 **1–11 ms**，`gated` 从 276/472 掉到 **0/946**（写再也不需要挂起）。
 - 事件循环的等待是有条件的：只要还有待发的读、待写的响应或上一 pass 收到的完成，就 `min_complete=0` 直接 `enter`，**不睡那 1 ms**；只有在完全没事干时才等（1 ms）。这一条是 220k 时 29% CPU 空转的来源。
 - 空闲连接清扫按时间切片（每 50 ms 扫一个 ring 的 1/32），不在 pass 里整表扫 6 M 个槽位——一次整扫在 1 vCPU 上是 25–70 ms，正好是 p99 悬崖。
 - **page cache 外面套一层 `SQLITE_CONFIG_PCACHE2` shim**（来自 #245）：`pcache1` 记住"曾经持有过的最大页号"且从不调低，而 B-tree split 会把一页临时改名到 lock-byte 页号再改回来，于是此后**每次 COMMIT** 的 `xTruncate` 都以为文件尾之外可能有页、把整个 hash 表扫一遍（#245 量到 ~350 µs、~30 次/秒）。shim 记录进入缓存的最大 key（停在 lock-byte 页号的页单独计数），确定不可能有越界页时直接跳过扫描。本地饱和 `/feed`：50.0 → **44.5 µs/请求（−11 %）**。
@@ -75,8 +80,9 @@
 - **listener 上设 `SO_RCVBUF=16384`**，accept 出来的连接继承（`ss -tin` 实测服务器侧 `rcv_space:16384`，客户端侧仍是默认值）。默认的自动调优会一路涨到上百 KB，2 GB 的机器在 300k 连接时正是被这一项顶到内存墙上（c-iouring-jowinjestine #486 对同一件事的处理：平时 16 KiB；**PSI 高压时降到 8 KiB**——每 2 秒读一次 `/sys/fs/cgroup/memory.pressure` （full avg10 ≥ 2 % 或 some avg10 ≥ 10 %）与 cgroup 用量（>85 % 上限），连续两次高压才降、连续四次低压才恢复，且只影响**未来 accept** 的连接，绝不节流或关闭已有连接（c-iouring-jowinjestine #486 的迟滞规则）。请求只有一两百字节，16 KiB 放得下几十个；`RCVBUF=` 可覆盖。
 - 端口上是 **8 个共享的 `SO_REUSEPORT` listener**（固定 8 个，与 ring 数无关），每个有独立的 accept 队列；ring 按需增长（1 → 最多 16），每个 ring 对每个 listener 保持 `depth/8` 个单发 accept 在途。ring 满时停止投递 accept，其他 ring 继续从全部 8 个 listener 接收。
 - Each connection has one **multishot receive**; buffers come from a provided-buffer ring (2048 × 2 KB per ring), so an idle connection holds no receive memory.
-- 突发之后 multishot receive 会耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。
-- **大响应用零拷贝发送**（IORING_OP_SEND_ZC）：feed 的 JSON 约 5.5 KB，send_zc 让内核直接读用户缓冲，省掉一次 5.5 KB 的拷贝；完成时会多一个 IORING_CQE_F_NOTIF，缓冲必须等它到达才能还回池（连接状态多了 Flushed）。post/like 的响应只有几百字节，多一个 NOTIF 不划算，仍走普通 send；关闭中的响应也不用。内核不支持时（-EINVAL/-ENOSYS）自动回退并永久关闭，ZC=0 可手动关掉做 A/B。还有两条边界：第一个完成若没有 IORING_CQE_F_MORE，说明不会再有 NOTIF，必须立刻视作已通知；以及**普通 send 根本不会有 NOTIF**，它的完成必须直接收尾——错判成 Flushed 会让连接永远等下去（响应其实已经发出，所以 42 项测试照过，但 keep-alive 的下一个请求就超时）。
+- **接收缓冲在 drain 中途就交还内核**：每处理 256 个完成就把 CQ 头推进一次、把 buffer ring 的尾指针发布一次（原来整批 2,048 个处理完才发布一次，而 buffer ring 正好 2,048 项——一个 drain 就能把接收缓冲用光，剩下的 multishot receive 全部以 `ENOBUFS` 结束、被塞进 pending 队列等下一个 pass 的单发读）。c-iouring-jowinjestine #486 的中途 publish 是同一个动机，他们量到 2.15M → 119k 次 ENOBUFS、最长的一次循环轮次 1.9 s → 0.65 s。
+- 突发之后 multishot receive 仍然可能耗尽 buffer 并以 ENOBUFS 结束；这样的连接进入 ring 内的 FIFO 队列，每个 pass 给它们发单发读（`MSG_DONTWAIT`，且每个 ring 不超过 buffer 数），并在同一个 pass 内收回来（见上）。填满 buffer 的读重新入队，短读或 EAGAIN 则重新装好 multishot receive。
+- **大响应用零拷贝发送**（IORING_OP_SEND_ZC）：feed 的 JSON 约 5.5 KB，send_zc 让内核直接读用户缓冲，省掉一次 5.5 KB 的拷贝；完成时会多一个 IORING_CQE_F_NOTIF，缓冲必须等它到达才能还回池（连接状态多了 Flushed）。post/like 的响应只有几百字节，多一个 NOTIF 不划算，仍走普通 send，并带 **`MSG_WAITALL`**：io_uring 自己把短写补完，完成就是全部发完，省掉一次「再挂一个 send」的 SQE 和完成（c-iouring-jowinjestine #486 与 c-iouring-pavlyhalim #245 的发送都是 `MSG_NOSIGNAL|MSG_WAITALL`）；关闭中的响应也不用。内核不支持时（-EINVAL/-ENOSYS）自动回退并永久关闭，ZC=0 可手动关掉做 A/B。还有两条边界：第一个完成若没有 IORING_CQE_F_MORE，说明不会再有 NOTIF，必须立刻视作已通知；以及**普通 send 根本不会有 NOTIF**，它的完成必须直接收尾——错判成 Flushed 会让连接永远等下去（响应其实已经发出，所以 42 项测试照过，但 keep-alive 的下一个请求就超时）。
 - 每个连接同一时间最多一个发送在途；流水线响应排在它后面。输出缓冲来自池（8 KB，启动预填 256 个），发送完成后归还；一次 feed 响应的 JSON 上界约 24 KB，所以回收阈值放到 `8 × 8 KB`，否则每个 feed 缓冲都会被丢掉重分配（实测：每请求一次 24 KB `malloc`，`brk` 37,738 次/10 s）。
 - 关闭是 `SHUTDOWN` 硬链接到 fixed-file `CLOSE`；每个 `user_data` 里的 generation 号会丢弃复用槽位的完成。
 - **`part` 缓冲保持 `std::vector`（不用 pmr 池）**：试过 `std::pmr::vector` + `unsynchronized_pool_resource`，碎片确实少了，但池会持有空闲块不归还（`release()` 又不能用，ready 队列空不代表没有存活的 `part`），270k 连接时实测内存 1,214 MB，比 `std::vector` + `malloc_trim` 的 1,097 MB 还高 117 MB，因此回退。
@@ -117,9 +123,11 @@ SQLite 选项（全部在 `xmake.lua` 中）：`THREADSAFE=2`、`DEFAULT_MEMSTAT
 
 - `test/test.sh`：**42/42**。
 - 跨两次写入的请求、一次写入的两个流水线请求、body 分两段到达的 POST：全部正确回答。
-- `bench/load.js` 在 **8,000 VUs**（30 s 爬坡，45 s 保持）：**0.00% 失败请求**，p95 3.17 ms，p99 3.92 ms。
+- `bench/load.js` 在 **8,000 VUs**（30 s 爬坡，45 s 保持）：**0.00 % 失败请求**，p95 3.17 ms，p99 3.92 ms。
 - 10 万条 keep-alive 长连接、每 3 秒一次 `GET /feed`（约 30k req/s）：**0 错误、0 断连**。
 - 单核无思考时间循环 `GET /feed`（1,024 连接）：约 35k req/s；`perf` 显示约一半 CPU 在内核 TCP/io_uring 路径。
+- **混合负载 A/B**（`bench/load.js` 的请求比例、去掉 think time，8,000 VUs × 40 s，服务器钉在 0 号核、k6 用 1–7 号核；两次交替测，数字是同一次机器状态下的对照）：改动前 6.8k req/s、p95 1.78 s、COMMIT 占循环 38–58 %、单次 COMMIT 最大 20–74 ms；改动后 **9.0k req/s、p95 1.47 s、COMMIT 占 4–8 %、最大 1–11 ms**，`enobufs=0`（接收缓冲不再耗尽）、`gated=0`（写从未被挂起）。这台容器的磁盘和宿主机是共享的，绝对值不可与基准机比较，只能同机对照。
+- `STATS=1` 会每秒打印一次分项：`pass/s`、`enobufs`、`gated`、wait/drain/read/commit 各自占比与 **COMMIT 最大值/超 5 ms 次数**。
 
 ## 运行
 
@@ -128,3 +136,7 @@ sudo bash install.sh
 bash build.sh
 SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80 bash start.sh
 ```
+
+A/B 用的环境变量（都有默认值，不设就是上面的行为）：`ANSWERS=` 每 pass 答案上限（默认 256；
+310,000 那次保持用的是 2,048）、`ZC=0` 关零拷贝发送、`RCVBUF=` 接收缓冲上限、
+`TCP_MEM_GOVERNOR=0` 关掉 PSI 治理、`WAL_COALESCE=0` 关掉 WAL 写合并 VFS、`STATS=1` 打分项统计。

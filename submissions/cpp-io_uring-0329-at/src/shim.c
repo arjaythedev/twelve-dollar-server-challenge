@@ -2,6 +2,8 @@
 #include "sqlite3.c"
 
 #include <stdatomic.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
@@ -26,11 +28,11 @@ struct dbx {
   _Atomic int wal_frames;
   _Atomic int gate_held;
   _Atomic long long gate_since;
+  /* 检查点状态机（见 dbx_ck_kick）：CK_IDLE → CK_BULK → CK_BULK_DONE → CK_TAIL → CK_TAIL_DONE。 */
+  _Atomic int ck_state;
+  _Atomic int ck_full;
   unsigned char *rec;
   unsigned rec_cap;
-  /* checkpoint 把帧拷回主库之后，WAL 里那些页在内核页缓存里已经没用了；2 GB 的机器上它们
-   * 占的是常驻内存（fsharp-uring-delneg #437 每轮之后也会丢掉这些帧的缓存）。 */
-  int walfd;
 };
 
 static int fail(sqlite3 *db, char *err, int n, const char *what) {
@@ -49,12 +51,6 @@ static int wal_cb(void *p, sqlite3 *db, const char *name, int frames) {
   (void)name;
   struct dbx *h = (struct dbx *)p;
   atomic_store_explicit(&h->wal_frames, frames, memory_order_relaxed);
-  /* 闸门 4,096 帧（16 MiB）：日志小一半，一次 hold 内拷完的概率大得多。基准机 3000 写/秒、
-   * 每 pass 组提交后约 7,000 帧/秒，8,192 帧的闸门 1.2 秒就满一次，检查点来不及就被迫再关。 */
-  if (frames >= 4096 && !atomic_load_explicit(&h->gate_held, memory_order_relaxed)) {
-    atomic_store_explicit(&h->gate_since, mono_ns(), memory_order_relaxed);
-    atomic_store_explicit(&h->gate_held, 1, memory_order_relaxed);
-  }
   return SQLITE_OK;
 }
 
@@ -208,7 +204,6 @@ void dbx_close(dbx *h) {
   for (int i = 0; i < 4; i++) sqlite3_free(h->cur[i]);
   for (int i = 0; i < 32; i++) sqlite3_free(h->acur[i]);
   if (h->rec) sqlite3_free(h->rec);
-  if (h->walfd >= 0) close(h->walfd);
   if (h->ckdb) sqlite3_close(h->ckdb);
   sqlite3_close(h->db);
   sqlite3_free(h);
@@ -618,13 +613,6 @@ dbx *dbx_open(const char *path, char *err, int n) {
   }
   sqlite3_exec(h->ckdb, "SELECT * FROM sqlite_schema", 0, 0, 0);
   h->bt = h->db->aDb[0].pBt;
-  h->walfd = -1;
-  {
-    /* 只读打开 -wal，用于 checkpoint 之后 fadvise(DONTNEED)。打不开就跳过。 */
-    char wp[1024];
-    int wn = snprintf(wp, sizeof wp, "%s-wal", path);
-    if (wn > 0 && (size_t)wn < sizeof wp) h->walfd = open(wp, O_RDONLY | O_CLOEXEC);
-  }
   for (int i = 0; i < 4; i++) {
     h->cur[i] = (BtCursor *)sqlite3_malloc(sqlite3BtreeCursorSize());
     if (!h->cur[i]) {
@@ -715,37 +703,125 @@ int dbx_commit(dbx *h) {
   return 0;
 }
 
-/* PASSIVE: copies frames to the database without ever waiting for readers, so this can run on a
- * thread next to the loop.  When every frame is copied the gate opens and the next write restarts
- * the log at frame 1, which is what keeps the file bounded (no truncate needed).
- * Returns 0 when the log is fully copied, 1 when more remains, -1 on error; `copied` receives the
- * number of frames copied so far, so the caller can stop when a pass makes no progress. */
-int dbx_checkpoint(dbx *h, int *copied) {
-  int nlog = 0, ndone = 0;
-  int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-  if (copied) *copied = ndone;
+/* ---- checkpoint state machine ---------------------------------------------------------
+ * 旧做法：WAL 一过 4,096 帧（16 MiB）就在 WAL 钩子里挂写，然后由同一个 nice 19 的线程把
+ * 整段积压拷回主库，闸门要等「全部帧都拷完」才松开——一次 hold 就是几百毫秒，而基准机上
+ * 300k/320k 的探针正是「0 错误、p99 4.45 s」的形状。
+ *
+ * 现在分两段（c-iouring-jowinjestine #404/#486 与 rust-iouring-kensac #264 都是这个结构）：
+ *   1. BULK：日志到 4,096 帧时**不挂写**，nice 19 的线程连着做 PASSIVE，每次拷的是
+ *      「上一次 pass 之后又写进来的帧」，直到落后不超过 64 帧；
+ *   2. TAIL：这时才挂写（读照常），由**普通优先级**的线程把剩下的几十帧拷完，几毫秒就结束；
+ *      全部拷完之后下一次写让日志从第 1 帧重新开始。
+ * 挂写的时间从「整个 16 MiB 的拷贝」缩到「尾段」，而尾段线程和主循环同优先级，不会被
+ * nice 19 拖成几百毫秒。超过 65,536 帧（256 MiB）属于线程追不上的情况，循环自己拷一次兜底。
+ */
+#define CK_GATE_FRAMES 4096
+#define CK_FORCE_FRAMES 65536
+#define CK_TAIL_FRAMES 64
+#define CK_HOLD_NS 400000000LL
+enum { CK_IDLE = 0, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
+
+/* 一次 PASSIVE：能拷多少拷多少，从不等读者。返回 0 = 全部拷完，1 = 还有，-1 = 出错。 */
+static int ck_pass(struct dbx *h, int *nlog, int *ndone) {
+  *nlog = 0;
+  *ndone = 0;
+  int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, nlog, ndone);
   if (rc != SQLITE_OK) {
     shim_log("checkpoint failed: %s (%d)", sqlite3_errmsg(h->ckdb), rc);
     return -1;
   }
-  int done = (nlog == 0 || ndone >= nlog);
-  if (done) {
-    /* 帧已经安全落在主库里了：把 WAL 的这些页从内核页缓存丢掉，别让它们常驻。
-     * 数据已经写完，丢掉缓存不会读回任何东西；下一次写从第 1 帧重新开始。 */
-    if (h->walfd >= 0) posix_fadvise(h->walfd, 0, 0, POSIX_FADV_DONTNEED);
-    if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) <= nlog)
-      atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
-  }
-  return done ? 0 : 1;
+  return (*nlog == 0 || *ndone >= *nlog) ? 0 : 1;
 }
 
-/* 非阻塞：WAL 超过闸门且检查点线程还没追平时返回真。写被挂起、读照常；hold 最多 250 ms，
- * 与 rust-iouring-kensac #264 一致——太短会让同一次积压被反复 hold（一次拷不完就重来），
- * 太短也正是 220k 那次 p99 4.28 s 的形状：写请求等了几轮 hold。 */
+/* 拷之前对整段日志做 readahead 试过一版（c-iouring-jowinjestine #404 的做法）：本地成对 A/B
+ * 里它让吞吐从 9.9k 掉到 8.9k——日志的帧本来就在页缓存里，readahead 走一遍 16 MB 的范围只是
+ * 白白占掉主循环的时间，所以去掉。 */
+
+/* 由事件循环每个 pass 调一次。返回非 0 表示状态刚刚切到「有活干」，要唤醒检查点线程。 */
+int dbx_ck_kick(dbx *h) {
+  int st = atomic_load_explicit(&h->ck_state, memory_order_acquire);
+  switch (st) {
+    case CK_IDLE: {
+      int frames = atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
+      if (frames >= CK_FORCE_FRAMES) {
+        /* 兜底：线程追不上（读者一直挡着帧，或者磁盘太慢），循环自己拷一次，别让日志无限长。 */
+        int nlog = 0, ndone = 0;
+        ck_pass(h, &nlog, &ndone);
+        if (nlog == 0 || ndone >= nlog) atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
+        return 0;
+      }
+      if (frames >= CK_GATE_FRAMES) {
+        atomic_store_explicit(&h->ck_state, CK_BULK, memory_order_release);
+        return 1;
+      }
+      break;
+    }
+    case CK_BULK_DONE:
+      if (atomic_load_explicit(&h->ck_full, memory_order_relaxed)) {
+        atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
+        atomic_store_explicit(&h->ck_state, CK_IDLE, memory_order_release);
+        break;
+      }
+      /* 大块已经拷完：从这里开始挂写，只让线程拷剩下的尾段。 */
+      atomic_store_explicit(&h->gate_since, mono_ns(), memory_order_relaxed);
+      atomic_store_explicit(&h->gate_held, 1, memory_order_relaxed);
+      atomic_store_explicit(&h->ck_state, CK_TAIL, memory_order_release);
+      return 1;
+    case CK_TAIL_DONE:
+      if (atomic_load_explicit(&h->ck_full, memory_order_relaxed)) {
+        atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
+      }
+      atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+      atomic_store_explicit(&h->ck_state, CK_IDLE, memory_order_release);
+      break;
+    default:
+      break;
+  }
+  return 0;
+}
+
+/* 线程侧：这一阶段有活干吗。 */
+int dbx_ck_wants(dbx *h, int tail) {
+  int st = atomic_load_explicit(&h->ck_state, memory_order_acquire);
+  return st == (tail ? CK_TAIL : CK_BULK);
+}
+
+/* 线程侧：做这一阶段的拷贝，然后把状态推到 *_DONE（由循环接手推进）。 */
+void dbx_ck_run(dbx *h, int tail) {
+  int nlog = 0, ndone = 0;
+  if (tail) {
+    int r = ck_pass(h, &nlog, &ndone);
+    atomic_store_explicit(&h->ck_full, r == 0, memory_order_relaxed);
+    atomic_store_explicit(&h->ck_state, CK_TAIL_DONE, memory_order_release);
+    return;
+  }
+  int full = 0;
+  int last = -1;
+  for (int i = 0; i < 8; i++) {
+    int r = ck_pass(h, &nlog, &ndone);
+    if (r < 0) break;
+    if (r == 0) {
+      full = 1;
+      break;
+    }
+    if (nlog - ndone <= CK_TAIL_FRAMES) break;
+    if (ndone == last) break; /* 这一轮没有进展（读者挡住），留给尾段 */
+    last = ndone;
+    usleep(200);
+  }
+  atomic_store_explicit(&h->ck_full, full, memory_order_relaxed);
+  atomic_store_explicit(&h->ck_state, CK_BULK_DONE, memory_order_release);
+}
+
+/* 非阻塞：写被挂起时返回真。读照常。hold 上限 400 ms，日志超过 32,768 帧（128 MiB）时
+ * 放宽到 800 ms——一次性拷完的概率更大，免得同一次积压被反复 hold。 */
 int dbx_writes_held(dbx *h) {
   if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
   long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);
-  if (mono_ns() - since > 250000000LL) {
+  long long limit = CK_HOLD_NS;
+  if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) > 32768) limit *= 2;
+  if (mono_ns() - since > limit) {
     atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
     return 0;
   }

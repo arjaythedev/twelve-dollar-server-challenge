@@ -59,6 +59,14 @@ constexpr uint32_t kWaitNs = 1000000;
  * 消化完积压的完成，backlog 就是这么堆起来的）。 */
 constexpr size_t kDrainBudget = 2048;
 
+/* 一个 pass 内「发单发读 → 收回来」最多走几轮。读和答在同一个 pass 里完成，连接就不用
+ * 多等一个完整的 pass（wait + drain + COMMIT + send）；pavlyhalim #245 量过两者的差别：
+ * 「在批末尾发出去的读要多等一批加最多 2 ms：p95 4.7 对 2.7 ms（20,000 用户）」，kensac
+ * #264 的 read_rounds 是同一形状，他们把它记成 270k → 310k 的那一步。 */
+constexpr int kMaxReadRounds = 4;
+/* 每 256 个完成就把 CQ 头和 buffer ring 的尾指针交还内核（见 drain）。 */
+constexpr size_t kPublishEvery = 256;
+
 // 单个 pass 最多答多少个请求。读不受此限：超过上限的接收数据留在连接上，由后续 pass 按
 // 最老优先回答，所以一个繁忙的 pass 不会把它后面排队的所有请求一起拖慢
 // （rust-iouring-kensac #264 同样限制 2,048，并用就绪队列保序）。
@@ -166,6 +174,12 @@ class Server {
     /* ZC=0 关掉零拷贝发送，用来在评测机上做 A/B。 */
     const char* zc = std::getenv("ZC");
     if (zc && zc[0] == '0') zc_ok_ = false;
+    /* ANSWERS 覆盖每 pass 的答案上限：310,000 那次保持用的是 2,048（kensac #264 的数），
+     * 本地 20k 连接的 A/B 又支持 256，留一个旋钮在评测机上复测，默认保持 256。 */
+    if (const char* a = std::getenv("ANSWERS")) {
+      long v = std::strtol(a, nullptr, 10);
+      if (v > 0 && v <= 65536) answers_cap_ = static_cast<uint32_t>(v);
+    }
   }
 
   bool init(const char* host, uint16_t port) {
@@ -341,6 +355,7 @@ class Server {
     uint64_t t_wait = 0, t_drain = 0, t_read = 0, t_commit = 0, t_sweep = 0;
     uint64_t stat_at = now_ns(), slow_total = 0, held_gate = 0;
     uint64_t cqes_sum = 0, requests_sum = 0, prev_responded = 0, reqs = 0, last_reqs = 1;
+    uint64_t commit_max = 0, commit_slow = 0, enobufs_prev = 0;
     uint64_t last_sweep = now_ns();
     now_sec_ = now_sec();
     for (;;) {
@@ -381,7 +396,7 @@ class Server {
         }
       }
       const uint64_t p1 = now_ns();
-      answers_left_ = kAnswersPerPass;
+      answers_left_ = answers_cap_;
       last_cqes = 0;
       for (size_t i = 0; i < workers_.size(); i++)
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
@@ -389,11 +404,31 @@ class Server {
       // 所有请求后面。
       run_ready();
       const uint64_t p2 = now_ns();
-      for (size_t i = 0; i < workers_.size(); i++) run_reads(*workers_[i], static_cast<uint32_t>(i));
+      /* 单发读在本 pass 内「发出去 → 收回来 → 答掉」，最多 kMaxReadRounds 轮。原来只在
+       * pass 末尾发出去，完成要等下一个 pass 的 drain，于是每个走单发读的连接都要多等一个
+       * 完整的 pass（低负载时是 1 ms 的等待，突发时是整个 backlog 的长度）。只发本 pass
+       * 还答得掉的个数：多读进来的请求只能 defer，而 defer 会为它分配一块 part 缓冲。 */
+      reads_budget_ = answers_left_;
+      for (int round = 0; round < kMaxReadRounds && reads_budget_ != 0; round++) {
+        size_t issued = 0;
+        for (size_t i = 0; i < workers_.size(); i++)
+          issued += run_reads(*workers_[i], static_cast<uint32_t>(i));
+        if (!issued) break;
+        for (auto& wp : workers_) wp->ring().submit_nowait();
+        size_t got = 0;
+        for (size_t i = 0; i < workers_.size(); i++)
+          got += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
+        last_cqes += got;
+        if (!got) break;
+        reads_budget_ = answers_left_; /* 这一轮答案用掉多少，下一轮就只能读多少 */
+      }
       maybe_grow();
       const uint64_t p3 = now_ns();
       commit_and_flush();
       const uint64_t p4 = now_ns();
+      /* 检查点状态机：WAL 过 4,096 帧先做不挂写的大块拷贝，只剩尾段时才挂写并由普通优先级
+       * 线程拷完（见 shim.c 的 CK_* 状态机）。 */
+      app_->db.ck_kick();
       if (!writes_ok_) writes_ok_ = !app_->db.writes_held();
       // 按时间而不是按 pass 驱动：负载下 pass 频率没有下界，按 pass 节奏清扫会在每秒把整张槽位表
       // 走很多遍。
@@ -435,6 +470,8 @@ class Server {
       t_read += p3 - p2;
       t_commit += p4 - p3;
       t_sweep += p5 - p4;
+      if (p4 - p3 > commit_max) commit_max = p4 - p3;
+      if (p4 - p3 > 5000000ULL) commit_slow++;
       cqes_sum += last_cqes;
       reqs = responded_ - prev_responded;
       prev_responded = responded_;
@@ -451,15 +488,15 @@ class Server {
                  (p4 - p3) / 1e6, (p5 - p4) / 1e6);
         }
         if (p5 - stat_at >= 1000000000ULL) {
-          errlog("stats: pass={}/s cqes={} req={} gated={}/{} wait={:.1f}% drain={:.1f}% "
-                 "read={:.1f}% commit={:.1f}% sweep={:.1f}% pool_miss={} pool={} "
-                 "enter[wait={} sqe={} ring={}]",
-                 pass - stat_pass, cqes_sum, requests_sum, held_gate, pass - stat_pass,
-                 100.0 * t_wait / (p5 - stat_at), 100.0 * t_drain / (p5 - stat_at),
+          errlog("stats: pass={}/s cqes={} req={} enobufs={} gated={}/{} wait={:.1f}% drain={:.1f}% "
+                 "read={:.1f}% commit={:.1f}% (max {:.1f}ms, >5ms {}) sweep={:.1f}% pool_miss={} "
+                 "pool={} enter[wait={} sqe={} ring={}]",
+                 pass - stat_pass, cqes_sum, requests_sum, enobufs_ - enobufs_prev, held_gate,
+                 pass - stat_pass, 100.0 * t_wait / (p5 - stat_at), 100.0 * t_drain / (p5 - stat_at),
                  100.0 * t_read / (p5 - stat_at), 100.0 * t_commit / (p5 - stat_at),
-                 100.0 * t_sweep / (p5 - stat_at), app::pool_misses(), pool_.size(),
-                 io::Ring::enters(0) - enter_base_[0], io::Ring::enters(1) - enter_base_[1],
-                 io::Ring::enters(2) - enter_base_[2]);
+                 commit_max / 1e6, commit_slow, 100.0 * t_sweep / (p5 - stat_at),
+                 app::pool_misses(), pool_.size(), io::Ring::enters(0) - enter_base_[0],
+                 io::Ring::enters(1) - enter_base_[1], io::Ring::enters(2) - enter_base_[2]);
           enter_base_[0] = io::Ring::enters(0);
           enter_base_[1] = io::Ring::enters(1);
           enter_base_[2] = io::Ring::enters(2);
@@ -467,6 +504,8 @@ class Server {
           stat_pass = pass;
           t_wait = t_drain = t_read = t_commit = t_sweep = 0;
           cqes_sum = requests_sum = held_gate = 0;
+          commit_max = commit_slow = 0;
+          enobufs_prev = enobufs_;
         }
       }
     }
@@ -543,8 +582,11 @@ class Server {
     if (zc) {
       io_uring_prep_send_zc(sqe, static_cast<int>(idx), c.wire->p, c.wire->len, MSG_NOSIGNAL, 0);
     } else {
+      /* MSG_WAITALL：让 io_uring 自己把短写补完，完成就是全部发完，省掉一次「再挂一个
+       * send」的 SQE 和完成（c-iouring-jowinjestine #486 与 c-iouring-pavlyhalim #245
+       * 的发送都是 MSG_NOSIGNAL|MSG_WAITALL）。续传也走这里。 */
       io_uring_prep_send(sqe, static_cast<int>(idx), c.wire->p + c.sent, c.wire->len - c.sent,
-                         MSG_NOSIGNAL);
+                         MSG_NOSIGNAL | MSG_WAITALL);
     }
     sqe->flags |= IOSQE_FIXED_FILE;
     sqe->user_data = ev(kEvSend, wi, c.gen, idx);
@@ -802,12 +844,16 @@ class Server {
   }
 
   size_t drain(Worker& w, uint32_t wi, size_t budget) {
+    io_uring& r = w.ring().raw();
     size_t n = 0;
-    unsigned head = 0;
-    struct io_uring_cqe* cqe = nullptr;
-    io_uring_for_each_cqe(&w.ring().raw(), head, cqe) {
-      if (n == budget) break;
+    size_t unposted = 0; /* 已经处理、但还没交还内核的完成数 */
+    unsigned head = *r.cq.khead;
+    const unsigned tail = io_uring_smp_load_acquire(r.cq.ktail);
+    while (head != tail && n < budget) {
+      const struct io_uring_cqe* cqe = &r.cq.cqes[head & *r.cq.kring_mask];
+      head++;
       n++;
+      unposted++;
       const uint64_t u = cqe->user_data;
       const int res = cqe->res;
       const uint32_t flags = cqe->flags;
@@ -863,6 +909,7 @@ class Server {
               w.pending().push_back(idx);
             }
           } else if (res == -ENOBUFS) [[unlikely]] {
+            enobufs_++;
             c.read = net::ReadState::Queued;
             w.pending().push_back(idx);
           } else {
@@ -903,6 +950,7 @@ class Server {
           } else if (res == -EAGAIN) {
             arm_recv(w, wi, idx, gen);
           } else if (res == -ENOBUFS) {
+            enobufs_++;
             c.read = net::ReadState::Queued;
             w.pending().push_back(idx);
           } else {
@@ -986,8 +1034,19 @@ class Server {
         default:
           break;
       }
+      /* 每 256 个完成就把 CQ 头还给内核、把 buffer ring 的尾指针发布出去。一个 drain 最多
+       * 处理 kDrainBudget = 2,048 个完成，而 provided-buffer ring 正好 2,048 项：整批结束时才
+       * 发布的话，内核在 drain 中途就会把接收缓冲用光，剩下的 multishot receive 全部以
+       * -ENOBUFS 结束、被塞进 pending 队列、等下一个 pass 的单发读——ramp 与突发之后每个连接
+       * 都立刻撞上这件事（c-iouring-jowinjestine #486 的中途 publish，他们量到 2.15M 次
+       * ENOBUFS，publish 之后降到 119k，最长的一次循环轮次 1.9 s → 0.65 s）。 */
+      if ((unposted & (kPublishEvery - 1)) == 0) {
+        io_uring_cq_advance(&r, static_cast<unsigned>(unposted));
+        unposted = 0;
+        w.bufs().publish();
+      }
     }
-    io_uring_cq_advance(&w.ring().raw(), static_cast<unsigned>(n));
+    if (unposted) io_uring_cq_advance(&r, static_cast<unsigned>(unposted));
     w.bufs().publish();
     if (w.accepting()) {
       if (w.full()) {
@@ -1004,15 +1063,22 @@ class Server {
     return n;
   }
 
-  void run_reads(Worker& w, uint32_t wi) {
-    while (!w.pending().empty() && w.reads() < kBufCount) {
+  /* 给排队等读的连接各发一个单发读，返回发出的个数。`reads_budget_` 是本 pass 一共还能
+   * 答多少个请求：读进来的数据一定答得掉，不会被 defer 到就绪队列（那要为每个连接分配
+   * 一块 part 缓冲，正是突发时最不该做的分配）。 */
+  size_t run_reads(Worker& w, uint32_t wi) {
+    size_t n = 0;
+    while (reads_budget_ && !w.pending().empty() && w.reads() < kBufCount) {
       const uint32_t idx = w.pending().front();
       w.pending().pop_front();
       net::Connection& c = w.table().at(idx);
       if (!c.open || c.closing || c.read != net::ReadState::Queued) continue;
       w.reads()++;
+      reads_budget_--;
+      n++;
       arm_read(w, wi, idx, c.gen);
     }
+    return n;
   }
 
   void commit_and_flush() {
@@ -1056,6 +1122,9 @@ class Server {
   uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
   uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
   uint32_t answers_left_ = 0;
+  uint32_t answers_cap_ = kAnswersPerPass;
+  uint32_t reads_budget_ = 0;
+  uint64_t enobufs_ = 0;
   uint64_t last_trim = 0;
   bool zc_ok_ = true; /* 内核支持零拷贝发送；-EINVAL 后永久关闭 */
   std::deque<ReadyRef> ready_;
@@ -1116,14 +1185,22 @@ int main() {
   mallopt(M_ARENA_MAX, 1);
   std::signal(SIGTERM, on_term);
   std::signal(SIGINT, on_term);
+  /* 把可执行文件的**所有**映射（text / rodata / data）都锁进内存。文件页正是内存紧张时被
+   * 回收的那一类，而 consteval 拼出来的响应头、JSON 转义表、base64url 表都在 rodata 里，
+   * 每个请求都要碰：只锁 r-x 段的话，内存墙上一旦发生回收，主循环就要为这些页等一次
+   * major fault（c-iouring-jowinjestine #486 与 c-iouring-pavlyhalim #245 都锁整个映像）。 */
   {
+    char exe[512] = {};
+    const ssize_t el = ::readlink("/proc/self/exe", exe, sizeof exe - 1);
     std::FILE* mf = std::fopen("/proc/self/maps", "r");
     if (mf) {
-      char line[512];
+      char line[1024];
       while (std::fgets(line, sizeof line, mf)) {
         unsigned long a = 0, b = 0;
         char perms[8] = {};
-        if (std::sscanf(line, "%lx-%lx %7s", &a, &b, perms) == 3 && perms[2] == 'x')
+        if (std::sscanf(line, "%lx-%lx %7s", &a, &b, perms) != 3) continue;
+        const bool is_exe = el > 0 && std::strstr(line, exe) != nullptr;
+        if ((is_exe || perms[2] == 'x') && b > a)
           ::mlock(reinterpret_cast<void*>(a), static_cast<size_t>(b - a));
       }
       std::fclose(mf);

@@ -20,7 +20,8 @@ struct CkState {
   std::mutex mu;
   std::condition_variable cv;
   std::atomic<bool> stop{false};
-  std::thread th;
+  std::thread th_bulk; /* 大块拷贝，nice 19 */
+  std::thread th_tail; /* 尾段拷贝，普通优先级 */
 };
 
 struct DbError {};
@@ -40,6 +41,8 @@ class Db {
 
   bool commit();
   void tick();
+  /* 每个 pass 调一次：推进检查点状态机，需要线程干活时唤醒它。 */
+  void ck_kick();
   bool writes_held() const;
   bool health(std::string& err);
 

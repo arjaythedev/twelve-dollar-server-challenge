@@ -1092,6 +1092,12 @@ int main(int argc, char **argv) {
   ckpt_tail = (int)env_long("CKPT_TAIL", 64);
   hold_max_ns = (uint64_t)env_long("HOLD_MAX_MS", 400) * 1000000ULL;
   wb_kick_ms = env_long("WB_KICK_MS", 250);
+  ckpt_sched_idle = env_long("CKPT_SCHED_IDLE", 1) != 0;
+  long kick_kib = env_long("WAL_KICK_KB", 258);
+  if (kick_kib < 4) kick_kib = 4;
+  if (kick_kib > 65536) kick_kib = 65536;
+  wb_kick_bytes = kick_kib * 1024;
+
   ckpt_log = (int)env_long("CKPT_LOG", 0);
   tail_restart_on = (int)env_long("TAIL_RESTART", 0);
   wal_ra_on = (int)env_long("WAL_READAHEAD", 1);
@@ -1102,6 +1108,19 @@ int main(int argc, char **argv) {
   int cache_kib = (int)env_long("CACHE_KIB", 65536); /* 64 MB: the likes index (24 MB), the post tails and their indexes stay resident */
 
   if (app_init(&A, db_path, secret, cache_kib) < 0) return 1;
+  /* Drop the seed DB's redundant kernel page cache before the connection ramp.
+   * SQLite's own 64 MiB page cache remains intact. Best effort: the bulk
+   * checkpoint worker already does periodic DONTNEED, but may not run until
+   * after the ramp has exhausted free memory. This runs once at startup. */
+  if (env_long("STARTUP_DROP_DB_CACHE", 1)) {
+    int cache_fd = open(db_path, O_RDONLY | O_CLOEXEC);
+    if (cache_fd >= 0) {
+      int advice_rc = posix_fadvise(cache_fd, 0, 0, POSIX_FADV_DONTNEED);
+      if (advice_rc) fprintf(stderr, "startup db cache drop: %s\\n", strerror(advice_rc));
+      close(cache_fd);
+    }
+  }
+
 
   const char *err = "";
   for (unsigned l = 0; l < NLISTEN; l++) {

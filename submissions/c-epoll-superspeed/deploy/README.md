@@ -88,8 +88,9 @@ failed requests. Every probe should start from a fresh database copy.
 Useful knobs while tuning:
 
 ```bash
-WORKERS=1|2|4   # process count; direct mode defaults to 4
-DEBUG_CKPT=1    # log the checkpoint helper's nlog/nckpt once a second
+WORKERS=1|2|4     # process count; direct mode defaults to 4
+NO_SCHED_BATCH=1  # disable the default SCHED_BATCH policy
+DEBUG_CKPT=1      # log the checkpoint helper's nlog/nckpt once a second
 ```
 
 Watch memory and the WAL:

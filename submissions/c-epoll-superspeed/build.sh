@@ -22,15 +22,17 @@ SQLITE_OPTS="-DSQLITE_THREADSAFE=0 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0 \
  -DSQLITE_MAX_EXPR_DEPTH=0 -DSQLITE_USE_ALLOCA -DHAVE_USLEEP=1 -DHAVE_FDATASYNC=1 \
  -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1"
 
-# The benchmark box is x86-64; v2 is a safe baseline (SSE4.2/POPCNT).
-MARCH=""
-if [ "$(uname -m)" = "x86_64" ]; then MARCH="-march=x86-64-v2"; fi
+# Override MARCH=... to tune for the exact CPU (e.g. MARCH=-march=native).
+# The default x86-64-v2 runs on any x86-64 server.
+if [ -z "${MARCH:-}" ]; then
+  MARCH=""
+  if [ "$(uname -m)" = "x86_64" ]; then MARCH="-march=x86-64-v2"; fi
+fi
 
-CFLAGS="-O3 $MARCH -flto -fno-plt -fomit-frame-pointer -Wall -Wextra -Wno-unused-parameter -I deps/$SQLITE"
-LDFLAGS="-flto $MARCH"
-
-gcc $CFLAGS $SQLITE_OPTS -c server.c -o build/server.o
-gcc $CFLAGS $SQLITE_OPTS -w -c "deps/$SQLITE/sqlite3.c" -o build/sqlite3.o
-gcc $LDFLAGS build/server.o build/sqlite3.o -o bin/server -lm
+# server.c includes the amalgamation, so the internal B-tree API is visible in
+# the same translation unit. One -O3 compile of the two together; no LTO
+# (static functions are already visible across the whole unit).
+CFLAGS="-O3 $MARCH -fno-plt -fomit-frame-pointer -w -I deps/$SQLITE"
+gcc $CFLAGS $SQLITE_OPTS server.c -o bin/server -lm
 
 echo "built bin/server"

@@ -3,8 +3,11 @@
 // Design:
 //   * one process, one thread, one epoll loop (the box has one vCPU)
 //   * hand-written HTTP/1.1, JSON, JWT (HS256) and base64url code
-//   * SQLite amalgamation compiled in, prepared statements, WAL + synchronous=NORMAL
-//   * group commit: one transaction per epoll batch, response sent only after COMMIT
+//   * SQLite amalgamation compiled into this translation unit; the read paths
+//     drive SQLite's own B-tree cursors directly (pager, WAL and page cache are
+//     still SQLite's; only the bytecode interpreter is skipped), with prepared
+//     SQL as the fallback for anything unusual
+//   * writes: short BEGIN IMMEDIATE ... COMMIT, response sent only after COMMIT
 //   * a forked helper process runs PASSIVE WAL checkpoints off the request path
 //   * OPTIONAL: WORKERS=N forks N processes sharing the port with SO_REUSEPORT
 //
@@ -19,6 +22,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <signal.h>
+#include <sched.h>
 #include <emmintrin.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -34,13 +38,13 @@
 #include <time.h>
 #include <unistd.h>
 
-#include "sqlite3.h"
+#include "sqlite3.c"   /* one translation unit: gives us SQLite's internal B-tree API */
 
 // ---------------------------------------------------------------------------
 // tunables
 // ---------------------------------------------------------------------------
-#define MAX_EVENTS      512
-#define MAX_RESPS       4096
+#define MAX_EVENTS      2048
+#define MAX_RESPS       8192
 #define ARENA_SIZE      (16u * 1024u * 1024u)
 #define ARENA_RESERVE   (128u * 1024u)
 #define HDR_RESERVE     256
@@ -813,6 +817,7 @@ static void flush_batch(void) {
 }
 
 static int resp_reserve(Conn *c) {
+    if (c->dead) return -1;
     if (resp_n >= MAX_RESPS || arena_used + ARENA_RESERVE > ARENA_SIZE) {
         flush_batch();
         if (c->dead) return -1;
@@ -894,12 +899,325 @@ static size_t write_post(char *w, int64_t id, const char *body, int blen,
     return (size_t)(s - w);
 }
 
+
+// ---------------------------------------------------------------------------
+// SQLite B-tree fast path
+//
+// The amalgamation is included in this translation unit, so SQLite's internal
+// B-tree cursor API is visible. The two read queries are fixed and known ahead
+// of time: we run them directly on SQLite's own B-tree cursors. Every page is
+// still read through SQLite's pager, WAL and page cache inside a read
+// transaction; only the bytecode interpreter is skipped. Anything unexpected
+// (overflowing record, missing row, a wide id span) falls back to prepared SQL.
+// ---------------------------------------------------------------------------
+typedef struct {
+    const unsigned char *col[4];
+    int64_t val[4];
+    int len[4];
+} BtRec;
+
+typedef struct {
+    Btree *bt;
+    Pgno root_posts, root_users, root_likes, root_top;
+    KeyInfo *ki_likes, *ki_top;
+    BtCursor *cur_posts, *cur_users, *cur_likes, *cur_top;
+    int ok;
+} BtFast;
+
+static BtFast BT;
+
+static Pgno bt_rootpage(const char *name) {
+    sqlite3_stmt *st = NULL;
+    Pgno root = 0;
+    if (sqlite3_prepare_v2(db, "SELECT rootpage FROM sqlite_schema WHERE name=?1", -1, &st, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(st, 1, name, -1, SQLITE_STATIC);
+        if (sqlite3_step(st) == SQLITE_ROW) root = (Pgno)sqlite3_column_int64(st, 0);
+        sqlite3_finalize(st);
+    }
+    return root;
+}
+
+static int bt_table_layout(const char *table, const char *expect) {
+    char sql[96];
+    snprintf(sql, sizeof(sql), "PRAGMA table_info(\"%s\")", table);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    char got[512];
+    size_t n = 0;
+    got[0] = 0;
+    while (sqlite3_step(st) == SQLITE_ROW && n < sizeof(got)) {
+        n += (size_t)snprintf(got + n, sizeof(got) - n, "%s%s:%s:%d",
+            n ? "," : "", sqlite3_column_text(st, 1), sqlite3_column_text(st, 2),
+            sqlite3_column_int(st, 5));
+    }
+    sqlite3_finalize(st);
+    return strcmp(got, expect) == 0;
+}
+
+static int bt_index_layout(const char *index, const char *expect) {
+    char sql[96];
+    snprintf(sql, sizeof(sql), "PRAGMA index_xinfo(\"%s\")", index);
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK) return 0;
+    char got[256];
+    size_t n = 0;
+    got[0] = 0;
+    while (sqlite3_step(st) == SQLITE_ROW) {
+        if (!sqlite3_column_int(st, 5)) continue;
+        n += (size_t)snprintf(got + n, sizeof(got) - n, "%s%s:%d",
+            n ? "," : "", sqlite3_column_text(st, 2), sqlite3_column_int(st, 3));
+    }
+    sqlite3_finalize(st);
+    return strcmp(got, expect) == 0;
+}
+
+static KeyInfo *bt_keyinfo(int nkey, int nextra, int desc) {
+    KeyInfo *k = sqlite3KeyInfoAlloc(db, nkey, nextra);
+    if (!k) return NULL;
+    for (int i = 0; i < nkey + nextra; i++) {
+        k->aColl[i] = db->pDfltColl;
+        if (desc && i < nkey) k->aSortFlags[i] = KEYINFO_ORDER_DESC;
+    }
+    return k;
+}
+
+static int bt_init(void) {
+    memset(&BT, 0, sizeof(BT));
+    if (!db || !db->aDb || !db->aDb[0].pBt || !db->pDfltColl) return 0;
+    if (!bt_table_layout("users", "id:INTEGER:1,username:TEXT:0,created_at:TEXT:0") ||
+        !bt_table_layout("posts", "id:INTEGER:1,user_id:INTEGER:0,body:TEXT:0,created_at:TEXT:0") ||
+        !bt_table_layout("likes", "user_id:INTEGER:1,post_id:INTEGER:2,created_at:TEXT:0") ||
+        !bt_index_layout("likes_post_id_idx", "post_id:0") ||
+        !bt_index_layout("posts_created_at_id_idx", "created_at:1,id:1")) {
+        fprintf(stderr, "btree: schema layout differs; reads use SQL\n");
+        return 0;
+    }
+    BT.bt = db->aDb[0].pBt;
+    BT.root_posts = bt_rootpage("posts");
+    BT.root_users = bt_rootpage("users");
+    BT.root_likes = bt_rootpage("likes_post_id_idx");
+    BT.root_top = bt_rootpage("posts_created_at_id_idx");
+    if (!BT.root_posts || !BT.root_users || !BT.root_likes || !BT.root_top) return 0;
+    BT.ki_likes = bt_keyinfo(1, 1, 0);
+    BT.ki_top = bt_keyinfo(2, 1, 1);
+    if (!BT.ki_likes || !BT.ki_top) return 0;
+    int sz = sqlite3BtreeCursorSize();
+    BT.cur_posts = (BtCursor *)malloc((size_t)sz);
+    BT.cur_users = (BtCursor *)malloc((size_t)sz);
+    BT.cur_likes = (BtCursor *)malloc((size_t)sz);
+    BT.cur_top = (BtCursor *)malloc((size_t)sz);
+    if (!BT.cur_posts || !BT.cur_users || !BT.cur_likes || !BT.cur_top) return 0;
+    BT.ok = 1;
+    fprintf(stderr, "btree fast path enabled\n");
+    return 1;
+}
+
+static int bt_begin(int *started) {
+    *started = 0;
+    if (sqlite3BtreeTxnState(BT.bt) == SQLITE_TXN_NONE) {
+        if (sqlite3BtreeBeginTrans(BT.bt, 0, 0) != SQLITE_OK) return 0;
+        *started = 1;
+    }
+    return 1;
+}
+
+static void bt_end(int started) {
+    if (started) sqlite3BtreeCommit(BT.bt);
+}
+
+static int bt_rec(BtCursor *c, int n, BtRec *r) {
+    u32 amt;
+    u32 size = sqlite3BtreePayloadSize(c);
+    const unsigned char *p = (const unsigned char *)sqlite3BtreePayloadFetch(c, &amt);
+    if (amt != size || size < 2) return 0;
+    u32 hdr;
+    int h = getVarint32(p, hdr);
+    if (hdr > size) return 0;
+    const unsigned char *data = p + hdr;
+    const unsigned char *end = p + size;
+    for (int i = 0; i < n; i++) {
+        u32 t;
+        if (h >= (int)hdr) return 0;
+        h += getVarint32(p + h, t);
+        int len;
+        int64_t v = 0;
+        if (t < 12) {
+            static const unsigned char sz[] = {0, 1, 2, 3, 4, 6, 8, 8, 0, 0, 0, 0};
+            len = sz[t];
+            if (t == 8) v = 0;
+            else if (t == 9) v = 1;
+            else if (t >= 10) return 0;
+            else if (len) {
+                if (data + len > end) return 0;
+                v = (signed char)data[0];
+                for (int k = 1; k < len; k++) v = (v << 8) | data[k];
+            }
+        } else {
+            len = (int)((t - 12) / 2);
+        }
+        if (data + len > end) return 0;
+        r->col[i] = data;
+        r->val[i] = v;
+        r->len[i] = len;
+        data += len;
+    }
+    return 1;
+}
+
+static int bt_count_likes(int64_t lo, int64_t hi, int64_t *counts) {
+    BtCursor *c = BT.cur_likes;
+    sqlite3BtreeCursorZero(c);
+    if (sqlite3BtreeCursor(BT.bt, BT.root_likes, 0, BT.ki_likes, c) != SQLITE_OK) return 0;
+    Mem m;
+    memset(&m, 0, sizeof(m));
+    m.flags = MEM_Int;
+    m.u.i = lo;
+    UnpackedRecord key;
+    memset(&key, 0, sizeof(key));
+    key.pKeyInfo = BT.ki_likes;
+    key.aMem = &m;
+    key.nField = 1;
+    key.default_rc = 1;
+    int res = 0;
+    int rc = sqlite3BtreeIndexMoveto(c, &key, &res);
+    if (rc == SQLITE_OK && res < 0) {
+        rc = sqlite3BtreeNext(c, 0);
+        if (rc == SQLITE_DONE) rc = SQLITE_OK;
+    }
+    while (rc == SQLITE_OK && !sqlite3BtreeEof(c)) {
+        BtRec rec;
+        if (!bt_rec(c, 1, &rec)) { rc = SQLITE_CORRUPT; break; }
+        if (rec.val[0] > hi) break;
+        if (rec.val[0] >= lo) counts[rec.val[0] - lo]++;
+        rc = sqlite3BtreeNext(c, 0);
+        if (rc == SQLITE_DONE) { rc = SQLITE_OK; break; }
+    }
+    sqlite3BtreeCloseCursor(c);
+    return rc == SQLITE_OK;
+}
+
+static int bt_feed(Conn *c) {
+    if (!BT.ok) return 0;
+    if (resp_reserve(c) < 0) return 0;
+    int started = 0;
+    if (!bt_begin(&started)) return 0;
+
+    int64_t ids[20], counts[256];
+    int n = 0, ok = 0, rc = SQLITE_OK, res = 0;
+    int posts_open = 0, users_open = 0;
+    BtCursor *top = BT.cur_top, *posts = BT.cur_posts, *users = BT.cur_users;
+
+    sqlite3BtreeCursorZero(top);
+    if (sqlite3BtreeCursor(BT.bt, BT.root_top, 0, BT.ki_top, top) != SQLITE_OK) goto done;
+    rc = sqlite3BtreeFirst(top, &res);
+    while (rc == SQLITE_OK && res == 0 && n < 20) {
+        BtRec r;
+        if (!bt_rec(top, 2, &r)) { n = 0; break; }
+        ids[n++] = r.val[1];
+        rc = sqlite3BtreeNext(top, 0);
+        if (rc == SQLITE_OK) res = 0;
+    }
+    sqlite3BtreeCloseCursor(top);
+    if ((rc != SQLITE_OK && rc != SQLITE_DONE) || n == 0) goto done;
+
+    int64_t lo = ids[0], hi = ids[0];
+    for (int k = 1; k < n; k++) {
+        if (ids[k] < lo) lo = ids[k];
+        if (ids[k] > hi) hi = ids[k];
+    }
+    if (hi - lo >= 256) goto done;
+    memset(counts, 0, sizeof(int64_t) * (size_t)(hi - lo + 1));
+    if (!bt_count_likes(lo, hi, counts)) goto done;
+
+    sqlite3BtreeCursorZero(posts);
+    if (sqlite3BtreeCursor(BT.bt, BT.root_posts, 0, NULL, posts) != SQLITE_OK) goto done;
+    posts_open = 1;
+    sqlite3BtreeCursorZero(users);
+    if (sqlite3BtreeCursor(BT.bt, BT.root_users, 0, NULL, users) != SQLITE_OK) goto done;
+    users_open = 1;
+
+    char *base = resp_body_ptr();
+    char *w = base;
+    PUTLIT(w, "{\"posts\":[");
+    ok = 1;
+    for (int k = 0; k < n; k++) {
+        BtRec r, u;
+        if (!(k > 0 && ids[k] == ids[k - 1] - 1 &&
+              sqlite3BtreePrevious(posts, 0) == SQLITE_OK &&
+              sqlite3BtreeIntegerKey(posts) == ids[k])) {
+            if (sqlite3BtreeTableMoveto(posts, ids[k], 0, &res) != SQLITE_OK || res != 0) { ok = 0; break; }
+        }
+        if (!bt_rec(posts, 4, &r) ||
+            sqlite3BtreeTableMoveto(users, r.val[1], 0, &res) != SQLITE_OK || res != 0 ||
+            !bt_rec(users, 2, &u)) { ok = 0; break; }
+        if (k) *w++ = ',';
+        w += write_post(w, ids[k], (const char *)r.col[2], r.len[2],
+                        (const char *)r.col[3], r.len[3],
+                        (const char *)u.col[1], u.len[1], counts[ids[k] - lo]);
+    }
+    if (ok) {
+        PUTLIT(w, "]}");
+        append_response(c, 200, (size_t)(w - base));
+    }
+
+done:
+    if (users_open) sqlite3BtreeCloseCursor(users);
+    if (posts_open) sqlite3BtreeCloseCursor(posts);
+    bt_end(started);
+    return ok;
+}
+
+static int bt_get_post(Conn *c, int64_t id) {
+    if (!BT.ok) return 0;
+    if (resp_reserve(c) < 0) return 0;
+    int started = 0;
+    if (!bt_begin(&started)) return 0;
+
+    int ok = 0, posts_open = 0, users_open = 0;
+    int64_t counts[1] = {0};
+    BtCursor *posts = BT.cur_posts, *users = BT.cur_users;
+
+    if (!bt_count_likes(id, id, counts)) goto done;
+
+    sqlite3BtreeCursorZero(posts);
+    if (sqlite3BtreeCursor(BT.bt, BT.root_posts, 0, NULL, posts) != SQLITE_OK) goto done;
+    posts_open = 1;
+    sqlite3BtreeCursorZero(users);
+    if (sqlite3BtreeCursor(BT.bt, BT.root_users, 0, NULL, users) != SQLITE_OK) goto done;
+    users_open = 1;
+
+    int res = 0;
+    BtRec r, u;
+    if (sqlite3BtreeTableMoveto(posts, id, 0, &res) == SQLITE_OK && res == 0 &&
+        bt_rec(posts, 4, &r) &&
+        sqlite3BtreeTableMoveto(users, r.val[1], 0, &res) == SQLITE_OK && res == 0 &&
+        bt_rec(users, 2, &u)) {
+        char *base = resp_body_ptr();
+        char *w = base;
+        PUTLIT(w, "{\"post\":");
+        w += write_post(w, id, (const char *)r.col[2], r.len[2],
+                        (const char *)r.col[3], r.len[3],
+                        (const char *)u.col[1], u.len[1], counts[0]);
+        *w++ = '}';
+        append_response(c, 200, (size_t)(w - base));
+        ok = 1;
+    }
+
+done:
+    if (users_open) sqlite3BtreeCloseCursor(users);
+    if (posts_open) sqlite3BtreeCloseCursor(posts);
+    bt_end(started);
+    return ok;
+}
+
 // ---------------------------------------------------------------------------
 // handlers
 // ---------------------------------------------------------------------------
 static void set_events(Conn *c, uint32_t ev);
 
 static void handle_feed(Conn *c) {
+    if (bt_feed(c)) return;
+    if (c->dead) return;
     if (resp_reserve(c) < 0) return;
     char *base = resp_body_ptr();
     char *w = base;
@@ -924,6 +1242,8 @@ static void handle_feed(Conn *c) {
 }
 
 static void handle_get_post(Conn *c, int64_t id) {
+    if (bt_get_post(c, id)) return;
+    if (c->dead) return;
     if (resp_reserve(c) < 0) return;
     sqlite3_reset(get_stmt);
     sqlite3_bind_int64(get_stmt, 1, id);
@@ -1509,6 +1829,14 @@ static void worker_main(void) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
+    // On a 1-vCPU box, several worker processes are runnable at once. Batch
+    // scheduling uses longer time slices and less wakeup preemption, which
+    // measurably improves total throughput (NO_SCHED_BATCH=1 opts out).
+    if (!getenv("NO_SCHED_BATCH")) {
+        struct sched_param sp;
+        memset(&sp, 0, sizeof(sp));
+        sched_setscheduler(0, SCHED_BATCH, &sp);
+    }
 
     struct rlimit rl;
     if (getrlimit(RLIMIT_NOFILE, &rl) == 0) {
@@ -1532,6 +1860,7 @@ static void worker_main(void) {
 
     sqlite3_initialize();
     if (open_db() < 0) exit(1);
+    bt_init();
 
     lfd = create_listener();
     if (lfd < 0) {

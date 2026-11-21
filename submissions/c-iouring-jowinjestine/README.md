@@ -557,8 +557,8 @@ Nothing injected; what goes wrong is the end of the ramp and the guest's own hic
 
 | cap | | p95 | p99 | requests over 1 s | sent to the backlog | delayed ACKs |
 |---|---|---|---|---|---|---|
-| 68 % | first version | 20.3 ms | 746 ms | 37,824 | 129,687 | 162,788 |
-| 68 % | **this PR** | 10.7 ms | 20.4 ms | 0 | 1,555 | 52,263 |
+| 68 % | first version | 20.3 / 22.3 / 10.7 ms | 746 / 370 / 19 ms | 37,824 / 41,541 / 0 | 129,687 / 167,812 / 18,586 | 162,788 / 188,465 / 59,205 |
+| 68 % | **this PR** | 10.7 / 11.2 ms | 20.4 / 21.0 ms | 0 / 0 | 1,555 / 1,449 | 52,263 / 52,199 |
 | 64 % | first version | 19.3 / 14.3 ms | 206 / 29 ms | 11,701 / 0 | 115,383 / 44,615 | 145,035 / 68,188 |
 | 64 % | **this PR**, `PASS_MS=16` | 16.5 / 16.7 ms | 39 / 38 ms | 0 / 0 | 17,835 / 17,678 | 76,359 / 81,799 |
 
@@ -582,11 +582,13 @@ version answered 24 % of the requests after more than 1 s (longest wait 15.9 s),
 throughout.
 
 Not every run went well. The guest has pauses of its own, 0.5-2 s in which the server gets no
-CPU, in some runs and not in others; they are why single runs differ so much. In one run of this
-PR such a pause, 18 s after the ramp, left more requests unread than the guest's memory holds,
-and the kernel ended the server (the collapse described under `CONN_LIMIT` below). The first
-version met pauses as long in other runs and came through. One case in eleven runs against none
-in twelve: I cannot tell whether that is chance, and say it for that reason.
+CPU, in some runs and not in others; they are why single runs differ so much. In two runs of this
+PR (one of them the third of the 68 % rows above, which is why that row has two numbers) such a
+pause left more requests unread than the guest's memory holds, and the kernel ended the server
+(the collapse described under `CONN_LIMIT` below). The first version met pauses as long in other
+runs and came through: two cases in thirteen runs against none in fifteen. In both of those runs
+the guest was losing a fifth of its time to the host (3-8 % in the other runs), so I take them
+for the host's doing, but I cannot prove it, and say it for that reason.
 
 `CONN_LIMIT`: the test box at 340k stopped answering on the network 200 s into the run and had to
 be restarted. The guest shows why. A connection costs the kernel 4.13 KB (the TCP socket, its

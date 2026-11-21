@@ -26,7 +26,7 @@ import {
   Http1Server,
 } from "nish/net/http1-server"
 import { Http1Parser } from "nish/net/http1-codec"
-import { Database, SQLITE_BUSY, Statement } from "nish/sqlite"
+import { Cursor, Database, SEEK_GE, SQLITE_BUSY, Statement } from "nish/sqlite"
 import { BODY_MALFORMED, BODY_OK, BODY_REQUIRED, BodyReader } from "./body"
 import { JWT_BAD_PAYLOAD, JWT_OK, Jwt } from "./jwt"
 import { Out, bytesOf } from "./out"
@@ -71,6 +71,8 @@ export class ServerConfig {
   idleTimeoutMs: i32 = 600000
   cacheKib: i32 = 65536
   mmapBytes: i64 = 0
+  /** Read posts through B-tree cursors (`CURSORS`, on by default) rather than SQL. */
+  cursors: boolean = true
 }
 
 /** One request, from its head to its answer. */
@@ -182,6 +184,17 @@ export class FeedServer {
   rows: Out
   /** Whether the pass's read transaction is open. */
   reading: boolean = false
+  /** Read through cursors at all (`ServerConfig.cursors`). */
+  useCursors: boolean
+  /**
+   * The pass's cursors, opened by the first read that wants them and closed by
+   * `endRead`: `posts_created_at_id_idx`, `posts`, `users` and
+   * `likes_post_id_idx`.
+   */
+  newestCur: Cursor | null = null
+  postCur: Cursor | null = null
+  userCur: Cursor | null = null
+  likeCur: Cursor | null = null
   rollback: Statement
   jwt: Jwt
   bodies: BodyReader
@@ -230,6 +243,7 @@ export class FeedServer {
     this.loop = pollCreate()
     pollAdd(this.loop, listener, H1_WANT_READ, TOKEN_LISTENER)
     this.db = db
+    this.useCursors = cfg.cursors
     this.feed = db.prepare(`${POST_SQL} ORDER BY p.created_at DESC, p.id DESC LIMIT 20`).expect("feed")
     this.post = db.prepare(`${POST_SQL} WHERE p.id = ?1`).expect("post")
     this.insertPost = db
@@ -586,18 +600,194 @@ export class FeedServer {
    */
   startRead(): void {
     if (!this.reading) {
-      this.reading = this.beginRead.step().isOk()
-      settle(this.beginRead)
+      this.reading = this.db.beginRead().isOk()
     }
   }
 
+  /** Ends the pass's read transaction, which closes its cursors. */
   endRead(): void {
-    const r = this.commit.step()
-    settle(this.commit)
+    const r = this.db.endRead()
     this.reading = false
+    this.newestCur = null
+    this.postCur = null
+    this.userCur = null
+    this.likeCur = null
     if (r.isErr()) {
       return
     }
+  }
+
+  /**
+   * Opens the pass's four cursors, if they are not open; false when they
+   * cannot be (cursors are off, there is no read transaction, or the schema
+   * is not the one they read), and the caller answers through SQL. Each
+   * `openCursor` checks the table's or index's columns against
+   * `sqlite_schema`, so a different schema is refused, never misread.
+   */
+  openCursors(): boolean {
+    if (this.likeCur !== null) {
+      return true
+    }
+    if (!this.useCursors || !this.reading) {
+      return false
+    }
+    const a = this.db.openCursor("posts_created_at_id_idx", "created_at DESC,id DESC,rowid")
+    const b = this.db.openCursor("posts", "id,user_id,body,created_at")
+    const c = this.db.openCursor("users", "id,username,created_at")
+    const d = this.db.openCursor("likes_post_id_idx", "post_id,rowid")
+    if (a.isErr() || b.isErr() || c.isErr() || d.isErr()) {
+      return false
+    }
+    this.newestCur = a.value
+    this.postCur = b.value
+    this.userCur = c.value
+    this.likeCur = d.value
+    return true
+  }
+
+  /** Appends text column `c` of `cur`'s row to `out` as a JSON string; false when SQLite failed. */
+  textCursor(cur: Cursor, c: i32, out: Out): boolean {
+    const r = cur.columnInto(c, this.col, 0)
+    if (r.isErr()) {
+      return false
+    }
+    if (r.value <= toI32(this.col.length)) {
+      out.string(this.col, 0, r.value)
+      return true
+    }
+    this.col = new Array<u8>(r.value)
+    const again = cur.columnInto(c, this.col, 0)
+    if (again.isErr()) {
+      return false
+    }
+    out.string(this.col, 0, again.value)
+    return true
+  }
+
+  /**
+   * Post `id`'s whole object into `out`, read through the open cursors: its
+   * row by rowid, its author's by rowid, and its likes counted in
+   * `likes_post_id_idx`, the reference query's three reads without its
+   * bytecode. 1 when written, 0 when the post or its author is not there (the
+   * reference JOIN drops a post without its user), -1 when SQLite failed.
+   */
+  cursorPost(id: i64, out: Out): i32 {
+    const posts = this.postCur
+    const users = this.userCur
+    const likes = this.likeCur
+    if (posts === null || users === null || likes === null) {
+      return -1
+    }
+    const p = posts.seekRowid(id)
+    if (p.isErr()) {
+      return -1
+    }
+    if (!p.value) {
+      return 0
+    }
+    const u = users.seekRowid(posts.columnI64(1))
+    if (u.isErr()) {
+      return -1
+    }
+    if (!u.value) {
+      return 0
+    }
+    let count: i64 = 0
+    if (likes.keyReset().isErr() || likes.keyI64(id).isErr()) {
+      return -1
+    }
+    const first = likes.seek(SEEK_GE)
+    if (first.isErr()) {
+      return -1
+    }
+    let on: boolean = first.value
+    while (on && likes.columnI64(0) === id) {
+      count++
+      const n = likes.next()
+      if (n.isErr()) {
+        return -1
+      }
+      on = n.value
+    }
+    out.bytes(this.frag[0], 0, 6)
+    out.int(id)
+    out.bytes(this.frag[1], 0, 8)
+    if (!this.textCursor(posts, 2, out)) {
+      return -1
+    }
+    out.bytes(this.frag[2], 0, 14)
+    if (!this.textCursor(posts, 3, out)) {
+      return -1
+    }
+    out.bytes(this.frag[3], 0, 10)
+    if (!this.textCursor(users, 1, out)) {
+      return -1
+    }
+    out.bytes(this.frag[4], 0, 14)
+    out.int(count)
+    out.byte(125)
+    return 1
+  }
+
+  /**
+   * `GET /feed` through cursors: `posts_created_at_id_idx` from its first
+   * entry, newest first in `(created_at DESC, id DESC)` order, and each entry's
+   * post object until 20 are written; an entry whose post or author is
+   * missing is skipped, as the reference query's JOIN skips it. False, having
+   * written nothing, when the cursors cannot be opened.
+   */
+  readFeedCursors(r: Req): boolean {
+    if (!this.openCursors()) {
+      return false
+    }
+    const ix = this.newestCur
+    if (ix === null) {
+      return false
+    }
+    const out: Out = this.out
+    out.reset()
+    out.bytes(this.feedOpen, 0, 10)
+    let n: i32 = 0
+    const first = ix.first()
+    let ok: boolean = true
+    let on: boolean = false
+    if (first.isOk()) {
+      on = first.value
+    } else {
+      ok = false
+    }
+    while (ok && on && n < 20) {
+      const mark: i32 = out.end
+      if (n > 0) {
+        out.byte(44)
+      }
+      const w: i32 = this.cursorPost(ix.rowid(), out)
+      if (w < 0) {
+        ok = false
+      } else {
+        if (w === 0) {
+          out.end = mark
+        } else {
+          n++
+        }
+        if (n < 20) {
+          const s = ix.next()
+          if (s.isOk()) {
+            on = s.value
+          } else {
+            ok = false
+          }
+        }
+      }
+    }
+    if (!ok || out.failed) {
+      this.fail(r, E_INTERNAL)
+      return true
+    }
+    out.byte(93)
+    out.byte(125)
+    this.answer(r, 200, out.buf, out.end)
+    return true
   }
 
   /** Appends the text column `c` of `st`'s row to `out` as a JSON string; false when SQLite failed. */
@@ -666,6 +856,10 @@ export class FeedServer {
    * statements read the pass's one snapshot.
    */
   readFeed(r: Req): void {
+    // Through cursors when they open; the SQL range reads below otherwise.
+    if (this.readFeedCursors(r)) {
+      return
+    }
     const ids: i64[] = this.feedIds
     let n: i32 = 0
     const st: Statement = this.newest
@@ -810,9 +1004,22 @@ export class FeedServer {
   }
 
   readPost(r: Req): void {
-    const st: Statement = this.post
     const out: Out = this.out
     out.reset()
+    if (this.openCursors()) {
+      out.bytes(this.postOpen, 0, 8)
+      const w: i32 = this.cursorPost(r.postId, out)
+      if (w < 0 || out.failed) {
+        this.fail(r, E_INTERNAL)
+      } else if (w === 0) {
+        this.fail(r, E_NO_POST)
+      } else {
+        out.byte(125)
+        this.answer(r, 200, out.buf, out.end)
+      }
+      return
+    }
+    const st: Statement = this.post
     if (st.bindI64(1, r.postId).isErr()) {
       this.fail(r, E_INTERNAL)
       return

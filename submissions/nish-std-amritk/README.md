@@ -42,16 +42,27 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
   pass's reads share one snapshot and one WAL read lock instead of taking and
   dropping it per statement. Every request still runs its own statements
   while it is served; nothing outlives the pass (rule 5).
-- **Feed as range reads.** `GET /feed` reads the 20 newest ids from
-  `posts_created_at_id_idx` alone. When they lie within 256 of each other, as
-  the newest posts nearly always do, their rows and authors are one range
-  scan of `posts` in id order (`WHERE p.id BETWEEN ? AND ?`, joined to
-  `users`), and their like counts one range scan of `likes_post_id_idx`
-  (`GROUP BY post_id`), instead of 20 seeks of each. Rows in the range that
-  are not among the 20 are skipped. Otherwise, or if any of the 20 is missing
-  from the range (a post without its user, which the reference query's JOIN
-  would drop), SPEC.md's reference query answers. Measured alone, this took a
-  feed from 47.9 to 39.7 µs.
+- **Posts through SQLite's B-tree cursors.** `GET /feed` and `GET /posts/:id`
+  read through `nish/sqlite`'s cursors (`Database.openCursor`), SQLite's own
+  B-tree functions on the unmodified amalgamation, without its bytecode
+  engine. The feed walks `posts_created_at_id_idx` from its first entry,
+  which is the newest post in `(created_at DESC, id DESC)` order. For each
+  entry it seeks the post and its author by rowid and counts the post's
+  entries in `likes_post_id_idx`, skipping a post whose author is missing as
+  the reference query's JOIN would, until it has 20. A single post is the
+  same three reads. The four cursors are opened by the pass's first read,
+  inside its read transaction, and closed when it ends, before the pass's
+  writes commit. Each open checks the table's or index's columns against
+  `sqlite_schema`, so a different schema is refused, not misread; then, or
+  with `CURSORS=0`, the reads go through SQL. Every response is byte for byte
+  the SQL path's.
+- **Feed as range reads, through SQL.** Without cursors, `GET /feed` reads
+  the 20 newest ids from `posts_created_at_id_idx` alone. When they lie within
+  256 of each other, as the newest posts nearly always do, their rows and
+  authors are one range scan of `posts` (`WHERE p.id BETWEEN ? AND ?`, joined
+  to `users`), and their like counts one range scan of `likes_post_id_idx`
+  (`GROUP BY post_id`), instead of 20 seeks of each. Otherwise SPEC.md's
+  reference query answers.
 - **Durable group commit.** A pass's writes go as one group after its reads:
   `BEGIN IMMEDIATE`, each `INSERT … RETURNING` or like, one `COMMIT` (WAL,
   `synchronous=NORMAL`), and each response is sent only after that `COMMIT`
@@ -94,6 +105,7 @@ No caches of responses, rows or tokens; no schema, kernel or CPU tuning. The
 process only raises its own soft descriptor limit to the hard one.
 
 Optional settings, with their defaults: `RING` (1; 0 keeps descriptors),
+`CURSORS` (1; 0 reads posts through SQL),
 `WORKERS` (1 on rings, 5 on descriptors), `SLOTS` (400000 on rings, 60000 on
 descriptors) per process, `CACHE_KIB` (16384) SQLite page cache per process, `MMAP_MIB` (0),
 `IDLE_TIMEOUT_MS` (600000), `CHECKPOINT_MS` (50), `RESTART_FRAMES` (2048),
@@ -110,28 +122,40 @@ the other three. CPU is the user and system time of every server process from
 20,000 descriptors, so a test with many connections uses five wrk processes on
 five loopback addresses.
 
-Nish 0.44.0, three interleaved rounds of each 90,000-connection design (100 s
-each, the first 20 s not counted), median with the range:
+The wrk script likes and opens posts from the last feed it read, as a k6 user
+does. Nish 0.44.0:
 
 | Load | Design | req/s | CPU / req | p99 | server PSS |
 | --- | --- | ---: | ---: | ---: | ---: |
-| 256 connections, no think time | 1 process on rings | 43,000 | 22.8 µs (22.5–23.8) | 63–81 ms | 14 MB |
-| 90,000 connections, 4 s per request each | 1 process on rings | 21,200 | 37.0 µs (35.5–41.7) | 118–220 ms | 45 MB |
-| 90,000 connections, 4 s per request each | 5 processes on descriptors (`RING=0`) | 21,100 | 42.2 µs (40.6–43.1) | 45–124 ms | 17 MB |
+| 256 connections, no think time, 5 rounds | rings, SQL reads (`CURSORS=0`) | 49,600 | 17.8 µs (17.0–19.6) | 9–156 ms | 15 MB |
+| 256 connections, no think time, 5 rounds | rings, cursors | 49,600 | 17.4 µs (16.6–17.7) | 8–65 ms | 16 MB |
+| 90,000 connections, 4 s per request each | 1 process on rings | 21,100 | 28.7–30.6 µs (2 runs) | 20–24 ms | 84–88 MB |
+| 90,000 connections, 4 s per request each | 5 processes on descriptors (`RING=0`) | 21,100 | 34.9 µs | 24 ms | 93 MB |
+| 180,000 connections, 8 s per request each | 1 process on rings | 17,700–18,900 | 31.0–42.8 µs (2 runs) | 54–85 ms | 100–122 MB |
 
-Rings cost about 12% less CPU a request at 90,000 connections, one process
-doing the work of five. Their tail is longer: with one process, a request
-waits behind the burst ahead of it on the one core, where five processes
-interleave. Both stay well inside k6's thresholds (p95 < 500 ms,
-p99 < 1 s) at this load. PSS is the server's processes alone; the kernel holds
-about 3.9 KB more a socket. With Nish 0.41.0 on descriptors, per route at
-saturation on one worker: `GET /feed` 39.7 µs, `GET /posts/:id` 8.5 µs, a 404
-that touches no database 5.1 µs; a new like 28 µs batched (59 µs alone), a
-new post 44 µs (84 µs alone).
+The saturated runs are not quite at full CPU (84–92%): the load generators'
+three cores, parsing every feed, ran out first. Rings cost about 12% less
+CPU a request than five processes at 90,000 connections, and cursors about 2%
+less than SQL, within the rounds' spread. PSS is the server's processes
+alone; the kernel holds about 3.9 KB more a socket.
+
+For comparison, two scored entries under the same harness:
+[c-iouring-pavlyhalim](../c-iouring-pavlyhalim) (295,000 on the leaderboard)
+spent 18.9 µs a request at 90,000 connections and 22.4 µs at 180,000;
+[c-epoll-unorig-username](../c-epoll-unorig-username) (210,000) 35.1 and
+43.2 µs.
 
 A profile-guided build (`nish --pgo-generate`, trained on this mix, then
 `--pgo-use`) measured 23.1 µs against 22.7 µs at saturation over three rounds
 each, no gain, so the build does not use it.
+
+**To check on the benchmark box.** With one serving process, a request waits
+behind every request ahead of it in the pass on the one core, where five
+processes interleave. At the loads above the two designs' p99s were alike, but
+a post with many likes costs a cursor step per like, so a run that piles likes
+on a few posts lengthens the tail. If the box shows p95 or p99 trouble before
+it shows full CPU, `RING=0` is the five-process design and `CURSORS=0` the SQL
+reads.
 
 All 42 checks of `test/test.sh` pass.
 

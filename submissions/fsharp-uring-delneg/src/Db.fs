@@ -189,34 +189,14 @@ let private CFeedPost = 4
 [<Literal>]
 let private CAuthor = 24
 [<Literal>]
-let private CPostSlot = 44
-[<Literal>]
-let private CPostAuthor = 108
-[<Literal>]
-let private CLikesEnd = 140
-[<Literal>]
-let private CCount = 141
-/// GET /posts/:id reads post X's author through users cursor X mod POSTSLOTS (32; 0: one shared pair of cursors)
-let private postSlots =
-    match Int32.TryParse(Environment.GetEnvironmentVariable "POSTSLOTS") with
-    | true, v when v >= 0 && v <= 32 -> v
-    | _ -> 32
-/// and the post through one of 64 posts cursors, each serving a run of POSTRUN (32) consecutive ids (0: posts cursor
-/// X mod POSTSLOTS, always searched from the root)
-let private postRun =
-    match Int32.TryParse(Environment.GetEnvironmentVariable "POSTRUN") with
-    | true, v when v >= 0 && v <= 64 -> v
-    | _ -> 32
+let private CCount = 44
 
 /// Cursors stay open for the rest of the transaction (closed before COMMIT/ROLLBACK), which read-only passes share; a write in between makes
 /// SQLite save and reseek them, as for any open statement cursor. The feed reads its n-th post and that post's author
 /// through cursors of their own: requests in one pass mostly ask for the same rows, and sqlite3BtreeTableMoveto returns
-/// at once from a cursor already on the key. GET /posts/:id does the same with a cursor pair per post id modulo 32: the
-/// posts asked for are the few that feeds list, so each pair mostly stays on one of them. The row is still decoded from
-/// SQLite's page for each request.
+/// at once from a cursor already on the key. The row is still decoded from SQLite's page for each request.
 let private curs = Array.zeroCreate<nativeint> CCount
 let private isOpen = Array.zeroCreate<bool> CCount
-let mutable private nOpen = 0
 let mutable private searchMem = 0n
 let mutable private searchKey = 0n
 
@@ -226,55 +206,29 @@ let private cur (i: int) =
     else
         let root, key =
             if i = CTop then rootTop, topKey
-            elif i = CLikes || i = CLikesEnd then rootLikes, likesKey
-            elif i = CUsers || (i >= CAuthor && i < CPostSlot) || (i >= CPostAuthor && i < CLikesEnd) then rootUsers, 0n
+            elif i = CLikes then rootLikes, likesKey
+            elif i = CUsers || i >= CAuthor then rootUsers, 0n
             else rootPosts, 0n
         NativeMemory.Clear(NativePtr.toVoidPtr (NativePtr.ofNativeInt<byte> c), unativeint (sqlite3BtreeCursorSize ()))
         sqlite3BtreeCursorZero c
         if sqlite3BtreeCursor (bt, root, 0, key, c) <> OK then 0n
         else
             isOpen.[i] <- true
-            nOpen <- nOpen + 1
             c
 
-/// The read transaction's B-tree check (read transaction open, schema cookie unchanged) passed once in this transaction:
-/// later reads in it skip that part (the inside-BEGIN test stays). Only this process opens the file (unix-excl) and it
-/// runs no DDL, so the cookie can't change inside a transaction; the flag drops with the cursors, at COMMIT/ROLLBACK.
-let mutable private readOk = false
-
-/// Where the table cursors are. at[i] is the rowid cursor i was last put on, good while atGen[i] = gen: gen moves on
-/// when the cursors are closed (COMMIT/ROLLBACK) and before every INSERT (an insert saves the other cursors of its
-/// table, a statement that fails saves them all, and a saved cursor must search again). Between those nothing moves a
-/// cursor but the reads below, so a cursor asked for the row it is on isn't sent to search for it
-/// (sqlite3BtreeTableMoveto would return at once), and GET /posts/:id can step to a nearby row. The row itself is read
-/// from SQLite's page through the cursor for every request, as before.
-let private at = Array.zeroCreate<int64> CCount
-let private atGen = Array.zeroCreate<int64> CCount
-let mutable private gen = 1L
-/// = gen while the feed's index cursor (CTop) rests on the 20th entry, where a feed that read 20 left it
-let mutable private topGen = 0L
-
 let private endCursors () =
-    readOk <- false
-    gen <- gen + 1L
-    if nOpen > 0 then
-        nOpen <- 0
-        for i in 0 .. CCount - 1 do
-            if isOpen.[i] then
-                sqlite3BtreeCloseCursor curs.[i] |> ignore
-                isOpen.[i] <- false
+    for i in 0 .. CCount - 1 do
+        if isOpen.[i] then
+            sqlite3BtreeCloseCursor curs.[i] |> ignore
+            isOpen.[i] <- false
 
 let private beginRead () =
-    if sqlite3_get_autocommit db <> 0 then // only inside the pass's BEGIN (also catches a rollback SQLite made itself)
-        readOk <- false
-        false
-    elif readOk then true
+    if sqlite3_get_autocommit db <> 0 then false // only inside the pass's BEGIN
     elif sqlite3BtreeBeginTrans (bt, 0, 0n) <> OK then false
     else
         let mutable c = 0u
         sqlite3BtreeGetMeta (bt, BTREE_SCHEMA_VERSION, &c)
-        readOk <- c = cookie
-        readOk
+        c = cookie
 
 /// Moves the likes_post_id_idx cursor to its first entry with post_id >= id. 0: on an entry, 1: none, -1: error.
 let private likesSeek (c: nativeint) (id: int64) =
@@ -320,15 +274,6 @@ let private firstInt (c: nativeint) (v: byref<int64>) =
         v <- cols.[0].V
         true
     else false
-
-/// True when likes_post_id_idx has no entry for post ids >= lo: its last entry, read through a cursor that stays on
-/// it (sqlite3BtreeLast returns at once from a cursor already there), is for an older post. The posts a feed lists are
-/// the newest 20 and under load mostly have no like yet: the search from the index's root is then spared.
-let private noLikesFrom (lo: int64) =
-    let c = cur CLikesEnd
-    let mutable res = 0
-    let mutable v = 0L
-    c <> 0n && sqlite3BtreeLast (c, &res) = OK && res = 0 && firstInt c &v && v < lo
 
 /// Adds the likes of post ids lo..hi to cnt[id - lo]. 0 ok, -1 error.
 let private likesCount (c: nativeint) (lo: int64) (hi: int64) (cnt: Span<int64>) =
@@ -476,47 +421,16 @@ let private userRow (c: nativeint) (v: byref<View>) =
         true
     else false
 
-/// Puts table cursor i (c) on rowid id. 0: on it, 1: no such row, -1: error.
-let private seek (i: int) (c: nativeint) (id: int64) =
-    if atGen.[i] = gen && at.[i] = id then 0
-    else
-        let mutable res = 0
-        atGen.[i] <- 0L
-        if sqlite3BtreeTableMoveto (c, id, 0, &res) <> OK then -1
-        elif res <> 0 then 1
-        else
-            at.[i] <- id
-            atGen.[i] <- gen
-            0
-
-/// As `seek`, for a cursor that may be on a row up to POSTRUN ids away: it steps there (sqlite3BtreeNext/Previous,
-/// mostly inside one leaf) instead of searching from the root, and the key it lands on is checked.
-let private stepTo (i: int) (c: nativeint) (id: int64) =
-    let d = if atGen.[i] = gen then id - at.[i] else Int64.MaxValue
-    if d = 0L then 0
-    elif d >= int64 -postRun && d <= int64 postRun then
-        let mutable k = abs d
-        let mutable rc = OK
-        while rc = OK && k > 0L do
-            rc <- if d > 0L then sqlite3BtreeNext (c, 0) else sqlite3BtreePrevious (c, 0)
-            k <- k - 1L
-        if rc = OK && sqlite3BtreeIntegerKey c = id then
-            at.[i] <- id
-            0
-        else
-            atGen.[i] <- 0L
-            seek i c id
-    else seek i c id
-
-/// The posts row under pc and its author (through users cursor ui, uc). 0 ok, -1 not covered, 1 no such author (the
-/// SQL join drops it).
-let private postView (pc: nativeint) (ui: int) (uc: nativeint) (v: byref<View>) =
+/// The posts row under pc and its author (through uc). 0 ok, -1 not covered, 1 no such author (the SQL join drops it).
+let private postView (pc: nativeint) (uc: nativeint) (v: byref<View>) =
     let mutable uid = 0L
     if not (postRow pc &uid &v) then -1
     else
-        match seek ui uc uid with
-        | 0 -> if userRow uc &v then 0 else -1
-        | r -> r
+        let mutable res = 0
+        if sqlite3BtreeTableMoveto (uc, uid, 0, &res) <> OK then -1
+        elif res <> 0 then 1
+        elif not (userRow uc &v) then -1
+        else 0
 
 [<Literal>]
 let private Span_ = 512
@@ -540,38 +454,18 @@ let private btFeed (o: Json.Out) =
         else
             let mutable n = 0
             let mutable res = 0
-            let mutable rc = OK
+            let mutable rc = sqlite3BtreeFirst (top, &res) // the index is (created_at DESC, id DESC): newest first
             let mutable ok = true
-            // A feed that read 20 entries leaves the cursor on the 20th. The next feed of the same transaction reads
-            // them from there back to the first, and its step before the first must find the start of the index:
-            // then these are the newest 20, with no search from the root. The feed after that starts at the root again.
-            let mutable back = topGen = gen
-            topGen <- 0L
-            if back then
-                let mutable i = 19
-                while back && i >= 0 do
-                    let mutable id = 0L
-                    if not (topId top &id) then back <- false
-                    else
-                        feedIds.[i] <- id
-                        let r = sqlite3BtreePrevious (top, 0)
-                        back <- (if i = 0 then r = DONE else r = OK)
-                        i <- i - 1
-                if back then n <- 20
-            if not back then
-                rc <- sqlite3BtreeFirst (top, &res) // the index is (created_at DESC, id DESC): newest first
-                while ok && rc = OK && res = 0 && n < 20 do
-                    let mutable id = 0L
-                    if not (topId top &id) then ok <- false
-                    else
-                        feedIds.[n] <- id
-                        n <- n + 1
-                        if n < 20 then
-                            rc <- sqlite3BtreeNext (top, 0)
-                            if rc = DONE then
-                                rc <- OK
-                                res <- 1
-                if ok && rc = OK && n = 20 then topGen <- gen
+            while ok && rc = OK && res = 0 && n < 20 do
+                let mutable id = 0L
+                if not (topId top &id) then ok <- false
+                else
+                    feedIds.[n] <- id
+                    n <- n + 1
+                    rc <- sqlite3BtreeNext (top, 0)
+                    if rc = DONE then
+                        rc <- OK
+                        res <- 1
             if not ok || rc <> OK then false
             else
                 let mutable lo = Int64.MaxValue
@@ -583,7 +477,7 @@ let private btFeed (o: Json.Out) =
                 if n > 0 && hi - lo < int64 Span_ then
                     let span = Span<int64>(tally, 0, int (hi - lo + 1L))
                     span.Clear()
-                    if not (noLikesFrom lo) then lrc <- likesCount lc lo hi span
+                    lrc <- likesCount lc lo hi span
                     for i in 0 .. n - 1 do
                         feedLikes.[i] <- tally.[int (feedIds.[i] - lo)]
                 else
@@ -602,18 +496,15 @@ let private btFeed (o: Json.Out) =
                         let pc = cur (CFeedPost + i)
                         let uc = cur (CAuthor + i)
                         if pc = 0n || uc = 0n then ok <- false
-                        else
-                            match seek (CFeedPost + i) pc feedIds.[i] with
+                        elif sqlite3BtreeTableMoveto (pc, feedIds.[i], 0, &res) <> OK then ok <- false
+                        elif res = 0 then // not in the table: same as the SQL join
+                            match postView pc uc &v with
                             | 0 ->
-                                match postView pc (CAuthor + i) uc &v with
-                                | 0 ->
-                                    if not first then Json.putByte o ','B
-                                    first <- false
-                                    Json.putPost o feedIds.[i] (Json.native v.Body v.BodyLen) (Json.native v.Ca v.CaLen)
-                                        (Json.native v.Au v.AuLen) feedLikes.[i]
-                                | 1 -> ()
-                                | _ -> ok <- false
-                            | 1 -> () // not in the table: same as the SQL join
+                                if not first then Json.putByte o ','B
+                                first <- false
+                                Json.putPost o feedIds.[i] (Json.native v.Body v.BodyLen) (Json.native v.Ca v.CaLen)
+                                    (Json.native v.Au v.AuLen) feedLikes.[i]
+                            | 1 -> ()
                             | _ -> ok <- false
                         i <- i + 1
                     if ok then
@@ -627,23 +518,17 @@ let private btFeed (o: Json.Out) =
 let private btPost (id: int64) (o: Json.Out) =
     if not (beginRead ()) then -1
     else
-        let slot = if postSlots > 0 then abs (int (id % int64 postSlots)) else -1
-        let pi =
-            if slot < 0 then CPosts
-            elif postRun > 0 then CPostSlot + int (uint64 (id / int64 postRun) &&& 63UL)
-            else CPostSlot + slot
-        let ui = if slot >= 0 then CPostAuthor + slot else CUsers
-        let pc = cur pi
-        let uc = cur ui
+        let pc = cur CPosts
+        let uc = cur CUsers
         let lc = cur CLikes
         if pc = 0n || uc = 0n || lc = 0n then -1
         else
-            let r = if slot >= 0 && postRun > 0 then stepTo pi pc id else seek pi pc id
-            if r < 0 then -1
-            elif r <> 0 then 0
+            let mutable res = 0
+            if sqlite3BtreeTableMoveto (pc, id, 0, &res) <> OK then -1
+            elif res <> 0 then 0
             else
                 let mutable v = View()
-                match postView pc ui uc &v with
+                match postView pc uc &v with
                 | 1 -> 0
                 | 0 ->
                     let mutable c = 0L
@@ -734,7 +619,6 @@ let create (uid: int64) (body: nativeint) (bodyLen: int) (created: byref<byte[]>
     sqlite3_bind_int64 (sCreate, 1, uid) |> ignore
     sqlite3_bind_text (sCreate, 2, body, bodyLen, 0n) |> ignore // SQLITE_STATIC: the arena is pinned and kept until the reset
     sqlite3_bind_text (sCreate, 3, Marshal.UnsafeAddrOfPinnedArrayElement(t, 0), 24, 0n) |> ignore
-    gen <- gen + 1L // the insert saves the posts cursors
     let rc = sqlite3_step_commit sCreate
     if rc <> DONE then logErr "insert post" rc
     sqlite3_reset sCreate |> ignore
@@ -746,7 +630,6 @@ let like (uid: int64) (pid: int64) =
     sqlite3_bind_int64 (sLike, 1, uid) |> ignore
     sqlite3_bind_int64 (sLike, 2, pid) |> ignore
     sqlite3_bind_text (sLike, 3, Marshal.UnsafeAddrOfPinnedArrayElement(t, 0), 24, 0n) |> ignore
-    gen <- gen + 1L // a statement that fails rolls back and saves every cursor
     let rc = sqlite3_step_commit sLike
     if rc <> DONE then logErr "insert like" rc
     sqlite3_reset sLike |> ignore
@@ -850,11 +733,6 @@ let private selfTest () =
     let mutable ok = begin' ()
     if ok then
         ok <- btFeed a && sqlFeedBody b && same ()
-        for _ in 1 .. 2 do // the second feed reads the index backwards from the 20th entry, the third from the start again
-            if ok then
-                a.Clear()
-                b.Clear()
-                ok <- btFeed a && sqlFeedBody b && same ()
         let ids = [ yield! (let s = prep "SELECT id FROM posts ORDER BY created_at DESC, id DESC LIMIT 25" in [ while sqlite3_step s = ROW do yield sqlite3_column_int64 (s, 0) ]); yield 1L; yield 0L; yield Int64.MaxValue / 2L ]
         for id in ids do
             if ok then

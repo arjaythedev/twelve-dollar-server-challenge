@@ -59,14 +59,16 @@
   then walked tens of thousands of held requests, answers fell behind arrivals, and the backlog never drained.
 - **Bounded passes.** A pass answers at most 64 requests; the rest stay parsed in the batch (a parsed request costs a
   few dozen bytes, one left in its socket a 3-4 KB socket buffer). Past one pass of backlog the newest requests go
-  first, keeping each connection's order, and the oldest get a share of each pass only from 30 s on (half, and all of
-  it from 45 s; `LIFOAGE`, ms), so no request waits without bound. The load is closed-loop: a request that waits holds
+  first, keeping each connection's order, and the oldest get a share of each pass only from 20 s on (half, and all of
+  it from 40 s; `LIFOAGE`, ms), so no request waits without bound. The load is closed-loop: a request that waits holds
   its client, so under a short overload of x % newest-first leaves about x % of the clients waiting, the same ones
   until it ends. With the share starting at 8 s, as before, a ramp-top overload longer than that sent half of every
   pass to requests that were already late, at the peak, and made many more late.
 - **Checkpoints, and writes that don't wait for them.** SQLite's automatic checkpoints are off (a WAL hook counts
   frames). Every 16,000 new frames the loop asks the checkpoint thread for a PASSIVE checkpoint and learns it
-  finished from an eventfd its ring reads. Under steady writes a pass never ends with the WAL fully copied, so the WAL
+  finished from an eventfd its ring reads. While more than a pass of requests is waiting (the top of the ramp) the next
+  pass is put off, up to 64,000 uncopied frames: a pass costs the checkpoint thread 35-45 ms of CPU, and at nice 19 it
+  still gets some of the one CPU while the loop is short of it. Under steady writes a pass never ends with the WAL fully copied, so the WAL
   can't rewind unless writes stop for a pass. They used to: past 16,384 frames (64 MB), about every 3 s at 300k users,
   writes waited (reads went on) until a pass had copied everything. On the test box a pass was running 22 % of the
   time and each hold kept writes ~200 ms. With the server's disk writes capped at 25 MB/s (it writes ~21 MB/s at
@@ -95,7 +97,7 @@
   that syncs the file (the held one), and once at startup, by the checkpoint thread before its first pass
   (`fdatasync`, then `POSIX_FADV_DONTNEED`; `DROPDB=0` leaves that out). The seed is 250 MB that the kernel has just
   written or read, and the server reads through its own page cache. Since writes stopped waiting for checkpoints, no
-  pass copies the whole WAL before it reaches its bound, minutes into a run, so nothing gave those pages back in time, and on a 2 GB box they are what
+  pass copies the whole WAL during a run, so nothing gave those pages back any more, and on a 2 GB box they are what
   reclaim has to take when the sockets have filled memory. A connection holds 3.9 KB of kernel memory (on the test
   box, from `/proc/slabinfo` at 300k: TCP socket 2,368 bytes, socket inode 832, file 256, dentry 192, the armed
   receive's request 256, LSM 32): 1.2 GB at 300k, +39 MB per 10,000 users, beside the process's 165 MB and the
@@ -174,29 +176,11 @@ closes cursors, decodes the record bytes SQLite returns (`Db.fs`), and builds on
 
 - **Feed:** the first 20 entries of `posts_created_at_id_idx` (`created_at DESC, id DESC`, so exactly the spec's
   order), then each post and its author. The n-th post and its author are read through cursors of their own, so when
-  requests in a transaction ask for the same rows the cursor is already there: the server keeps the rowid it put
-  each cursor on and doesn't send it to search for the row it is on (`sqlite3BtreeTableMoveto` would return at
-  once); every request still decodes the rows from SQLite's pages. Like counts take one range walk of
-  `likes_post_id_idx` when the 20 ids lie within 512 of each other, a seek per post otherwise.
-- **Post:** `GET /posts/:id` reads post X through one of 64 posts cursors, each serving a run of 32 consecutive ids
-  (`POSTRUN`; 0: cursor X mod 32, searched from the root each time), and its author through users cursor X mod 32
-  (`POSTSLOTS`, 0 for one shared pair). Under load the posts asked for are the ones feeds listed in the last seconds,
-  a thousand or more of the newest: an id rarely comes twice in one transaction, a neighbour's mostly does. From a
-  row of its run the cursor steps to the one asked for (`sqlite3BtreeNext`/`Previous`, mostly inside one leaf) and
-  the key it lands on is checked; only the first request of a run in a transaction searches from the root. The row
-  and its like count are read for every request.
-- **Fewer searches from the root.** A search costs a page lookup and a binary search per level on memory the network
-  path has pushed out of the CPU's caches: the profile had about 9 % of the loop thread in them, 2.7 a request. Two
-  more are spared besides the post's. A feed that read 20 index entries leaves that cursor on the 20th; the next feed of
-  the transaction reads them from there back to the first, and its step before the first must find the start of the
-  index, so every second feed does without the walk from the root. The 20 newest posts mostly have no like yet: a
-  cursor that stays on the last entry of `likes_post_id_idx` shows that in one read (`sqlite3BtreeLast` returns at
-  once from a cursor already there), and the range walk runs only when that entry is for one of them or a newer
-  post. Test box, 160,000 users, 30 s of the hold (counted with uprobes): 28,900 searches from the root a second
-  against 46,600, 1.7 a request against 2.7. At 320,000 users the difference in CPU per request stayed inside the test
-  box's run-to-run spread.
+  requests in a pass ask for the same rows, SQLite's move returns at once from a cursor already there; every request
+  still decodes the rows from SQLite's pages. Like counts take one range walk of `likes_post_id_idx` when the 20 ids
+  lie within 512 of each other, a seek per post otherwise.
 - **Live reads:** every request reads its rows while it is served (rule 5). Only prepared statements, cursors, key
-  descriptions and the four root pages are kept, and the schema cookie is checked once per transaction. A read transaction
+  descriptions and the four root pages are kept, and the schema cookie is checked on every read. A read transaction
   that read-only passes share always sees the latest commit: only the loop writes, and a pass that writes commits.
 - **Fallbacks to SQL:** a row the decoder doesn't cover (a record spilling onto overflow pages, an unexpected type, a
   post without its user) is read with the reference SQL query. At startup the server checks the column order of each
@@ -231,7 +215,7 @@ SQLITE_PATH=seed/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 PORT=80
 ```
 
 io_uring must be allowed (Docker's default seccomp profile blocks it). Optional env vars, for testing: `RINGS` (8),
-`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `POSTRUN` (32), `VFS`
+`LISTENERS` (8), `ANSWERS` (64), `WWIN` (ms, 20), `CKPASS` (frames, 16000), `HOLDMAX` (frames, 2097152), `HOLDRIDE` (ms, 1500), `CKDEFER` (ms, 500; 0: passes never put off), `CKDEFERMAX` (passes, 4), `BUFS` (1024), `CACHE_KB` (64000), `BTREE` (1), `VFS`
 (`unix-excl`), `WALBUF` (1; 0: WAL frames written one by one), `PCACHE` (1; 0: pcache1 as it is), `ANON` (1; 0: the
 process's file-backed pages stay file-backed), `DROPDB` (1; 0: the database file's kernel cache isn't dropped at
 startup), `WALKICK_MB` (8; 0: the WAL's writeback is left to the checkpoint's sync and the flusher), `STATS` (1: a line a second on stderr).

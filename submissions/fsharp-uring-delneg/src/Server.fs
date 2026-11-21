@@ -29,13 +29,16 @@ let private lifoMin = env "LIFOMIN" 0
 // The old end's share starts late. The load is closed-loop: a waiting request holds its client, so under an overload
 // of x % newest-first leaves about x % of the clients waiting, the same ones until it ends. A share for the old end
 // while the overload lasts takes capacity from fresh requests to answer ones that are already late, and makes more
-// requests late. So the share starts at 30 s (half of each pass) and is the whole pass from 45 s, which keeps the
-// longest wait inside a client timeout of 60 s.
-let private lifoAge = uint32 (env "LIFOAGE" 30000)
+// requests late. 20 s is longer than a ramp's peak and, doubled, inside a client timeout of 60 s.
+let private lifoAge = uint32 (env "LIFOAGE" 20000)
 let private oneWriteOn = env "ONEWRITE" 1 = 1
 let private wqMax = env "WQMAX" 4096 // held requests answered per pass once a hold ends
 let private rearmMax = env "REARM" 2048
 let private ckPass = env "CKPASS" 16000 // a checkpoint pass per this many new WAL frames
+// While the loop has more than a pass of requests waiting (and for CKDEFER ms after), the next pass is put off, up to
+// CKDEFERMAX passes' worth of frames: see ckAfterFlush.
+let private ckDefer = uint32 (env "CKDEFER" 500)
+let private ckDeferMax = env "CKDEFERMAX" 4
 // The WAL's new pages are started for the disk every this many MB (0: left to the checkpoint thread's sync and to the
 // kernel's flusher): see the end of `flush`.
 let private walKickBytes = int64 (env "WALKICK_MB" 8) <<< 20
@@ -336,6 +339,7 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
     let hdr = Array.zeroCreate<byte> 160
     let mutable nrearm = 0
     let mutable passMs = 0u
+    let mutable lastLifoMs = 0u // the last pass that had more than a pass of requests waiting
     let mutable lastWriteMs = 0u
     let mutable nHeldNow = 0
     // the WAL's bytes below this offset have been started for the disk; the descriptor the kernel worker gets
@@ -493,7 +497,14 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
                 // passes run without holding writes until one leaves at most holdRem frames uncopied; ckDone then holds
                 // writes for one short pass that copies the rest, and the WAL rewinds
                 // (not while a rewind is due: a pass running when the next write begins would keep it from rewinding)
-                if not ckHold && not ckBusy && not ckRewind && (f - ckBackfilled >= ckPass || f >= ckHoldAt) then ckRequest ()
+                // A pass takes 35-45 ms of CPU from the checkpoint thread, which runs at nice 19 but still gets some of
+                // the one CPU while the loop has requests waiting: at the top of the ramp, where the loop is short of
+                // CPU and each 1 % it lacks leaves about 1 % of the clients waiting (the load is closed-loop). So while
+                // requests are waiting the pass is put off, until ckDeferMax passes' worth of frames are uncopied. Reads
+                // look up uncopied frames in the WAL index, one 4,096-frame block more per 4,096 frames, only for pages
+                // not in SQLite's cache; and the WAL is nowhere near its bound then.
+                let due = f - ckBackfilled >= ckPass && (passMs - lastLifoMs > ckDefer || f - ckBackfilled >= ckPass * ckDeferMax)
+                if not ckHold && not ckBusy && not ckRewind && (due || f >= ckHoldAt) then ckRequest ()
             elif not ckHold && f >= ckHoldAt then
                 ckHold <- true
                 ckClock.Restart()
@@ -911,13 +922,14 @@ type Worker(listenFds: int[], slots: int, nringsWanted: int, ck: Db.Checkpointer
             let last = if nreq - first > budget then first + budget else nreq
             // A request answered more than 40 ms after it arrived costs the kernel a delayed-ACK timer and a bare ACK.
             // In a backlog, oldest-first makes every newcomer wait that long too. So past one pass of backlog the
-            // newest go first; the old end gets a share of the pass from lifoAge on (all of it at 1.5 times that age), so
+            // newest go first; the old end gets a share of the pass from lifoAge on (all of it at twice that age), so
             // waiting has a bound. A connection's own requests keep their order.
             let lifo = lifoOn && nreq - first > budget
+            if nreq - first > budget then lastLifoMs <- passMs
             let mutable oldShare = budget
             if lifo then
                 let age = passMs - reqs.[first].Ms
-                oldShare <- budget * (if age >= lifoAge + lifoAge / 2u then 8 elif age >= lifoAge then lifoCap else lifoMin) / 8
+                oldShare <- budget * (if age >= lifoAge * 2u then 8 elif age >= lifoAge then lifoCap else lifoMin) / 8
             let mutable db = drain || lifo
             let mutable j = first
             while not db && j < last do

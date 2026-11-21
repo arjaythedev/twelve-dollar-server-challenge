@@ -1,0 +1,141 @@
+{
+  "clock": "Linux task scheduler runtime and service cgroup CPU, aligned to stock seconds 150 through 330",
+  "users": 310000,
+  "full_windows_per_run": 59,
+  "hardware_counters": {
+    "single_process_cycles": "not supported",
+    "single_process_instructions": "not supported"
+  },
+  "runs": [
+    {
+      "tag": "napiprof-quiet-d04-310-r1",
+      "arm": "d04",
+      "anchor_tag": "large512k-quiet-submitted-310-h1",
+      "stock_window": [
+        150,
+        330
+      ],
+      "stock": {
+        "reqs": 11525133,
+        "fails": 0,
+        "p95_ms": 19.068684434084922,
+        "p99_ms": 33.95943148452363,
+        "pass": true
+      },
+      "completed": 5904627,
+      "incoming_tcp": 13014040.452386785,
+      "outgoing_tcp": 12558071.352315504,
+      "napi_schedstat_seconds": 81.13933601826476,
+      "direct_napi_schedstat_seconds_near_boundaries": 81.18944497,
+      "napi_us_per_inseg": 6.2347536351313355,
+      "napi_slices_per_1k_http": 320.6977906286318,
+      "unprofiled_anchor_napi_us_per_inseg": 6.14779809335659,
+      "unprofiled_anchor_slices_per_1k_http": 359.9329539522136,
+      "us_per_http": {
+        "whole_core": 29.733923987626465,
+        "service_cgroup": 15.851109148871295,
+        "napi": 13.741653116829353,
+        "all_registered_service_tids": 15.860777428616574
+      },
+      "http_s": 32803.48333333333,
+      "busy_percent": 97.53762799627049,
+      "observed_inseg_per_http": 2.204041077003981,
+      "exposure_seconds": {
+        "nominal_sum": 169.714283508,
+        "schedstat_sum": 174.841419616,
+        "nominal_by_role": {
+          "service": 119.061222942,
+          "napi": 50.653060566
+        },
+        "schedstat_by_role": {
+          "service": 93.651974646,
+          "napi": 81.18944497
+        }
+      },
+      "exposure_guard_passed": false,
+      "raw_sample_count": 8591,
+      "timed_sample_count": 8316,
+      "source_sha256": {
+        "shape.json": "c990977da741d9df12ecad038fb7617fe607120c6c0c3f6c386484fc5a22a366",
+        "shard-0.json": "1c2c64c2b62ad9534ea846b004a1129229b93f5fe9089aa61feb623e351bcbee",
+        "shard-1.json": "a3d0a74d971e57791141d3f044282cb5e9ec3d6c7f1a141a32162045b008a119",
+        "shard-2.json": "5299f4f1103249a1a61f224bb1368996485a50d33ebc736ffe278ba17a751896",
+        "shard-3.json": "a729923168c06c6a8e52707a59cc5340bc811f56b25ada7ba9ff1ca6224f33bc",
+        "timing.json": "0ed78a35004d68f7cedfa2c56ea1d1f6ee5c542d8f504c49799de3f3aca2eb3c",
+        "component-test-lock.json": "e9fa8e8e95ef3b19fbc497d2397dccdf6b53a7dc182a24f9024de4df24050c14",
+        "telemetry.jsonl": "1d97250bcccd56da79776da9d8ad5879000cfb02ee7a9e5b5ce02688289f1fee",
+        "summary.json": "4e88a846957b1903292de72d5cdc49b05f2e718081e828c0cdd43e66e928e54e"
+      },
+      "scope_and_profiler_sha256": {
+        "capture.json": "914fb68e4e6c1efb7865809de29990aab0f03be1521aa9647c2b72d37d0e51fb",
+        "samples.perf": "1da00f4b00a1b0fbb7228636b2ea0da3bc460d86885a28964c6dacce2fe5610b",
+        "record.log": "8bceb2008c538974c59dd187c324fc8a312db215ed510ea1b219eb4d3f3fb442"
+      }
+    },
+    {
+      "tag": "napiprof-quiet-pavly-310-r1",
+      "arm": "pavly",
+      "anchor_tag": "large512k-quiet-pavlyhalim-310-h1",
+      "stock_window": [
+        150,
+        330
+      ],
+      "stock": {
+        "reqs": 11500507,
+        "fails": 0,
+        "p95_ms": 51.57724136618794,
+        "p99_ms": 135.40396032875566,
+        "pass": true
+      },
+      "completed": 5899714,
+      "incoming_tcp": 13020569.35232487,
+      "outgoing_tcp": 12894382.066397583,
+      "napi_schedstat_seconds": 63.35737074783284,
+      "direct_napi_schedstat_seconds_near_boundaries": 63.42151559,
+      "napi_us_per_inseg": 4.865944724338814,
+      "napi_slices_per_1k_http": 195.52168252521062,
+      "unprofiled_anchor_napi_us_per_inseg": 4.439016942207271,
+      "unprofiled_anchor_slices_per_1k_http": 176.90439555902833,
+      "us_per_http": {
+        "whole_core": 28.014789679625547,
+        "service_cgroup": 16.98720255287029,
+        "napi": 10.739057986172353,
+        "all_registered_service_tids": 16.99378531315247
+      },
+      "http_s": 32776.188888888886,
+      "busy_percent": 91.82180382219019,
+      "observed_inseg_per_http": 2.206983143983737,
+      "exposure_seconds": {
+        "nominal_sum": 160.20407955000002,
+        "schedstat_sum": 163.67998871499998,
+        "nominal_by_role": {
+          "service": 117.571427043,
+          "napi": 42.632652507
+        },
+        "schedstat_by_role": {
+          "service": 100.258473125,
+          "napi": 63.42151559
+        }
+      },
+      "exposure_guard_passed": false,
+      "raw_sample_count": 8111,
+      "timed_sample_count": 7850,
+      "source_sha256": {
+        "shape.json": "49c744a8c8d857f0000d4b65b6f3744c92a7fd8c819694e4466ff3524c4ffe13",
+        "shard-0.json": "fc58b1dad7792b3340f2fd8ddaf076b978f7cafbee9d20be094129b6c8100b9b",
+        "shard-1.json": "f469507286c33a1ba735188c11635e1a6558a6e0a34f3aa0751e33ea71784d77",
+        "shard-2.json": "96912163cb2ac6c63708302dfbd15bb55121332ac07709bdf9f6e88aac8bd633",
+        "shard-3.json": "304a5b8bf6808412dca07b726fe1e489d1a12682ea8b44642b2a3a7f42477aa5",
+        "timing.json": "c99167c6bb994af38aec438c048c74105e0d4c9c191fa42cfa12e89a0f657026",
+        "component-test-lock.json": "4ec5c48b6a74cfb43a18d36a3b7e7fda774521710f6031c913a6b5931d0fd823",
+        "telemetry.jsonl": "c7897a11affa63ce8433f042037fe8156c3c327bdc054fddda8c7a48ea4daf8b",
+        "summary.json": "74e35be963728f44a389eb5a38f41589761c78899b187762394a609db9e7f409"
+      },
+      "scope_and_profiler_sha256": {
+        "capture.json": "a24df2f145e700916696e0bcb5ff701f66ae1500c7b602aaeef14cc601b36853",
+        "samples.perf": "462eec93edbce0cf153426abbc7e37172f9cd54a7a06abb37a28433220ac6750",
+        "record.log": "8fad0ac3b4603e3b0e384be215e4cb135242872744c9ef40e4bdd97922600c50"
+      }
+    }
+  ]
+}

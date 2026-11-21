@@ -1,0 +1,182 @@
+--- run.py
++++ eth_run.py
+@@ -1 +1 @@
+-"""Run independent shards of the unmodified organizer mload using local private target aliases."""
++"""Private Ethernet derivative of PR #403 tests/official/run.py. Stock scorer is unchanged."""
+@@ -6 +6,4 @@
+-import ipaddress
++import sys
++from pathlib import Path
++sys.path.insert(0, str(Path(__file__).resolve().parent))
++from private_net import Link
+@@ -12,0 +16 @@
++import re
+@@ -76 +80 @@
+-            for s in (Path("/proc/net") / name).read_text().splitlines()
++            for s in (Path(f"/proc/{LINK.server.pid}/net") / name).read_text().splitlines()
+@@ -118,10 +122,5 @@
+-    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=0.5)
+-    try:
+-        conn.request("GET", "/health")
+-        response = conn.getresponse()
+-        body = json.loads(response.read())
+-        return response.status == 200 and isinstance(body, dict) and body.get("db") == "ok"
+-    except (OSError, http.client.HTTPException, ValueError):
+-        return False
+-    finally:
+-        conn.close()
++    # A small unprivileged client binds through the actual scored topology.
++    return subprocess.run(LINK.client.cmd([
++        "/usr/bin/curl", "--noproxy", "*", "--fail", "--silent",
++        "--max-time", ".5", f"http://{LINK.targets[0][0]}:{port}/health"
++    ]), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL).stdout.strip().find(b'"ok"') >= 0
+@@ -175,6 +173,0 @@
+-    if os.readlink("/proc/self/ns/net") == os.environ.get("ORIGINAL_NET_NS") or not os.environ.get(
+-        "ORIGINAL_NET_NS"
+-    ):
+-        raise RuntimeError("use score-private.sh to create a private namespace")
+-    if socket.if_nameindex() != [(1, "lo")]:
+-        raise RuntimeError("requires a private loopback-only namespace")
+@@ -212 +205,4 @@
+-        aliases = [str(ipaddress.IPv4Address(f"127.81.{shard + 1}.{j}")) for j in range(1, naddr + 1)]
++        aliases = LINK.targets[shard]
++        naddr = len(aliases)
++        if count > naddr * width * 0.55:
++            raise RuntimeError("too few endpoint tuples for this shard")
+@@ -240,2 +236,3 @@
+-        topology="private loopback only",
+-        mtu=int(Path("/sys/class/net/lo/mtu").read_text()),
++        topology="two MTU-1500 veth links with a dedicated L3 router between server and generator namespaces; GRO enabled; netem only on router egress",
++        link=LINK.meta,
++        mtu=1500,
+@@ -255 +252 @@
+-        max_port_occupancy=args.port_occupancy,
++        configured_aliases_per_shard=args.aliases,
+@@ -279 +276 @@
+-    measured_cores = set.union(*args.groups) | {args.server_cpu}
++    measured_cores = set.union(*args.groups) | {args.server_cpu} | {9,14}
+@@ -288 +285,6 @@
+-    def sample():
++    def actual_client(i):
++        marker = results / f"client{i}.pid"
++        return int(marker.read_text()) if marker.exists() else clients[i].pid
++
++    last_cgroup=None
++    def read_cgroup():
+@@ -299,0 +302,13 @@
++        memory["events"]=fields(scope/"memory.events")
++        return cgcpu, memory
++
++    def sample():
++        nonlocal last_cgroup
++        fresh=True
++        try:
++            last_cgroup=read_cgroup()
++        except (FileNotFoundError,ProcessLookupError):
++            fresh=False
++            if last_cgroup is None:
++                raise
++        cgcpu, memory=last_cgroup
+@@ -301 +316 @@
+-            wall=time.time(),
++            cgroup_live_sample=fresh, wall=time.time(),
+@@ -306 +321,4 @@
+-            clients=[process_sample(p.pid) for p in clients],
++            clients=[process_sample(actual_client(i)) for i in range(len(clients))],
++            private_server_net_devices=next(s for s in Path(f"/proc/{LINK.server.pid}/net/dev").read_text().splitlines() if "tserver:" in s),
++            private_devices={h.name:Path(f"/proc/{h.pid}/net/dev").read_text().strip().splitlines()[2:] for h in (LINK.server,LINK.client,LINK.router)},
++            host_softnet_stat_by_cpu=Path("/proc/net/softnet_stat").read_text().splitlines(),
+@@ -313,2 +331,11 @@
+-        if server.poll() is not None:
+-            raise RuntimeError("server exited: " + (results / "server.log").read_text()[-300:])
++        rc=server.poll()
++        if rc is not None:
++            details=(results/"app_fail.json")
++            if server_pid is None:
++                raise RuntimeError("server failed startup: " + (results / "server.log").read_text()[-300:])
++            if not details.exists():
++                evidence=last_cgroup[1].get("events") if last_cgroup else None
++                log=subprocess.run(["journalctl","--user","-u",unit,"--no-pager","-n","25"],
++                    stdin=subprocess.DEVNULL, capture_output=True,text=True,timeout=5).stdout
++                details.write_text(json.dumps(dict(healthy_before=True, elapsed_seconds=time.monotonic()-start_mono,
++                    server_exit=rc,last_sampled_memory_events=evidence,scope_journal=log,server_log_tail=(results/"server.log").read_text()[-850:]),indent=2))
+@@ -321,4 +347,0 @@
+-        launch = (
+-            "import os,pathlib,shutil,sys; shutil.copyfile(sys.argv[1],sys.argv[2]); "
+-            "pathlib.Path(sys.argv[3]).write_text(str(os.getpid())); os.execv(sys.argv[4],[sys.argv[4]])"
+-        )
+@@ -338,3 +361,5 @@
+-            sys.executable,
+-            "-c",
+-            launch,
++            *LINK.server.cmd(["/usr/bin/env",
++                "HOST=0.0.0.0", f"PORT={args.port}", f"SQLITE_PATH={dbfile}",
++                "JWT_SECRET=twelve-dollar-challenge",
++                *([f"LD_LIBRARY_PATH={os.environ['LD_LIBRARY_PATH']}"] if "LD_LIBRARY_PATH" in os.environ else []),
++                sys.executable, str(Path(__file__).parent/"launch.py"), "server",str(pidfile),str(args.server_cpu),"65535"]),
+@@ -343 +367,0 @@
+-            str(pidfile),
+@@ -375,3 +399,5 @@
+-        tracker = NET / "netfilter/nf_conntrack_count"
+-        if tracker.exists() and int(tracker.read_text()) != 0:
+-            raise RuntimeError("private namespace tracks connections")
++        if os.stat(f"/proc/{server_pid}/ns/net").st_ino != LINK.server.inode:
++            raise RuntimeError("wrong server network namespace")
++        status = Path(f"/proc/{server_pid}/status").read_text()
++        if not all(re.search(rf"^{key}:\s*0+\s*$",status,re.M) for key in ("CapEff","CapPrm","CapBnd")):
++            raise RuntimeError("unexpected benchmark process capabilities")
+@@ -416,0 +443,4 @@
++                # Record the final unprivileged PID as sudo may wait for its child.
++                marker = results / f"client{idx}.pid"
++                cmd = LINK.client.cmd(["/usr/bin/env", f"GOMAXPROCS={len(desc['cpus'])}", sys.executable, Path(__file__).parent/"launch.py",
++                    "client",marker,",".join(map(str,desc["cpus"])), str(desc["users"]+128), *cmd])
+@@ -424,0 +455,18 @@
++        settings=[]
++        def effective(pid):
++            fields=next(l for l in Path(f"/proc/{pid}/limits").read_text().splitlines() if l.startswith("Max open files")).split()
++            return [int(n) for n in fields[3:5]]
++        if effective(server_pid)!=[65535,65535]:
++            raise RuntimeError("unexpected server FD limits")
++        for idx, desc in enumerate(info["groups"]):
++            marker=results / f"client{idx}.pid"
++            while not (marker.exists() and marker.stat().st_size):
++                alive()
++                if time.monotonic() >= start_mono:
++                    raise RuntimeError("generator namespace startup missed synchronized start")
++                time.sleep(.01)
++            child=int(marker.read_text())
++            limits=effective(child)
++            if limits[0]<desc["users"]+128 or os.sched_getaffinity(child)!=set(desc["cpus"]) or os.stat(f"/proc/{child}/ns/net").st_ino!=LINK.client.inode:
++                raise RuntimeError("generator FD, namespace, or CPU mismatch")
++            settings.append(dict(pid=child,nofile=limits,cpus=sorted(os.sched_getaffinity(child))))
+@@ -426 +474 @@
+-            json.dumps({"start_unix_ms": start_ms, "scope": str(scope), "pid": server_pid}, indent=2)
++            json.dumps({"start_unix_ms": start_ms, "scope": str(scope), "pid": server_pid, "server_nofile": effective(server_pid), "generators":settings}, indent=2)
+@@ -512 +560 @@
+-            max_established_pairs_sampled=max(s["tcp"]["CurrEstab"] for s in samples) / 2,
++            max_established_pairs_sampled=max(s["tcp"]["CurrEstab"] for s in samples),
+@@ -516,0 +565,6 @@
++            private_server_qdisc_after=LINK.server.setup("/usr/sbin/tc","-s","qdisc","show","dev","tserver"),
++            private_client_qdisc_after=LINK.client.setup("/usr/sbin/tc","-s","qdisc","show","dev","tclient"),
++            private_ethtool_stats_after=LINK.driver_stats(),
++            private_router_qdiscs_after={iface:LINK.router.setup("/usr/sbin/tc","-s","qdisc","show","dev",iface) for iface in ("rserver","rclient")},
++            conntrack_after={h.name:subprocess.check_output(h.cmd(["/bin/cat",
++                "/proc/sys/net/netfilter/nf_conntrack_count"]),text=True).strip() for h in (LINK.server,LINK.client,LINK.router)},
+@@ -583,0 +638,2 @@
++    parser.add_argument("--aliases", type=int, default=12)
++    parser.add_argument("--delay-us", type=int, default=30)
+@@ -590,5 +646,9 @@
+-    conf = plan(args)
+-    if args.preflight:
+-        print(json.dumps(conf, indent=2))
+-    else:
+-        run(args, conf)
++    LINK = Link(args.server_cpu,args.groups,args.aliases,args.delay_us)
++    try:
++        conf = plan(args)
++        if args.preflight:
++            print(json.dumps(conf, indent=2))
++        else:
++            run(args, conf)
++    finally:
++        LINK.close()

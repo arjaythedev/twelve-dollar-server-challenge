@@ -1,0 +1,503 @@
+{
+  "kernel": {
+    "1": {
+      "cpu_ns": {
+        "control_ns_group": 3328.3515625,
+        "hybrid_ns_group": 3951.0751953125,
+        "paired_delta_group_ns": 553.3759765625,
+        "paired_delta_pct": 16.793735894986796,
+        "hybrid_lower": 0,
+        "pairs": 8,
+        "individual_delta_ns": [
+          460.5,
+          600.5,
+          719.9,
+          448.7,
+          694.1,
+          485.7,
+          557.4,
+          549.4
+        ]
+      },
+      "wall_ns": {
+        "control_ns_group": 4375.1943359375,
+        "hybrid_ns_group": 4991.986328125,
+        "paired_delta_group_ns": 551.0478515625,
+        "paired_delta_pct": 12.735083562579208,
+        "hybrid_lower": 0,
+        "pairs": 8,
+        "individual_delta_ns": [
+          474.3,
+          685.1,
+          852.1,
+          450.8,
+          653.9,
+          499.4,
+          602.7,
+          448.9
+        ]
+      }
+    },
+    "2": {
+      "cpu_ns": {
+        "control_ns_group": 4638.1962890625,
+        "hybrid_ns_group": 5830.0751953125,
+        "paired_delta_group_ns": 1217.783203125,
+        "paired_delta_pct": 26.031321003190566,
+        "hybrid_lower": 0,
+        "pairs": 8,
+        "individual_delta_ns": [
+          1305.1,
+          983.7,
+          1316.1,
+          1130.5,
+          920.9,
+          952.4,
+          1399.0,
+          1407.3
+        ]
+      },
+      "wall_ns": {
+        "control_ns_group": 5729.134765625,
+        "hybrid_ns_group": 6894.048828125,
+        "paired_delta_group_ns": 1168.8466796875,
+        "paired_delta_pct": 20.146536118673673,
+        "hybrid_lower": 0,
+        "pairs": 8,
+        "individual_delta_ns": [
+          1332.7,
+          897.4,
+          1258.1,
+          1079.6,
+          888.7,
+          837.4,
+          1584.5,
+          1509.4
+        ]
+      }
+    },
+    "3": {
+      "cpu_ns": {
+        "control_ns_group": 5604.3271484375,
+        "hybrid_ns_group": 7668.345703125,
+        "paired_delta_group_ns": 1905.1025390625,
+        "paired_delta_pct": 33.71360660270194,
+        "hybrid_lower": 0,
+        "pairs": 8,
+        "individual_delta_ns": [
+          1868.4,
+          1926.5,
+          1913.8,
+          1862.7,
+          1896.4,
+          2040.9,
+          1540.2,
+          3523.1
+        ]
+      },
+      "wall_ns": {
+        "control_ns_group": 6817.6552734375,
+        "hybrid_ns_group": 8749.095703125,
+        "paired_delta_group_ns": 1954.2587890625,
+        "paired_delta_pct": 28.199393216591595,
+        "hybrid_lower": 0,
+        "pairs": 8,
+        "individual_delta_ns": [
+          1785.2,
+          1942.7,
+          2131.1,
+          1973.5,
+          1965.8,
+          1927.2,
+          1400.1,
+          3571.8
+        ]
+      }
+    },
+    "4": {
+      "cpu_ns": {
+        "control_ns_group": 6686.072265625,
+        "hybrid_ns_group": 6747.4658203125,
+        "paired_delta_group_ns": 208.9443359375,
+        "paired_delta_pct": 3.1613116645352046,
+        "hybrid_lower": 2,
+        "pairs": 8,
+        "individual_delta_ns": [
+          51.8,
+          -46.1,
+          1027.4,
+          200.7,
+          347.2,
+          217.2,
+          -136.3,
+          279.4
+        ]
+      },
+      "wall_ns": {
+        "control_ns_group": 7761.1455078125,
+        "hybrid_ns_group": 7852.330078125,
+        "paired_delta_group_ns": 139.95703125,
+        "paired_delta_pct": 1.793485307643028,
+        "hybrid_lower": 2,
+        "pairs": 8,
+        "individual_delta_ns": [
+          71.9,
+          -59.2,
+          1115.9,
+          165.6,
+          421.1,
+          114.3,
+          -157.3,
+          500.9
+        ]
+      }
+    }
+  },
+  "mixed": {
+    "one-bank": {
+      "established": {
+        "server_cpu_us_per_response": {
+          "control_median": 44.11750842285156,
+          "hybrid_median": 43.22932702636719,
+          "paired_pct_median": -1.9529263656552276,
+          "hybrid_lower": 3,
+          "pairs": 4,
+          "individual_pct": [
+            -4.55,
+            -1.0,
+            -2.91,
+            1.29
+          ]
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 4151.8825,
+          "hybrid_median": 4127.332,
+          "paired_pct_median": -1.1682779131268528,
+          "hybrid_lower": 4,
+          "pairs": 4,
+          "individual_pct": [
+            -1.57,
+            -2.12,
+            -0.15,
+            -0.77
+          ]
+        },
+        "control_pooled": {
+          "n": 16384,
+          "p99_us": 4155.789,
+          "new_p99_us": null,
+          "old_p99_us": 4155.789,
+          "cpu_us_per_reply": 44.01769970703125
+        },
+        "candidate_pooled": {
+          "n": 16384,
+          "p99_us": 4114.151,
+          "new_p99_us": null,
+          "old_p99_us": 4114.151,
+          "cpu_us_per_reply": 43.15791662597656
+        }
+      },
+      "reconnect_mixed": {
+        "server_cpu_us_per_response": {
+          "control_median": 31.602116094503167,
+          "hybrid_median": 31.80033943427319,
+          "paired_pct_median": 0.5121331095400861,
+          "hybrid_lower": 2,
+          "pairs": 4,
+          "individual_pct": [
+            1.84,
+            -5.07,
+            1.75,
+            -0.73
+          ]
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 4126.4665,
+          "hybrid_median": 3564.938,
+          "paired_pct_median": -8.294179097862253,
+          "hybrid_lower": 4,
+          "pairs": 4,
+          "individual_pct": [
+            -29.99,
+            -4.39,
+            -7.5,
+            -9.09
+          ]
+        },
+        "new_p99_us": {
+          "control_median": 3107.7785000000003,
+          "hybrid_median": 1944.0149999999999,
+          "paired_pct_median": -24.836732443875718,
+          "hybrid_lower": 4,
+          "pairs": 4,
+          "individual_pct": [
+            -66.38,
+            -26.85,
+            -16.05,
+            -22.82
+          ]
+        },
+        "established_p99_us": {
+          "control_median": 4384.75,
+          "hybrid_median": 4395.5985,
+          "paired_pct_median": 0.2994299368824893,
+          "hybrid_lower": 2,
+          "pairs": 4,
+          "individual_pct": [
+            5.98,
+            1.96,
+            -1.37,
+            -5.4
+          ]
+        },
+        "control_pooled": {
+          "n": 4200,
+          "p99_us": 4285.879,
+          "new_p99_us": 4533.075,
+          "old_p99_us": 4209.843,
+          "cpu_us_per_reply": 31.73145142857143
+        },
+        "candidate_pooled": {
+          "n": 4200,
+          "p99_us": 3584.553,
+          "new_p99_us": 2381.528,
+          "old_p99_us": 3988.396,
+          "cpu_us_per_reply": 31.586254761904762
+        }
+      }
+    },
+    "multiple-banks": {
+      "established": {
+        "server_cpu_us_per_response": {
+          "control_median": 44.42003784179687,
+          "hybrid_median": 44.69523852539062,
+          "paired_pct_median": 0.5262158463265498,
+          "hybrid_lower": 2,
+          "pairs": 6,
+          "individual_pct": [
+            -0.71,
+            0.07,
+            1.11,
+            0.98,
+            4.06,
+            -2.53
+          ]
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 4151.836,
+          "hybrid_median": 4131.1939999999995,
+          "paired_pct_median": -0.5958732608127737,
+          "hybrid_lower": 4,
+          "pairs": 6,
+          "individual_pct": [
+            1.47,
+            -3.17,
+            -0.55,
+            -0.64,
+            -1.49,
+            5.21
+          ]
+        },
+        "control_pooled": {
+          "n": 24576,
+          "p99_us": 4132.89,
+          "new_p99_us": null,
+          "old_p99_us": 4132.89,
+          "cpu_us_per_reply": 44.71473095703125
+        },
+        "candidate_pooled": {
+          "n": 24576,
+          "p99_us": 4176.551,
+          "new_p99_us": null,
+          "old_p99_us": 4176.551,
+          "cpu_us_per_reply": 44.96018318684896
+        }
+      },
+      "reconnect_mixed": {
+        "server_cpu_us_per_response": {
+          "control_median": 31.758203107758874,
+          "hybrid_median": 32.283727296155405,
+          "paired_pct_median": 1.6348349782692173,
+          "hybrid_lower": 2,
+          "pairs": 6,
+          "individual_pct": [
+            2.12,
+            1.15,
+            6.97,
+            4.51,
+            -4.72,
+            -1.64
+          ]
+        },
+        "schedule_to_http_p99_us": {
+          "control_median": 4917.334500000001,
+          "hybrid_median": 4426.2744999999995,
+          "paired_pct_median": -3.3135623717399865,
+          "hybrid_lower": 3,
+          "pairs": 6,
+          "individual_pct": [
+            -57.64,
+            -17.64,
+            161.76,
+            11.01,
+            -55.31,
+            54.62
+          ]
+        },
+        "new_p99_us": {
+          "control_median": 4943.896500000001,
+          "hybrid_median": 4086.818,
+          "paired_pct_median": 17.957151574343822,
+          "hybrid_lower": 3,
+          "pairs": 6,
+          "individual_pct": [
+            -72.95,
+            -23.0,
+            252.07,
+            58.91,
+            -72.46,
+            73.9
+          ]
+        },
+        "established_p99_us": {
+          "control_median": 4643.2335,
+          "hybrid_median": 4506.433999999999,
+          "paired_pct_median": 2.912893015925394,
+          "hybrid_lower": 3,
+          "pairs": 6,
+          "individual_pct": [
+            -23.51,
+            -5.72,
+            67.61,
+            11.55,
+            -40.48,
+            21.08
+          ]
+        },
+        "control_pooled": {
+          "n": 6300,
+          "p99_us": 6066.268,
+          "new_p99_us": 7521.615,
+          "old_p99_us": 4880.359,
+          "cpu_us_per_reply": 31.944744126984126
+        },
+        "candidate_pooled": {
+          "n": 6300,
+          "p99_us": 6061.914,
+          "new_p99_us": 8186.234,
+          "old_p99_us": 5475.54,
+          "cpu_us_per_reply": 32.37388746031746
+        }
+      }
+    }
+  },
+  "stock_300k_precursor_histogram": {
+    "source": "/tmp/twelve-revisit/guarded-batch-watch/same-elf-diagnostic-comparison.json",
+    "sha256": "ef62fe96761dc297dfbf34acd42fa163281198972a16540470055edc24c5b091",
+    "widths": {
+      "1-1": {
+        "prefixes": 115535,
+        "sockets": 115535
+      },
+      "2-2": {
+        "prefixes": 32376,
+        "sockets": 64752
+      },
+      "3-3": {
+        "prefixes": 11367,
+        "sockets": 34101
+      },
+      "4-7": {
+        "prefixes": 9171,
+        "sockets": 43983
+      },
+      "8-15": {
+        "prefixes": 1904,
+        "sockets": 19333
+      },
+      "16-31": {
+        "prefixes": 519,
+        "sockets": 11080
+      },
+      "32-64": {
+        "prefixes": 245,
+        "sockets": 11217
+      }
+    },
+    "small_groups": 159278,
+    "small_sockets": 214388,
+    "extra_ordinary_ctl_and_watch_cqes_removed": 214388,
+    "modeled_ramp_delta_issuer_ms": 125.01654299804687
+  },
+  "http_qa": {
+    "arms": 20,
+    "real_http_byte_checked": 118410,
+    "tcp_clean_eofs": 15360,
+    "committed_new_likes": 4310,
+    "each_database_integrity_fk_clean": true,
+    "healthy_network": true
+  },
+  "independent_3_bank_coverage": {
+    "candidate-trace": {
+      "enters": 17658,
+      "named_updates": 620,
+      "watch_cqes": 45,
+      "dynamic_updates": 0,
+      "dynamic_sockets": 0,
+      "watch_errors": 0,
+      "ordinary_short_syscalls": 723,
+      "widths": {
+        "1": 516,
+        "2": 72,
+        "3": 21,
+        "4": 10,
+        "5": 1
+      }
+    },
+    "control-trace": {
+      "enters": 13695,
+      "named_updates": 547,
+      "watch_cqes": 768,
+      "dynamic_updates": 0,
+      "dynamic_sockets": 0,
+      "watch_errors": 0,
+      "ordinary_short_syscalls": 0,
+      "widths": {
+        "1": 476,
+        "2": 20,
+        "3": 13,
+        "4": 14,
+        "5": 13,
+        "6": 3,
+        "7": 3,
+        "9": 2,
+        "10": 1,
+        "11": 1,
+        "14": 1
+      }
+    }
+  },
+  "sha256": {
+    "prototype.patch": "60bfd5d365b0d17544cab5dec5321196725572da419193b305b004e67c48c99d",
+    "candidate/reactor.c": "9a9733315baef936b791e4dcfee52118a524b93282eab6defd133e5b414bf822",
+    "control/reactor.c": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+    "candidate/bin/server": "2cb7fe8a83817c6b878710785980f43f22b6c187fbe0dc93f3f19f28ceaefab1",
+    "control/bin/server": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+    "mixed-http.fixture": "e1cb945ebdbf9937b6aa7fcc170822eb50923895bfba9ca993daa1b823ed4e34",
+    "mixed-seed.db": "837454e3be58bef1a4fa51399f3fa37aeb532604fd8286544b2ef608fbd133fc",
+    "wire": "4c4122dddb209ef7a7b318de9c18fc7cce339bc5300d6237dc91d6acbe386f5a",
+    "micro.c": "7b982bf5e5c7e2a1da8a8a990f5f1aa6803a5d98e955dab1b8fdb86a0337a6ff",
+    "state.c": "815c41edec733eff7df540c70c3e4bc79afa21d7dd0329d1464f18b984c1f73d",
+    "run.py": "802dd5bc11cdd9513cc53b7948259c3a3c205b8da725ce4260900859dc23ef19",
+    "micro.jsonl": "ac4646ef9bf1f4175943547b4423a15dbda1537d9f3962fd1912bf2ca2e158b0",
+    "http.json": "9a47c685167ae119e36c686d49c03c05eee3550ed2fe032aa569020946256b76",
+    "component-census.json": "1b87bee6b1bdf98895603e71db5a7c51e16f8e995583109ab8b8429939baca70",
+    "state.log": "52d64a36f35955740caa9ce4df309c62b7d0dfa694b47ef7b35fc036e319897d",
+    "topology.json": "48af711903bcb20eb92842851a2b606f3358434c91c44ded7a59f0b87612f236",
+    "topology-http.json": "2ba9ab6efc9569286854bd7165ecaa6ae89fd830fb6525a439c94456f8ba03d3",
+    "fixture-refresh.json": "ce206d73152cf3ee00c2abbe26538a9ae67e5015b5c05e5122c6c90bda544076",
+    "freshen.py": "08987062cc2092e2306dcc2e4b2f286649f346968d14d2bc990b51e71edb1269",
+    "trace.py": "5c5c1431d22df632afa67d837a7f9f53bf83e5068271a1d2af238df0d5220d43",
+    "assess.py": "afc723d526ea291057e799e6a187c3a23c4834b48fdb75b1ff48782d2e003fc9"
+  }
+}

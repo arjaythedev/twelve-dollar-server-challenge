@@ -1,0 +1,309 @@
+{
+  "count": 310000,
+  "ramp_s": 93,
+  "hold_s": 300,
+  "external_fixture": "single-queue split polling TAP, 4096-entry queues, service CPU 10, 1750 MiB, private service TCP hash +524288; all other parameters as predeclared 310k hash crossover",
+  "blocks": [
+    [
+      "large512k-quiet-mojo-310-h1",
+      "large512k-quiet-submitted-310-h1",
+      "large512k-quiet-rkkautsar-310-h1",
+      "large512k-quiet-pavlyhalim-310-h1",
+      "large512k-quiet-kensac-310-h1",
+      "large512k-quiet-leaf-cursor-310-h1",
+      "large512k-quiet-swift-310-h1"
+    ],
+    [
+      "large512k-quiet-swift-310-h2",
+      "large512k-quiet-leaf-cursor-310-h2",
+      "large512k-quiet-kensac-310-h2",
+      "large512k-quiet-pavlyhalim-310-h2",
+      "large512k-quiet-rkkautsar-310-h2",
+      "large512k-quiet-submitted-310-h2",
+      "large512k-quiet-mojo-310-h2"
+    ]
+  ],
+  "comparability": "Check the strict stock criteria, four shard populations, all private counters and the component lock. Include missed and excluded trials. The separate crossover anchor has its own identity.",
+  "higher_loads": [
+    {
+      "users": 350000,
+      "ramp_s": 105,
+      "hold_s": 300,
+      "trials": [
+        "large512k-quiet-leaf-cursor-350-h1",
+        "large512k-quiet-kensac-350-h1",
+        "large512k-quiet-pavlyhalim-350-h1",
+        "large512k-quiet-submitted-350-h1",
+        "large512k-quiet-mojo-350-h1",
+        "large512k-quiet-swift-350-h1",
+        "large512k-quiet-rkkautsar-350-h1"
+      ]
+    },
+    {
+      "users": 330000,
+      "ramp_s": 99,
+      "hold_s": 300,
+      "trials": [
+        "large512k-quiet-mojo-330-h1",
+        "large512k-quiet-submitted-330-h1",
+        "large512k-quiet-kensac-330-h1",
+        "large512k-quiet-leaf-cursor-330-h1",
+        "large512k-quiet-pavlyhalim-330-h1",
+        "large512k-quiet-swift-330-h1",
+        "large512k-quiet-rkkautsar-330-h1"
+      ]
+    }
+  ],
+  "higher_loads_reason": "Score every entry at the requested first target, then measure the interval between 310,000 and 350,000. The 330,000-user block retains the original five-trial order and appends Swift and Rkkautsar so all five peers face the target for a 20,000-user margin. Complete a second full hold and the stock search probe before describing a boundary as repeatable.",
+  "after_first_current_350k_pass": [
+    {
+      "after": "large512k-quiet-rkkautsar-350-h1",
+      "trials": [
+        {
+          "tag": "large512k-quiet-leaf-cursor-350-p1",
+          "users": 350000,
+          "stock_ramp_s": 105,
+          "hold_s": 120
+        },
+        {
+          "tag": "large512k-quiet-leaf-cursor-350-h2",
+          "users": 350000,
+          "stock_ramp_s": 105,
+          "hold_s": 300
+        },
+        {
+          "tag": "large512k-quiet-leaf-cursor-370-p1",
+          "users": 370000,
+          "stock_ramp_s": 111,
+          "hold_s": 120
+        },
+        {
+          "tag": "large512k-quiet-leaf-cursor-370-h1",
+          "users": 370000,
+          "stock_ramp_s": 111,
+          "hold_s": 300
+        }
+      ]
+    },
+    {
+      "after": "napiprof-quiet-pavly-310-r1",
+      "trials": [
+        {
+          "tag": "large512k-quiet-leaf-cursor-400-p1",
+          "users": 400000,
+          "stock_ramp_s": 120,
+          "hold_s": 120
+        },
+        {
+          "tag": "large512k-quiet-leaf-cursor-400-h1",
+          "users": 400000,
+          "stock_ramp_s": 120,
+          "hold_s": 300
+        }
+      ]
+    }
+  ],
+  "higher_load_continuation_reason": "After the first passing 350,000-user hold on the current build, repeat that count with the stock search duration and the full hold. Then test 370,000 and 400,000 independently on the same larger-table fixture. Retain the declared five-peer comparison and every failed or ineligible attempt.",
+  "published_capacity_anchors": {
+    "reason": "Measure the selected large-table fixture against published capacities for all five peers, plus the earlier C submission at its official passing and failing points. Each run uses the published load and stock duration. The separately scheduled 310,000-user Kensac crossover supplies that comparison. Keep all ties and failed controls when interpreting local capacity.",
+    "additional_trials": [
+      {
+        "tag": "hash512k-quiet-mojo-304-h1",
+        "entry": "mojo",
+        "users": 304000,
+        "hold_s": 300,
+        "published_pass": true
+      },
+      {
+        "tag": "hash512k-quiet-rkkautsar-300-h1",
+        "entry": "rkkautsar",
+        "users": 300000,
+        "hold_s": 300,
+        "published_pass": true
+      },
+      {
+        "tag": "hash512k-quiet-swift-300-h1",
+        "entry": "swift",
+        "users": 300000,
+        "hold_s": 300,
+        "published_pass": true
+      },
+      {
+        "tag": "hash512k-quiet-pavlyhalim-295-h1",
+        "entry": "pavlyhalim",
+        "users": 295000,
+        "hold_s": 300,
+        "published_pass": true
+      },
+      {
+        "tag": "hash512k-quiet-stock-280-h1",
+        "entry": "stock",
+        "users": 280000,
+        "hold_s": 300,
+        "published_pass": true
+      },
+      {
+        "tag": "hash512k-quiet-stock-290-p1",
+        "entry": "stock",
+        "users": 290000,
+        "hold_s": 120,
+        "published_pass": false
+      },
+      {
+        "tag": "hash512k-quiet-stock-300-p1",
+        "entry": "stock",
+        "users": 300000,
+        "hold_s": 120,
+        "published_pass": false
+      }
+    ],
+    "implementation_attribution_controls": [
+      {
+        "tag": "hash512k-quiet-stock-330-h1",
+        "entry": "stock",
+        "source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+        "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+        "users": 330000,
+        "hold_s": 300,
+        "purpose": "Compare the original 280,000-user official PR directly with the current C build at 330,000 on the same local fixture. Its existing local 310,000-user pass and the later unscored C revision are separate comparisons."
+      },
+      {
+        "tag": "hash512k-quiet-stock-345-h1",
+        "entry": "stock",
+        "source_revision": "0142ba23cd06969938941dac17e424ca7f3357cd",
+        "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+        "users": 345000,
+        "hold_s": 300,
+        "purpose": "Compare the original 280,000-user official PR directly with the current C build at 345,000 on the same local fixture. Its existing local 310,000-user pass and the later unscored C revision are separate comparisons."
+      }
+    ]
+  },
+  "matched_330k_dispatch": "After the first three peer misses at 350,000, schedule the entire seven-entry 330,000-user block after the 400,000-user large-table attempt. The within-block order and all identities are fixed. This tests the requested 20,000-user margin in the same fixture before additional memory and storage comparisons.",
+  "after_mixed_350k_holds": {
+    "reason": "The shipping binary passed one of two full 350,000-user holds while passing its independent two-minute probe. Measure 345,000 with two fresh full holds and a stock probe to bracket a repeatable boundary. Keep both 350,000-user outcomes in the capacity estimate.",
+    "users": 345000,
+    "ramp_s": 104,
+    "trials": [
+      {
+        "tag": "large512k-quiet-leaf-cursor-345-h1",
+        "hold_s": 300
+      },
+      {
+        "tag": "large512k-quiet-leaf-cursor-345-p1",
+        "hold_s": 120
+      },
+      {
+        "tag": "large512k-quiet-leaf-cursor-345-h2",
+        "hold_s": 300
+      }
+    ]
+  },
+  "mojo_330k_followup": {
+    "reason": "The Mojo build passed at 310,000 and missed at 330,000 and 350,000. Determine which intermediate loads pass the unmodified stock search and full hold. The 325,000-user repeats put Mojo 20,000 users below the 345,000-user C bracket. Preserve the full seven-entry 330,000-user block and both remaining C trials at 345,000 ahead of these five tests.",
+    "after": "large512k-quiet-leaf-cursor-345-h2",
+    "trials": [
+      {
+        "tag": "large512k-quiet-mojo-320-h1",
+        "users": 320000,
+        "stock_ramp_s": 96,
+        "hold_s": 300
+      },
+      {
+        "tag": "large512k-quiet-mojo-320-p1",
+        "users": 320000,
+        "stock_ramp_s": 96,
+        "hold_s": 120
+      },
+      {
+        "tag": "large512k-quiet-mojo-325-h1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 300
+      },
+      {
+        "tag": "large512k-quiet-mojo-325-p1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 120
+      },
+      {
+        "tag": "large512k-quiet-mojo-325-h2",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 300
+      }
+    ]
+  },
+  "kensac_330k_followup": {
+    "reason": "Kensac passed a separate same-binary 310,000-user calibration and missed the 330,000-user full hold with every connection open. Test 325,000 users with both stock durations, preserving existing order. This count is 20,000 below the 345,000-user C bracket.",
+    "after": "large512k-quiet-mojo-325-h2",
+    "trials": [
+      {
+        "tag": "large512k-quiet-kensac-325-h1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 300
+      },
+      {
+        "tag": "large512k-quiet-kensac-325-p1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 120
+      }
+    ]
+  },
+  "pavlyhalim_330k_followup": {
+    "reason": "Pavlyhalim passed at 310,000 and missed at 330,000 with 9.67 s p99 and exactly 330,000 dials. Test the same two intermediate loads and both stock durations used for Mojo. Repeat the five-minute hold at 325,000, which is 20,000 below the C bracket at 345,000.",
+    "after": "large512k-quiet-kensac-325-p1",
+    "trials": [
+      {
+        "tag": "large512k-quiet-pavlyhalim-320-h1",
+        "users": 320000,
+        "stock_ramp_s": 96,
+        "hold_s": 300
+      },
+      {
+        "tag": "large512k-quiet-pavlyhalim-320-p1",
+        "users": 320000,
+        "stock_ramp_s": 96,
+        "hold_s": 120
+      },
+      {
+        "tag": "large512k-quiet-pavlyhalim-325-h1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 300
+      },
+      {
+        "tag": "large512k-quiet-pavlyhalim-325-p1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 120
+      },
+      {
+        "tag": "large512k-quiet-pavlyhalim-325-h2",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 300
+      }
+    ]
+  },
+  "remaining_325k_peers": {
+    "reason": "The current build passed two 345,000-user holds and its stock probe. Run Swift and Rkkautsar at 325,000 as well, so all five published peers have an actual five-minute hold exactly 20,000 users below that confirmed count. Keep all results at 310,000, 330,000 and 350,000 and the existing intermediate tests.",
+    "after": "large512k-quiet-pavlyhalim-325-h2",
+    "trials": [
+      {
+        "tag": "large512k-quiet-swift-325-h1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 300
+      },
+      {
+        "tag": "large512k-quiet-rkkautsar-325-h1",
+        "users": 325000,
+        "stock_ramp_s": 98,
+        "hold_s": 300
+      }
+    ]
+  }
+}

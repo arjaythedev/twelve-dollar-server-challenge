@@ -1,0 +1,70 @@
+--- a/submissions/c-uring-willwang/reader.c
++++ b/submissions/c-uring-willwang/reader.c
+@@ -246,6 +246,7 @@
+         if (!page->intKeyLeaf) { rc = READ_FALLBACK; break; }
+         sqlite3PagerRef(page->pDbPage);
+         pages[(*n_pages)++] = page->pDbPage;
++        int crosses = c.ix + 1 < FEED_SIZE - *count;
+         for (int i = c.ix; i >= 0 && *count < FEED_SIZE; --i) {
+             CellInfo cell;
+             PostView *p = &rows[*count];
+@@ -257,12 +258,13 @@
+             if (*ordered && *count && text_compare(rows[*count - 1].timestamp, p->timestamp) < 0)
+                 *ordered = 0;
+             ++*count;
+-        }
++            if (crosses) {
++                rc = sqlite3BtreePrevious(&c, 0);
++                if (rc != SQLITE_OK) break;
++            }
++        }
++        if (rc == SQLITE_DONE) { rc = SQLITE_OK; break; }
+         if (rc != SQLITE_OK || *count == FEED_SIZE) break;
+-        /* We inspected the leaf without changing SQLite's cursor. Walk it to
+-         * its predecessor through the SQLite API, including the page boundary. */
+-        for (int i = c.ix; i >= 0 && rc == SQLITE_OK; --i) rc = sqlite3BtreePrevious(&c, 0);
+-        if (rc == SQLITE_DONE) { rc = SQLITE_OK; break; }
+     }
+     sqlite3BtreeCloseCursor(&c);
+     return rc;
+@@ -297,6 +299,27 @@
+     if (rc != SQLITE_OK) return rc;
+     if (sqlite3BtreeEof(c)) return SQLITE_DONE;
+     return cmp < 0 ? sqlite3BtreeNext(c, 0) : SQLITE_OK;
++}
++
++/* Every physical likes-index key has the post id followed by its unique
++ * rowid. The maximum decoded cell belongs to this very snapshot. A full-key
++ * seek leaves SQLite responsible for all cursor state, including its stack. */
++static int after_likes_leaf(BtCursor *cursor) {
++    MemPage *page = cursor->pPage;
++    CellInfo cell;
++    RecordView record;
++    i64 post_id, rowid;
++    parse_cell(page, page->nCell - 1, &cell);
++    if (!record_view(&cell, &record) || !next_integer(&record, &post_id) ||
++        !next_integer(&record, &rowid) || record.types != record.end_types ||
++        record.values != record.end) return READ_FALLBACK;
++    Mem fields[2] = {{.flags = MEM_Int, .u.i = post_id}, {.flags = MEM_Int, .u.i = rowid}};
++    UnpackedRecord key = {.pKeyInfo = reader.likes.key, .aMem = fields, .nField = 2};
++    int cmp;
++    int rc = sqlite3BtreeIndexMoveto(cursor, &key, &cmp);
++    if (rc != SQLITE_OK) return rc;
++    if (cmp || sqlite3BtreeEof(cursor)) return READ_FALLBACK;
++    return sqlite3BtreeNext(cursor, 0);
+ }
+ 
+ /* IDs are in decreasing order. A fresh maximum key proves every id above it
+@@ -359,7 +382,11 @@
+                 rc = seek_like(&c, rows[i].id);
+             } else {
+                 if (page->leaf && page->pgno == rightmost) break;
+-                for (int j = start; j < stop && rc == SQLITE_OK; ++j) rc = sqlite3BtreeNext(&c, 0);
++                if (stop - start > 32) {
++                    rc = after_likes_leaf(&c);
++                } else {
++                    for (int j = start; j < stop && rc == SQLITE_OK; ++j) rc = sqlite3BtreeNext(&c, 0);
++                }
+             }
+         }
+         if (rc == SQLITE_DONE) rc = SQLITE_OK;

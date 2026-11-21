@@ -1,0 +1,280 @@
+{
+  "scope": "Isolated counterbalanced HTTP component comparisons on one CPU shared with the Linux receive thread. These observations have no stock capacity score.",
+  "source_sha256": {
+    "egress-pair-d04/verification.json": "b00e959e8b6e047d9aefb13e562c65f944e765f48f029fef1f2818b2a7f3c397",
+    "egress-pair-d04/clean-summary.json": "cd50b74648cc08a7a989edcfbc599c9cab0e83053a90c486132b1c918d099c8f",
+    "hot-idle/saturation/result.json": "7efe2a8c2ba65552d13ef9558bbaab3df21566c6bdf7bc7bd3ac1f8dd9c887cb",
+    "per-process-fd-34ab/summary.json": "d613c1686df3a241378245fdc3bfb7be537f504dbe128df793866ddfe77c597d",
+    "per-process-fd-34ab/qa/result.json": "3562abf3468febfab29032266cc3b2a7332ef83eb1302246cb5483496735e4c5"
+  },
+  "send_publication_across_adjacent_rings": {
+    "binaries": {
+      "candidate": "7a03e592c4d2150248f10748ab2621b04ddc08fcc1f9a7e64ff9733440afb4ab",
+      "control": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5"
+    },
+    "untraced_arms": 16,
+    "verified_http": 644096,
+    "verified_opens": 75776,
+    "new_durable_likes": 33824,
+    "established_client_control_packet_proxy": {
+      "control": 160079,
+      "candidate": 160000
+    },
+    "phase_comparisons": {
+      "18000-established": {
+        "included_pair_ids": [
+          0,
+          2,
+          4,
+          6
+        ],
+        "excluded_pair_ids_and_driver_drops": [],
+        "median_within_pair_change_pct": {
+          "cpu": 0.019205767357832748,
+          "rate": 6.915747268188e-05,
+          "rx_frames/slice": 0.3844312908463099,
+          "p99": -0.2959945461528779
+        }
+      },
+      "18000-mixed": {
+        "included_pair_ids": [
+          0,
+          2,
+          4,
+          6
+        ],
+        "excluded_pair_ids_and_driver_drops": [],
+        "median_within_pair_change_pct": {
+          "cpu": -0.5469644775900839,
+          "rate": -0.17456606895938087,
+          "rx_frames/slice": 1.2565241229701485,
+          "p99": 0.5581850785500553
+        }
+      },
+      "27000-established": {
+        "included_pair_ids": [
+          1,
+          3,
+          5,
+          7
+        ],
+        "excluded_pair_ids_and_driver_drops": [],
+        "median_within_pair_change_pct": {
+          "cpu": -0.0004421475609972525,
+          "rate": 1.2362634500467706,
+          "rx_frames/slice": -4.482635610893682,
+          "p99": -47.12306572709997
+        }
+      },
+      "27000-mixed": {
+        "included_pair_ids": [
+          3,
+          5,
+          7
+        ],
+        "excluded_pair_ids_and_driver_drops": [
+          [
+            1,
+            752,
+            0
+          ]
+        ],
+        "median_within_pair_change_pct": {
+          "cpu": -0.010922267652768713,
+          "rate": 0.02645327427208688,
+          "rx_frames/slice": -2.733787020100442,
+          "p99": -4.289481157048558
+        }
+      }
+    }
+  },
+  "defer_sleep_after_busy_receive": {
+    "binaries": {
+      "control": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+      "timed": "dae46cc6f355143eeafba4e5cc5110011eb4a278c0c949b37583a369afffba60",
+      "trace-control": "5cb83fd6fa2f146c4e6bac7541c694d2231f4aedee2d8b1aca41c14a19d38bee",
+      "trace-timed": "a339fd585a52129d2b379035e87d0635d98067ee5b48d25cf4fe507176b18dc2"
+    },
+    "release_and_trace_totals": {
+      "release": {
+        "trials": 8,
+        "responses": 109312,
+        "new_durable_likes": 24896,
+        "eof": 11264
+      },
+      "instrumented": {
+        "trials": 2,
+        "responses": 27328,
+        "new_durable_likes": 6224,
+        "eof": 2816
+      }
+    },
+    "duration_requested_us": 64,
+    "active_phases": {
+      "pressure_steady": {
+        "trace-control": {
+          "http": 4000,
+          "timer_eligible": 0
+        },
+        "trace-timed": {
+          "http": 4000,
+          "timer_eligible": 0
+        }
+      },
+      "pressure_mixed": {
+        "trace-control": {
+          "http": 8064,
+          "timer_eligible": 1
+        },
+        "trace-timed": {
+          "http": 8064,
+          "timer_eligible": 0
+        }
+      }
+    },
+    "mixed": {
+      "whole_cpu9_us_per_request": {
+        "paired_pct": [
+          -3.856,
+          0.428,
+          -1.35,
+          0.906
+        ],
+        "paired_median_pct": -0.461
+      },
+      "napi_us_per_in_segment": {
+        "paired_pct": [
+          1.288,
+          -0.359,
+          -5.455,
+          0.335
+        ],
+        "paired_median_pct": -0.012
+      },
+      "fresh_p99_us": {
+        "paired_pct": [
+          29.437,
+          -21.64,
+          -39.657,
+          212.681
+        ],
+        "paired_median_pct": 3.899
+      }
+    },
+    "mixed_service_cpu_utilization_pct": {
+      "control": 78.447,
+      "timed": 80.324
+    }
+  },
+  "six_processes_with_private_fd_tables": {
+    "binaries": {
+      "control": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "candidate": "18e23187a9874f6d18b6409459a625471f9ad94f26e471545eb36f85cf2102a2"
+    },
+    "raw_block_sha256": [
+      {
+        "file": "block-0.json",
+        "sha256": "8ffdf6ba58cb31ad226d4db35e505610c2af53377b1a398800c700a01dbab8d5"
+      },
+      {
+        "file": "block-1.json",
+        "sha256": "017d11235073ec0459896e6d0bc8a880febc532252d727ec30b101deb9f41524"
+      },
+      {
+        "file": "block-2.json",
+        "sha256": "ee5e00e98becdcf25350fe4d89c89ba474bacfc67579b16b79503c3a1d2efb9d"
+      },
+      {
+        "file": "block-3.json",
+        "sha256": "63cc2c8ac9a884afb4302f7c61fed8a914ebec50ad470de7d43cfa316297fc07"
+      }
+    ],
+    "all_arms": 8,
+    "verified_http": 359936,
+    "verified_opens": 37888,
+    "new_durable_likes": 16912,
+    "method": "Six private SO_REUSEPORT epoll workers and separate real SQLite pagers on the same WAL file. CPU for the parent and all six workers is included. Each phase excludes any pair with an interface drop in either arm.",
+    "phase_comparisons": {
+      "established_18000": {
+        "included_pairs": 2,
+        "candidate_minus_original_us_per_completed_http": {
+          "server_cpu_us_per_response": [
+            -6.19580045,
+            2.796892749999998
+          ],
+          "napi_us_per_response": [
+            -4.5966231,
+            0.11788124999999638
+          ],
+          "whole_core_schedstat_us_per_response": [
+            -11.074820249999995,
+            2.6607441000000023
+          ],
+          "process_group_and_napi_us_per_response": [
+            -10.792423549999995,
+            2.914773999999994
+          ]
+        }
+      },
+      "established_27000": {
+        "included_pairs": 1,
+        "candidate_minus_original_us_per_completed_http": {
+          "server_cpu_us_per_response": [
+            1.5932928000000004
+          ],
+          "napi_us_per_response": [
+            -1.3429944999999979
+          ],
+          "whole_core_schedstat_us_per_response": [
+            0.1772470499999983
+          ],
+          "process_group_and_napi_us_per_response": [
+            0.2502983000000043
+          ]
+        }
+      },
+      "reconnect_mixed_18000": {
+        "included_pairs": 2,
+        "candidate_minus_original_us_per_completed_http": {
+          "server_cpu_us_per_response": [
+            -2.9280300157977877,
+            1.2839512736966867
+          ],
+          "napi_us_per_response": [
+            -5.659844490521326,
+            1.71933125987362
+          ],
+          "whole_core_schedstat_us_per_response": [
+            -8.94013941548183,
+            2.854195546998419
+          ],
+          "process_group_and_napi_us_per_response": [
+            -8.58787450631911,
+            3.0032825335702995
+          ]
+        }
+      },
+      "reconnect_mixed_27000": {
+        "included_pairs": 2,
+        "candidate_minus_original_us_per_completed_http": {
+          "server_cpu_us_per_response": [
+            3.278147906793052,
+            3.3661356635071122
+          ],
+          "napi_us_per_response": [
+            -1.9342996149289124,
+            -2.7650325335702988
+          ],
+          "whole_core_schedstat_us_per_response": [
+            1.244549565560824,
+            0.5197027053712446
+          ],
+          "process_group_and_napi_us_per_response": [
+            1.3438482918641341,
+            0.6011031299368099
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,340 @@
+{
+  "directional": {
+    "actual_directional_queue_masks": {
+      "rclient": {
+        "rx-0": "4000"
+      },
+      "rserver": {
+        "rx-0": "0200"
+      },
+      "tclient": {
+        "rx-0": "39ff"
+      },
+      "tserver": {
+        "rx-0": "0400"
+      }
+    },
+    "all_snapshots_full": [
+      59,
+      60
+    ],
+    "complete_5s_windows_full": [
+      59,
+      59
+    ],
+    "dials": 280000,
+    "external_router_rx_drops": 1043195,
+    "external_rx_drops_per_1000_requests": 101.49687198995923,
+    "failures": 0,
+    "first_private_rx_drop": {
+      "at_established": 175036,
+      "between_s": [
+        50,
+        55
+      ]
+    },
+    "hold_s": 300,
+    "infrastructure_flags": [
+      "positive private scored RX/TX drop or error delta"
+    ],
+    "input_artifact_sha256": {
+      "charged-descendants.jsonl": "71070f193b7cd32d41c5b1fa90f55785f16d0cbb1fcdd016d20bcdf419fb30d5",
+      "component-test-lock.json": "efaeb1464152b2939c853b1878daeb00306512e38dddbed6c9df2469833f014e",
+      "directional-rps.json": "54f5335af99914637b50b72cf1596273b33a1974e084780f747864f64f00c2d6",
+      "placements.json": "d396d9a75d3b84a3be33f272b250fa3a51145bc0bc5880419843d5e7b79ed8c8",
+      "raw/plan.json": "c7d8009ec81dacda40690ec8fcb43a6c9f857f5d364fb93333b98e2a1f0f916c",
+      "raw/runtime.json": "a0c43d90069db4156697c84e3e3a38373839a3800476df9961343e4c1e752480",
+      "raw/samples.jsonl": "ee7575cc0da731cba04ba1a14007ace78b272663ea77233ced06fcd5b9c618b4",
+      "raw/score.json": "e346743bd0280f84a95a8d2c516d7c3e46edafa8c79d30e3ef9e62c5909f39a9",
+      "raw/shard0.json": "fe33670297d5251bc8ce2592581d8f57122d9e3eee6a243cb41c6f185917fcf6",
+      "raw/shard1.json": "5b5a60f7a14e6cf3646550cdf19248a645d940bd845bf15bfd60d7cd5e0dbbfa",
+      "raw/shard2.json": "659317c058fd086df541a398c4e7cb20d28b0a767bf2c4208b7b8540b21b4129",
+      "raw/shard3.json": "91a1e827575ab49803afcab6d08e28799146c7124edf8dd26f07db50d8354f34",
+      "scored-assessment.json": "ff201e97f16dcae90a3e61700b93a62be26bc41eb14c0a5a226191ec01f4f0aa",
+      "serial-lock.json": "93dc8e6db3dfd2efaa0604233f6fd5b92ec24134c19824671861f41b86c628e3",
+      "shape.json": "142f27df3656bc84d316c3cba30053c7ee58dd7aebc854a80fcfef0e3eb2b0c5"
+    },
+    "input_profile": "common",
+    "interface_rx_drops": {
+      "rclient": 1043002,
+      "rserver": 193,
+      "tclient": 0,
+      "tserver": 0
+    },
+    "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "original_seven": {
+      "calibrate.py": "d8d3565748f6af19d7dc9d6f46910ea97b2db27361afd0826eeddc0d1651139b",
+      "eth_run.py": "d3fcdafc57b311cf05ad2b429166e8c62da00ba0c32cbb6f1f6173df2ba85ffc",
+      "icmp.py": "4289aa4709a01921916b7ed5712406eb6cc94f51a83c595a3df8b6aa0936e357",
+      "launch.py": "dd401e10e5f247ea3f0ca28d50addda34a6c08b109ef82e833fd8880cc22b53e",
+      "placement": "fd91f952e653505d46d36f7bb50c57fa3f04175eb1e22e6d81eb3390e70487d9",
+      "private_net.py": "dfba97db8349c14cad3c6f8841c34502ed9c9ce852f37f11af70b433d45f5295",
+      "run-native": "d2133fd9dbbccc1afba8d9bb7ce3c6c3fa3cc2a5138abaf46fc55105097a8187"
+    },
+    "p95_ms": 19.068684434084922,
+    "p99_ms": 36.40910703201363,
+    "qualified": false,
+    "ramp_s": 84,
+    "requests": 10278100,
+    "requests_per_s": 26765.87708620564,
+    "scheduled_shard_dials": [
+      70000,
+      70000,
+      70000,
+      70000
+    ],
+    "scored_to_s": 383.75,
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+    "signed_hash_by_role": {
+      "client": "-524288",
+      "manager": "524288",
+      "router": "-524288",
+      "server": "-524288"
+    },
+    "softnet_backlog_drops_by_cpu": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      193,
+      0,
+      0,
+      0,
+      0,
+      1043002,
+      0
+    ],
+    "stock_pass": true,
+    "tag": "priorrps-stock-280-h1",
+    "target_retransmissions": 96156,
+    "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+    "topology": "historical-single-middle-router-directional-rps",
+    "users": 280000
+  },
+  "directional_over_original": {
+    "external_router_rx_drops": 1.9047701647875108,
+    "external_rx_drops_per_1000_requests": 1.9041989987502204,
+    "p99_ms": 0.8963237175178052,
+    "requests_per_s": 1.0003024934910636
+  },
+  "original": {
+    "actual_directional_queue_masks": null,
+    "all_snapshots_full": [
+      59,
+      60
+    ],
+    "complete_5s_windows_full": [
+      59,
+      59
+    ],
+    "dials": 280000,
+    "external_router_rx_drops": 547675,
+    "external_rx_drops_per_1000_requests": 53.30160978793419,
+    "failures": 0,
+    "first_private_rx_drop": {
+      "at_established": 241620,
+      "between_s": [
+        70,
+        75
+      ]
+    },
+    "hold_s": 300,
+    "infrastructure_flags": [
+      "positive private scored RX/TX drop or error delta"
+    ],
+    "input_artifact_sha256": {
+      "charged-descendants.jsonl": "fa6894510798ca8f4cac95f176338888c65e8560ce386508a4053de72242b446",
+      "component-test-lock.json": "322a5c15308990a776a065687d4792473809b7f7a1854e54370358a722ec9081",
+      "placements.json": "a76a38b6e6eb703f56f1f548be416cf36158a92a966ba750859e7d164b9851c2",
+      "raw/plan.json": "fe00df0206072e1deb8c4a6fb92f937d9134856500759646d74a5e1f2dc4e94a",
+      "raw/runtime.json": "834196e386b6665ac011c66d037fb2991abe32d9dae69f7d18373d45b745d825",
+      "raw/samples.jsonl": "cb4d24de155b161bcefe5454dd24b74110e3d89c7d68ceba034617ffcb69fc77",
+      "raw/score.json": "d5e7cac2787eff367490ae38fcade44ed92f5cac9608121c6ed1e6ae81b662c9",
+      "raw/shard0.json": "f3c824606792b7d042b4706b3d003ec3af447b80c61aa5002b34cf01052f9dd5",
+      "raw/shard1.json": "ed0d572ea9208cd980cf6e4b2af427e2dcfeecc41153bba2e8cb4ed1455469f8",
+      "raw/shard2.json": "ec83a12f084cdd3106c58ffef49db9bba2475a2a13637538be6908e1105084ce",
+      "raw/shard3.json": "e5b9410779f5f22bff1561a6b85ec292f2b1acd80fde93590725a18e4fe1acd2",
+      "scored-assessment.json": "3b7e26a7e0d41d8e5a93786592d5b3ccc02f4edfcb8ec13132930b9ff757e17e",
+      "serial-lock.json": "145ab268b4f333a2e5c96e9d7d58510193bc61e83cc92574333a2adff4945a9e",
+      "shape.json": "c70030004564c068be40af4b3843d628f9bff1bd7e3ece275950ca58c852d4fa"
+    },
+    "input_profile": "common",
+    "interface_rx_drops": {
+      "rclient": 206389,
+      "rserver": 341286,
+      "tclient": 0,
+      "tserver": 0
+    },
+    "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "original_seven": {
+      "calibrate.py": "d8d3565748f6af19d7dc9d6f46910ea97b2db27361afd0826eeddc0d1651139b",
+      "eth_run.py": "d3fcdafc57b311cf05ad2b429166e8c62da00ba0c32cbb6f1f6173df2ba85ffc",
+      "icmp.py": "4289aa4709a01921916b7ed5712406eb6cc94f51a83c595a3df8b6aa0936e357",
+      "launch.py": "dd401e10e5f247ea3f0ca28d50addda34a6c08b109ef82e833fd8880cc22b53e",
+      "placement": "fd91f952e653505d46d36f7bb50c57fa3f04175eb1e22e6d81eb3390e70487d9",
+      "private_net.py": "dfba97db8349c14cad3c6f8841c34502ed9c9ce852f37f11af70b433d45f5295",
+      "run-native": "d2133fd9dbbccc1afba8d9bb7ce3c6c3fa3cc2a5138abaf46fc55105097a8187"
+    },
+    "p95_ms": 23.03704833800125,
+    "p99_ms": 40.6204882459672,
+    "qualified": false,
+    "ramp_s": 84,
+    "requests": 10275018,
+    "requests_per_s": 26757.783031003473,
+    "scheduled_shard_dials": [
+      70000,
+      70000,
+      70000,
+      70000
+    ],
+    "scored_to_s": 383.75,
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+    "signed_hash_by_role": {
+      "client": "-524288",
+      "manager": "524288",
+      "router": "-524288",
+      "server": "-524288"
+    },
+    "softnet_backlog_drops_by_cpu": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      280766,
+      0,
+      0,
+      0,
+      0,
+      266909,
+      0
+    ],
+    "stock_pass": true,
+    "tag": "priorroute-stock-280-h1",
+    "target_retransmissions": 139837,
+    "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+    "topology": "historical-single-middle-router-paced",
+    "users": 280000
+  },
+  "smoke": {
+    "actual_directional_queue_masks": {
+      "rclient": {
+        "rx-0": "4000"
+      },
+      "rserver": {
+        "rx-0": "0200"
+      },
+      "tclient": {
+        "rx-0": "39ff"
+      },
+      "tserver": {
+        "rx-0": "0400"
+      }
+    },
+    "all_snapshots_full": [
+      8,
+      8
+    ],
+    "complete_5s_windows_full": [
+      8,
+      8
+    ],
+    "dials": 128,
+    "external_router_rx_drops": 0,
+    "external_rx_drops_per_1000_requests": 0.0,
+    "failures": 0,
+    "first_private_rx_drop": null,
+    "hold_s": 45,
+    "infrastructure_flags": [],
+    "input_artifact_sha256": {
+      "charged-descendants.jsonl": "59b090fcf5716e541c1a08a209d8a41e524394cabb918e72a1902c3cc76f7931",
+      "component-test-lock.json": "74a0f6c3ba9b25ebb3133f8f34b29f7833ffab7e53dbdbea3f460b82426ec57f",
+      "directional-rps.json": "0fe57cf29d9d7b4df9889ffbe0708b3468931bfc20e4c458ee0f655cb2b9b986",
+      "placements.json": "c61625018fa49bb4548e5a8eb08811da33f5ac70db42dbaf5c40a9f6b5902ef5",
+      "raw/plan.json": "8a2d5868beba18e12cc08c3297844d0274656bce65b117fecb2aeab0e24784ac",
+      "raw/runtime.json": "6f721eb00c237dec3eaa7eb7f86fb21094224b55e59f23ce07638064be530833",
+      "raw/samples.jsonl": "975a2a459806a842d6f7345e5924a6a28fdad0f6ecc14252998bb53be3a684ff",
+      "raw/score.json": "aa23700d0b6249e426800826d79e2f26f77d2a8fd199db26eee7409adca0e1f8",
+      "raw/shard0.json": "9059ca43e96b7350b68ef008b1f6aefc513992723d8aeddd1425f2b2b8ee2699",
+      "raw/shard1.json": "145b945c6afa1039d499c3194dd31873b83ee6e41dc2248c4a1cf60f56b7ca08",
+      "raw/shard2.json": "2adaf8e5e6e2666d2b6cb705e3ed4a44cd88c6cb51965ab8d87d2f777159574c",
+      "raw/shard3.json": "39f94e4b547611e35b7f397cf1ecb897c9848057abb5053793ef49570dc5822a",
+      "scored-assessment.json": "45c8dcfe72fda1ae3e8e4dffb70d20cead3f14f37f3d760b5a8e7ab80e15e5c2",
+      "serial-lock.json": "aa4bb2fbef10f687b7da834fb868d3745e559c21cf7fb6fd7a9f5a5063d3882f",
+      "shape.json": "2390bdd0dded53626c9572e58e55e95e0cde36b37f5499293c80f69955ca1919"
+    },
+    "input_profile": "common",
+    "interface_rx_drops": {
+      "rclient": 0,
+      "rserver": 0,
+      "tclient": 0,
+      "tserver": 0
+    },
+    "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "original_seven": {
+      "calibrate.py": "d8d3565748f6af19d7dc9d6f46910ea97b2db27361afd0826eeddc0d1651139b",
+      "eth_run.py": "d3fcdafc57b311cf05ad2b429166e8c62da00ba0c32cbb6f1f6173df2ba85ffc",
+      "icmp.py": "4289aa4709a01921916b7ed5712406eb6cc94f51a83c595a3df8b6aa0936e357",
+      "launch.py": "dd401e10e5f247ea3f0ca28d50addda34a6c08b109ef82e833fd8880cc22b53e",
+      "placement": "fd91f952e653505d46d36f7bb50c57fa3f04175eb1e22e6d81eb3390e70487d9",
+      "private_net.py": "dfba97db8349c14cad3c6f8841c34502ed9c9ce852f37f11af70b433d45f5295",
+      "run-native": "d2133fd9dbbccc1afba8d9bb7ce3c6c3fa3cc2a5138abaf46fc55105097a8187"
+    },
+    "p95_ms": 0.8810818050863922,
+    "p99_ms": 1.858314718058272,
+    "qualified": true,
+    "ramp_s": 60,
+    "requests": 1101,
+    "requests_per_s": 10.485664551608137,
+    "scheduled_shard_dials": [
+      32,
+      32,
+      32,
+      32
+    ],
+    "scored_to_s": 104.75,
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+    "signed_hash_by_role": {
+      "client": "-524288",
+      "manager": "524288",
+      "router": "-524288",
+      "server": "-524288"
+    },
+    "softnet_backlog_drops_by_cpu": [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "stock_pass": true,
+    "tag": "priorrps-stock-smoke-128",
+    "target_retransmissions": 0,
+    "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+    "topology": "historical-single-middle-router-directional-rps",
+    "users": 128
+  }
+}

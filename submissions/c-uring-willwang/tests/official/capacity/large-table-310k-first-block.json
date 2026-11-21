@@ -1,0 +1,742 @@
+{
+  "block": 1,
+  "entries": [
+    {
+      "app": "mojo",
+      "clock_epoch": {
+        "cutoff_epoch": 1794538028.574,
+        "hold_epoch": 1794537728.574,
+        "start_epoch": 1794537635.574
+      },
+      "common_t100_t390": {
+        "app_us_per_completion": 18.327408,
+        "app_us_per_outgoing_tap_record": 13.770436,
+        "exact_completions": 9500723,
+        "external_vs_tap_record_difference": {
+          "egress": -0.002293170719167006,
+          "ingress": -0.0024487600491172224
+        },
+        "incoming_tcp_segments_per_completion": 2.205165,
+        "napi_slices_per_1000_completions": 197.39346,
+        "napi_us_per_completion": 10.180117,
+        "napi_us_per_incoming_tcp_segment": 4.616488,
+        "napi_us_per_slice": 51.57272,
+        "outgoing_tap_records_per_completion": 1.330924,
+        "tcp_segments_per_napi_slice": 11.17142,
+        "whole_core_busy_us_per_completion": 28.788991
+      },
+      "complete_hold_windows": 59,
+      "complete_windows_over_1s": {
+        "all_shards_p99_over_1s": 0,
+        "any_shards_p99_over_1s": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "full_score": {
+        "above_1s_bounds": [
+          2182,
+          2362
+        ],
+        "histogram_observations": 11514427,
+        "p95_ms": 54.75028102261996,
+        "p99_ms": 177.13666303429113,
+        "requests": 11514427
+      },
+      "individual_shard_p99_after_t100": {
+        "at_t": [
+          300
+        ],
+        "ms": 780.177
+      },
+      "ramp_p99_by_shard_ms": {
+        "90": [
+          578.831,
+          584.62,
+          573.1,
+          561.808
+        ],
+        "95": [
+          980.81,
+          980.81,
+          980.81,
+          980.81
+        ],
+        "100": [
+          685.512,
+          727.685,
+          734.962,
+          713.347
+        ],
+        "105": [
+          44.426,
+          45.319,
+          41.851,
+          43.119
+        ]
+      },
+      "raw_sha256": {
+        "component-test-lock.json": "f233947da119d43b3819a5b394243cf34687a495ae56b77ae7fa4cc80afd4dfd",
+        "merged.json": "436f2c141dfa7391deebcf47d0a05b2e954b693bb8a185f79290b8c76c426680",
+        "network-samples.jsonl": "c91e4972b99b3ad9962a3f8a9c931e07d60fcc5732c700069de4bec07343dfce",
+        "samples.jsonl": "9b26493742da10f44b427ecc5e7cb23754607738bf203265f458ea2ecf2b7638",
+        "shape.json": "b2276cb489d10df931ab104e70cdf248ffe771bed4ad6d6e78fbcef62b7d50ae",
+        "shard-0.json": "1f86ee6489d2f084dcecbcbe1a5435f9b81f153c527a78d959e7cbac8ad0257c",
+        "shard-1.json": "babc4bc1d6167f9631fe53823bdb933343534460d2cd6c1177a48da7fb25a28b",
+        "shard-2.json": "be6bfb0ef96e2d9663e5af07ec72d639ca11277cb7cf45966f9b4e456b51add5",
+        "shard-3.json": "3ea5ff27eb9a1b109b3feaf621399e040beb57838f98651466717ce1ddc16c15",
+        "summary.json": "87bb44a955580baed1e6cc0bf010703abd5192b7a327cdb901cc54ffab83cc41",
+        "telemetry.jsonl": "313909885a5a4a58f22be8832053abf3dbfcf74289706352ddeec46c5f9caae0",
+        "timing.json": "b5f9b673d05f1ca35d29d2a858dc2e7c965c1aaf49ef828a654b30b1182ea694"
+      },
+      "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+      "signed_ehash": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_commit": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+      "stock_failures": 0,
+      "stock_pass": true,
+      "tag": "large512k-quiet-mojo-310-h1"
+    },
+    {
+      "app": "submitted",
+      "clock_epoch": {
+        "cutoff_epoch": 1794538561.91,
+        "hold_epoch": 1794538261.91,
+        "start_epoch": 1794538168.91
+      },
+      "common_t100_t390": {
+        "app_us_per_completion": 15.634749,
+        "app_us_per_outgoing_tap_record": 12.718324,
+        "exact_completions": 9505249,
+        "external_vs_tap_record_difference": {
+          "egress": 0.001834783523301878,
+          "ingress": 0.00015874722662825305
+        },
+        "incoming_tcp_segments_per_completion": 2.20333,
+        "napi_slices_per_1000_completions": 357.29217,
+        "napi_us_per_completion": 13.552313,
+        "napi_us_per_incoming_tcp_segment": 6.150831,
+        "napi_us_per_slice": 37.93062,
+        "outgoing_tap_records_per_completion": 1.229309,
+        "tcp_segments_per_napi_slice": 6.16675,
+        "whole_core_busy_us_per_completion": 29.351709
+      },
+      "complete_hold_windows": 59,
+      "complete_windows_over_1s": {
+        "all_shards_p99_over_1s": 0,
+        "any_shards_p99_over_1s": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "full_score": {
+        "above_1s_bounds": [
+          0,
+          0
+        ],
+        "histogram_observations": 11507983,
+        "p95_ms": 28.96132522244034,
+        "p99_ms": 685.5123659961642,
+        "requests": 11507984
+      },
+      "individual_shard_p99_after_t100": {
+        "at_t": [
+          115
+        ],
+        "ms": 291.325
+      },
+      "ramp_p99_by_shard_ms": {
+        "90": [
+          446.885,
+          451.354,
+          451.354,
+          446.885
+        ],
+        "95": [
+          879.123,
+          879.123,
+          879.123,
+          879.123
+        ],
+        "100": [
+          836.455,
+          836.455,
+          836.455,
+          836.455
+        ],
+        "105": [
+          33.29,
+          33.29,
+          33.29,
+          33.623
+        ]
+      },
+      "raw_sha256": {
+        "component-test-lock.json": "b23da6fa89f48533e48c6de42a4b5790cfcf53029830820f4a4086313ec4309a",
+        "merged.json": "30cdcef1338ed28ea13a1103d07e5025bccbb5bfb891b194ef0365fe349c8833",
+        "network-samples.jsonl": "e664fe32fd37ce7937b6464217f05b705b7978af6098fc750699ff62ae9f01a9",
+        "samples.jsonl": "ff5920c6d4b128b7c833dc1c06e171687c6b475f2a31474ff70d8df77b1fea94",
+        "shape.json": "acb13b4ec1b156484316cb3ae941c0c83fc074438154de21c46eb3bd50f2c17b",
+        "shard-0.json": "5dfc04104e4e24dfc835cdc084ea6736150dcae68963fad9f4263c18b7d0b81c",
+        "shard-1.json": "bb6609b781c340178ceb63821d3c2988f6bd48e30acc8568ec78fab2e1c31e6f",
+        "shard-2.json": "1b55a2e285dde5bdbd97e625dcf321371e5414943ca866b7aba9c76880aeb5d8",
+        "shard-3.json": "fb2b18951de8ed09a3f906215e445e0649f09ca1185d949f89ccffd4cbf67c3e",
+        "summary.json": "9e8af11d803c764225221df69994dc10f9c0b68ae79a209e10f83abd133f31c8",
+        "telemetry.jsonl": "92489f0952310e58db22713245ec14853beeec1844e80539eb2cb948581caeb4",
+        "timing.json": "a3cb228344c2a26a5918f9ec9cdf8656b3b1293c1fcab2b66b828ac2d3e4d994"
+      },
+      "server_sha256": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+      "signed_ehash": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_commit": "0b9d84c4cf7c7a90bdd27f26d54c0229afa64e10",
+      "stock_failures": 0,
+      "stock_pass": true,
+      "tag": "large512k-quiet-submitted-310-h1"
+    },
+    {
+      "app": "rkkautsar",
+      "clock_epoch": {
+        "cutoff_epoch": 1794538980.582,
+        "hold_epoch": 1794538680.582,
+        "start_epoch": 1794538587.582
+      },
+      "common_t100_t390": {
+        "app_us_per_completion": 19.633918,
+        "app_us_per_outgoing_tap_record": 8.908692,
+        "exact_completions": 8750993,
+        "external_vs_tap_record_difference": {
+          "egress": -0.00040757814526874773,
+          "ingress": -0.0004452136864371144
+        },
+        "incoming_tcp_segments_per_completion": 2.203393,
+        "napi_slices_per_1000_completions": 247.69687,
+        "napi_us_per_completion": 13.498494,
+        "napi_us_per_incoming_tcp_segment": 6.126231,
+        "napi_us_per_slice": 54.49602,
+        "outgoing_tap_records_per_completion": 2.203906,
+        "tcp_segments_per_napi_slice": 8.89552,
+        "whole_core_busy_us_per_completion": 33.139096
+      },
+      "complete_hold_windows": 59,
+      "complete_windows_over_1s": {
+        "all_shards_p99_over_1s": 57,
+        "any_shards_p99_over_1s": 57
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "full_score": {
+        "above_1s_bounds": [
+          3047518,
+          3142910
+        ],
+        "histogram_observations": 10602912,
+        "p95_ms": 2089.340184202541,
+        "p99_ms": 3611.4758507370116,
+        "requests": 10602912
+      },
+      "individual_shard_p99_after_t100": {
+        "at_t": [
+          105
+        ],
+        "ms": 9294.269
+      },
+      "ramp_p99_by_shard_ms": {
+        "90": [
+          3110.743,
+          3110.743,
+          3110.743,
+          3110.743
+        ],
+        "95": [
+          5065.373,
+          5065.373,
+          5065.373,
+          5065.373
+        ],
+        "100": [
+          8755.622,
+          8755.622,
+          8755.622,
+          8755.622
+        ],
+        "105": [
+          9294.269,
+          9294.269,
+          9294.269,
+          9294.269
+        ]
+      },
+      "raw_sha256": {
+        "component-test-lock.json": "614c563df0ca4892436d025bf006921667da08893004604b772472d4086daf87",
+        "merged.json": "36ae6b6cf842cd05609ce639718d209c3ad7e8c38ceeb586f8c8d5c330fa75a8",
+        "network-samples.jsonl": "f7d9a6974f7bfd1b8d93927c3f137cc409dc220916c2010a1bf4b10bc51f0e64",
+        "samples.jsonl": "38d7d2a6509b01552d8d51fe0b1ec7ab3636eefbad15a304634b769c5ed1f6bc",
+        "shape.json": "034e37884a92e87c6de64269b9976bff55e32f4ee425a0898288f20c9948ff5d",
+        "shard-0.json": "c1e34946e4fcad9d4f717975b3e645bb92e4989922213fd85f5528e35229d394",
+        "shard-1.json": "ee85069ed55bc9d940ab7a49046f3a864e202b7038632df14a2c31881f1b2ea5",
+        "shard-2.json": "0ddf4e0d065c06e77f8b9beedea454a86afb267dcb6bf4425f8510f17e294b51",
+        "shard-3.json": "1ebe3e789ca2e8251b61590d0a6a4f4ed1df32b806f4f60f197dbd1798625ec4",
+        "summary.json": "7932ad24492de4b11c337aeb95888ed89c7dc731450d9a9b8beb8fe283b7be74",
+        "telemetry.jsonl": "f8d13031cb3f3e65778a950729ba21dee824f729378e3ae0cf337856a5dc094b",
+        "timing.json": "467140224b01d4fe883f7deadd0df53b237ec60ea6c9d7d81b1873d643afe1a2"
+      },
+      "server_sha256": "615b36997cd8429bc31c183d567e8a156c4b1b4daa3ff3bc425873795ea63e63",
+      "signed_ehash": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_commit": "2daf23833a6653b5cc747b009d94705c009f5812",
+      "stock_failures": 0,
+      "stock_pass": false,
+      "tag": "large512k-quiet-rkkautsar-310-h1"
+    },
+    {
+      "app": "pavlyhalim",
+      "clock_epoch": {
+        "cutoff_epoch": 1794539514.124,
+        "hold_epoch": 1794539214.124,
+        "start_epoch": 1794539121.124
+      },
+      "common_t100_t390": {
+        "app_us_per_completion": 17.221817,
+        "app_us_per_outgoing_tap_record": 13.741417,
+        "exact_completions": 9504425,
+        "external_vs_tap_record_difference": {
+          "egress": -0.001450572683215978,
+          "ingress": -0.00196078644595591
+        },
+        "incoming_tcp_segments_per_completion": 2.2068,
+        "napi_slices_per_1000_completions": 172.06274,
+        "napi_us_per_completion": 9.671869,
+        "napi_us_per_incoming_tcp_segment": 4.382756,
+        "napi_us_per_slice": 56.21129,
+        "outgoing_tap_records_per_completion": 1.253278,
+        "tcp_segments_per_napi_slice": 12.82556,
+        "whole_core_busy_us_per_completion": 27.193999
+      },
+      "complete_hold_windows": 59,
+      "complete_windows_over_1s": {
+        "all_shards_p99_over_1s": 0,
+        "any_shards_p99_over_1s": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "full_score": {
+        "above_1s_bounds": [
+          794,
+          920
+        ],
+        "histogram_observations": 11520004,
+        "p95_ms": 22.138150647719726,
+        "p99_ms": 90.04405442469601,
+        "requests": 11520005
+      },
+      "individual_shard_p99_after_t100": {
+        "at_t": [
+          325
+        ],
+        "ms": 451.354
+      },
+      "ramp_p99_by_shard_ms": {
+        "90": [
+          20.855,
+          24.212,
+          18.325,
+          19.646
+        ],
+        "95": [
+          658.764,
+          652.241,
+          665.352,
+          672.005
+        ],
+        "100": [
+          836.455,
+          853.268,
+          844.82,
+          819.974
+        ],
+        "105": [
+          34.988,
+          45.319,
+          36.409,
+          34.299
+        ]
+      },
+      "raw_sha256": {
+        "component-test-lock.json": "8f32c0adf27cf4043509e17153622290c9164e3bb16599d640e6d7fa8466ec3c",
+        "merged.json": "cee8e19e750af780541fcbe82a806d3ee3d97525bdce8427cda61789cbcef819",
+        "network-samples.jsonl": "d072f5cd787e020eb801bbcb975c797c3aa9df7fca0929b0f187da0d11a7dbc8",
+        "samples.jsonl": "061e248a3597e825c81d043ac3c083455dbea311f88e3deaee24efe13525ebe6",
+        "shape.json": "2ec39b9285a6d0f82eaf937272068de4a3b698325c23cd6529dafdcdf67b6b8e",
+        "shard-0.json": "b715ab47e59cd9dbaa30bd1ea53c3b4f221928cc43185793299c6fcc7c0295e1",
+        "shard-1.json": "de6145c878f338e497fc858f093587e24b813e8097b54185bdf12e1adc1b904d",
+        "shard-2.json": "9864e0828947a5a11fd4491f1567e54169ff836a9b542ea439107088eba78817",
+        "shard-3.json": "dbd12ccc1aeb200fd8700ff4fcaf019156dafcf49386080a46eac408df34160b",
+        "summary.json": "ed23d2c26f86f2405dedf0e316b2db8319e1b1a8aa4afef1fdd57986af619e13",
+        "telemetry.jsonl": "6e099c80ea801d2c601f5d4db85742a81435751aed0823d43b04fddd728adf2f",
+        "timing.json": "03cb22904e9cc48dcda2c0270974814b8f3ab4267bea53c087cf5c39da1dbd0a"
+      },
+      "server_sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+      "signed_ehash": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_commit": "7387a313d58041c76e0fe8134825ef335eeafd0d",
+      "stock_failures": 0,
+      "stock_pass": true,
+      "tag": "large512k-quiet-pavlyhalim-310-h1"
+    },
+    {
+      "app": "kensac",
+      "clock_epoch": {
+        "cutoff_epoch": 1794539935.263,
+        "hold_epoch": 1794539635.263,
+        "start_epoch": 1794539542.263
+      },
+      "common_t100_t390": {
+        "app_us_per_completion": 16.918926,
+        "app_us_per_outgoing_tap_record": 8.58357,
+        "exact_completions": 9385018,
+        "external_vs_tap_record_difference": {
+          "egress": 0.0012307730040726486,
+          "ingress": 0.0009912260066096685
+        },
+        "incoming_tcp_segments_per_completion": 2.207423,
+        "napi_slices_per_1000_completions": 241.41915,
+        "napi_us_per_completion": 12.605839,
+        "napi_us_per_incoming_tcp_segment": 5.710658,
+        "napi_us_per_slice": 52.21557,
+        "outgoing_tap_records_per_completion": 1.971083,
+        "tcp_segments_per_napi_slice": 9.14353,
+        "whole_core_busy_us_per_completion": 29.625251
+      },
+      "complete_hold_windows": 59,
+      "complete_windows_over_1s": {
+        "all_shards_p99_over_1s": 27,
+        "any_shards_p99_over_1s": 29
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "full_score": {
+        "above_1s_bounds": [
+          223439,
+          223726
+        ],
+        "histogram_observations": 11361969,
+        "p95_ms": 120.16413969158782,
+        "p99_ms": 4277.086853824184,
+        "requests": 11361969
+      },
+      "individual_shard_p99_after_t100": {
+        "at_t": [
+          355
+        ],
+        "ms": 10898.261
+      },
+      "ramp_p99_by_shard_ms": {
+        "90": [
+          209.784,
+          211.882,
+          211.882,
+          211.882
+        ],
+        "95": [
+          205.65,
+          207.707,
+          207.707,
+          209.784
+        ],
+        "100": [
+          7926.35,
+          7926.35,
+          7926.35,
+          7926.35
+        ],
+        "105": [
+          7693.237,
+          7693.237,
+          7693.237,
+          7693.237
+        ]
+      },
+      "raw_sha256": {
+        "component-test-lock.json": "0487adadcd7f3318d47dd57be9b0039c4023d5d72b269fd70f966afa10e2980a",
+        "merged.json": "bc30a4fe3e107f5bc564fa05a6f25ac0ce5f6f123f9947160c767b47b0b93759",
+        "network-samples.jsonl": "adc3d1a6e34b4bbf97bde46640f6871727748f5894a39ba49f96829ac9246f4b",
+        "samples.jsonl": "4b7485976ca2d269163a4b7a1e9174391f88a6c0b943f930ddd0ba1032081347",
+        "shape.json": "6ea1cd08632a33c7968fe05f0e219bf242ec17dbfb1586437776f060fcef9d11",
+        "shard-0.json": "25649b1bef9da797f5365c4ba196658d2cf00399c7bdb58bcd92cfb868bc6d48",
+        "shard-1.json": "3aa282f6cb4760693e800d2878eeb62cf54aa76f54842a6e479187559c8a0bb9",
+        "shard-2.json": "19af63cbca255cfd16170029071c2bdd1d23b5075afefce5199bf59c23665229",
+        "shard-3.json": "7ba92732905c63e68aa795422b425d528a8101d57e2ad104e4a8c7c2810e2445",
+        "summary.json": "9d82d2c419955cf201c9d108c7f0abb848c168f883f5aac8b7abda3a3c84c4e6",
+        "telemetry.jsonl": "572427ae89dd4e8e09ea941d03ec08df72595824e2aebfa71904d0505440c146",
+        "timing.json": "e983037ae6f68f423e3fe7e6261a84ce719e575c51cedbf19bd8793d938c0ef1"
+      },
+      "server_sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+      "signed_ehash": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+      "stock_failures": 0,
+      "stock_pass": false,
+      "tag": "large512k-quiet-kensac-310-h1"
+    },
+    {
+      "app": "leaf-cursor",
+      "clock_epoch": {
+        "cutoff_epoch": 1794540535.894,
+        "hold_epoch": 1794540235.894,
+        "start_epoch": 1794540142.894
+      },
+      "common_t100_t390": {
+        "app_us_per_completion": 15.612449,
+        "app_us_per_outgoing_tap_record": 12.929983,
+        "exact_completions": 9509915,
+        "external_vs_tap_record_difference": {
+          "egress": 0.0013451374688289376,
+          "ingress": 0.0008254690202311502
+        },
+        "incoming_tcp_segments_per_completion": 2.203851,
+        "napi_slices_per_1000_completions": 359.83295,
+        "napi_us_per_completion": 13.548506,
+        "napi_us_per_incoming_tcp_segment": 6.14765,
+        "napi_us_per_slice": 37.65221,
+        "outgoing_tap_records_per_completion": 1.207461,
+        "tcp_segments_per_napi_slice": 6.12465,
+        "whole_core_busy_us_per_completion": 29.324544
+      },
+      "complete_hold_windows": 59,
+      "complete_windows_over_1s": {
+        "all_shards_p99_over_1s": 0,
+        "any_shards_p99_over_1s": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "full_score": {
+        "above_1s_bounds": [
+          0,
+          0
+        ],
+        "histogram_observations": 11528412,
+        "p95_ms": 19.068684434084922,
+        "p99_ms": 33.95943148452363,
+        "requests": 11528413
+      },
+      "individual_shard_p99_after_t100": {
+        "at_t": [
+          385
+        ],
+        "ms": 107.706
+      },
+      "ramp_p99_by_shard_ms": {
+        "90": [
+          76.791,
+          77.559,
+          76.031,
+          76.791
+        ],
+        "95": [
+          73.795,
+          63.563,
+          64.199,
+          64.199
+        ],
+        "100": [
+          236.39,
+          62.311,
+          62.934,
+          61.694
+        ],
+        "105": [
+          32.961,
+          67.474,
+          32.961,
+          33.29
+        ]
+      },
+      "raw_sha256": {
+        "component-test-lock.json": "bf616761bb5d5f602d3564ee54eb40bd479431698c77f5368f2d6cba5897e8bb",
+        "merged.json": "636eb8e00be44e3089f980f2299b7a40a10e23b58548418627afa54f7967cce0",
+        "network-samples.jsonl": "9a93752984d522e7d01becdf57848f311d9bfe5ff18ce3b300df338c878c2761",
+        "samples.jsonl": "1f8226c7d40f9bcc8dd61e94a932e1acf867000f6cc0f97946cb116a8a5bbd33",
+        "shape.json": "6d7c7b9b1dc935ded4c63d915dfbf2d1b38d384cfd92126d5a971727fb614d0e",
+        "shard-0.json": "e19b76b66204561d0a0ee96472b3ed030656a2d8b5cff87fbfaeda463b8f5d60",
+        "shard-1.json": "8df61935353aeebccf4a736794726f9ba7c3f62b14b392eddf6e8f8823a5525d",
+        "shard-2.json": "e2dfa924db2575bae8db987f6d6eab40b05f2458754f66f946984cb751281887",
+        "shard-3.json": "0f757565d9669f1ec97736c9bc2c465d409cd2b7e839cf820ba695ea3cc3b73e",
+        "summary.json": "90959fb4ac5157e42ae6515672a61c977fec50d902ee6c61f5748cd7acc21867",
+        "telemetry.jsonl": "ac6e8581cacdec10f57dd3f67581b12902c9dc5665e58653cea43bc6fdbc6fef",
+        "timing.json": "1e0855326b69bce29ab9dc92f89c454063e61bb120fb06654462b0c0d786a51f"
+      },
+      "server_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+      "signed_ehash": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_commit": "cd4b88d5ce33c6fae4a360cd4162bc4fa1a87555",
+      "stock_failures": 0,
+      "stock_pass": true,
+      "tag": "large512k-quiet-leaf-cursor-310-h1"
+    },
+    {
+      "app": "swift",
+      "clock_epoch": {
+        "cutoff_epoch": 1794540955.045,
+        "hold_epoch": 1794540655.045,
+        "start_epoch": 1794540562.045
+      },
+      "common_t100_t390": {
+        "app_us_per_completion": 18.212877,
+        "app_us_per_outgoing_tap_record": 8.248473,
+        "exact_completions": 9096504,
+        "external_vs_tap_record_difference": {
+          "egress": 0.0008952319868681524,
+          "ingress": 0.0009335545689049077
+        },
+        "incoming_tcp_segments_per_completion": 2.208064,
+        "napi_slices_per_1000_completions": 238.35963,
+        "napi_us_per_completion": 13.602204,
+        "napi_us_per_incoming_tcp_segment": 6.16024,
+        "napi_us_per_slice": 57.06589,
+        "outgoing_tap_records_per_completion": 2.20803,
+        "tcp_segments_per_napi_slice": 9.26358,
+        "whole_core_busy_us_per_completion": 31.832008
+      },
+      "complete_hold_windows": 59,
+      "complete_windows_over_1s": {
+        "all_shards_p99_over_1s": 57,
+        "any_shards_p99_over_1s": 57
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "full_score": {
+        "above_1s_bounds": [
+          560099,
+          560373
+        ],
+        "histogram_observations": 11039372,
+        "p95_ms": 1348.5551462240494,
+        "p99_ms": 8330.673484447596,
+        "requests": 11039372
+      },
+      "individual_shard_p99_after_t100": {
+        "at_t": [
+          110
+        ],
+        "ms": 11801.255
+      },
+      "ramp_p99_by_shard_ms": {
+        "90": [
+          4151.298,
+          4319.858,
+          4319.858,
+          4151.298
+        ],
+        "95": [
+          11117.316,
+          11117.316,
+          11117.316,
+          11117.316
+        ],
+        "100": [
+          11340.774,
+          11340.774,
+          11340.774,
+          11340.774
+        ],
+        "105": [
+          11340.774,
+          11340.774,
+          11340.774,
+          11340.774
+        ]
+      },
+      "raw_sha256": {
+        "component-test-lock.json": "ebf468bd6ced8a62ef197820db18dc1c4f7d1e24185905f4e62eb2b09cb42d7c",
+        "merged.json": "27727331743200b86fa25d912bda20948d65ff14cc64d8fc473e45dc273e04a6",
+        "network-samples.jsonl": "965f1ea067f67d01bc67305cfabc09726ada120b15bb8359da5b6bc603c7e037",
+        "samples.jsonl": "18f19bc7102544afadab6ffdeb4ca1cfdb9803e998178df106a437a104441974",
+        "shape.json": "f6e9f9753cda4973cdc9f993b6415f7bd46e539238d21822b77d77c2780401a3",
+        "shard-0.json": "4877db5f272426b28136bbfad66fac71c2fa0376041b7f4fc3a929ea8dcfb6d4",
+        "shard-1.json": "ace2ddf6b4b55929e9f746c4361d14af92cbb8c98c84bfff7c1f92bd38ec3545",
+        "shard-2.json": "33df6a38cf77f1bb2ce88e437f64e7f3f413851431f267b8ee7c44c55fcf1337",
+        "shard-3.json": "834d0547b9e2bbd80d49690f7f60b162f89256b8a1e29d2126041cf521ed36d1",
+        "summary.json": "17485ab85190205e47af5d28fa2e7829866d5d64d5b5d74bd1eea7c752c5cac4",
+        "telemetry.jsonl": "596322f24ff8e6aee77020fbbf688666d0883ec6161e3f0ae26ead856c6cee62",
+        "timing.json": "c3bdc8a7dde282a910586381ede9d124347b033215232b93b6b955e438ae2e78"
+      },
+      "server_sha256": "3640c15706243a4fa39a7643914a7ac57860fa6140051f942633262be8f8cb4f",
+      "signed_ehash": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_commit": "77d91a746b2905d06e0e70726d6407a45a040c7b",
+      "stock_failures": 0,
+      "stock_pass": false,
+      "tag": "large512k-quiet-swift-310-h1"
+    }
+  ],
+  "fixture_inputs_sha256": "98b73e556157a690e7907ab68507107c501a4af658275cb7a94386a73785618b",
+  "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6"
+}

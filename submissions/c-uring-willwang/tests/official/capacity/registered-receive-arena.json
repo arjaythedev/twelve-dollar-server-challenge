@@ -1,0 +1,117 @@
+{
+  "kernel": "6.8.0-147-generic",
+  "selected_server_sha256": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+  "selected_reactor_sha256": "189ae66ae62e8889355cb076bcb9c79dcb8c16f02d060223789cbcdc886d2b14",
+  "peers": 48,
+  "pairs_per_size": 6,
+  "timed_reads": 103680,
+  "cpu9": {
+    "128": {
+      "issuer_cpu_ns": {
+        "ordinary_median_ns_per_read": 4656.979,
+        "fixed_median_ns_per_read": 5149.961,
+        "paired_median_change_ns": 497.218,
+        "paired_median_change_pct": 10.708,
+        "paired_change_pct": [
+          10.871,
+          10.545,
+          10.926,
+          10.426,
+          9.761,
+          11.519
+        ],
+        "fixed_faster": 0
+      },
+      "recv_wall_ns": {
+        "ordinary_median_ns_per_read": 4654.195,
+        "fixed_median_ns_per_read": 5149.048,
+        "paired_median_change_ns": 498.82,
+        "paired_median_change_pct": 10.75,
+        "paired_change_pct": [
+          10.884,
+          10.616,
+          10.927,
+          10.18,
+          9.757,
+          11.516
+        ],
+        "fixed_faster": 0
+      }
+    },
+    "384": {
+      "issuer_cpu_ns": {
+        "ordinary_median_ns_per_read": 4669.288,
+        "fixed_median_ns_per_read": 5186.528,
+        "paired_median_change_ns": 520.694,
+        "paired_median_change_pct": 11.193,
+        "paired_change_pct": [
+          10.882,
+          10.638,
+          10.315,
+          12.541,
+          12.643,
+          11.504
+        ],
+        "fixed_faster": 0
+      },
+      "recv_wall_ns": {
+        "ordinary_median_ns_per_read": 4668.681,
+        "fixed_median_ns_per_read": 5185.693,
+        "paired_median_change_ns": 520.278,
+        "paired_median_change_pct": 11.185,
+        "paired_change_pct": [
+          10.857,
+          10.635,
+          10.302,
+          12.717,
+          12.517,
+          11.513
+        ],
+        "fixed_faster": 0
+      }
+    },
+    "720": {
+      "issuer_cpu_ns": {
+        "ordinary_median_ns_per_read": 4718.969,
+        "fixed_median_ns_per_read": 5206.436,
+        "paired_median_change_ns": 495.327,
+        "paired_median_change_pct": 10.538,
+        "paired_change_pct": [
+          10.715,
+          10.079,
+          9.354,
+          10.361,
+          10.953,
+          11.476
+        ],
+        "fixed_faster": 0
+      },
+      "recv_wall_ns": {
+        "ordinary_median_ns_per_read": 4717.534,
+        "fixed_median_ns_per_read": 5203.155,
+        "paired_median_change_ns": 493.739,
+        "paired_median_change_pct": 10.502,
+        "paired_change_pct": [
+          10.735,
+          10.076,
+          9.287,
+          10.269,
+          11.079,
+          11.483
+        ],
+        "fixed_faster": 0
+      }
+    }
+  },
+  "probe_sha256": "30dfca341496bac0baf6606d48055d2b7ddbeb7b5c5dcaa353f601b9e003e113",
+  "kernel_observations": [
+    "memlock limit_KiB=8192 rings=5 VmPin_before_KiB=0 reg0=0/0/VmPin192 reg1=0/0/VmPin384 reg2=0/0/VmPin576 reg3=0/0/VmPin768 reg4=0/0/VmPin960",
+    "memlock limit_KiB=512 rings=5 VmPin_before_KiB=0 reg0=-1/12/VmPin0 reg1=-1/12/VmPin0 reg2=-1/12/VmPin0 reg3=-1/12/VmPin0 reg4=-1/12/VmPin0",
+    "memlock limit_KiB=193 rings=5 VmPin_before_KiB=0 reg0=-1/12/VmPin0 reg1=-1/12/VmPin0 reg2=-1/12/VmPin0 reg3=-1/12/VmPin0 reg4=-1/12/VmPin0",
+    "semantics mode=RECV_DONTWAIT full1_flags=4 full2_flags=4 short_flags=0 fin_short_flags=4 urgent_short_flags=4 urgent_remaining=5 extra_edge=0 EAGAIN=immediate race=ok EOF=ok",
+    "semantics mode=READ_FIXED_NOWAIT full1_flags=0 full2_flags=0 short_flags=0 fin_short_flags=0 urgent_short_flags=0 urgent_remaining=5 extra_edge=0 EAGAIN=immediate race=ok EOF=ok",
+    "READ_FIXED_without_NOWAIT O_NONBLOCK=0 retained_credit=1 grace_us=8035 result=1",
+    "READ_FIXED_without_NOWAIT O_NONBLOCK=1 retained_credit=1 grace_us=8053 result=1",
+    "RECV_DONTWAIT_with_RECVSEND_FIXED_BUF result=-22"
+  ]
+}

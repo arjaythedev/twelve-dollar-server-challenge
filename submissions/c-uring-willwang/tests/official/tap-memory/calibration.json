@@ -1,0 +1,23 @@
+{
+  "accepted_socket_bytes": 1304,
+  "active_socket_bytes": 3680,
+  "cohorts": [
+    3072,
+    1536
+  ],
+  "kernel_cgroup_doc": "https://docs.kernel.org/admin-guide/cgroup-v2.html",
+  "lab_source_sha256": {
+    "forward.json": "ef2bae2b8e2946e3fc4ccd1df39a1ffb8159ccd7a1ce8a294cdfdce8b77aefc2",
+    "kernel-geometry.json": "5e83d0c593e761c9efce3f91f61ece684190f92cd77c2c38b546d4a933ba98d6",
+    "measurements.json": "19f05f573fe05bde0530b33d4837fcf4db66a8b4dc168d44131f150633ebb8b4",
+    "probe.py": "2353b23e11c7e26dcb215b7a90ad60e8334ac77fa27039f6f0aac9b7a740d137",
+    "reverse.json": "8a3642416b58b8cd544c63033410ca3100dde65dc657c63cb260ce30c7b30966"
+  },
+  "linux_sockstat_source": "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/tree/net/ipv4/proc.c?h=v6.8",
+  "missing_per_full_passive_ipv4_socket": 2376,
+  "objcg": 8,
+  "paired_measurement_kernel": "6.8.0-147-generic",
+  "passive_handshake_charge": 0,
+  "server": "threaded NAPI, private IPv4 wire, external active peer, same isolated core",
+  "tcp_slab_slot": 2368
+}

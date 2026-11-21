@@ -1,0 +1,425 @@
+{
+  "kernel": "6.8.0-147-generic",
+  "kernel_configuration": {
+    "CONFIG_VIRT_CPU_ACCOUNTING_GEN": true,
+    "CONFIG_IRQ_TIME_ACCOUNTING": false,
+    "CONFIG_HZ": 1000,
+    "running_nohz_full_cpu_list": []
+  },
+  "clock_definitions": {
+    "app": "cgroup v2 cpu.stat usage_usec divided by elapsed wall time, normalized to one CPU",
+    "guest_cpu": "/proc/stat per-CPU categories divided by total category ticks",
+    "private_napi": "Private kernel task /proc/<tid>/schedstat run_ns, runqueue_wait_ns and scheduler dispatches. Runtime includes actual protocol handling.",
+    "estimated_overlap": "Lower bound = application cgroup pct plus guest softirq pct minus total busy pct. The clocks are independently sampled on the same core."
+  },
+  "official_reference": {
+    "metric": "application cgroup over scored hold",
+    "source": "https://github.com/arjaythedev/twelve-dollar-server-challenge/blob/8b20e65/LEADERBOARD.md",
+    "sampled_cpu_pct": {
+      "baseline Willwang at 280000": 82,
+      "Kensac at 310000": 82,
+      "Mojo at 304000": 82,
+      "Swift at 300000": 92,
+      "Rkkautsar at 300000": 96
+    }
+  },
+  "comparisons": {
+    "stock-280-h1": {
+      "profile": "four-router-lanes",
+      "app_elf_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "user_count": 280000,
+      "sample_source_sha256": {
+        "samples.jsonl": "07d85ca9c927665f28e99cd63ff92e4bfa236e93e243966479d867dc9edd8486",
+        "telemetry.jsonl": "ecc72b2ae754acb3742f30096e9af46cc1c5a8829b8a96cd0772423ba0f13f77",
+        "timing.json": "5595cff5c331523682ac3f632fdb71a93cf435046cef243d4a8832c56c3848c3"
+      },
+      "scored_healthy_environment": false,
+      "infrastructure_flags": [
+        "generator 3 CPU receive backlog recorded packet drops"
+      ],
+      "windows": {
+        "ramp": {
+          "app_sample_s": 82.3961,
+          "core_sample_s": 82.3961,
+          "app_cgroup_one_cpu_pct": 71.679,
+          "app_cgroup_user_one_cpu_pct": 6.486,
+          "app_cgroup_system_one_cpu_pct": 65.193,
+          "guest_cpu_pct": {
+            "user": 7.013,
+            "nice": 0.048,
+            "sys": 23.745,
+            "idle": 0.191,
+            "iowait": 20.692,
+            "irq": 0.0,
+            "softirq": 48.301,
+            "steal": 0.012
+          }
+        },
+        "hold": {
+          "app_sample_s": 297.7275,
+          "core_sample_s": 297.7275,
+          "app_cgroup_one_cpu_pct": 97.974,
+          "app_cgroup_user_one_cpu_pct": 8.985,
+          "app_cgroup_system_one_cpu_pct": 88.99,
+          "guest_cpu_pct": {
+            "user": 8.861,
+            "nice": 0.131,
+            "sys": 30.39,
+            "idle": 0.0,
+            "iowait": 0.081,
+            "irq": 0.0,
+            "softirq": 60.531,
+            "steal": 0.007
+          }
+        },
+        "ramp_and_hold": {
+          "app_sample_s": 382.1258,
+          "core_sample_s": 382.1258,
+          "app_cgroup_one_cpu_pct": 92.305,
+          "app_cgroup_user_one_cpu_pct": 8.432,
+          "app_cgroup_system_one_cpu_pct": 83.873,
+          "guest_cpu_pct": {
+            "user": 8.444,
+            "nice": 0.112,
+            "sys": 28.934,
+            "idle": 0.042,
+            "iowait": 4.588,
+            "irq": 0.0,
+            "softirq": 57.872,
+            "steal": 0.008
+          }
+        }
+      }
+    },
+    "napi-stock-280-h1": {
+      "profile": "four-router-lanes-threaded-napi",
+      "app_elf_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "user_count": 280000,
+      "sample_source_sha256": {
+        "samples.jsonl": "576f2589f52a2e44bddba6a8aed6f006d69ef33fa49fa35b38aaefca2df61046",
+        "telemetry.jsonl": "9f9b6c66c1f03d078b6028fd4bd2f070f95ac2f4b0d47564e829ef597654578d",
+        "timing.json": "b4b0b87e66fce0ba8751f852ab8ad67625b81d26c17c9a72be462e6c0d5677c9"
+      },
+      "scored_healthy_environment": false,
+      "infrastructure_flags": [
+        "virtual-router receive interface dropped packets during scoring",
+        "router CPU 2 dropped packets in its receive backlog",
+        "router CPU 5 dropped packets in its receive backlog",
+        "router CPU 8 dropped packets in its receive backlog",
+        "router CPU 14 dropped packets in its receive backlog"
+      ],
+      "windows": {
+        "ramp": {
+          "app_sample_s": 82.7234,
+          "core_sample_s": 82.7176,
+          "app_cgroup_one_cpu_pct": 42.571,
+          "app_cgroup_user_one_cpu_pct": 6.33,
+          "app_cgroup_system_one_cpu_pct": 36.241,
+          "guest_cpu_pct": {
+            "user": 7.331,
+            "nice": 0.062,
+            "sys": 64.823,
+            "idle": 0.012,
+            "iowait": 18.866,
+            "irq": 0.0,
+            "softirq": 8.894,
+            "steal": 0.012
+          }
+        },
+        "hold": {
+          "app_sample_s": 298.8646,
+          "core_sample_s": 298.8647,
+          "app_cgroup_one_cpu_pct": 52.902,
+          "app_cgroup_user_one_cpu_pct": 8.433,
+          "app_cgroup_system_one_cpu_pct": 44.468,
+          "guest_cpu_pct": {
+            "user": 9.784,
+            "nice": 0.155,
+            "sys": 77.722,
+            "idle": 0.0,
+            "iowait": 0.047,
+            "irq": 0.0,
+            "softirq": 12.289,
+            "steal": 0.003
+          }
+        },
+        "ramp_and_hold": {
+          "app_sample_s": 383.5905,
+          "core_sample_s": 383.5848,
+          "app_cgroup_one_cpu_pct": 50.645,
+          "app_cgroup_user_one_cpu_pct": 7.965,
+          "app_cgroup_system_one_cpu_pct": 42.68,
+          "guest_cpu_pct": {
+            "user": 9.251,
+            "nice": 0.134,
+            "sys": 75.016,
+            "idle": 0.003,
+            "iowait": 4.04,
+            "irq": 0.0,
+            "softirq": 11.551,
+            "steal": 0.005
+          }
+        }
+      }
+    },
+    "split-guarded-300-h1": {
+      "profile": "single-queue-split-polling-tap",
+      "app_elf_sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+      "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "user_count": 300000,
+      "sample_source_sha256": {
+        "samples.jsonl": "97b1f1c0ded0af94f84fea6717831eb000e4f0d75c0a5416e639f8c50d1be7f1",
+        "telemetry.jsonl": "6dfec933a5ced1fc5fa276e0c2d5585928b924a6dc9310d0bf5d998f68f90ace",
+        "timing.json": "986fe18bb793d6542221a96bf2cf0920931617cf67d34d62c23f2981d67b823e"
+      },
+      "scored_healthy_environment": true,
+      "infrastructure_flags": [],
+      "windows": {
+        "ramp": {
+          "app_sample_s": 88.6682,
+          "core_sample_s": 88.6683,
+          "app_cgroup_one_cpu_pct": 37.852,
+          "app_cgroup_user_one_cpu_pct": 6.797,
+          "app_cgroup_system_one_cpu_pct": 31.055,
+          "guest_cpu_pct": {
+            "user": 9.294,
+            "nice": 0.046,
+            "sys": 67.338,
+            "idle": 0.0,
+            "iowait": 23.287,
+            "irq": 0.0,
+            "softirq": 0.0,
+            "steal": 0.035
+          },
+          "private_napi": {
+            "run_s": 31.4612,
+            "runnable_wait_s": 14.6219,
+            "timeslices": 973651,
+            "one_cpu_pct": 35.482,
+            "mean_run_us_per_timeslice": 32.313
+          },
+          "guest_tcp_segments_per_napi_timeslice": 3.983
+        },
+        "hold": {
+          "app_sample_s": 298.3136,
+          "core_sample_s": 298.3138,
+          "app_cgroup_one_cpu_pct": 48.625,
+          "app_cgroup_user_one_cpu_pct": 9.807,
+          "app_cgroup_system_one_cpu_pct": 38.818,
+          "guest_cpu_pct": {
+            "user": 12.097,
+            "nice": 0.183,
+            "sys": 84.754,
+            "idle": 0.0,
+            "iowait": 2.845,
+            "irq": 0.0,
+            "softirq": 0.118,
+            "steal": 0.003
+          },
+          "private_napi": {
+            "run_s": 143.1916,
+            "runnable_wait_s": 62.9565,
+            "timeslices": 2496958,
+            "one_cpu_pct": 48.0,
+            "mean_run_us_per_timeslice": 57.346
+          },
+          "guest_tcp_segments_per_napi_timeslice": 8.355
+        },
+        "ramp_and_hold": {
+          "app_sample_s": 388.9844,
+          "core_sample_s": 388.9846,
+          "app_cgroup_one_cpu_pct": 46.156,
+          "app_cgroup_user_one_cpu_pct": 9.099,
+          "app_cgroup_system_one_cpu_pct": 37.057,
+          "guest_cpu_pct": {
+            "user": 11.44,
+            "nice": 0.153,
+            "sys": 80.858,
+            "idle": 0.0,
+            "iowait": 7.447,
+            "irq": 0.0,
+            "softirq": 0.091,
+            "steal": 0.01
+          },
+          "private_napi": {
+            "run_s": 175.7276,
+            "runnable_wait_s": 78.0509,
+            "timeslices": 3483719,
+            "one_cpu_pct": 45.176,
+            "mean_run_us_per_timeslice": 50.443
+          },
+          "guest_tcp_segments_per_napi_timeslice": 7.143
+        }
+      },
+      "external_counters_last_pre_cutoff_s": 0.589
+    }
+  },
+  "private_abba": {
+    "test": "One fresh private pair of 1500-MTU TAPs per trial, 75 us per frame, 128 ordered requests and deterministic replies, perf trace on ordinary test server and relay plus the private NAPI task where present. Confirmed MSS 1448 and SO_INCOMING_CPU 9. Same single remote CPU15 used for injector and client in the tiny test.",
+    "run_order": [
+      "threaded-1",
+      "softirq-1",
+      "softirq-2",
+      "threaded-2"
+    ],
+    "scoring_relation": "A bounded placement experiment on spare cores. The injection CPU handles device/GRO polling in the ordinary RPS treatment. This experiment measures no organizer capacity or IRQ coalescing behavior.",
+    "trials": {
+      "threaded-1": {
+        "source_summary_sha256": "f740c03cbf5605dc83f13d2aeb872586969d3af556353a517c8194e9839b879e",
+        "source_perf_script_sha256": "b1ef16f11dffa4a80c3c2d31db538b121477407cfbc8548cf1fa669d7179b6ed",
+        "service_observed_receive_cpus": [
+          9
+        ],
+        "mss": 1448,
+        "response_bytes": 360160,
+        "response_sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596",
+        "service_task_runtime_ms": 4.414,
+        "service_timeslices": 129,
+        "private_tap_poll": [
+          {
+            "count": 184,
+            "cpu": 9,
+            "kind": "polls",
+            "task": "private NAPI"
+          },
+          {
+            "count": 185,
+            "cpu": 9,
+            "kind": "work",
+            "task": "private NAPI"
+          }
+        ],
+        "task_scoped_net_rx_entries": [
+          {
+            "count": 3,
+            "cpu": 15,
+            "kind": "NET_RX",
+            "task": "injector"
+          }
+        ],
+        "napi_task_runtime_ms": 2.584,
+        "napi_task_timeslices": 132,
+        "napi_voluntary_switches": 132
+      },
+      "softirq-1": {
+        "source_summary_sha256": "8917d9cf923c3782931f46c622874694771be5b778cd5157d7000682c05a7fb8",
+        "source_perf_script_sha256": "3b978710c68207aab8af4fb14a20fe377bb88e9f379d1cd683c7454ab65361ae",
+        "service_observed_receive_cpus": [
+          9
+        ],
+        "mss": 1448,
+        "response_bytes": 360160,
+        "response_sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596",
+        "service_task_runtime_ms": 4.396,
+        "service_timeslices": 128,
+        "private_tap_poll": [
+          {
+            "count": 187,
+            "cpu": 15,
+            "kind": "polls",
+            "task": "injector"
+          },
+          {
+            "count": 187,
+            "cpu": 15,
+            "kind": "work",
+            "task": "injector"
+          }
+        ],
+        "task_scoped_net_rx_entries": [
+          {
+            "count": 187,
+            "cpu": 15,
+            "kind": "NET_RX",
+            "task": "injector"
+          }
+        ]
+      },
+      "softirq-2": {
+        "source_summary_sha256": "2432497b882f47652290fa3bebc2c072d4ed20225f977723fd4d28619920df8a",
+        "source_perf_script_sha256": "22d9da1ad5f03ec7e6e56669d3cbb8d8de80e63392bbc87dd015caa183d92051",
+        "service_observed_receive_cpus": [
+          9
+        ],
+        "mss": 1448,
+        "response_bytes": 360160,
+        "response_sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596",
+        "service_task_runtime_ms": 4.369,
+        "service_timeslices": 131,
+        "private_tap_poll": [
+          {
+            "count": 185,
+            "cpu": 15,
+            "kind": "polls",
+            "task": "injector"
+          },
+          {
+            "count": 185,
+            "cpu": 15,
+            "kind": "work",
+            "task": "injector"
+          }
+        ],
+        "task_scoped_net_rx_entries": [
+          {
+            "count": 185,
+            "cpu": 15,
+            "kind": "NET_RX",
+            "task": "injector"
+          }
+        ]
+      },
+      "threaded-2": {
+        "source_summary_sha256": "658be3eac67af48994ebc41f49bbe3293a82c74c2e5d00b756d70049250c5a88",
+        "source_perf_script_sha256": "25c82935a82ae920ceb5d544207fb0924ece48c8eadabe0e2d7e8ea8f7778c05",
+        "service_observed_receive_cpus": [
+          9
+        ],
+        "mss": 1448,
+        "response_bytes": 360160,
+        "response_sha256": "6b4ba63f945012ba9ff036084e31056258af60179468a82404762fc1e30e8596",
+        "service_task_runtime_ms": 4.368,
+        "service_timeslices": 128,
+        "private_tap_poll": [
+          {
+            "count": 184,
+            "cpu": 9,
+            "kind": "polls",
+            "task": "private NAPI"
+          },
+          {
+            "count": 185,
+            "cpu": 9,
+            "kind": "work",
+            "task": "private NAPI"
+          }
+        ],
+        "task_scoped_net_rx_entries": [
+          {
+            "count": 3,
+            "cpu": 15,
+            "kind": "NET_RX",
+            "task": "injector"
+          }
+        ],
+        "napi_task_runtime_ms": 2.276,
+        "napi_task_timeslices": 131,
+        "napi_voluntary_switches": 131
+      }
+    }
+  },
+  "source_urls": {
+    "ordinary_versus_threaded_napi": "https://github.com/torvalds/linux/blob/v6.8/net/core/dev.c#L4444",
+    "threaded_napi_loop": "https://github.com/torvalds/linux/blob/v6.8/net/core/dev.c#L6704",
+    "scheduler_task_clock_irq_accounting": "https://github.com/torvalds/linux/blob/v6.8/kernel/sched/core.c#L695",
+    "cpu_cgroup_accounting": "https://github.com/torvalds/linux/blob/v6.8/kernel/sched/fair.c#L1106",
+    "softirq_per_cpu_and_task_accounting": "https://github.com/torvalds/linux/blob/v6.8/kernel/sched/cputime.c#L168",
+    "tun_receive_queue_and_gro": "https://github.com/torvalds/linux/blob/v6.8/drivers/net/tun.c#L226",
+    "tun_write_arbitrary_frame_schedule": "https://github.com/torvalds/linux/blob/v6.8/drivers/net/tun.c#L1987",
+    "tun_character_write_more_false": "https://github.com/torvalds/linux/blob/v6.8/drivers/net/tun.c#L2054",
+    "virtio_queue_callback": "https://github.com/torvalds/linux/blob/v6.8/drivers/net/virtio_net.c#L2027",
+    "virtio_budgeted_poll": "https://github.com/torvalds/linux/blob/v6.8/drivers/net/virtio_net.c#L2191"
+  }
+}

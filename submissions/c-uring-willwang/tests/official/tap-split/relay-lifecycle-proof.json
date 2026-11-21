@@ -1,0 +1,238 @@
+{
+  "source": "Existing /proc/<tid>/schedstat samples for the four pinned, busy-polling external switch workers. No changes to the organizer scorer.",
+  "scoring_elf_sha256": "54935ba0c1222b0f2a1267e051c84c7d6c07bfbf1be070121be541e28e58c4f1",
+  "scoring_relay_c_sha256": "11c949f7105382c8bf06f7d974fe68371f178f2d8b9e959a8f662360ab781236",
+  "scoring_router_assess_py_sha256": "c68870d2cca273d86ba61c3414918dbd5afa1755ff33b1d1019d500d22afc37c",
+  "reproduction_elf_sha256": "0444da76098fba2d7cc3c664a2f3e8bf296d597cb9c3e633eaea5776f86ea8c4",
+  "reproduction_relay_c_sha256": "59577787cb38395855139caf38e9712a44719aaf65661da8fc7a02aae8948e64",
+  "reproduction_router_assess_py_sha256": "467dedd76b453664cf9c45e22013059ebe416128eb356052fb266e71dc4dfd9a",
+  "compiler": "cc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0",
+  "build_command_from_relay_c_directory": "cc -O3 -g -Wall -Wextra -Werror -std=gnu11 -pthread -ffile-prefix-map=\"$PWD\"=. relay.c -o relay",
+  "independent_clean_rebuild_sha256": [
+    "0444da76098fba2d7cc3c664a2f3e8bf296d597cb9c3e633eaea5776f86ea8c4",
+    "0444da76098fba2d7cc3c664a2f3e8bf296d597cb9c3e633eaea5776f86ea8c4"
+  ],
+  "lifecycle": {
+    "real_launcher": "ordinary Linux user, sudo -n taskset, private stdin=PIPE, start_new_session=True, two distinct down TAPs, polling on CPU9, detached sudo monitor and relay. Both names were deleted after the four cases.",
+    "records": [
+      {
+        "stage": "before-go",
+        "owner_signal": "SIGKILL",
+        "observed_by": "pidfd POLLIN",
+        "exit_ms": 25.791,
+        "uid": 1000,
+        "worker_loops": 0,
+        "frames_forwarded": 0
+      },
+      {
+        "stage": "after-go",
+        "owner_signal": "SIGKILL",
+        "observed_by": "pidfd POLLIN",
+        "exit_ms": 24.091,
+        "uid": 1000,
+        "worker_loops": 476601,
+        "frames_forwarded": 0
+      },
+      {
+        "stage": "before-go",
+        "owner_signal": "SIGKILL",
+        "observed_by": "pidfd POLLIN",
+        "exit_ms": 18.162,
+        "uid": 1000,
+        "worker_loops": 0,
+        "frames_forwarded": 0
+      },
+      {
+        "stage": "after-go",
+        "owner_signal": "SIGKILL",
+        "observed_by": "pidfd POLLIN",
+        "exit_ms": 22.679,
+        "uid": 1000,
+        "worker_loops": 455654,
+        "frames_forwarded": 0
+      }
+    ]
+  },
+  "exposure_and_repair": {
+    "stale_trial": "split-mojo-280-h1",
+    "port_scope": "the same external CPUs 2, 5, 8, 14, old uniquely named private TAP file descriptors",
+    "stale_relay_pid": 1916835,
+    "stale_sudo_monitor_pid": 1916834,
+    "stopped_utc": "2026-11-12T13:20:30Z",
+    "guarded_before": {
+      "end_s": 208.6,
+      "four_worker_runnable_wait_pct_range": [
+        51.25,
+        51.49
+      ]
+    },
+    "guarded_after": {
+      "end_s": 216.8,
+      "four_worker_runnable_wait_pct_range": [
+        0.0,
+        0.12
+      ]
+    }
+  },
+  "worker_cpu_delivery": {
+    "ring4096-kensac-280-h1": {
+      "hold_seconds_sampled": 295.972,
+      "hold_workers": {
+        "14": {
+          "running_pct": 99.905,
+          "runnable_wait_pct": 0.092,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "2": {
+          "running_pct": 99.902,
+          "runnable_wait_pct": 0.095,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "5": {
+          "running_pct": 99.917,
+          "runnable_wait_pct": 0.081,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "8": {
+          "running_pct": 99.959,
+          "runnable_wait_pct": 0.038,
+          "consecutive_20pct_wait_s": 0.0
+        }
+      },
+      "dedicated_relay_scheduler_flags": 0,
+      "stock_p99_ms": 3540.316
+    },
+    "ring4096-mojo-280-h1": {
+      "hold_seconds_sampled": 296.422,
+      "hold_workers": {
+        "14": {
+          "running_pct": 99.923,
+          "runnable_wait_pct": 0.075,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "2": {
+          "running_pct": 99.982,
+          "runnable_wait_pct": 0.016,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "5": {
+          "running_pct": 99.983,
+          "runnable_wait_pct": 0.015,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "8": {
+          "running_pct": 99.984,
+          "runnable_wait_pct": 0.013,
+          "consecutive_20pct_wait_s": 0.0
+        }
+      },
+      "dedicated_relay_scheduler_flags": 0,
+      "stock_p99_ms": 416.818
+    },
+    "ring4096-pavlyhalim-280-h1": {
+      "hold_seconds_sampled": 296.609,
+      "hold_workers": {
+        "14": {
+          "running_pct": 43.175,
+          "runnable_wait_pct": 56.823,
+          "consecutive_20pct_wait_s": 278.012
+        },
+        "2": {
+          "running_pct": 40.887,
+          "runnable_wait_pct": 59.112,
+          "consecutive_20pct_wait_s": 296.609
+        },
+        "5": {
+          "running_pct": 43.671,
+          "runnable_wait_pct": 56.325,
+          "consecutive_20pct_wait_s": 278.012
+        },
+        "8": {
+          "running_pct": 43.002,
+          "runnable_wait_pct": 56.998,
+          "consecutive_20pct_wait_s": 296.609
+        }
+      },
+      "dedicated_relay_scheduler_flags": 8,
+      "stock_p99_ms": 8248.192
+    },
+    "ring4096-guarded-300-h1": {
+      "hold_seconds_sampled": 294.183,
+      "hold_workers": {
+        "14": {
+          "running_pct": 78.875,
+          "runnable_wait_pct": 21.122,
+          "consecutive_20pct_wait_s": 114.374
+        },
+        "2": {
+          "running_pct": 78.861,
+          "runnable_wait_pct": 21.137,
+          "consecutive_20pct_wait_s": 114.374
+        },
+        "5": {
+          "running_pct": 78.896,
+          "runnable_wait_pct": 21.102,
+          "consecutive_20pct_wait_s": 114.374
+        },
+        "8": {
+          "running_pct": 78.863,
+          "runnable_wait_pct": 21.135,
+          "consecutive_20pct_wait_s": 114.374
+        }
+      },
+      "dedicated_relay_scheduler_flags": 8,
+      "stock_p99_ms": 1417.345
+    },
+    "ring4096-swift-280-h1": {
+      "hold_seconds_sampled": 296.535,
+      "hold_workers": {
+        "14": {
+          "running_pct": 99.934,
+          "runnable_wait_pct": 0.064,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "2": {
+          "running_pct": 99.818,
+          "runnable_wait_pct": 0.179,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "5": {
+          "running_pct": 99.936,
+          "runnable_wait_pct": 0.061,
+          "consecutive_20pct_wait_s": 0.0
+        },
+        "8": {
+          "running_pct": 99.898,
+          "runnable_wait_pct": 0.099,
+          "consecutive_20pct_wait_s": 0.0
+        }
+      },
+      "dedicated_relay_scheduler_flags": 0,
+      "stock_p99_ms": 14543.772
+    }
+  },
+  "replay": {
+    "complete_trials": 17,
+    "trials_with_new_scheduler_flags": [
+      "ring4096-guarded-300-h1",
+      "ring4096-pavlyhalim-280-h1"
+    ],
+    "historical_without_task_clocks": [
+      "split-guarded-300-h1",
+      "split-guarded-350-p1",
+      "split-swift-280-h1"
+    ],
+    "unchanged_stock_fields": [
+      "stock_pass",
+      "reqs",
+      "req_per_s",
+      "p95_ms",
+      "p99_ms",
+      "fails",
+      "err_pct",
+      "users_active",
+      "simultaneous_connections"
+    ],
+    "unchanged_qualification": true
+  }
+}

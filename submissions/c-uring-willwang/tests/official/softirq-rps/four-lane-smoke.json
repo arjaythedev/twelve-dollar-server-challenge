@@ -1,0 +1,127 @@
+{
+  "all_tx_ring_lengths": [
+    4096,
+    4096,
+    4096,
+    4096,
+    4096
+  ],
+  "byte_checked_exchanges": 128,
+  "bytes_all_lanes": 345184,
+  "bytes_per_lane": [
+    86296
+  ],
+  "lanes": 4,
+  "mss_values": [
+    1448
+  ],
+  "observed_napi_ids": [
+    0
+  ],
+  "observed_service_cpus": [
+    10
+  ],
+  "preflight_forwarding": {
+    "bad_frame": 0,
+    "gso": 52,
+    "partial_checksum": 413,
+    "queue_overflow": 0
+  },
+  "private_evidence": {
+    "facts": {
+      "private_queue_reads": {
+        "hold": 6,
+        "ramp": 7
+      },
+      "service_cpu_receive_backlog": {
+        "hold": {
+          "dropped": 0,
+          "processed": 19844,
+          "time_squeeze": 0
+        },
+        "ramp": {
+          "dropped": 0,
+          "processed": 20278,
+          "time_squeeze": 0
+        }
+      },
+      "verified_tcp_probes": {
+        "guest_cpu": 10,
+        "lanes": 4,
+        "per_lane_byte_checks": 32,
+        "per_lane_short_socket_checks": 4
+      }
+    },
+    "infrastructure_flags": [],
+    "target_network_flags": []
+  },
+  "raw_stock": {
+    "fails": 0,
+    "infrastructure_flags": [],
+    "p95_ms": 0.5574848104805618,
+    "p99_ms": 1.7506165257495587,
+    "qualified": true,
+    "reqs": 17392,
+    "simultaneous_connections": {
+      "all_expected_full": true,
+      "expected_5s_ticks": 8,
+      "first_observed_s": 65,
+      "full_ticks": 8,
+      "last_observed_s": 100,
+      "max_established": 2048,
+      "min_established": 2048,
+      "min_users": 2048,
+      "synchronized_ticks": 8
+    },
+    "stock_pass": true,
+    "target_network_flags": [],
+    "users": 2048
+  },
+  "run": "rps4096-stock-quiet-2k-s1",
+  "runtime_manifest_sha256": "17fa63d51f8b4de57661294ded83e6264a64ad70075fbefe142352aea8dc1326",
+  "scope": "2,048-user stock functional/ownership smoke on the four-client split TAP; not an official capacity result",
+  "service_receive_after_wire": {
+    "device": "tfc65aa3",
+    "ifindex": 2,
+    "namespace_inode": 4026533522,
+    "napi": [],
+    "rps_flow_cnt": 0,
+    "rx_rps_cpus": [
+      "0400"
+    ],
+    "socket_napi_id": 0,
+    "threaded": "0"
+  },
+  "sha256_per_lane": [
+    "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+  ],
+  "shape_sha256": "ceddca364126974bb3720f7a43c1ab31db26b4ca54bfe209bc7c835ac952efa3",
+  "short_check_count": 16,
+  "summary_sha256_at_capture": "73f8c016b00fd3b34278e68569d540620c4898829f3ea8a2c01a5393a5960120",
+  "tx_handoffs": [
+    {
+      "consumer_cpu": 2,
+      "destination": 1,
+      "producer_cpu": 14,
+      "source": 0
+    },
+    {
+      "consumer_cpu": 5,
+      "destination": 2,
+      "producer_cpu": 14,
+      "source": 0
+    },
+    {
+      "consumer_cpu": 8,
+      "destination": 3,
+      "producer_cpu": 14,
+      "source": 0
+    },
+    {
+      "consumer_cpu": 5,
+      "destination": 4,
+      "producer_cpu": 14,
+      "source": 0
+    }
+  ]
+}

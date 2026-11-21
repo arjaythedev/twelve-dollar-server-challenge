@@ -1,0 +1,646 @@
+{
+  "schema": 1,
+  "guest_mib": 1967,
+  "fitted_bytes_per_passive_socket": 2376,
+  "kernel": "6.8.0-147-generic",
+  "no_scored_guest_memavailable_series": true,
+  "separate_unscored_process_meminfo_kib": {
+    "MemTotal": 51393584,
+    "MemAvailable": 39381528
+  },
+  "mojo_revision": "a9df151ce2210f753e133126cc26b293f34dc7a9",
+  "common_source_sha256": {
+    "competitors/mojo-build.json": "bcbd14114aeae0349458c290c4c3164763d16bce7d80c0f19e97b2de94ce650b",
+    "competitors/mojo/src/server.mojo": "b3802cb65791c9a8ed3f7dbf2b925358a1aa9873b1bd365a2218e886e891b911",
+    "competitors/mojo/src/shim.c": "03af507f1ba14169e8a6d33053084522ce7252254f09393d967d4875ea051058",
+    "tcp-pressure/linux-6.8/show_mem.c": "29c0c6f784bf30c666e0f8416e0e4c36ca65bdcbbd4ecccc0218b40bf24aee18",
+    "tcp-pressure/linux-6.8/tcp.c": "9860509be9d7025ce3348c4208ceb9c0516196c0add3346965a15dc3bae434c7",
+    "ack/tcp_minisocks.c": "19545c05fe3cc108f43eb9351f6e6b46cd659cd375eadff53d7335d7565bd67e",
+    "tap-memory/calibration.json": "4702f5178a53aa20a808c5c53a86e175124c2ae3491f6ecdd2afc449c7f14458",
+    "harness/mojo-memavailable.json": "888786abf47c968ff169298d91d3ca8f0b51d612652d5f9b8e0b380f6ec9a517"
+  },
+  "runs": [
+    {
+      "tag": "ring4096-mojo-280-h1",
+      "cpu9_component_lock_covers_score": false,
+      "host_prestart_memavailable_kib": 44245400,
+      "host_prestart_memtotal_kib": 51393584,
+      "log_marker_counts": {
+        "MemAvailable low; accepting paused": 0,
+        "all rings full; accepting paused": 0,
+        "ring open failed; accepting paused": 0
+      },
+      "stock": {
+        "ramp_s": 84,
+        "hold_s": 300,
+        "pass_stock": true,
+        "eligible": true,
+        "p95_ms": 148.08931727469755,
+        "p99_ms": 416.8181333300486,
+        "reqs": 10240476,
+        "fails": 0,
+        "dials": 280000,
+        "full_vu_ticks": 59,
+        "expected_vu_ticks": 59,
+        "oom_kill_at_cutoff": 0,
+        "infrastructure_flags": []
+      },
+      "max_telemetry_gap_s": 2.2676,
+      "phases": {
+        "ramp": {
+          "n": 41,
+          "min_mib_and_time_s": {
+            "raw": [
+              796.53,
+              82.06005
+            ],
+            "raw_plus_clean_lo": [
+              852.011,
+              82.06005
+            ],
+            "raw_plus_clean_hi": [
+              852.214,
+              82.06005
+            ],
+            "raw_plus_half_lru_slab": [
+              971.9,
+              82.06005
+            ],
+            "raw_plus_full_lru_slab": [
+              1147.269,
+              82.06005
+            ]
+          },
+          "samples_raw_below_160": 0,
+          "samples_raw_below_256": 0,
+          "min_raw_snapshot": {
+            "elapsed_s": 82.06005,
+            "established": 265332,
+            "current_mib": 569.246,
+            "missing_mib": 601.224,
+            "file_mib": 87.562,
+            "active_file_mib": 0.0,
+            "inactive_file_mib": 87.363,
+            "dirty_mib": 31.879,
+            "writeback_mib": 0.004,
+            "shmem_mib": 0.0,
+            "anon_mib": 74.637,
+            "kernel_mib": 406.199,
+            "sock_mib": 1.062,
+            "slab_reclaimable_mib": 263.376,
+            "slab_unreclaimable_mib": 138.75,
+            "lru_mib": 87.363,
+            "clean_lo_mib": 55.48,
+            "clean_hi_mib": 55.684,
+            "raw_mib": 796.53,
+            "raw_plus_clean_lo_mib": 852.011,
+            "raw_plus_clean_hi_mib": 852.214,
+            "raw_plus_half_lru_slab_mib": 971.9,
+            "raw_plus_full_lru_slab_mib": 1147.269
+          }
+        },
+        "hold": {
+          "n": 147,
+          "min_mib_and_time_s": {
+            "raw": [
+              679.317,
+              378.30687
+            ],
+            "raw_plus_clean_lo": [
+              747.246,
+              88.21148
+            ],
+            "raw_plus_clean_hi": [
+              747.637,
+              88.21148
+            ],
+            "raw_plus_half_lru_slab": [
+              881.344,
+              378.30687
+            ],
+            "raw_plus_full_lru_slab": [
+              1075.359,
+              90.21421
+            ]
+          },
+          "samples_raw_below_160": 0,
+          "samples_raw_below_256": 0,
+          "min_raw_snapshot": {
+            "elapsed_s": 378.30687,
+            "established": 280000,
+            "current_mib": 653.223,
+            "missing_mib": 634.46,
+            "file_mib": 122.805,
+            "active_file_mib": 0.0,
+            "inactive_file_mib": 122.605,
+            "dirty_mib": 7.383,
+            "writeback_mib": 0.0,
+            "shmem_mib": 0.0,
+            "anon_mib": 93.156,
+            "kernel_mib": 434.473,
+            "sock_mib": 2.578,
+            "slab_reclaimable_mib": 281.449,
+            "slab_unreclaimable_mib": 148.915,
+            "lru_mib": 122.605,
+            "clean_lo_mib": 115.223,
+            "clean_hi_mib": 115.422,
+            "raw_mib": 679.317,
+            "raw_plus_clean_lo_mib": 794.54,
+            "raw_plus_clean_hi_mib": 794.739,
+            "raw_plus_half_lru_slab_mib": 881.344,
+            "raw_plus_full_lru_slab_mib": 1083.371
+          }
+        }
+      },
+      "entire_score_model_floor": {
+        "postcutoff_hwm_delay_s": 0.2013,
+        "leaf_high_water_bytes": 719192064,
+        "lifetime_private_server_passive_clones": 280009,
+        "lifetime_private_server_active_opens": 0,
+        "lifetime_syncookies_sent": 0,
+        "raw_floor_mib": 646.644
+      },
+      "shape_sha": {
+        "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+        "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+        "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+        "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439"
+      },
+      "raw_input_sha256": {
+        "server.log": "aca5145391dba118dadcbed73a147304418c277046a6e097c5113c3f582a91c7",
+        "shape.json": "a34a123c01d4555bd7d63f4d49559c73e8135e58f29b3b5ffab19c9debc206c3",
+        "summary.json": "7174cf2c7ec22ad4269a843cf8026e27951975c88ccdb4ae9da126092f2a1ecd",
+        "telemetry.jsonl": "823641f1343c21ea6832a05afed3cb40213378ffda8c7c331711b0e62ac7be5b",
+        "timing.json": "6ef841b7f91d6417de1e27d9e4cbcbfb711e591c47c20f91eb6126b9de8f4cac",
+        "net-trd615ba2s.txt": "3675785b34680fb9d3cbc0867f87d665980fe4396e7184c2909f9839935f999d"
+      }
+    },
+    {
+      "tag": "ring4096-mojo-290-h1",
+      "cpu9_component_lock_covers_score": true,
+      "host_prestart_memavailable_kib": 47455940,
+      "host_prestart_memtotal_kib": 51393584,
+      "log_marker_counts": {
+        "MemAvailable low; accepting paused": 0,
+        "all rings full; accepting paused": 0,
+        "ring open failed; accepting paused": 0
+      },
+      "stock": {
+        "ramp_s": 87,
+        "hold_s": 300,
+        "pass_stock": false,
+        "eligible": false,
+        "p95_ms": 811.855332810203,
+        "p99_ms": 1746.724569228494,
+        "reqs": 10467473,
+        "fails": 0,
+        "dials": 290000,
+        "full_vu_ticks": 57,
+        "expected_vu_ticks": 59,
+        "oom_kill_at_cutoff": 0,
+        "infrastructure_flags": []
+      },
+      "max_telemetry_gap_s": 2.2445,
+      "phases": {
+        "ramp": {
+          "n": 43,
+          "min_mib_and_time_s": {
+            "raw": [
+              728.836,
+              85.83934
+            ],
+            "raw_plus_clean_lo": [
+              812.508,
+              85.83934
+            ],
+            "raw_plus_clean_hi": [
+              812.508,
+              85.83934
+            ],
+            "raw_plus_half_lru_slab": [
+              919.88,
+              85.83934
+            ],
+            "raw_plus_full_lru_slab": [
+              1110.925,
+              85.83934
+            ]
+          },
+          "samples_raw_below_160": 0,
+          "samples_raw_below_256": 0,
+          "min_raw_snapshot": {
+            "elapsed_s": 85.83934,
+            "established": 276637,
+            "current_mib": 611.324,
+            "missing_mib": 626.84,
+            "file_mib": 108.438,
+            "active_file_mib": 0.0,
+            "inactive_file_mib": 108.438,
+            "dirty_mib": 24.766,
+            "writeback_mib": 0.0,
+            "shmem_mib": 0.0,
+            "anon_mib": 80.02,
+            "kernel_mib": 421.57,
+            "sock_mib": 1.051,
+            "slab_reclaimable_mib": 273.651,
+            "slab_unreclaimable_mib": 143.828,
+            "lru_mib": 108.438,
+            "clean_lo_mib": 83.672,
+            "clean_hi_mib": 83.672,
+            "raw_mib": 728.836,
+            "raw_plus_clean_lo_mib": 812.508,
+            "raw_plus_clean_hi_mib": 812.508,
+            "raw_plus_half_lru_slab_mib": 919.88,
+            "raw_plus_full_lru_slab_mib": 1110.925
+          }
+        },
+        "hold": {
+          "n": 147,
+          "min_mib_and_time_s": {
+            "raw": [
+              389.701,
+              326.91352
+            ],
+            "raw_plus_clean_lo": [
+              588.404,
+              349.5076
+            ],
+            "raw_plus_clean_hi": [
+              588.435,
+              349.5076
+            ],
+            "raw_plus_half_lru_slab": [
+              694.409,
+              347.26306
+            ],
+            "raw_plus_full_lru_slab": [
+              947.568,
+              347.26306
+            ]
+          },
+          "samples_raw_below_160": 0,
+          "samples_raw_below_256": 0,
+          "min_raw_snapshot": {
+            "elapsed_s": 326.91352,
+            "established": 290000,
+            "current_mib": 920.18,
+            "missing_mib": 657.12,
+            "file_mib": 319.57,
+            "active_file_mib": 0.0,
+            "inactive_file_mib": 319.539,
+            "dirty_mib": 71.852,
+            "writeback_mib": 0.0,
+            "shmem_mib": 0.0,
+            "anon_mib": 96.527,
+            "kernel_mib": 455.781,
+            "sock_mib": 47.848,
+            "slab_reclaimable_mib": 297.211,
+            "slab_unreclaimable_mib": 154.439,
+            "lru_mib": 319.539,
+            "clean_lo_mib": 247.688,
+            "clean_hi_mib": 247.719,
+            "raw_mib": 389.701,
+            "raw_plus_clean_lo_mib": 637.388,
+            "raw_plus_clean_hi_mib": 637.419,
+            "raw_plus_half_lru_slab_mib": 698.075,
+            "raw_plus_full_lru_slab_mib": 1006.45
+          }
+        }
+      },
+      "entire_score_model_floor": {
+        "postcutoff_hwm_delay_s": 0.20105,
+        "leaf_high_water_bytes": 1009311744,
+        "lifetime_private_server_passive_clones": 290009,
+        "lifetime_private_server_active_opens": 0,
+        "lifetime_syncookies_sent": 0,
+        "raw_floor_mib": 347.305
+      },
+      "shape_sha": {
+        "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+        "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+        "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+        "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439"
+      },
+      "raw_input_sha256": {
+        "server.log": "fb69532c302a7a610a2dae523059f4d083116ef8744a9ffe38de8bebe0c3cb31",
+        "shape.json": "742cc318d3200c03b7b638dcd60db2630da5f02195e37e2fce6f728c806179b5",
+        "summary.json": "ddc9f476e6bccc28819c40ee1c10aa1326533e5061bc66418e5efa85e2c8e0be",
+        "telemetry.jsonl": "9c74f6e9857c4e859b0c487e84ebd5e1c3dabd25fe25720f2a48e85ee9f81c80",
+        "timing.json": "2945f22965e8eef22841718214afe4d8cfae6fd9dd62bcd7e3495b7be1812ae8",
+        "net-trd16614es.txt": "77d0b7fc359ee36018a71dbd0e64544c06de40f48859311465625fe54cce5b30",
+        "component-test-lock.json": "24ccdb3366d34624d70b3def583d31155989c968417ae0136a300a78a9bb2689"
+      }
+    },
+    {
+      "tag": "ring4096-mojo-quiet-300-h2",
+      "cpu9_component_lock_covers_score": true,
+      "host_prestart_memavailable_kib": 47108528,
+      "host_prestart_memtotal_kib": 51393584,
+      "log_marker_counts": {
+        "MemAvailable low; accepting paused": 0,
+        "all rings full; accepting paused": 0,
+        "ring open failed; accepting paused": 0
+      },
+      "stock": {
+        "ramp_s": 90,
+        "hold_s": 300,
+        "pass_stock": false,
+        "eligible": false,
+        "p95_ms": 811.855332810203,
+        "p99_ms": 1403.311892866882,
+        "reqs": 10800960,
+        "fails": 0,
+        "dials": 302650,
+        "full_vu_ticks": 52,
+        "expected_vu_ticks": 59,
+        "oom_kill_at_cutoff": 0,
+        "infrastructure_flags": []
+      },
+      "max_telemetry_gap_s": 2.6996,
+      "phases": {
+        "ramp": {
+          "n": 44,
+          "min_mib_and_time_s": {
+            "raw": [
+              667.151,
+              88.64847
+            ],
+            "raw_plus_clean_lo": [
+              760.644,
+              88.64847
+            ],
+            "raw_plus_clean_hi": [
+              768.218,
+              88.64847
+            ],
+            "raw_plus_half_lru_slab": [
+              875.514,
+              88.64847
+            ],
+            "raw_plus_full_lru_slab": [
+              1083.877,
+              88.64847
+            ]
+          },
+          "samples_raw_below_160": 0,
+          "samples_raw_below_256": 0,
+          "min_raw_snapshot": {
+            "elapsed_s": 88.64847,
+            "established": 285936,
+            "current_mib": 651.938,
+            "missing_mib": 647.911,
+            "file_mib": 133.312,
+            "active_file_mib": 0.008,
+            "inactive_file_mib": 133.105,
+            "dirty_mib": 32.246,
+            "writeback_mib": 7.375,
+            "shmem_mib": 0.0,
+            "anon_mib": 80.895,
+            "kernel_mib": 436.223,
+            "sock_mib": 2.227,
+            "slab_reclaimable_mib": 283.612,
+            "slab_unreclaimable_mib": 148.498,
+            "lru_mib": 133.113,
+            "clean_lo_mib": 93.492,
+            "clean_hi_mib": 101.066,
+            "raw_mib": 667.151,
+            "raw_plus_clean_lo_mib": 760.644,
+            "raw_plus_clean_hi_mib": 768.218,
+            "raw_plus_half_lru_slab_mib": 875.514,
+            "raw_plus_full_lru_slab_mib": 1083.877
+          }
+        },
+        "hold": {
+          "n": 147,
+          "min_mib_and_time_s": {
+            "raw": [
+              361.674,
+              388.39598
+            ],
+            "raw_plus_clean_lo": [
+              603.99,
+              237.47681
+            ],
+            "raw_plus_clean_hi": [
+              604.244,
+              237.47681
+            ],
+            "raw_plus_half_lru_slab": [
+              687.224,
+              388.39598
+            ],
+            "raw_plus_full_lru_slab": [
+              956.458,
+              337.47156
+            ]
+          },
+          "samples_raw_below_160": 0,
+          "samples_raw_below_256": 0,
+          "min_raw_snapshot": {
+            "elapsed_s": 388.39598,
+            "established": 300000,
+            "current_mib": 925.547,
+            "missing_mib": 679.779,
+            "file_mib": 343.527,
+            "active_file_mib": 0.008,
+            "inactive_file_mib": 343.266,
+            "dirty_mib": 52.434,
+            "writeback_mib": 0.0,
+            "shmem_mib": 0.0,
+            "anon_mib": 98.43,
+            "kernel_mib": 471.715,
+            "sock_mib": 11.477,
+            "slab_reclaimable_mib": 307.827,
+            "slab_unreclaimable_mib": 159.745,
+            "lru_mib": 343.273,
+            "clean_lo_mib": 290.84,
+            "clean_hi_mib": 291.094,
+            "raw_mib": 361.674,
+            "raw_plus_clean_lo_mib": 652.514,
+            "raw_plus_clean_hi_mib": 652.768,
+            "raw_plus_half_lru_slab_mib": 687.224,
+            "raw_plus_full_lru_slab_mib": 1012.774
+          }
+        }
+      },
+      "entire_score_model_floor": {
+        "postcutoff_hwm_delay_s": 0.20196,
+        "leaf_high_water_bytes": 998985728,
+        "lifetime_private_server_passive_clones": 300009,
+        "lifetime_private_server_active_opens": 0,
+        "lifetime_syncookies_sent": 0,
+        "raw_floor_mib": 334.494
+      },
+      "shape_sha": {
+        "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+        "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+        "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+        "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439"
+      },
+      "raw_input_sha256": {
+        "server.log": "16a06bf389a6723e267833b165155678d74d2f3fdec6c7c2ee837bb573fec1e6",
+        "shape.json": "cbfac030053a8f0a2c55df89ac26ce434bbfb9ad71c836a1f396f2085de9b59a",
+        "summary.json": "e7862ba0d744077b151ae0d025a9f841ea58c30ec275e83b6437a1aee5c553f5",
+        "telemetry.jsonl": "fec4c4db83f2fe904b1c1d0c7db1539c065dbaf9511f1221ab5070fc418ddbd2",
+        "timing.json": "a13f16c218174271cdf7908a5d13efcee20ba91fada08b27689602b2a44571e3",
+        "net-tre6efec2s.txt": "13f9efcfe96021354246ae7e3e256e7079fe06e116020c8c9c9e5fde5ef3dc91",
+        "component-test-lock.json": "3665a487d18e7b8f0b27eaa6decc50f3d44e049ed7df3550f940dbfc41ec78cd"
+      }
+    },
+    {
+      "tag": "ring4096-mojo-300-h1",
+      "cpu9_component_lock_covers_score": false,
+      "host_prestart_memavailable_kib": 47270012,
+      "host_prestart_memtotal_kib": 51393584,
+      "log_marker_counts": {
+        "MemAvailable low; accepting paused": 0,
+        "all rings full; accepting paused": 0,
+        "ring open failed; accepting paused": 0
+      },
+      "stock": {
+        "ramp_s": 90,
+        "hold_s": 300,
+        "pass_stock": false,
+        "eligible": false,
+        "p95_ms": 10473.014622583376,
+        "p99_ms": 20398.75929584611,
+        "reqs": 8963695,
+        "fails": 76,
+        "dials": 300076,
+        "full_vu_ticks": 48,
+        "expected_vu_ticks": 59,
+        "oom_kill_at_cutoff": 0,
+        "infrastructure_flags": []
+      },
+      "max_telemetry_gap_s": 2.2657,
+      "phases": {
+        "ramp": {
+          "n": 44,
+          "min_mib_and_time_s": {
+            "raw": [
+              728.513,
+              88.12505
+            ],
+            "raw_plus_clean_lo": [
+              776.72,
+              88.12505
+            ],
+            "raw_plus_clean_hi": [
+              778.282,
+              88.12505
+            ],
+            "raw_plus_half_lru_slab": [
+              907.479,
+              88.12505
+            ],
+            "raw_plus_full_lru_slab": [
+              1086.445,
+              88.12505
+            ]
+          },
+          "samples_raw_below_160": 0,
+          "samples_raw_below_256": 0,
+          "min_raw_snapshot": {
+            "elapsed_s": 88.12505,
+            "established": 285430,
+            "current_mib": 591.723,
+            "missing_mib": 646.764,
+            "file_mib": 75.422,
+            "active_file_mib": 0.0,
+            "inactive_file_mib": 75.422,
+            "dirty_mib": 25.652,
+            "writeback_mib": 1.562,
+            "shmem_mib": 0.0,
+            "anon_mib": 80.41,
+            "kernel_mib": 435.391,
+            "sock_mib": 1.082,
+            "slab_reclaimable_mib": 282.51,
+            "slab_unreclaimable_mib": 148.773,
+            "lru_mib": 75.422,
+            "clean_lo_mib": 48.207,
+            "clean_hi_mib": 49.77,
+            "raw_mib": 728.513,
+            "raw_plus_clean_lo_mib": 776.72,
+            "raw_plus_clean_hi_mib": 778.282,
+            "raw_plus_half_lru_slab_mib": 907.479,
+            "raw_plus_full_lru_slab_mib": 1086.445
+          }
+        },
+        "hold": {
+          "n": 147,
+          "min_mib_and_time_s": {
+            "raw": [
+              -418.877,
+              231.18729
+            ],
+            "raw_plus_clean_lo": [
+              281.014,
+              243.5526
+            ],
+            "raw_plus_clean_hi": [
+              281.018,
+              243.5526
+            ],
+            "raw_plus_half_lru_slab": [
+              156.731,
+              231.18729
+            ],
+            "raw_plus_full_lru_slab": [
+              627.216,
+              235.37463
+            ]
+          },
+          "samples_raw_below_160": 82,
+          "samples_raw_below_256": 98,
+          "min_raw_snapshot": {
+            "elapsed_s": 231.18729,
+            "established": 300000,
+            "current_mib": 1706.098,
+            "missing_mib": 679.779,
+            "file_mib": 828.996,
+            "active_file_mib": 0.0,
+            "inactive_file_mib": 828.996,
+            "dirty_mib": 102.418,
+            "writeback_mib": 0.0,
+            "shmem_mib": 0.0,
+            "anon_mib": 102.754,
+            "kernel_mib": 488.992,
+            "sock_mib": 285.477,
+            "slab_reclaimable_mib": 322.22,
+            "slab_unreclaimable_mib": 162.62,
+            "lru_mib": 828.996,
+            "clean_lo_mib": 726.578,
+            "clean_hi_mib": 726.578,
+            "raw_mib": -418.877,
+            "raw_plus_clean_lo_mib": 307.701,
+            "raw_plus_clean_hi_mib": 307.701,
+            "raw_plus_half_lru_slab_mib": 156.731,
+            "raw_plus_full_lru_slab_mib": 732.339
+          }
+        }
+      },
+      "entire_score_model_floor": {
+        "postcutoff_hwm_delay_s": 0.20122,
+        "leaf_high_water_bytes": 1848856576,
+        "lifetime_private_server_passive_clones": 300085,
+        "lifetime_private_server_active_opens": 0,
+        "lifetime_syncookies_sent": 0,
+        "raw_floor_mib": -476.179
+      },
+      "shape_sha": {
+        "server_sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+        "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+        "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+        "tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439"
+      },
+      "raw_input_sha256": {
+        "server.log": "6992287639d49e4fcea5d4e4b7f6f567b25a8cb65e18cc3bb4981f130ab44e84",
+        "shape.json": "0fa98650dafcf1f7ba6fda88ef3803f2dadc3ee75d8b06445972aa53cf57b204",
+        "summary.json": "855718f52b68909149eb28edb6f5f94bb83af3cb9738df6f25b903a3608f52a0",
+        "telemetry.jsonl": "6a1d103c8aa4774eb82af72241176f0a8c434b4a5016b14f0aefbd18b3c05e8e",
+        "timing.json": "1100ae149c255a093c18738c0423a38d2db85d17774e4b269a47c3912182ad8b",
+        "net-trf8b858fs.txt": "3268f0abafb4d7fa45b4a58594969b545c0b532b4ba56152230435b4672ca63a"
+      }
+    }
+  ]
+}

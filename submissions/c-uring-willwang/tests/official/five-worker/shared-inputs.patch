@@ -1,0 +1,141 @@
+--- a/router/assess.py
++++ b/router/assess.py
+@@ -111,54 +111,6 @@
+         "mean_softirq_pct": round(means["softirq"], 2),
+         "mean_steal_pct": round(means["steal"], 2),
+     }
+-
+-
+-def split_worker_schedule(samples, workers, start, hold_start, end):
+-    """Measure time each dedicated polling worker spent running and waiting to run."""
+-    result, reasons = {}, []
+-    complete = bool(workers)
+-    for stage, low, high in (("ramp", start, hold_start), ("hold", hold_start, end)):
+-        points = [s for s in samples if low <= s["unix"] < high]
+-        stage_rows = result[stage] = {}
+-        for worker in workers:
+-            cpu, tid = worker["cpu"], str(worker["tid"])
+-            elapsed = running = waiting = longest = streak = 0.0
+-            observed = 0
+-            switches = 0
+-            for left, right in zip(points, points[1:]):
+-                first = left.get("relay_worker_scheduling", {}).get(tid)
+-                last = right.get("relay_worker_scheduling", {}).get(tid)
+-                dt = right["unix"] - left["unix"]
+-                if not first or not last or dt <= 0:
+-                    streak = 0.0
+-                    continue
+-                run = last["run_ns"] - first["run_ns"]
+-                wait = last["runqueue_wait_ns"] - first["runqueue_wait_ns"]
+-                slices = last["timeslices"] - first["timeslices"]
+-                if min(run, wait, slices) < 0:
+-                    streak = 0.0
+-                    continue
+-                observed += 1
+-                elapsed += dt
+-                running += run
+-                waiting += wait
+-                switches += slices
+-                streak = streak + dt if wait >= 0.2 * dt * 1e9 else 0.0
+-                longest = max(longest, streak)
+-            enough = observed > 0 and observed == len(points) - 1
+-            complete = complete and enough
+-            stage_rows[str(cpu)] = {
+-                "tid": int(tid), "role": worker["role"],
+-                "observed_intervals": observed, "complete_samples": enough,
+-                "coverage_s": round(elapsed, 3), "timeslices": switches,
+-                "running_pct": round(running / elapsed / 1e7, 3) if elapsed else None,
+-                "runnable_wait_pct": round(waiting / elapsed / 1e7, 3) if elapsed else None,
+-                "consecutive_20pct_wait_s": round(longest, 3),
+-            }
+-            if longest >= 30:
+-                reasons.append(f"dedicated relay CPU {cpu} waited to run for at least 20% of each sampled "
+-                               f"interval for at least 30 consecutive seconds during {stage}")
+-    return result, reasons, complete
+
+
+ def polling_worker_headroom(samples, config, start, ramp, end):
+@@ -556,15 +508,6 @@
+             )
+             system["polling_worker_intervals"] = worker_health
+             placed = [s for s in relay_samples if s.get("relay_worker_scheduling")]
+-            scheduler_expected = relay_config.get("scheduler_observation", {}).get("external_relay_workers")
+-            if placed or scheduler_expected:
+-                delivery, contention, complete = split_worker_schedule(
+-                    relay_samples, relay_config["verified_workers"], start, start + ramp, end
+-                )
+-                system["external_worker_cpu_delivery"] = delivery
+-                reasons.extend(contention)
+-                if scheduler_expected:
+-                    worker_evidence = worker_evidence and complete
+             if len(placed) >= 2:
+                 earliest, latest = placed[0]["relay_worker_scheduling"], placed[-1]["relay_worker_scheduling"]
+                 system["external_worker_schedule_delta"] = {
+--- a/router/run.py
++++ b/router/run.py
+@@ -415,7 +415,7 @@
+
+
+ def main(network_setup=set_up, network_profile="four-router-lanes", network_sample=None, delay_us=48,
+-         service_properties=(), inspect_service=None):
++         service_properties=(), inspect_service=None, relay_cpus=ROUTER_CPUS):
+     p = argparse.ArgumentParser()
+     p.add_argument("--server", required=True, type=Path)
+     p.add_argument("--cwd", type=Path)
+@@ -433,7 +433,7 @@
+     p.add_argument("--app-cpu", type=int, default=APP_CPU)
+     p.add_argument(
+         "--router-cpus",
+-        default=",".join(map(str, ROUTER_CPUS)),
++        default=",".join(map(str, relay_cpus)),
+         help="One dedicated router CPU per lane, comma separated",
+     )
+     p.add_argument(
+@@ -453,13 +453,13 @@
+     clients_cpu_list = [[int(s) for s in group.split(",")] for group in a.groups]
+     cpus = [a.app_cpu, a.manager_cpu, *a.router_cpus, *[cpu for group in clients_cpu_list for cpu in group]]
+     if (
+-        len(a.router_cpus) != 4
++        len(a.router_cpus) != len(relay_cpus)
+         or len(a.groups) != 4
+         or len(set(cpus)) != len(cpus)
+         or not set(cpus) <= os.sched_getaffinity(0)
+     ):
+         p.error(
+-            "provide four disjoint router and client groups from this process' affinity, plus dedicated app and manager CPUs"
++            "provide the expected number of distinct relay CPUs, four disjoint client groups and dedicated app and manager CPUs"
+         )
+     a.server = a.server.resolve(strict=True)
+     a.seed = a.seed.resolve(strict=True)
+--- a/tap-sharded/run_sharded.py
++++ b/tap-sharded/run_sharded.py
+@@ -177,13 +177,13 @@
+         return topology
+
+
+-def route_proof(fixture):
++def route_proof(fixture, relay_cpus=(2, 5, 8, 14)):
+     p = argparse.ArgumentParser()
+     p.add_argument("--wire-proof-only", action="store_true")
+     p.add_argument("--output", required=True, type=Path)
+     p.add_argument("--app-cpu", type=int, default=10)
+     p.add_argument("--manager-cpu", type=int, default=15)
+-    p.add_argument("--router-cpus", default="2,5,8,14")
++    p.add_argument("--router-cpus", default=",".join(map(str, relay_cpus)))
+     p.add_argument("--client-cpus", default="0,1;3,4;6,7;11,12,13")
+     p.add_argument("--delay-us", type=int, default=75)
+     p.add_argument(
+@@ -194,11 +194,11 @@
+     a.groups = a.client_cpus.split(";")
+     if (
+         len(a.groups) != 4
+-        or len(set(a.router_cpus)) not in ((1,) if a.scratch else (4,))
++        or len(set(a.router_cpus)) not in ((1,) if a.scratch else (len(relay_cpus),))
+         or a.app_cpu in a.router_cpus
+     ):
+         p.error(
+-            "use four unique external CPUs for the normal proof, one spare CPU for a scratch proof, and four client groups"
++            "use the selected number of unique external relay CPUs and four client groups"
+         )
+     temp = Path(tempfile.gettempdir())
+     lock = (

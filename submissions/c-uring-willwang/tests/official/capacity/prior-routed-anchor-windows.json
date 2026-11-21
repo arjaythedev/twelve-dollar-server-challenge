@@ -1,0 +1,3438 @@
+[
+  {
+    "first_full_5s_hold_window": 90,
+    "last_full_5s_window": 380,
+    "summary": {
+      "all_shards_p99_over_1s": {
+        "windows": 0
+      },
+      "largest_five_drop_windows": [
+        [
+          10607,
+          145
+        ],
+        [
+          10701,
+          125
+        ],
+        [
+          10886,
+          190
+        ],
+        [
+          11009,
+          235
+        ],
+        [
+          11728,
+          105
+        ]
+      ],
+      "largest_five_median_p99_windows": [
+        [
+          50.06036232730818,
+          180
+        ],
+        [
+          51.84025976386769,
+          225
+        ],
+        [
+          53.80172896394053,
+          250
+        ],
+        [
+          54.63033888636283,
+          195
+        ],
+        [
+          203.61402637687965,
+          110
+        ]
+      ],
+      "some_shard_p99_at_most_1s": {
+        "median_app_core_fraction": 0.7871654487409517,
+        "median_router_drops_per_5s": 9176,
+        "median_successful_requests_per_5s": 148086,
+        "median_target_retransmits_per_5s": 2199,
+        "windows": 59
+      }
+    },
+    "tag": "priorroute-stock-280-h1",
+    "windows": [
+      {
+        "actual_elapsed": 5.000387191772461,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.068195,
+        "end_s": 90,
+        "full": true,
+        "median_shard_p99_ms": 36.957064092845435,
+        "per_device_rx_drops": {
+          "rclient": 1027,
+          "rserver": 3981,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 150051,
+        "router_rx_drops": 5008,
+        "shard_p99_ms": [
+          36.773198102333765,
+          37.140930083357105,
+          36.773198102333765,
+          37.512339384190675
+        ],
+        "target_retransmits": 1821
+      },
+      {
+        "actual_elapsed": 4.999675512313843,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.806308,
+        "end_s": 95,
+        "full": true,
+        "median_shard_p99_ms": 45.09910632779993,
+        "per_device_rx_drops": {
+          "rclient": 1646,
+          "rserver": 4769,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 145154,
+        "router_rx_drops": 6415,
+        "shard_p99_ms": [
+          45.77218289173733,
+          44.42602976386252,
+          42.69254138648045,
+          51.57724136618794
+        ],
+        "target_retransmits": 1508
+      },
+      {
+        "actual_elapsed": 4.999946594238281,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.826304,
+        "end_s": 100,
+        "full": true,
+        "median_shard_p99_ms": 42.271935523394355,
+        "per_device_rx_drops": {
+          "rclient": 2372,
+          "rserver": 5014,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 145767,
+        "router_rx_drops": 7386,
+        "shard_p99_ms": [
+          43.11946680034525,
+          41.43696005971115,
+          42.69254138648045,
+          41.85132966030826
+        ],
+        "target_retransmits": 1959
+      },
+      {
+        "actual_elapsed": 5.000004768371582,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.78958,
+        "end_s": 105,
+        "full": true,
+        "median_shard_p99_ms": 48.588094476573524,
+        "per_device_rx_drops": {
+          "rclient": 5919,
+          "rserver": 5809,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 150432,
+        "router_rx_drops": 11728,
+        "shard_p99_ms": [
+          48.588094476573524,
+          48.588094476573524,
+          46.69220376786124,
+          51.06657561008707
+        ],
+        "target_retransmits": 2516
+      },
+      {
+        "actual_elapsed": 4.999980449676514,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.847738,
+        "end_s": 110,
+        "full": true,
+        "median_shard_p99_ms": 203.61402637687965,
+        "per_device_rx_drops": {
+          "rclient": 2501,
+          "rserver": 6674,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 150517,
+        "router_rx_drops": 9175,
+        "shard_p99_ms": [
+          203.61402637687965,
+          203.61402637687965,
+          203.61402637687965,
+          205.65016664064848
+        ],
+        "target_retransmits": 1934
+      },
+      {
+        "actual_elapsed": 5.000020980834961,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.847127,
+        "end_s": 115,
+        "full": true,
+        "median_shard_p99_ms": 39.04322077915741,
+        "per_device_rx_drops": {
+          "rclient": 2711,
+          "rserver": 4344,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 146334,
+        "router_rx_drops": 7055,
+        "shard_p99_ms": [
+          38.26633740581291,
+          39.82010415250191,
+          39.82010415250191,
+          38.26633740581291
+        ],
+        "target_retransmits": 1713
+      },
+      {
+        "actual_elapsed": 5.000025987625122,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.78123,
+        "end_s": 120,
+        "full": true,
+        "median_shard_p99_ms": 44.87917548738477,
+        "per_device_rx_drops": {
+          "rclient": 4825,
+          "rserver": 5117,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 146016,
+        "router_rx_drops": 9942,
+        "shard_p99_ms": [
+          43.986168083032204,
+          46.22990472065469,
+          45.77218289173733,
+          42.26984295691133
+        ],
+        "target_retransmits": 2361
+      },
+      {
+        "actual_elapsed": 4.999952077865601,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.908845,
+        "end_s": 125,
+        "full": true,
+        "median_shard_p99_ms": 43.55928557517149,
+        "per_device_rx_drops": {
+          "rclient": 4012,
+          "rserver": 6689,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 149117,
+        "router_rx_drops": 10701,
+        "shard_p99_ms": [
+          46.22990472065469,
+          44.42602976386252,
+          42.69254138648045,
+          41.43696005971115
+        ],
+        "target_retransmits": 2077
+      },
+      {
+        "actual_elapsed": 4.999984979629517,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.941052,
+        "end_s": 130,
+        "full": true,
+        "median_shard_p99_ms": 43.986168083032204,
+        "per_device_rx_drops": {
+          "rclient": 3595,
+          "rserver": 6368,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 149842,
+        "router_rx_drops": 9963,
+        "shard_p99_ms": [
+          43.11946680034525,
+          43.986168083032204,
+          43.986168083032204,
+          44.87029006150115
+        ],
+        "target_retransmits": 1882
+      },
+      {
+        "actual_elapsed": 5.000009059906006,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.911971,
+        "end_s": 135,
+        "full": true,
+        "median_shard_p99_ms": 42.271935523394355,
+        "per_device_rx_drops": {
+          "rclient": 3250,
+          "rserver": 4861,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147547,
+        "router_rx_drops": 8111,
+        "shard_p99_ms": [
+          41.02669312842687,
+          41.85132966030826,
+          58.11852655657861,
+          42.69254138648045
+        ],
+        "target_retransmits": 1978
+      },
+      {
+        "actual_elapsed": 5.000056028366089,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.945763,
+        "end_s": 140,
+        "full": true,
+        "median_shard_p99_ms": 42.90600409341285,
+        "per_device_rx_drops": {
+          "rclient": 1811,
+          "rserver": 6691,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147109,
+        "router_rx_drops": 8502,
+        "shard_p99_ms": [
+          41.02669312842687,
+          43.11946680034525,
+          46.69220376786124,
+          42.69254138648045
+        ],
+        "target_retransmits": 1808
+      },
+      {
+        "actual_elapsed": 4.999986886978149,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.959679,
+        "end_s": 145,
+        "full": true,
+        "median_shard_p99_ms": 41.6441448600097,
+        "per_device_rx_drops": {
+          "rclient": 4612,
+          "rserver": 5995,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148273,
+        "router_rx_drops": 10607,
+        "shard_p99_ms": [
+          43.11946680034525,
+          41.85132966030826,
+          41.43696005971115,
+          40.21830519402695
+        ],
+        "target_retransmits": 2270
+      },
+      {
+        "actual_elapsed": 5.000004768371582,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.9325,
+        "end_s": 150,
+        "full": true,
+        "median_shard_p99_ms": 44.206098923447364,
+        "per_device_rx_drops": {
+          "rclient": 3786,
+          "rserver": 6194,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148809,
+        "router_rx_drops": 9980,
+        "shard_p99_ms": [
+          43.11946680034525,
+          44.42602976386252,
+          43.986168083032204,
+          45.31899296211616
+        ],
+        "target_retransmits": 2085
+      },
+      {
+        "actual_elapsed": 5.000247478485107,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.951275,
+        "end_s": 155,
+        "full": true,
+        "median_shard_p99_ms": 41.859617257453664,
+        "per_device_rx_drops": {
+          "rclient": 2881,
+          "rserver": 5158,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148765,
+        "router_rx_drops": 8039,
+        "shard_p99_ms": [
+          42.69254138648045,
+          41.02669312842687,
+          44.42602976386252,
+          40.6204882459672
+        ],
+        "target_retransmits": 1530
+      },
+      {
+        "actual_elapsed": 4.999943971633911,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.910782,
+        "end_s": 160,
+        "full": true,
+        "median_shard_p99_ms": 46.47485501285571,
+        "per_device_rx_drops": {
+          "rclient": 2588,
+          "rserver": 5975,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 146974,
+        "router_rx_drops": 8563,
+        "shard_p99_ms": [
+          48.588094476573524,
+          43.550661468348714,
+          47.630717063595256,
+          45.31899296211616
+        ],
+        "target_retransmits": 1971
+      },
+      {
+        "actual_elapsed": 5.001641273498535,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.966441,
+        "end_s": 165,
+        "full": true,
+        "median_shard_p99_ms": 44.8902830945017,
+        "per_device_rx_drops": {
+          "rclient": 3411,
+          "rserver": 6254,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147268,
+        "router_rx_drops": 9665,
+        "shard_p99_ms": [
+          43.550661468348714,
+          46.22990472065469,
+          42.26984295691133,
+          205.65016664064848
+        ],
+        "target_retransmits": 2146
+      },
+      {
+        "actual_elapsed": 4.9990105628967285,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.915741,
+        "end_s": 170,
+        "full": true,
+        "median_shard_p99_ms": 49.81747068596026,
+        "per_device_rx_drops": {
+          "rclient": 3889,
+          "rserver": 6634,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148926,
+        "router_rx_drops": 10523,
+        "shard_p99_ms": [
+          50.56096595058126,
+          43.986168083032204,
+          49.07397542133925,
+          203.61402637687965
+        ],
+        "target_retransmits": 2107
+      },
+      {
+        "actual_elapsed": 4.999040126800537,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.860769,
+        "end_s": 175,
+        "full": true,
+        "median_shard_p99_ms": 40.419396719997074,
+        "per_device_rx_drops": {
+          "rclient": 2968,
+          "rserver": 6228,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147939,
+        "router_rx_drops": 9196,
+        "shard_p99_ms": [
+          42.69254138648045,
+          38.649000779871045,
+          40.21830519402695,
+          40.6204882459672
+        ],
+        "target_retransmits": 1978
+      },
+      {
+        "actual_elapsed": 5.0000317096710205,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.921279,
+        "end_s": 180,
+        "full": true,
+        "median_shard_p99_ms": 50.06036232730818,
+        "per_device_rx_drops": {
+          "rclient": 2200,
+          "rserver": 5664,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148532,
+        "router_rx_drops": 7864,
+        "shard_p99_ms": [
+          54.75028102261996,
+          43.986168083032204,
+          50.06036232730818,
+          50.06036232730818
+        ],
+        "target_retransmits": 2453
+      },
+      {
+        "actual_elapsed": 5.00009822845459,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.887788,
+        "end_s": 185,
+        "full": true,
+        "median_shard_p99_ms": 46.93960356298427,
+        "per_device_rx_drops": {
+          "rclient": 4124,
+          "rserver": 5771,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147642,
+        "router_rx_drops": 9895,
+        "shard_p99_ms": [
+          45.77218289173733,
+          48.107024234231204,
+          42.69254138648045,
+          201.59804591770256
+        ],
+        "target_retransmits": 2199
+      },
+      {
+        "actual_elapsed": 4.999976396560669,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.886156,
+        "end_s": 190,
+        "full": true,
+        "median_shard_p99_ms": 40.82359068719704,
+        "per_device_rx_drops": {
+          "rclient": 4574,
+          "rserver": 6312,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147736,
+        "router_rx_drops": 10886,
+        "shard_p99_ms": [
+          40.6204882459672,
+          41.02669312842687,
+          40.6204882459672,
+          43.550661468348714
+        ],
+        "target_retransmits": 2312
+      },
+      {
+        "actual_elapsed": 4.9999847412109375,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.914417,
+        "end_s": 195,
+        "full": true,
+        "median_shard_p99_ms": 54.63033888636283,
+        "per_device_rx_drops": {
+          "rclient": 3537,
+          "rserver": 6445,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148355,
+        "router_rx_drops": 9982,
+        "shard_p99_ms": [
+          205.65016664064848,
+          49.07397542133925,
+          50.56096595058126,
+          58.699711822144394
+        ],
+        "target_retransmits": 2152
+      },
+      {
+        "actual_elapsed": 4.999979734420776,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.937297,
+        "end_s": 200,
+        "full": true,
+        "median_shard_p99_ms": 44.005767174298306,
+        "per_device_rx_drops": {
+          "rclient": 3581,
+          "rserver": 5373,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148245,
+        "router_rx_drops": 8954,
+        "shard_p99_ms": [
+          51.06657561008707,
+          45.31899296211616,
+          42.69254138648045,
+          40.6204882459672
+        ],
+        "target_retransmits": 2250
+      },
+      {
+        "actual_elapsed": 5.000284910202026,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.946223,
+        "end_s": 205,
+        "full": true,
+        "median_shard_p99_ms": 40.82763262686905,
+        "per_device_rx_drops": {
+          "rclient": 4390,
+          "rserver": 4786,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147754,
+        "router_rx_drops": 9176,
+        "shard_p99_ms": [
+          42.69254138648045,
+          41.43696005971115,
+          39.035490787669744,
+          40.21830519402695
+        ],
+        "target_retransmits": 2173
+      },
+      {
+        "actual_elapsed": 4.9997642040252686,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.92916,
+        "end_s": 210,
+        "full": true,
+        "median_shard_p99_ms": 45.54558792692674,
+        "per_device_rx_drops": {
+          "rclient": 4431,
+          "rserver": 5538,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148085,
+        "router_rx_drops": 9969,
+        "shard_p99_ms": [
+          45.31899296211616,
+          45.77218289173733,
+          45.77218289173733,
+          44.42602976386252
+        ],
+        "target_retransmits": 2442
+      },
+      {
+        "actual_elapsed": 5.000002384185791,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.893356,
+        "end_s": 215,
+        "full": true,
+        "median_shard_p99_ms": 40.019204673264426,
+        "per_device_rx_drops": {
+          "rclient": 3513,
+          "rserver": 5981,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148277,
+        "router_rx_drops": 9494,
+        "shard_p99_ms": [
+          41.02669312842687,
+          40.21830519402695,
+          39.035490787669744,
+          39.82010415250191
+        ],
+        "target_retransmits": 2165
+      },
+      {
+        "actual_elapsed": 4.999974012374878,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.9686,
+        "end_s": 220,
+        "full": true,
+        "median_shard_p99_ms": 45.77218289173733,
+        "per_device_rx_drops": {
+          "rclient": 3002,
+          "rserver": 4811,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148264,
+        "router_rx_drops": 7813,
+        "shard_p99_ms": [
+          45.77218289173733,
+          45.77218289173733,
+          46.69220376786124,
+          44.87029006150115
+        ],
+        "target_retransmits": 2040
+      },
+      {
+        "actual_elapsed": 5.000033617019653,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.018026,
+        "end_s": 225,
+        "full": true,
+        "median_shard_p99_ms": 51.84025976386769,
+        "per_device_rx_drops": {
+          "rclient": 3196,
+          "rserver": 6615,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147611,
+        "router_rx_drops": 9811,
+        "shard_p99_ms": [
+          53.1400833568248,
+          51.06657561008707,
+          50.56096595058126,
+          52.61394391764832
+        ],
+        "target_retransmits": 2184
+      },
+      {
+        "actual_elapsed": 4.999979257583618,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.005703,
+        "end_s": 230,
+        "full": true,
+        "median_shard_p99_ms": 42.271935523394355,
+        "per_device_rx_drops": {
+          "rclient": 3885,
+          "rserver": 5071,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147942,
+        "router_rx_drops": 8956,
+        "shard_p99_ms": [
+          41.43696005971115,
+          43.550661468348714,
+          42.69254138648045,
+          41.85132966030826
+        ],
+        "target_retransmits": 2029
+      },
+      {
+        "actual_elapsed": 5.0001161098480225,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.930656,
+        "end_s": 235,
+        "full": true,
+        "median_shard_p99_ms": 49.07640482606308,
+        "per_device_rx_drops": {
+          "rclient": 3765,
+          "rserver": 7244,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148189,
+        "router_rx_drops": 11009,
+        "shard_p99_ms": [
+          49.56471517555265,
+          48.588094476573524,
+          205.65016664064848,
+          47.630717063595256
+        ],
+        "target_retransmits": 2387
+      },
+      {
+        "actual_elapsed": 4.999890565872192,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.020566,
+        "end_s": 240,
+        "full": true,
+        "median_shard_p99_ms": 44.21047576492494,
+        "per_device_rx_drops": {
+          "rclient": 3509,
+          "rserver": 5441,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147780,
+        "router_rx_drops": 8950,
+        "shard_p99_ms": [
+          45.77218289173733,
+          42.26984295691133,
+          44.87029006150115,
+          43.550661468348714
+        ],
+        "target_retransmits": 1879
+      },
+      {
+        "actual_elapsed": 5.000031232833862,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.954592,
+        "end_s": 245,
+        "full": true,
+        "median_shard_p99_ms": 45.54558792692674,
+        "per_device_rx_drops": {
+          "rclient": 2883,
+          "rserver": 5855,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148764,
+        "router_rx_drops": 8738,
+        "shard_p99_ms": [
+          49.56471517555265,
+          45.31899296211616,
+          45.77218289173733,
+          43.986168083032204
+        ],
+        "target_retransmits": 2518
+      },
+      {
+        "actual_elapsed": 4.999929428100586,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.945749,
+        "end_s": 250,
+        "full": true,
+        "median_shard_p99_ms": 53.80172896394053,
+        "per_device_rx_drops": {
+          "rclient": 3930,
+          "rserver": 5467,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148158,
+        "router_rx_drops": 9397,
+        "shard_p99_ms": [
+          50.06036232730818,
+          50.06036232730818,
+          62.31092693367804,
+          57.54309560057289
+        ],
+        "target_retransmits": 2815
+      },
+      {
+        "actual_elapsed": 4.999943256378174,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.945263,
+        "end_s": 255,
+        "full": true,
+        "median_shard_p99_ms": 40.42339864046439,
+        "per_device_rx_drops": {
+          "rclient": 3305,
+          "rserver": 5871,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147999,
+        "router_rx_drops": 9176,
+        "shard_p99_ms": [
+          38.649000779871045,
+          39.82010415250191,
+          41.02669312842687,
+          41.02669312842687
+        ],
+        "target_retransmits": 2262
+      },
+      {
+        "actual_elapsed": 5.000090837478638,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.939244,
+        "end_s": 260,
+        "full": true,
+        "median_shard_p99_ms": 45.09910632779993,
+        "per_device_rx_drops": {
+          "rclient": 3723,
+          "rserver": 5925,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147674,
+        "router_rx_drops": 9648,
+        "shard_p99_ms": [
+          50.06036232730818,
+          43.550661468348714,
+          45.77218289173733,
+          44.42602976386252
+        ],
+        "target_retransmits": 1881
+      },
+      {
+        "actual_elapsed": 4.999983787536621,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.964052,
+        "end_s": 265,
+        "full": true,
+        "median_shard_p99_ms": 49.56716887432371,
+        "per_device_rx_drops": {
+          "rclient": 3324,
+          "rserver": 5207,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148816,
+        "router_rx_drops": 8531,
+        "shard_p99_ms": [
+          50.06036232730818,
+          44.42602976386252,
+          50.06036232730818,
+          49.07397542133925
+        ],
+        "target_retransmits": 1861
+      },
+      {
+        "actual_elapsed": 5.0000505447387695,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.911907,
+        "end_s": 270,
+        "full": true,
+        "median_shard_p99_ms": 46.250503562548204,
+        "per_device_rx_drops": {
+          "rclient": 2673,
+          "rserver": 6588,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148339,
+        "router_rx_drops": 9261,
+        "shard_p99_ms": [
+          43.550661468348714,
+          66.14430454272582,
+          47.630717063595256,
+          44.87029006150115
+        ],
+        "target_retransmits": 2304
+      },
+      {
+        "actual_elapsed": 4.999946117401123,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.902594,
+        "end_s": 275,
+        "full": true,
+        "median_shard_p99_ms": 40.019204673264426,
+        "per_device_rx_drops": {
+          "rclient": 3555,
+          "rserver": 5059,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147694,
+        "router_rx_drops": 8614,
+        "shard_p99_ms": [
+          39.82010415250191,
+          40.6204882459672,
+          40.21830519402695,
+          39.035490787669744
+        ],
+        "target_retransmits": 2288
+      },
+      {
+        "actual_elapsed": 5.000024318695068,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.940295,
+        "end_s": 280,
+        "full": true,
+        "median_shard_p99_ms": 40.62249916122691,
+        "per_device_rx_drops": {
+          "rclient": 3110,
+          "rserver": 5669,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148155,
+        "router_rx_drops": 8779,
+        "shard_p99_ms": [
+          41.02669312842687,
+          41.02669312842687,
+          40.21830519402695,
+          40.21830519402695
+        ],
+        "target_retransmits": 2069
+      },
+      {
+        "actual_elapsed": 5.00000524520874,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.979801,
+        "end_s": 285,
+        "full": true,
+        "median_shard_p99_ms": 38.65091409674133,
+        "per_device_rx_drops": {
+          "rclient": 3172,
+          "rserver": 4597,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148536,
+        "router_rx_drops": 7769,
+        "shard_p99_ms": [
+          39.035490787669744,
+          37.512339384190675,
+          38.26633740581291,
+          39.035490787669744
+        ],
+        "target_retransmits": 2186
+      },
+      {
+        "actual_elapsed": 4.999982118606567,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.953631,
+        "end_s": 290,
+        "full": true,
+        "median_shard_p99_ms": 48.34755935540237,
+        "per_device_rx_drops": {
+          "rclient": 3387,
+          "rserver": 6401,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147845,
+        "router_rx_drops": 9788,
+        "shard_p99_ms": [
+          48.588094476573524,
+          47.630717063595256,
+          48.107024234231204,
+          205.65016664064848
+        ],
+        "target_retransmits": 2459
+      },
+      {
+        "actual_elapsed": 5.000008583068848,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.935834,
+        "end_s": 295,
+        "full": true,
+        "median_shard_p99_ms": 39.62689799084835,
+        "per_device_rx_drops": {
+          "rclient": 3598,
+          "rserver": 5261,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148478,
+        "router_rx_drops": 8859,
+        "shard_p99_ms": [
+          38.26633740581291,
+          39.035490787669744,
+          40.21830519402695,
+          40.21830519402695
+        ],
+        "target_retransmits": 2082
+      },
+      {
+        "actual_elapsed": 5.0000128746032715,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.920828,
+        "end_s": 300,
+        "full": true,
+        "median_shard_p99_ms": 41.02669312842687,
+        "per_device_rx_drops": {
+          "rclient": 3733,
+          "rserver": 5999,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147632,
+        "router_rx_drops": 9732,
+        "shard_p99_ms": [
+          40.21830519402695,
+          41.02669312842687,
+          42.26984295691133,
+          41.02669312842687
+        ],
+        "target_retransmits": 2409
+      },
+      {
+        "actual_elapsed": 4.999983072280884,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.930301,
+        "end_s": 305,
+        "full": true,
+        "median_shard_p99_ms": 48.83586970489193,
+        "per_device_rx_drops": {
+          "rclient": 3689,
+          "rserver": 5802,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147947,
+        "router_rx_drops": 9491,
+        "shard_p99_ms": [
+          49.56471517555265,
+          52.09301377984982,
+          44.87029006150115,
+          48.107024234231204
+        ],
+        "target_retransmits": 2379
+      },
+      {
+        "actual_elapsed": 5.001136302947998,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.898697,
+        "end_s": 310,
+        "full": true,
+        "median_shard_p99_ms": 47.16146041572824,
+        "per_device_rx_drops": {
+          "rclient": 3175,
+          "rserver": 6620,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147885,
+        "router_rx_drops": 9795,
+        "shard_p99_ms": [
+          46.69220376786124,
+          43.986168083032204,
+          47.630717063595256,
+          48.107024234231204
+        ],
+        "target_retransmits": 2360
+      },
+      {
+        "actual_elapsed": 4.998910665512085,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.945608,
+        "end_s": 315,
+        "full": true,
+        "median_shard_p99_ms": 42.91025221263003,
+        "per_device_rx_drops": {
+          "rclient": 4063,
+          "rserver": 5545,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148763,
+        "router_rx_drops": 9608,
+        "shard_p99_ms": [
+          43.550661468348714,
+          40.6204882459672,
+          42.26984295691133,
+          44.42602976386252
+        ],
+        "target_retransmits": 2703
+      },
+      {
+        "actual_elapsed": 4.999983072280884,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.977859,
+        "end_s": 320,
+        "full": true,
+        "median_shard_p99_ms": 41.6441448600097,
+        "per_device_rx_drops": {
+          "rclient": 3402,
+          "rserver": 5337,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147652,
+        "router_rx_drops": 8739,
+        "shard_p99_ms": [
+          41.85132966030826,
+          40.6204882459672,
+          43.550661468348714,
+          41.43696005971115
+        ],
+        "target_retransmits": 2424
+      },
+      {
+        "actual_elapsed": 5.000054121017456,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.96255,
+        "end_s": 325,
+        "full": true,
+        "median_shard_p99_ms": 42.91025221263003,
+        "per_device_rx_drops": {
+          "rclient": 3749,
+          "rserver": 4616,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147432,
+        "router_rx_drops": 8365,
+        "shard_p99_ms": [
+          43.550661468348714,
+          47.159125805539865,
+          42.26984295691133,
+          41.02669312842687
+        ],
+        "target_retransmits": 2359
+      },
+      {
+        "actual_elapsed": 4.999920845031738,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.929687,
+        "end_s": 330,
+        "full": true,
+        "median_shard_p99_ms": 41.0348174271676,
+        "per_device_rx_drops": {
+          "rclient": 3835,
+          "rserver": 4778,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148947,
+        "router_rx_drops": 8613,
+        "shard_p99_ms": [
+          38.649000779871045,
+          43.550661468348714,
+          41.85132966030826,
+          40.21830519402695
+        ],
+        "target_retransmits": 2331
+      },
+      {
+        "actual_elapsed": 5.000000476837158,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.910778,
+        "end_s": 335,
+        "full": true,
+        "median_shard_p99_ms": 44.44582484604129,
+        "per_device_rx_drops": {
+          "rclient": 2542,
+          "rserver": 5992,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148277,
+        "router_rx_drops": 8534,
+        "shard_p99_ms": [
+          43.11946680034525,
+          42.69254138648045,
+          45.77218289173733,
+          46.69220376786124
+        ],
+        "target_retransmits": 2156
+      },
+      {
+        "actual_elapsed": 5.000106573104858,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.969644,
+        "end_s": 340,
+        "full": true,
+        "median_shard_p99_ms": 39.42584569554644,
+        "per_device_rx_drops": {
+          "rclient": 3596,
+          "rserver": 5441,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147867,
+        "router_rx_drops": 9037,
+        "shard_p99_ms": [
+          39.035490787669744,
+          43.11946680034525,
+          39.42584569554644,
+          39.42584569554644
+        ],
+        "target_retransmits": 2231
+      },
+      {
+        "actual_elapsed": 4.999968767166138,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.947776,
+        "end_s": 345,
+        "full": true,
+        "median_shard_p99_ms": 42.0647507230958,
+        "per_device_rx_drops": {
+          "rclient": 4062,
+          "rserver": 5474,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147581,
+        "router_rx_drops": 9536,
+        "shard_p99_ms": [
+          41.43696005971115,
+          39.42584569554644,
+          42.69254138648045,
+          42.69254138648045
+        ],
+        "target_retransmits": 2537
+      },
+      {
+        "actual_elapsed": 4.999942302703857,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.033568,
+        "end_s": 350,
+        "full": true,
+        "median_shard_p99_ms": 44.42602976386252,
+        "per_device_rx_drops": {
+          "rclient": 3476,
+          "rserver": 5515,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148311,
+        "router_rx_drops": 8991,
+        "shard_p99_ms": [
+          44.42602976386252,
+          43.550661468348714,
+          46.22990472065469,
+          44.42602976386252
+        ],
+        "target_retransmits": 2288
+      },
+      {
+        "actual_elapsed": 5.000367641448975,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.913294,
+        "end_s": 355,
+        "full": true,
+        "median_shard_p99_ms": 43.377976510913655,
+        "per_device_rx_drops": {
+          "rclient": 2939,
+          "rserver": 5851,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148301,
+        "router_rx_drops": 8790,
+        "shard_p99_ms": [
+          46.22990472065469,
+          45.31899296211616,
+          40.6204882459672,
+          41.43696005971115
+        ],
+        "target_retransmits": 2497
+      },
+      {
+        "actual_elapsed": 4.999603271484375,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.866216,
+        "end_s": 360,
+        "full": true,
+        "median_shard_p99_ms": 42.0605863086098,
+        "per_device_rx_drops": {
+          "rclient": 3212,
+          "rserver": 6204,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147680,
+        "router_rx_drops": 9416,
+        "shard_p99_ms": [
+          41.85132966030826,
+          42.26984295691133,
+          40.6204882459672,
+          43.11946680034525
+        ],
+        "target_retransmits": 2142
+      },
+      {
+        "actual_elapsed": 5.000006914138794,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.97044,
+        "end_s": 365,
+        "full": true,
+        "median_shard_p99_ms": 47.88308959460024,
+        "per_device_rx_drops": {
+          "rclient": 4264,
+          "rserver": 5791,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 147833,
+        "router_rx_drops": 10055,
+        "shard_p99_ms": [
+          51.06657561008707,
+          49.07397542133925,
+          46.22990472065469,
+          46.69220376786124
+        ],
+        "target_retransmits": 2807
+      },
+      {
+        "actual_elapsed": 5.0002686977386475,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.967637,
+        "end_s": 370,
+        "full": true,
+        "median_shard_p99_ms": 41.02669312842687,
+        "per_device_rx_drops": {
+          "rclient": 3927,
+          "rserver": 4412,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148591,
+        "router_rx_drops": 8339,
+        "shard_p99_ms": [
+          43.550661468348714,
+          41.02669312842687,
+          39.82010415250191,
+          41.02669312842687
+        ],
+        "target_retransmits": 2390
+      },
+      {
+        "actual_elapsed": 4.999738931655884,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.799777,
+        "end_s": 375,
+        "full": true,
+        "median_shard_p99_ms": 45.32123647661924,
+        "per_device_rx_drops": {
+          "rclient": 3326,
+          "rserver": 5791,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148320,
+        "router_rx_drops": 9117,
+        "shard_p99_ms": [
+          44.87029006150115,
+          45.77218289173733,
+          46.22990472065469,
+          41.02669312842687
+        ],
+        "target_retransmits": 2639
+      },
+      {
+        "actual_elapsed": 5.0000176429748535,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.95801,
+        "end_s": 380,
+        "full": true,
+        "median_shard_p99_ms": 41.25632276949118,
+        "per_device_rx_drops": {
+          "rclient": 3876,
+          "rserver": 5382,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148086,
+        "router_rx_drops": 9258,
+        "shard_p99_ms": [
+          43.986168083032204,
+          39.035490787669744,
+          39.82010415250191,
+          42.69254138648045
+        ],
+        "target_retransmits": 2279
+      }
+    ]
+  },
+  {
+    "first_full_5s_hold_window": 95,
+    "last_full_5s_window": 205,
+    "summary": {
+      "all_shards_p99_over_1s": {
+        "windows": 0
+      },
+      "largest_five_drop_windows": [
+        [
+          10761,
+          190
+        ],
+        [
+          10843,
+          170
+        ],
+        [
+          11442,
+          165
+        ],
+        [
+          11873,
+          195
+        ],
+        [
+          12400,
+          130
+        ]
+      ],
+      "largest_five_median_p99_windows": [
+        [
+          45.32123647661924,
+          205
+        ],
+        [
+          45.33918592544672,
+          115
+        ],
+        [
+          46.465654348638594,
+          180
+        ],
+        [
+          54.75299143257157,
+          190
+        ],
+        [
+          127.34030099348337,
+          175
+        ]
+      ],
+      "some_shard_p99_at_most_1s": {
+        "median_app_core_fraction": 0.8051312400150614,
+        "median_router_drops_per_5s": 9897,
+        "median_successful_requests_per_5s": 153349,
+        "median_target_retransmits_per_5s": 1689,
+        "windows": 23
+      }
+    },
+    "tag": "priorroute-stock-290-p1",
+    "windows": [
+      {
+        "actual_elapsed": 5.000077247619629,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.123454,
+        "end_s": 95,
+        "full": true,
+        "median_shard_p99_ms": 36.773198102333765,
+        "per_device_rx_drops": {
+          "rclient": 1781,
+          "rserver": 3712,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153504,
+        "router_rx_drops": 5493,
+        "shard_p99_ms": [
+          36.773198102333765,
+          36.40910703201363,
+          36.773198102333765,
+          36.773198102333765
+        ],
+        "target_retransmits": 1019
+      },
+      {
+        "actual_elapsed": 4.999921560287476,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.919231,
+        "end_s": 100,
+        "full": true,
+        "median_shard_p99_ms": 38.26633740581291,
+        "per_device_rx_drops": {
+          "rclient": 2312,
+          "rserver": 5616,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 148395,
+        "router_rx_drops": 7928,
+        "shard_p99_ms": [
+          38.26633740581291,
+          38.649000779871045,
+          37.887462778032585,
+          38.26633740581291
+        ],
+        "target_retransmits": 1323
+      },
+      {
+        "actual_elapsed": 4.999912738800049,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.958953,
+        "end_s": 105,
+        "full": true,
+        "median_shard_p99_ms": 38.268231778951815,
+        "per_device_rx_drops": {
+          "rclient": 3497,
+          "rserver": 6333,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 152916,
+        "router_rx_drops": 9830,
+        "shard_p99_ms": [
+          37.140930083357105,
+          38.649000779871045,
+          37.887462778032585,
+          38.649000779871045
+        ],
+        "target_retransmits": 1496
+      },
+      {
+        "actual_elapsed": 5.000084400177002,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.033564,
+        "end_s": 110,
+        "full": true,
+        "median_shard_p99_ms": 41.02669312842687,
+        "per_device_rx_drops": {
+          "rclient": 3641,
+          "rserver": 6624,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 156690,
+        "router_rx_drops": 10265,
+        "shard_p99_ms": [
+          41.02669312842687,
+          41.02669312842687,
+          42.26984295691133,
+          40.6204882459672
+        ],
+        "target_retransmits": 1517
+      },
+      {
+        "actual_elapsed": 4.999916315078735,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.011738,
+        "end_s": 115,
+        "full": true,
+        "median_shard_p99_ms": 45.33918592544672,
+        "per_device_rx_drops": {
+          "rclient": 3523,
+          "rserver": 5049,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 154347,
+        "router_rx_drops": 8572,
+        "shard_p99_ms": [
+          46.69220376786124,
+          43.986168083032204,
+          56.97336198076523,
+          43.550661468348714
+        ],
+        "target_retransmits": 1626
+      },
+      {
+        "actual_elapsed": 4.999977350234985,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.026305,
+        "end_s": 120,
+        "full": true,
+        "median_shard_p99_ms": 37.88933839500179,
+        "per_device_rx_drops": {
+          "rclient": 3692,
+          "rserver": 5115,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 151040,
+        "router_rx_drops": 8807,
+        "shard_p99_ms": [
+          38.26633740581291,
+          37.512339384190675,
+          37.512339384190675,
+          39.42584569554644
+        ],
+        "target_retransmits": 1791
+      },
+      {
+        "actual_elapsed": 4.999995708465576,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.02653,
+        "end_s": 125,
+        "full": true,
+        "median_shard_p99_ms": 38.27391508593021,
+        "per_device_rx_drops": {
+          "rclient": 4771,
+          "rserver": 5600,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 152819,
+        "router_rx_drops": 10371,
+        "shard_p99_ms": [
+          37.512339384190675,
+          42.26984295691133,
+          37.512339384190675,
+          39.035490787669744
+        ],
+        "target_retransmits": 1787
+      },
+      {
+        "actual_elapsed": 5.000014543533325,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.028398,
+        "end_s": 130,
+        "full": true,
+        "median_shard_p99_ms": 44.206098923447364,
+        "per_device_rx_drops": {
+          "rclient": 5771,
+          "rserver": 6629,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 155011,
+        "router_rx_drops": 12400,
+        "shard_p99_ms": [
+          44.42602976386252,
+          45.31899296211616,
+          43.986168083032204,
+          43.11946680034525
+        ],
+        "target_retransmits": 1761
+      },
+      {
+        "actual_elapsed": 5.000201225280762,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.02319,
+        "end_s": 135,
+        "full": true,
+        "median_shard_p99_ms": 41.859617257453664,
+        "per_device_rx_drops": {
+          "rclient": 3006,
+          "rserver": 5745,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153916,
+        "router_rx_drops": 8751,
+        "shard_p99_ms": [
+          42.69254138648045,
+          39.42584569554644,
+          46.69220376786124,
+          41.02669312842687
+        ],
+        "target_retransmits": 1689
+      },
+      {
+        "actual_elapsed": 4.999794244766235,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.01885,
+        "end_s": 140,
+        "full": true,
+        "median_shard_p99_ms": 42.481192171695895,
+        "per_device_rx_drops": {
+          "rclient": 2242,
+          "rserver": 6717,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 151979,
+        "router_rx_drops": 8959,
+        "shard_p99_ms": [
+          43.986168083032204,
+          42.26984295691133,
+          42.69254138648045,
+          40.21830519402695
+        ],
+        "target_retransmits": 1394
+      },
+      {
+        "actual_elapsed": 5.000320196151733,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.025914,
+        "end_s": 145,
+        "full": true,
+        "median_shard_p99_ms": 37.69990108111163,
+        "per_device_rx_drops": {
+          "rclient": 4484,
+          "rserver": 5900,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 152680,
+        "router_rx_drops": 10384,
+        "shard_p99_ms": [
+          37.140930083357105,
+          37.887462778032585,
+          37.512339384190675,
+          41.85132966030826
+        ],
+        "target_retransmits": 1660
+      },
+      {
+        "actual_elapsed": 4.99968695640564,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.992109,
+        "end_s": 150,
+        "full": true,
+        "median_shard_p99_ms": 41.6482680426691,
+        "per_device_rx_drops": {
+          "rclient": 3821,
+          "rserver": 6932,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 154443,
+        "router_rx_drops": 10753,
+        "shard_p99_ms": [
+          44.87029006150115,
+          41.02669312842687,
+          40.6204882459672,
+          42.26984295691133
+        ],
+        "target_retransmits": 1608
+      },
+      {
+        "actual_elapsed": 4.999985218048096,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.016562,
+        "end_s": 155,
+        "full": true,
+        "median_shard_p99_ms": 42.0647507230958,
+        "per_device_rx_drops": {
+          "rclient": 4154,
+          "rserver": 5995,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153778,
+        "router_rx_drops": 10149,
+        "shard_p99_ms": [
+          42.69254138648045,
+          43.550661468348714,
+          40.21830519402695,
+          41.43696005971115
+        ],
+        "target_retransmits": 1819
+      },
+      {
+        "actual_elapsed": 5.000019311904907,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.057503,
+        "end_s": 160,
+        "full": true,
+        "median_shard_p99_ms": 42.711564071371676,
+        "per_device_rx_drops": {
+          "rclient": 3021,
+          "rserver": 5599,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153598,
+        "router_rx_drops": 8620,
+        "shard_p99_ms": [
+          44.87029006150115,
+          41.43696005971115,
+          41.43696005971115,
+          43.986168083032204
+        ],
+        "target_retransmits": 1676
+      },
+      {
+        "actual_elapsed": 5.000000715255737,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.991232,
+        "end_s": 165,
+        "full": true,
+        "median_shard_p99_ms": 42.91025221263003,
+        "per_device_rx_drops": {
+          "rclient": 4606,
+          "rserver": 6836,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 152928,
+        "router_rx_drops": 11442,
+        "shard_p99_ms": [
+          41.85132966030826,
+          43.550661468348714,
+          46.69220376786124,
+          42.26984295691133
+        ],
+        "target_retransmits": 1968
+      },
+      {
+        "actual_elapsed": 4.999995470046997,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.007464,
+        "end_s": 170,
+        "full": true,
+        "median_shard_p99_ms": 38.649000779871045,
+        "per_device_rx_drops": {
+          "rclient": 4665,
+          "rserver": 6178,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153205,
+        "router_rx_drops": 10843,
+        "shard_p99_ms": [
+          38.649000779871045,
+          39.82010415250191,
+          37.887462778032585,
+          38.649000779871045
+        ],
+        "target_retransmits": 2002
+      },
+      {
+        "actual_elapsed": 4.999970436096191,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.959469,
+        "end_s": 175,
+        "full": true,
+        "median_shard_p99_ms": 127.34030099348337,
+        "per_device_rx_drops": {
+          "rclient": 3713,
+          "rserver": 6464,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153994,
+        "router_rx_drops": 10177,
+        "shard_p99_ms": [
+          51.06657561008707,
+          44.87029006150115,
+          205.65016664064848,
+          203.61402637687965
+        ],
+        "target_retransmits": 2289
+      },
+      {
+        "actual_elapsed": 5.000045537948608,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.00445,
+        "end_s": 180,
+        "full": true,
+        "median_shard_p99_ms": 46.465654348638594,
+        "per_device_rx_drops": {
+          "rclient": 4114,
+          "rserver": 5653,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153290,
+        "router_rx_drops": 9767,
+        "shard_p99_ms": [
+          47.630717063595256,
+          45.77218289173733,
+          47.159125805539865,
+          45.31899296211616
+        ],
+        "target_retransmits": 1768
+      },
+      {
+        "actual_elapsed": 5.000269174575806,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.056609,
+        "end_s": 185,
+        "full": true,
+        "median_shard_p99_ms": 42.26984295691133,
+        "per_device_rx_drops": {
+          "rclient": 3724,
+          "rserver": 6088,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153263,
+        "router_rx_drops": 9812,
+        "shard_p99_ms": [
+          41.85132966030826,
+          42.26984295691133,
+          42.26984295691133,
+          42.69254138648045
+        ],
+        "target_retransmits": 1419
+      },
+      {
+        "actual_elapsed": 4.999896287918091,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.093036,
+        "end_s": 190,
+        "full": true,
+        "median_shard_p99_ms": 54.75299143257157,
+        "per_device_rx_drops": {
+          "rclient": 5445,
+          "rserver": 5316,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153349,
+        "router_rx_drops": 10761,
+        "shard_p99_ms": [
+          51.57724136618794,
+          58.699711822144394,
+          55.29778383284616,
+          54.20819903229698
+        ],
+        "target_retransmits": 2343
+      },
+      {
+        "actual_elapsed": 4.999812602996826,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.074327,
+        "end_s": 195,
+        "full": true,
+        "median_shard_p99_ms": 43.347936360386925,
+        "per_device_rx_drops": {
+          "rclient": 6358,
+          "rserver": 5515,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153619,
+        "router_rx_drops": 11873,
+        "shard_p99_ms": [
+          44.42602976386252,
+          42.26984295691133,
+          46.22990472065469,
+          41.43696005971115
+        ],
+        "target_retransmits": 2045
+      },
+      {
+        "actual_elapsed": 5.000003099441528,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.051108,
+        "end_s": 200,
+        "full": true,
+        "median_shard_p99_ms": 44.206098923447364,
+        "per_device_rx_drops": {
+          "rclient": 3145,
+          "rserver": 6310,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153613,
+        "router_rx_drops": 9455,
+        "shard_p99_ms": [
+          43.986168083032204,
+          44.87029006150115,
+          40.6204882459672,
+          44.42602976386252
+        ],
+        "target_retransmits": 1556
+      },
+      {
+        "actual_elapsed": 5.000072240829468,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.091729,
+        "end_s": 205,
+        "full": true,
+        "median_shard_p99_ms": 45.32123647661924,
+        "per_device_rx_drops": {
+          "rclient": 3051,
+          "rserver": 6846,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 153162,
+        "router_rx_drops": 9897,
+        "shard_p99_ms": [
+          44.87029006150115,
+          46.69220376786124,
+          45.77218289173733,
+          43.550661468348714
+        ],
+        "target_retransmits": 2181
+      }
+    ]
+  },
+  {
+    "first_full_5s_hold_window": 100,
+    "last_full_5s_window": 390,
+    "summary": {
+      "all_shards_p99_over_1s": {
+        "median_app_core_fraction": 0.968091018667657,
+        "median_router_drops_per_5s": 82768.5,
+        "median_successful_requests_per_5s": 156658.0,
+        "median_target_retransmits_per_5s": 34064.0,
+        "windows": 12
+      },
+      "largest_five_drop_windows": [
+        [
+          105664,
+          335
+        ],
+        [
+          138166,
+          340
+        ],
+        [
+          170175,
+          380
+        ],
+        [
+          195277,
+          390
+        ],
+        [
+          378228,
+          385
+        ]
+      ],
+      "largest_five_median_p99_windows": [
+        [
+          5485.073026811734,
+          280
+        ],
+        [
+          5881.031826710737,
+          265
+        ],
+        [
+          6180.717578713188,
+          270
+        ],
+        [
+          6495.996292057299,
+          275
+        ],
+        [
+          6626.565817527651,
+          390
+        ]
+      ],
+      "some_shard_p99_at_most_1s": {
+        "median_app_core_fraction": 0.7998524837027661,
+        "median_router_drops_per_5s": 26130,
+        "median_successful_requests_per_5s": 163540,
+        "median_target_retransmits_per_5s": 1755,
+        "windows": 47
+      }
+    },
+    "tag": "priorroute-kensac-310-h1",
+    "windows": [
+      {
+        "actual_elapsed": 4.999985933303833,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.259314,
+        "end_s": 100,
+        "full": true,
+        "median_shard_p99_ms": 221.5872378912477,
+        "per_device_rx_drops": {
+          "rclient": 3713,
+          "rserver": 7584,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 166953,
+        "router_rx_drops": 11297,
+        "shard_p99_ms": [
+          220.484813822137,
+          222.68966196035836,
+          220.484813822137,
+          222.68966196035836
+        ],
+        "target_retransmits": 2787
+      },
+      {
+        "actual_elapsed": 4.999958276748657,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.912734,
+        "end_s": 105,
+        "full": true,
+        "median_shard_p99_ms": 211.88157234002674,
+        "per_device_rx_drops": {
+          "rclient": 3716,
+          "rserver": 7536,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 159883,
+        "router_rx_drops": 11252,
+        "shard_p99_ms": [
+          211.88157234002674,
+          211.88157234002674,
+          211.88157234002674,
+          211.88157234002674
+        ],
+        "target_retransmits": 687
+      },
+      {
+        "actual_elapsed": 4.99998664855957,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.908923,
+        "end_s": 110,
+        "full": true,
+        "median_shard_p99_ms": 210.83265366507612,
+        "per_device_rx_drops": {
+          "rclient": 11458,
+          "rserver": 4402,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 161164,
+        "router_rx_drops": 15860,
+        "shard_p99_ms": [
+          209.78373499012548,
+          211.88157234002674,
+          209.78373499012548,
+          211.88157234002674
+        ],
+        "target_retransmits": 1309
+      },
+      {
+        "actual_elapsed": 5.00022029876709,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.025863,
+        "end_s": 115,
+        "full": true,
+        "median_shard_p99_ms": 211.88157234002674,
+        "per_device_rx_drops": {
+          "rclient": 10307,
+          "rserver": 6752,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 166820,
+        "router_rx_drops": 17059,
+        "shard_p99_ms": [
+          211.88157234002674,
+          211.88157234002674,
+          211.88157234002674,
+          211.88157234002674
+        ],
+        "target_retransmits": 1365
+      },
+      {
+        "actual_elapsed": 4.999831438064575,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.952421,
+        "end_s": 120,
+        "full": true,
+        "median_shard_p99_ms": 218.3017958635019,
+        "per_device_rx_drops": {
+          "rclient": 15716,
+          "rserver": 5288,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 166527,
+        "router_rx_drops": 21004,
+        "shard_p99_ms": [
+          218.3017958635019,
+          218.3017958635019,
+          220.484813822137,
+          218.3017958635019
+        ],
+        "target_retransmits": 1437
+      },
+      {
+        "actual_elapsed": 4.999939441680908,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.889246,
+        "end_s": 125,
+        "full": true,
+        "median_shard_p99_ms": 211.88157234002674,
+        "per_device_rx_drops": {
+          "rclient": 5639,
+          "rserver": 6247,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 161492,
+        "router_rx_drops": 11886,
+        "shard_p99_ms": [
+          211.88157234002674,
+          209.78373499012548,
+          211.88157234002674,
+          211.88157234002674
+        ],
+        "target_retransmits": 858
+      },
+      {
+        "actual_elapsed": 5.000026226043701,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.7947,
+        "end_s": 130,
+        "full": true,
+        "median_shard_p99_ms": 210.83265366507612,
+        "per_device_rx_drops": {
+          "rclient": 8419,
+          "rserver": 7041,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 161461,
+        "router_rx_drops": 15460,
+        "shard_p99_ms": [
+          211.88157234002674,
+          211.88157234002674,
+          207.70666830705494,
+          209.78373499012548
+        ],
+        "target_retransmits": 1110
+      },
+      {
+        "actual_elapsed": 4.999985694885254,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.924402,
+        "end_s": 135,
+        "full": true,
+        "median_shard_p99_ms": 214.00038806342707,
+        "per_device_rx_drops": {
+          "rclient": 23736,
+          "rserver": 5367,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 165492,
+        "router_rx_drops": 29103,
+        "shard_p99_ms": [
+          214.00038806342707,
+          216.14039194406132,
+          214.00038806342707,
+          211.88157234002674
+        ],
+        "target_retransmits": 1250
+      },
+      {
+        "actual_elapsed": 5.00001072883606,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.999271,
+        "end_s": 140,
+        "full": true,
+        "median_shard_p99_ms": 218.3017958635019,
+        "per_device_rx_drops": {
+          "rclient": 20512,
+          "rserver": 5618,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 165794,
+        "router_rx_drops": 26130,
+        "shard_p99_ms": [
+          218.3017958635019,
+          218.3017958635019,
+          220.484813822137,
+          218.3017958635019
+        ],
+        "target_retransmits": 1443
+      },
+      {
+        "actual_elapsed": 5.000037908554077,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.925602,
+        "end_s": 145,
+        "full": true,
+        "median_shard_p99_ms": 216.14039194406132,
+        "per_device_rx_drops": {
+          "rclient": 7479,
+          "rserver": 7117,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163329,
+        "router_rx_drops": 14596,
+        "shard_p99_ms": [
+          214.00038806342707,
+          216.14039194406132,
+          216.14039194406132,
+          216.14039194406132
+        ],
+        "target_retransmits": 887
+      },
+      {
+        "actual_elapsed": 5.000007390975952,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.850079,
+        "end_s": 150,
+        "full": true,
+        "median_shard_p99_ms": 212.94098020172692,
+        "per_device_rx_drops": {
+          "rclient": 7244,
+          "rserver": 7439,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 162030,
+        "router_rx_drops": 14683,
+        "shard_p99_ms": [
+          211.88157234002674,
+          211.88157234002674,
+          214.00038806342707,
+          214.00038806342707
+        ],
+        "target_retransmits": 1325
+      },
+      {
+        "actual_elapsed": 4.9999613761901855,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.91532,
+        "end_s": 155,
+        "full": true,
+        "median_shard_p99_ms": 210.83265366507612,
+        "per_device_rx_drops": {
+          "rclient": 20319,
+          "rserver": 4929,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164014,
+        "router_rx_drops": 25248,
+        "shard_p99_ms": [
+          211.88157234002674,
+          209.78373499012548,
+          211.88157234002674,
+          182.50408106089318
+        ],
+        "target_retransmits": 1081
+      },
+      {
+        "actual_elapsed": 4.999991416931152,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.0019,
+        "end_s": 160,
+        "full": true,
+        "median_shard_p99_ms": 214.00038806342707,
+        "per_device_rx_drops": {
+          "rclient": 25669,
+          "rserver": 7299,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164517,
+        "router_rx_drops": 32968,
+        "shard_p99_ms": [
+          214.00038806342707,
+          214.00038806342707,
+          214.00038806342707,
+          211.88157234002674
+        ],
+        "target_retransmits": 901
+      },
+      {
+        "actual_elapsed": 5.000009775161743,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.94048,
+        "end_s": 165,
+        "full": true,
+        "median_shard_p99_ms": 216.14039194406132,
+        "per_device_rx_drops": {
+          "rclient": 13443,
+          "rserver": 3935,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163234,
+        "router_rx_drops": 17378,
+        "shard_p99_ms": [
+          216.14039194406132,
+          216.14039194406132,
+          216.14039194406132,
+          216.14039194406132
+        ],
+        "target_retransmits": 1138
+      },
+      {
+        "actual_elapsed": 5.000003099441528,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.204624,
+        "end_s": 170,
+        "full": true,
+        "median_shard_p99_ms": 216.14039194406132,
+        "per_device_rx_drops": {
+          "rclient": 14796,
+          "rserver": 1932,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163478,
+        "router_rx_drops": 16728,
+        "shard_p99_ms": [
+          216.14039194406132,
+          218.3017958635019,
+          216.14039194406132,
+          216.14039194406132
+        ],
+        "target_retransmits": 1377
+      },
+      {
+        "actual_elapsed": 4.999999523162842,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.919873,
+        "end_s": 175,
+        "full": true,
+        "median_shard_p99_ms": 218.3017958635019,
+        "per_device_rx_drops": {
+          "rclient": 21913,
+          "rserver": 5733,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164150,
+        "router_rx_drops": 27646,
+        "shard_p99_ms": [
+          218.3017958635019,
+          218.3017958635019,
+          218.3017958635019,
+          218.3017958635019
+        ],
+        "target_retransmits": 1244
+      },
+      {
+        "actual_elapsed": 5.000024080276489,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.948005,
+        "end_s": 180,
+        "full": true,
+        "median_shard_p99_ms": 217.2210939037816,
+        "per_device_rx_drops": {
+          "rclient": 18447,
+          "rserver": 3631,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164551,
+        "router_rx_drops": 22078,
+        "shard_p99_ms": [
+          216.14039194406132,
+          218.3017958635019,
+          216.14039194406132,
+          218.3017958635019
+        ],
+        "target_retransmits": 1549
+      },
+      {
+        "actual_elapsed": 5.000265598297119,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.852033,
+        "end_s": 185,
+        "full": true,
+        "median_shard_p99_ms": 216.14039194406132,
+        "per_device_rx_drops": {
+          "rclient": 23668,
+          "rserver": 6157,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163182,
+        "router_rx_drops": 29825,
+        "shard_p99_ms": [
+          216.14039194406132,
+          216.14039194406132,
+          216.14039194406132,
+          216.14039194406132
+        ],
+        "target_retransmits": 961
+      },
+      {
+        "actual_elapsed": 4.999675035476685,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.817077,
+        "end_s": 190,
+        "full": true,
+        "median_shard_p99_ms": 220.484813822137,
+        "per_device_rx_drops": {
+          "rclient": 17639,
+          "rserver": 5401,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164471,
+        "router_rx_drops": 23040,
+        "shard_p99_ms": [
+          220.484813822137,
+          220.484813822137,
+          220.484813822137,
+          220.484813822137
+        ],
+        "target_retransmits": 1186
+      },
+      {
+        "actual_elapsed": 5.000045299530029,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.869556,
+        "end_s": 195,
+        "full": true,
+        "median_shard_p99_ms": 216.14039194406132,
+        "per_device_rx_drops": {
+          "rclient": 20343,
+          "rserver": 4068,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163537,
+        "router_rx_drops": 24411,
+        "shard_p99_ms": [
+          216.14039194406132,
+          216.14039194406132,
+          216.14039194406132,
+          216.14039194406132
+        ],
+        "target_retransmits": 1372
+      },
+      {
+        "actual_elapsed": 5.00008487701416,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.836239,
+        "end_s": 200,
+        "full": true,
+        "median_shard_p99_ms": 218.3017958635019,
+        "per_device_rx_drops": {
+          "rclient": 16740,
+          "rserver": 4722,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163546,
+        "router_rx_drops": 21462,
+        "shard_p99_ms": [
+          218.3017958635019,
+          216.14039194406132,
+          220.484813822137,
+          218.3017958635019
+        ],
+        "target_retransmits": 1202
+      },
+      {
+        "actual_elapsed": 5.001754522323608,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.888421,
+        "end_s": 205,
+        "full": true,
+        "median_shard_p99_ms": 218.3017958635019,
+        "per_device_rx_drops": {
+          "rclient": 20020,
+          "rserver": 3872,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163713,
+        "router_rx_drops": 23892,
+        "shard_p99_ms": [
+          220.484813822137,
+          218.3017958635019,
+          218.3017958635019,
+          218.3017958635019
+        ],
+        "target_retransmits": 1339
+      },
+      {
+        "actual_elapsed": 4.998003005981445,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.876479,
+        "end_s": 210,
+        "full": true,
+        "median_shard_p99_ms": 219.39330484281945,
+        "per_device_rx_drops": {
+          "rclient": 18961,
+          "rserver": 5362,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163540,
+        "router_rx_drops": 24323,
+        "shard_p99_ms": [
+          218.3017958635019,
+          220.484813822137,
+          218.3017958635019,
+          222.68966196035836
+        ],
+        "target_retransmits": 1388
+      },
+      {
+        "actual_elapsed": 5.000031232833862,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.854102,
+        "end_s": 215,
+        "full": true,
+        "median_shard_p99_ms": 222.68966196035836,
+        "per_device_rx_drops": {
+          "rclient": 19930,
+          "rserver": 7082,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164055,
+        "router_rx_drops": 27012,
+        "shard_p99_ms": [
+          222.68966196035836,
+          222.68966196035836,
+          222.68966196035836,
+          224.91655857996184
+        ],
+        "target_retransmits": 1789
+      },
+      {
+        "actual_elapsed": 5.000094652175903,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.859505,
+        "end_s": 220,
+        "full": true,
+        "median_shard_p99_ms": 224.91655857996184,
+        "per_device_rx_drops": {
+          "rclient": 23131,
+          "rserver": 8605,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163133,
+        "router_rx_drops": 31736,
+        "shard_p99_ms": [
+          224.91655857996184,
+          222.68966196035836,
+          224.91655857996184,
+          224.91655857996184
+        ],
+        "target_retransmits": 1755
+      },
+      {
+        "actual_elapsed": 5.000024080276489,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.950267,
+        "end_s": 225,
+        "full": true,
+        "median_shard_p99_ms": 228.3015527865903,
+        "per_device_rx_drops": {
+          "rclient": 17495,
+          "rserver": 3526,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163928,
+        "router_rx_drops": 21021,
+        "shard_p99_ms": [
+          227.16572416576147,
+          229.4373814074191,
+          229.4373814074191,
+          227.16572416576147
+        ],
+        "target_retransmits": 2331
+      },
+      {
+        "actual_elapsed": 5.000035285949707,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.101115,
+        "end_s": 230,
+        "full": true,
+        "median_shard_p99_ms": 224.91655857996184,
+        "per_device_rx_drops": {
+          "rclient": 18970,
+          "rserver": 4990,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164063,
+        "router_rx_drops": 23960,
+        "shard_p99_ms": [
+          224.91655857996184,
+          224.91655857996184,
+          224.91655857996184,
+          224.91655857996184
+        ],
+        "target_retransmits": 1669
+      },
+      {
+        "actual_elapsed": 4.99997353553772,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.974481,
+        "end_s": 235,
+        "full": true,
+        "median_shard_p99_ms": 224.91655857996184,
+        "per_device_rx_drops": {
+          "rclient": 14031,
+          "rserver": 4274,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164468,
+        "router_rx_drops": 18305,
+        "shard_p99_ms": [
+          227.16572416576147,
+          224.91655857996184,
+          222.68966196035836,
+          224.91655857996184
+        ],
+        "target_retransmits": 1957
+      },
+      {
+        "actual_elapsed": 5.0,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 3.963744,
+        "end_s": 240,
+        "full": true,
+        "median_shard_p99_ms": 221.5872378912477,
+        "per_device_rx_drops": {
+          "rclient": 18682,
+          "rserver": 5397,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163524,
+        "router_rx_drops": 24079,
+        "shard_p99_ms": [
+          222.68966196035836,
+          222.68966196035836,
+          220.484813822137,
+          220.484813822137
+        ],
+        "target_retransmits": 1897
+      },
+      {
+        "actual_elapsed": 5.000001907348633,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.250225,
+        "end_s": 245,
+        "full": true,
+        "median_shard_p99_ms": 238.7534591364598,
+        "per_device_rx_drops": {
+          "rclient": 24472,
+          "rserver": 7832,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163916,
+        "router_rx_drops": 32304,
+        "shard_p99_ms": [
+          238.7534591364598,
+          236.3895635014453,
+          238.7534591364598,
+          238.7534591364598
+        ],
+        "target_retransmits": 2334
+      },
+      {
+        "actual_elapsed": 5.000006198883057,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.45913,
+        "end_s": 250,
+        "full": true,
+        "median_shard_p99_ms": 259.82846313890445,
+        "per_device_rx_drops": {
+          "rclient": 28175,
+          "rserver": 10288,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 161529,
+        "router_rx_drops": 38463,
+        "shard_p99_ms": [
+          258.5357842178153,
+          261.12114205999353,
+          255.97602397803496,
+          261.12114205999353
+        ],
+        "target_retransmits": 3724
+      },
+      {
+        "actual_elapsed": 4.999999284744263,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.852736,
+        "end_s": 255,
+        "full": true,
+        "median_shard_p99_ms": 1403.311892866882,
+        "per_device_rx_drops": {
+          "rclient": 40149,
+          "rserver": 28957,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 155789,
+        "router_rx_drops": 69106,
+        "shard_p99_ms": [
+          1403.311892866882,
+          1389.4177157097845,
+          1403.311892866882,
+          1403.311892866882
+        ],
+        "target_retransmits": 27327
+      },
+      {
+        "actual_elapsed": 5.000018835067749,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.867509,
+        "end_s": 260,
+        "full": true,
+        "median_shard_p99_ms": 3436.195353596658,
+        "per_device_rx_drops": {
+          "rclient": 34114,
+          "rserver": 15109,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 156462,
+        "router_rx_drops": 49223,
+        "shard_p99_ms": [
+          3436.195353596658,
+          3402.173617422433,
+          3436.195353596658,
+          3470.5573071326253
+        ],
+        "target_retransmits": 12412
+      },
+      {
+        "actual_elapsed": 5.000030517578125,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.867645,
+        "end_s": 265,
+        "full": true,
+        "median_shard_p99_ms": 5881.031826710737,
+        "per_device_rx_drops": {
+          "rclient": 37161,
+          "rserver": 19706,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 143057,
+        "router_rx_drops": 56867,
+        "shard_p99_ms": [
+          5822.515545478675,
+          5822.515545478675,
+          5939.548107942798,
+          5939.548107942798
+        ],
+        "target_retransmits": 18827
+      },
+      {
+        "actual_elapsed": 4.999957799911499,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.868746,
+        "end_s": 270,
+        "full": true,
+        "median_shard_p99_ms": 6180.717578713188,
+        "per_device_rx_drops": {
+          "rclient": 48851,
+          "rserver": 37884,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163189,
+        "router_rx_drops": 86735,
+        "shard_p99_ms": [
+          6180.717578713188,
+          6180.717578713188,
+          6242.52475450032,
+          6180.717578713188
+        ],
+        "target_retransmits": 32918
+      },
+      {
+        "actual_elapsed": 5.0000104904174805,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.466217,
+        "end_s": 275,
+        "full": true,
+        "median_shard_p99_ms": 6495.996292057299,
+        "per_device_rx_drops": {
+          "rclient": 35767,
+          "rserver": 22966,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 145436,
+        "router_rx_drops": 58733,
+        "shard_p99_ms": [
+          6495.996292057299,
+          6495.996292057299,
+          6495.996292057299,
+          6495.996292057299
+        ],
+        "target_retransmits": 31263
+      },
+      {
+        "actual_elapsed": 4.999974250793457,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.871954,
+        "end_s": 280,
+        "full": true,
+        "median_shard_p99_ms": 5485.073026811734,
+        "per_device_rx_drops": {
+          "rclient": 46056,
+          "rserver": 32746,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163931,
+        "router_rx_drops": 78802,
+        "shard_p99_ms": [
+          5485.073026811734,
+          5485.073026811734,
+          5485.073026811734,
+          5485.073026811734
+        ],
+        "target_retransmits": 35210
+      },
+      {
+        "actual_elapsed": 5.000006198883057,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.703546,
+        "end_s": 285,
+        "full": true,
+        "median_shard_p99_ms": 4406.905015396891,
+        "per_device_rx_drops": {
+          "rclient": 47811,
+          "rserver": 27413,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 169639,
+        "router_rx_drops": 75224,
+        "shard_p99_ms": [
+          4450.753731207731,
+          4363.056299586052,
+          4450.753731207731,
+          4363.056299586052
+        ],
+        "target_retransmits": 27846
+      },
+      {
+        "actual_elapsed": 5.0001280307769775,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.778108,
+        "end_s": 290,
+        "full": true,
+        "median_shard_p99_ms": 575.965708100207,
+        "per_device_rx_drops": {
+          "rclient": 37005,
+          "rserver": 21479,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 162310,
+        "router_rx_drops": 58484,
+        "shard_p99_ms": [
+          584.6195212268866,
+          567.4259475889926,
+          578.8312091355315,
+          573.1002070648826
+        ],
+        "target_retransmits": 17148
+      },
+      {
+        "actual_elapsed": 5.0000011920928955,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.199651,
+        "end_s": 295,
+        "full": true,
+        "median_shard_p99_ms": 252.1869464738017,
+        "per_device_rx_drops": {
+          "rclient": 14420,
+          "rserver": 7371,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 160618,
+        "router_rx_drops": 21791,
+        "shard_p99_ms": [
+          250.9322850485589,
+          253.4416078990445,
+          250.9322850485589,
+          253.4416078990445
+        ],
+        "target_retransmits": 4712
+      },
+      {
+        "actual_elapsed": 4.999954700469971,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.197574,
+        "end_s": 300,
+        "full": true,
+        "median_shard_p99_ms": 238.7534591364598,
+        "per_device_rx_drops": {
+          "rclient": 29611,
+          "rserver": 10388,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163540,
+        "router_rx_drops": 39999,
+        "shard_p99_ms": [
+          238.7534591364598,
+          238.7534591364598,
+          238.7534591364598,
+          236.3895635014453
+        ],
+        "target_retransmits": 3618
+      },
+      {
+        "actual_elapsed": 4.999822616577148,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.33803,
+        "end_s": 305,
+        "full": true,
+        "median_shard_p99_ms": 239.9472264321421,
+        "per_device_rx_drops": {
+          "rclient": 26339,
+          "rserver": 9781,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 165700,
+        "router_rx_drops": 36120,
+        "shard_p99_ms": [
+          238.7534591364598,
+          241.1409937278244,
+          241.1409937278244,
+          238.7534591364598
+        ],
+        "target_retransmits": 2792
+      },
+      {
+        "actual_elapsed": 5.000078439712524,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.465719,
+        "end_s": 310,
+        "full": true,
+        "median_shard_p99_ms": 241.1409937278244,
+        "per_device_rx_drops": {
+          "rclient": 18503,
+          "rserver": 7985,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164751,
+        "router_rx_drops": 26488,
+        "shard_p99_ms": [
+          241.1409937278244,
+          241.1409937278244,
+          243.55240366510262,
+          241.1409937278244
+        ],
+        "target_retransmits": 3721
+      },
+      {
+        "actual_elapsed": 5.00002384185791,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.499417,
+        "end_s": 315,
+        "full": true,
+        "median_shard_p99_ms": 359.0260802427826,
+        "per_device_rx_drops": {
+          "rclient": 26138,
+          "rserver": 12655,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 159689,
+        "router_rx_drops": 38793,
+        "shard_p99_ms": [
+          359.0260802427826,
+          359.0260802427826,
+          351.9518480960519,
+          359.0260802427826
+        ],
+        "target_retransmits": 11253
+      },
+      {
+        "actual_elapsed": 5.001862049102783,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.293025,
+        "end_s": 320,
+        "full": true,
+        "median_shard_p99_ms": 258.5357842178153,
+        "per_device_rx_drops": {
+          "rclient": 20769,
+          "rserver": 7172,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 164828,
+        "router_rx_drops": 27941,
+        "shard_p99_ms": [
+          258.5357842178153,
+          258.5357842178153,
+          258.5357842178153,
+          261.12114205999353
+        ],
+        "target_retransmits": 6644
+      },
+      {
+        "actual_elapsed": 4.99815821647644,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.424981,
+        "end_s": 325,
+        "full": true,
+        "median_shard_p99_ms": 263.7323534805934,
+        "per_device_rx_drops": {
+          "rclient": 23962,
+          "rserver": 8609,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 165461,
+        "router_rx_drops": 32571,
+        "shard_p99_ms": [
+          263.7323534805934,
+          263.7323534805934,
+          263.7323534805934,
+          269.03337378555335
+        ],
+        "target_retransmits": 3050
+      },
+      {
+        "actual_elapsed": 4.999950170516968,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.674898,
+        "end_s": 330,
+        "full": true,
+        "median_shard_p99_ms": 923.9670989552242,
+        "per_device_rx_drops": {
+          "rclient": 52290,
+          "rserver": 28281,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 152957,
+        "router_rx_drops": 80571,
+        "shard_p99_ms": [
+          923.9670989552242,
+          923.9670989552242,
+          980.8096940333187,
+          923.9670989552242
+        ],
+        "target_retransmits": 25253
+      },
+      {
+        "actual_elapsed": 4.999996185302734,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.837339,
+        "end_s": 335,
+        "full": true,
+        "median_shard_p99_ms": 3269.42197486096,
+        "per_device_rx_drops": {
+          "rclient": 60427,
+          "rserver": 45237,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 156854,
+        "router_rx_drops": 105664,
+        "shard_p99_ms": [
+          3269.42197486096,
+          3302.116194609569,
+          3269.42197486096,
+          3269.42197486096
+        ],
+        "target_retransmits": 42405
+      },
+      {
+        "actual_elapsed": 5.00005316734314,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.843619,
+        "end_s": 340,
+        "full": true,
+        "median_shard_p99_ms": 2788.232575285989,
+        "per_device_rx_drops": {
+          "rclient": 78268,
+          "rserver": 59898,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 168658,
+        "router_rx_drops": 138166,
+        "shard_p99_ms": [
+          2788.232575285989,
+          2788.232575285989,
+          2760.6263121643456,
+          2901.4459986552265
+        ],
+        "target_retransmits": 49882
+      },
+      {
+        "actual_elapsed": 5.000004768371582,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.727837,
+        "end_s": 345,
+        "full": true,
+        "median_shard_p99_ms": 631.2353903223932,
+        "per_device_rx_drops": {
+          "rclient": 44364,
+          "rserver": 30003,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 161346,
+        "router_rx_drops": 74367,
+        "shard_p99_ms": [
+          590.4657164391555,
+          692.3674896561259,
+          672.005064205631,
+          561.8078688999926
+        ],
+        "target_retransmits": 28734
+      },
+      {
+        "actual_elapsed": 4.999948263168335,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.375235,
+        "end_s": 350,
+        "full": true,
+        "median_shard_p99_ms": 772.4524924694659,
+        "per_device_rx_drops": {
+          "rclient": 36147,
+          "rserver": 15571,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 163001,
+        "router_rx_drops": 51718,
+        "shard_p99_ms": [
+          780.1770173941604,
+          772.4524924694659,
+          772.4524924694659,
+          764.8044479895701
+        ],
+        "target_retransmits": 14760
+      },
+      {
+        "actual_elapsed": 5.000128984451294,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.422885,
+        "end_s": 355,
+        "full": true,
+        "median_shard_p99_ms": 258.54858301901425,
+        "per_device_rx_drops": {
+          "rclient": 28133,
+          "rserver": 9406,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 158050,
+        "router_rx_drops": 37539,
+        "shard_p99_ms": [
+          255.97602397803496,
+          261.12114205999353,
+          261.12114205999353,
+          255.97602397803496
+        ],
+        "target_retransmits": 3114
+      },
+      {
+        "actual_elapsed": 5.000087022781372,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.659297,
+        "end_s": 360,
+        "full": true,
+        "median_shard_p99_ms": 458.19255418814055,
+        "per_device_rx_drops": {
+          "rclient": 40220,
+          "rserver": 16929,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 165541,
+        "router_rx_drops": 57149,
+        "shard_p99_ms": [
+          465.0307976724588,
+          366.24250445566247,
+          469.68110564918345,
+          451.35431070382236
+        ],
+        "target_retransmits": 13861
+      },
+      {
+        "actual_elapsed": 4.999828815460205,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.646002,
+        "end_s": 365,
+        "full": true,
+        "median_shard_p99_ms": 788.0177964189719,
+        "per_device_rx_drops": {
+          "rclient": 57488,
+          "rserver": 35665,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 162383,
+        "router_rx_drops": 93153,
+        "shard_p99_ms": [
+          780.1770173941604,
+          780.1770173941604,
+          795.8585754437834,
+          795.8585754437834
+        ],
+        "target_retransmits": 23626
+      },
+      {
+        "actual_elapsed": 5.000087022781372,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.606456,
+        "end_s": 370,
+        "full": true,
+        "median_shard_p99_ms": 857.6193589823015,
+        "per_device_rx_drops": {
+          "rclient": 40666,
+          "rserver": 20494,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 165417,
+        "router_rx_drops": 61160,
+        "shard_p99_ms": [
+          844.819914862182,
+          971.0987069636822,
+          870.418803102421,
+          819.9738861383051
+        ],
+        "target_retransmits": 19898
+      },
+      {
+        "actual_elapsed": 4.999866485595703,
+        "all_shards_over_1s": false,
+        "app_cpu_s": 4.739772,
+        "end_s": 375,
+        "full": true,
+        "median_shard_p99_ms": 350.20951221438827,
+        "per_device_rx_drops": {
+          "rclient": 31975,
+          "rserver": 18830,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 162595,
+        "router_rx_drops": 50805,
+        "shard_p99_ms": [
+          348.46717633272465,
+          351.9518480960519,
+          359.0260802427826,
+          348.46717633272465
+        ],
+        "target_retransmits": 12850
+      },
+      {
+        "actual_elapsed": 5.000037431716919,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.692077,
+        "end_s": 380,
+        "full": true,
+        "median_shard_p99_ms": 1051.560746662381,
+        "per_device_rx_drops": {
+          "rclient": 95848,
+          "rserver": 74327,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 149807,
+        "router_rx_drops": 170175,
+        "shard_p99_ms": [
+          1041.1492541211694,
+          1051.560746662381,
+          1051.560746662381,
+          1051.560746662381
+        ],
+        "target_retransmits": 43692
+      },
+      {
+        "actual_elapsed": 4.999971628189087,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.640973,
+        "end_s": 385,
+        "full": true,
+        "median_shard_p99_ms": 3049.5998672261244,
+        "per_device_rx_drops": {
+          "rclient": 200490,
+          "rserver": 177738,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 131624,
+        "router_rx_drops": 378228,
+        "shard_p99_ms": [
+          3079.9433934531653,
+          3019.2563409990835,
+          2989.362713860479,
+          3079.9433934531653
+        ],
+        "target_retransmits": 115919
+      },
+      {
+        "actual_elapsed": 5.000047445297241,
+        "all_shards_over_1s": true,
+        "app_cpu_s": 4.803696,
+        "end_s": 390,
+        "full": true,
+        "median_shard_p99_ms": 6626.565817527651,
+        "per_device_rx_drops": {
+          "rclient": 110552,
+          "rserver": 84725,
+          "tclient": 0,
+          "tserver": 0
+        },
+        "requests_completed": 159168,
+        "router_rx_drops": 195277,
+        "shard_p99_ms": [
+          6692.8314757029275,
+          6626.565817527651,
+          6626.565817527651,
+          6626.565817527651
+        ],
+        "target_retransmits": 53710
+      }
+    ]
+  }
+]

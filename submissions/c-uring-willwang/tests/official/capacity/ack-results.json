@@ -1,0 +1,774 @@
+{
+  "kernel": "Linux 6.8.0-147-generic",
+  "method": "Three network namespaces, MTU 1500, 48 microsecond delay per direction. Count each socket from the beginning of an HTTP request through its validated last response byte. Extra ACKs = change in TCP_INFO tcpi_segs_in minus change in tcpi_data_segs_in. Process CPU includes kernel work in server process context.",
+  "server_sha256": {
+    "stock": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+    "ackdelay": "c1ba37af2b25ddba377ca13720854aad8232506c525e730a9d4f354686855301",
+    "ackdelay-partial": "c533d5ecabe11985f08e38265edc1f23b529ed4574f10ff21675cb99681f626c"
+  },
+  "inputs_sha256": {
+    "golden-cpu-v1.jsonl": "15f427c30a99d38443997e49ef7708c5bdc7e9addcae46a668e12024b1795929",
+    "golden-low-v1.jsonl": "405f278db10219a02ff5454a40230a73667e96e4006c1ad0de4a9414724a2d7b",
+    "partial-v1.jsonl": "9b5b8db626089f108818980fac6f01ba1560973f0f92326dd837cf75d4dade3e",
+    "multi-v1.jsonl": "43bff675564346f10b808386888c27dbac1fc3a18c57e49c674cae0a6acc5907",
+    "paced-v1.jsonl": "4df68b1a23b8ac8f4379408cb6b5bd3fcaf8612ba64a2f59f299197045041bb2"
+  },
+  "golden_feed_trials": [
+    {
+      "arm": "stock",
+      "order": 0,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 123.453,
+        "completed_per_s": 2219.91
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 27.454,
+        "completed_per_s": 8805.19
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 43.938,
+        "completed_per_s": 6942.89
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 1,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          2048,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 124.936,
+        "completed_per_s": 2499.18
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 29.761,
+        "completed_per_s": 11998.95
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          2048,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 38.03,
+        "completed_per_s": 12056.9
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 2,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          2048,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 119.898,
+        "completed_per_s": 2499.59
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 29.96,
+        "completed_per_s": 11999.07
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          2048,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 43.376,
+        "completed_per_s": 10506.64
+      }
+    },
+    {
+      "arm": "stock",
+      "order": 3,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 122.908,
+        "completed_per_s": 2499.41
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 31.59,
+        "completed_per_s": 11998.8
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 45.11,
+        "completed_per_s": 11056.45
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 4,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          2048,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 129.379,
+        "completed_per_s": 2498.77
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 30.857,
+        "completed_per_s": 11998.46
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          1981,
+          67,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 43.233,
+        "completed_per_s": 10981.61
+      }
+    },
+    {
+      "arm": "stock",
+      "order": 5,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 126.168,
+        "completed_per_s": 2499.35
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 30.769,
+        "completed_per_s": 11998.91
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 38.388,
+        "completed_per_s": 6492.25
+      }
+    },
+    {
+      "arm": "stock",
+      "order": 6,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 132.106,
+        "completed_per_s": 2499.3
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 31.14,
+        "completed_per_s": 11998.79
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          0,
+          2048,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 44.111,
+        "completed_per_s": 10173.31
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 7,
+      "fresh_per_s_target": 2500,
+      "established_per_s_target": 12000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 2048,
+        "fresh_extra_ack_histogram": [
+          2048,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 123.152,
+        "completed_per_s": 2499.47
+      },
+      "established": {
+        "requests": 30000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 30.321,
+        "completed_per_s": 11998.9
+      },
+      "mixed": {
+        "requests": 11878,
+        "fresh_extra_ack_histogram": [
+          2048,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 44.413,
+        "completed_per_s": 10533.13
+      }
+    },
+    {
+      "arm": "stock",
+      "order": 0,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 127.469,
+        "completed_per_s": 999.38
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 47.825,
+        "completed_per_s": 4996.94
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 48.25,
+        "completed_per_s": 5999.65
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 1,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 120.211,
+        "completed_per_s": 1000.26
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 47.576,
+        "completed_per_s": 4999.77
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 43.871,
+        "completed_per_s": 5992.03
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 2,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 108.416,
+        "completed_per_s": 1000.4
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 50.773,
+        "completed_per_s": 4999.86
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 57.903,
+        "completed_per_s": 5927.56
+      }
+    },
+    {
+      "arm": "stock",
+      "order": 3,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 163.143,
+        "completed_per_s": 1000.29
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 46.034,
+        "completed_per_s": 4999.81
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 43.881,
+        "completed_per_s": 5999.76
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 4,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 118.347,
+        "completed_per_s": 1000.27
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 53.405,
+        "completed_per_s": 4998.68
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 44.829,
+        "completed_per_s": 5999.46
+      }
+    },
+    {
+      "arm": "stock",
+      "order": 5,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 123.997,
+        "completed_per_s": 1000.4
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 50.372,
+        "completed_per_s": 4999.88
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 48.042,
+        "completed_per_s": 5999.24
+      }
+    },
+    {
+      "arm": "stock",
+      "order": 6,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 142.001,
+        "completed_per_s": 1000.4
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 44.857,
+        "completed_per_s": 4999.8
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          0,
+          1024,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 50.77,
+        "completed_per_s": 5999.57
+      }
+    },
+    {
+      "arm": "ackdelay",
+      "order": 7,
+      "fresh_per_s_target": 1000,
+      "established_per_s_target": 5000,
+      "http_bytes": 5176,
+      "fresh": {
+        "requests": 1024,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 135.384,
+        "completed_per_s": 1000.09
+      },
+      "established": {
+        "requests": 12000,
+        "fresh_extra_ack_histogram": null,
+        "server_cpu_us_per_request": 46.453,
+        "completed_per_s": 4999.55
+      },
+      "mixed": {
+        "requests": 6144,
+        "fresh_extra_ack_histogram": [
+          1024,
+          0,
+          0,
+          0,
+          0
+        ],
+        "server_cpu_us_per_request": 47.86,
+        "completed_per_s": 5999.55
+      }
+    }
+  ],
+  "fragmented_post_median_ms": {
+    "stock": {
+      "parts2_nagle": [
+        3.366,
+        3.898
+      ],
+      "parts2_nodelay": [
+        3.323,
+        4.725
+      ],
+      "parts3_nagle": [
+        5.575,
+        5.52
+      ],
+      "parts3_nodelay": [
+        5.64,
+        5.611
+      ],
+      "parts8_nagle": [
+        19.197,
+        17.413
+      ],
+      "parts8_nodelay": [
+        19.961,
+        19.279
+      ]
+    },
+    "ackdelay": {
+      "parts2_nagle": [
+        41.412,
+        41.583
+      ],
+      "parts2_nodelay": [
+        3.254,
+        3.971
+      ],
+      "parts3_nagle": [
+        41.281,
+        41.452
+      ],
+      "parts3_nodelay": [
+        5.397,
+        5.489
+      ],
+      "parts8_nagle": [
+        41.735,
+        41.273
+      ],
+      "parts8_nodelay": [
+        21.962,
+        17.767
+      ]
+    },
+    "ackdelay-partial": {
+      "parts2_nagle": [
+        4.24,
+        4.165
+      ],
+      "parts2_nodelay": [
+        3.439,
+        3.917
+      ],
+      "parts3_nagle": [
+        5.55,
+        5.499
+      ],
+      "parts3_nodelay": [
+        5.518,
+        5.574
+      ],
+      "parts8_nagle": [
+        18.662,
+        19.632
+      ],
+      "parts8_nodelay": [
+        18.289,
+        17.673
+      ]
+    }
+  },
+  "established_extra_acks": {
+    "stock": {
+      "round01": {
+        "1": 128
+      },
+      "round02": {
+        "0": 128
+      },
+      "round03": {
+        "0": 128
+      },
+      "round04": {
+        "0": 128
+      },
+      "round05": {
+        "0": 128
+      }
+    },
+    "ackdelay": {
+      "round01": {
+        "0": 128
+      },
+      "round02": {
+        "0": 128
+      },
+      "round03": {
+        "0": 128
+      },
+      "round04": {
+        "0": 128
+      },
+      "round05": {
+        "0": 128
+      }
+    }
+  },
+  "portable_probe_smoke": {
+    "fixture": "127.0.0.1 Linux GET /feed, 12 connections per arm and mode, two byte-complete 200 responses per connection",
+    "scored_0142ba2": {
+      "tcp_nodelay": {
+        "pure_acks": [
+          1,
+          0
+        ],
+        "median_ms": [
+          0.23,
+          0.119
+        ]
+      },
+      "nagle_split_2ms": {
+        "pure_acks": [
+          2,
+          2
+        ],
+        "median_ms": [
+          2.366,
+          41.125
+        ]
+      }
+    },
+    "guarded_with_formatter": {
+      "server_sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+      "tcp_nodelay": {
+        "pure_acks": [
+          0,
+          0
+        ],
+        "median_ms": [
+          0.17,
+          0.111
+        ]
+      },
+      "nagle_split_2ms": {
+        "pure_acks": [
+          2,
+          2
+        ],
+        "median_ms": [
+          2.286,
+          2.297
+        ]
+      }
+    }
+  }
+}

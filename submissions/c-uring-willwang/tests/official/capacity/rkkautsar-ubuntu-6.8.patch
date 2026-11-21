@@ -1,0 +1,35 @@
+--- a/src/uring.rs
++++ b/src/uring.rs
+@@ -254,8 +254,30 @@
+                 BUF_GROUP,
+                 0,
+             ) {
+-                dealloc(mem, layout);
+-                return Err(e);
++                if e.raw_os_error() != Some(libc::EINVAL) {
++                    dealloc(mem, layout);
++                    return Err(e);
++                }
++                // Ubuntu 6.8.0-147 in this benchmark host rejects all-zero
++                // resv bytes (LP #2162843). Retry only a refused registration.
++                #[repr(C)]
++                struct BufReg {
++                    ring_addr: u64, ring_entries: u32, bgid: u16,
++                    flags: u16, resv: [u64; 3],
++                }
++                let reg = BufReg {
++                    ring_addr: mem as u64, ring_entries: entries as u32,
++                    bgid: BUF_GROUP, flags: 0, resv: [1, 0, 0],
++                };
++                let rc = libc::syscall(
++                    libc::SYS_io_uring_register, ring.as_raw_fd(), 22,
++                    &reg as *const BufReg, 1u32,
++                );
++                if rc < 0 {
++                    let retry_error = io::Error::last_os_error();
++                    dealloc(mem, layout);
++                    return Err(retry_error);
++                }
+             }
+         }
+         let mut br = Self {

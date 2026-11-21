@@ -1,0 +1,190 @@
+{
+  "trial": "ring4096-guarded-310-h1",
+  "score": {
+    "fails": 0,
+    "p95_ms": 288.44019,
+    "p99_ms": 772.45249,
+    "qualified": false,
+    "req_per_s": 29181.86982,
+    "reqs": 11468485,
+    "stock_pass": true,
+    "users": 310000,
+    "wire_eligible": true
+  },
+  "native_loss": {
+    "observation_times_s": [
+      175.8557,
+      175.9986,
+      184.01762,
+      184.17468
+    ],
+    "service_tx": {
+      "packets": 418934,
+      "dropped": 1185,
+      "errors": 0
+    },
+    "qdisc": {
+      "packets": 666140,
+      "drops": 0,
+      "overlimits": 0,
+      "requeues": 0,
+      "drop_overlimit": 0,
+      "qlen_at_edges": [
+        0,
+        0
+      ]
+    },
+    "other_native_drops": 0,
+    "measured_macro_driver_free_reason": null,
+    "leading_explanation": "TUN transmit pointer ring transiently full. The positive control recorded FULL_RING, while the macro archived the device aggregate only."
+  },
+  "corroborating_probes_at_stock_second_181": {
+    "0": null,
+    "1": {
+      "seq": 182,
+      "s": 181.16863,
+      "rtt_ms": 31.9
+    },
+    "2": {
+      "seq": 182,
+      "s": 181.27005,
+      "rtt_ms": 19.5
+    },
+    "3": null
+  },
+  "cpu14_reader": {
+    "scheduler": {
+      "relay_idle_pct": 76.47886,
+      "relay_cpu_pct": 99.9955,
+      "wait_ms": 0.1608,
+      "involuntary": 7.0,
+      "voluntary": 0.0,
+      "max_lateness_ms_at_edges": [
+        0.0,
+        3.64369
+      ],
+      "outer_loop_rate_s": 702561.29817
+    },
+    "native_frames_per_s": 51238.96667,
+    "64_frame_bursts": {
+      "incident": 610,
+      "other_hold": {
+        "min": 0,
+        "median": 63.5,
+        "max": 357
+      },
+      "preceding_minute": {
+        "min": 0,
+        "median": 47.5,
+        "max": 242
+      }
+    }
+  },
+  "downstream": {
+    "max_ms_on_cpu8_at_edges": [
+      19.85134,
+      119.4797
+    ],
+    "per_lane_queue_peaks": [
+      348,
+      465,
+      398,
+      629
+    ],
+    "lane_capacity": 2048,
+    "service_pool_peak": 1178,
+    "pool_capacity": 8192,
+    "counted_full_polls": 0,
+    "late_events_over_1ms": {
+      "incident": 11588,
+      "other_hold": {
+        "min": 17,
+        "median": 389.5,
+        "max": 3896
+      },
+      "preceding_minute": {
+        "min": 53,
+        "median": 898.0,
+        "max": 2137
+      }
+    }
+  },
+  "two_second_tcp": [
+    {
+      "start_s": 178.0044,
+      "end_s": 180.00747,
+      "memory_sock_mib": 0.55859,
+      "retransmits": 249,
+      "retransmission_timeouts": 0,
+      "delayed_ack_timer_sends": 104,
+      "original_data_out": 126686
+    },
+    {
+      "start_s": 180.00747,
+      "end_s": 182.01106,
+      "memory_sock_mib": 56.14453,
+      "retransmits": 3126,
+      "retransmission_timeouts": 204,
+      "delayed_ack_timer_sends": 38812,
+      "original_data_out": 99943
+    },
+    {
+      "start_s": 182.01106,
+      "end_s": 184.01438,
+      "memory_sock_mib": 32.73828,
+      "retransmits": 1855,
+      "retransmission_timeouts": 0,
+      "delayed_ack_timer_sends": 58242,
+      "original_data_out": 138281
+    }
+  ],
+  "stock_shard_latency_ms": [
+    {
+      "ending_s": 180,
+      "p99": [
+        34.64,
+        34.3,
+        34.64,
+        34.64
+      ]
+    },
+    {
+      "ending_s": 185,
+      "p99": [
+        503.56,
+        508.6,
+        503.56,
+        503.56
+      ]
+    }
+  ],
+  "guest_cpus": {
+    "interval_s": [
+      180.00747,
+      182.01106
+    ],
+    "expected_user_hz_ticks": 200.35944,
+    "observed_user_hz_ticks": {
+      "2": 197,
+      "5": 194,
+      "8": 192,
+      "10": 196,
+      "14": 188
+    },
+    "softnet_time_squeeze": {
+      "cpu0": 2,
+      "cpu3": 2,
+      "cpu4": 1,
+      "cpu7": 2,
+      "cpu11": 3,
+      "cpu12": 1
+    },
+    "softnet_drop_count": 0
+  },
+  "smaller_no_loss_event": {
+    "near_s": 292.34,
+    "service_socket_mib": 51.15625,
+    "service_tx_dropped": 0
+  },
+  "decision": "Exclude this run. Keep the primary fixture identical. No evidence of downstream saturation, scheduler competition or installed TUN per-flow filtering. The observed burst and uneven guest CPU progress cannot recover the initial cause. If recurrent, use a separate service-device and namespace-scoped driver free-reason plus reader-gap diagnostic. Any larger ring remains a separate sensitivity."
+}

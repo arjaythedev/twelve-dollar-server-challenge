@@ -57,7 +57,15 @@ static void commit_and_ack(void) {
 static void check_fragmented_pipeline(void) {
     gate_closed = 1;
     budget = PASS_REPLIES;
-    input(0, "POS");
+    input(0, "P");
+    input(0, "OS");
+    Ring *r = &rings[0];
+    assert(r->tail == sq_head + 1);
+    const struct io_uring_sqe *hint = &submissions[sq_head++ & r->sq_mask];
+    assert(hint->opcode == IORING_OP_URING_CMD && hint->fd == 0);
+    assert(hint->cmd_op == SOCKET_URING_OP_SETSOCKOPT && (hint->flags & IOSQE_FIXED_FILE));
+    assert(hint->level == IPPROTO_TCP && hint->optname == TCP_QUICKACK);
+    assert(hint->optlen == sizeof(int) && *(const int *)(uintptr_t)hint->optval == 1);
     input(0, "T 10\nGE");
     input(0, "T 11\n");
     drain_ready();
@@ -68,6 +76,7 @@ static void check_fragmented_pipeline(void) {
     assert(records == 1 && order[0] == 30);
     drain_ready();
     assert(records == 3 && order[1] == 10 && order[2] == 20);
+    assert(!(clients[0].flags & FRAGMENT_ACK));
     commit_and_ack();
     budget = PASS_REPLIES;
     drain_ready();

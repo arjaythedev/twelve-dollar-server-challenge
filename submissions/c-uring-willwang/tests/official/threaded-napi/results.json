@@ -1,0 +1,196 @@
+{
+  "host_inode": 4026531840,
+  "controller_cpu": 9,
+  "sender_cpu": 15,
+  "trials": [
+    {
+      "mode": "tso-on",
+      "receiver_affinity": [
+        9
+      ],
+      "observed_cpu_and_napi_id": [
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ],
+        [
+          15,
+          0
+        ]
+      ],
+      "peer_features": [
+        "tcp-segmentation-offload: on",
+        "tx-tcp-segmentation: on",
+        "tx-tcp-ecn-segmentation: on",
+        "tx-tcp-mangleid-segmentation: on",
+        "tx-tcp6-segmentation: on",
+        "generic-segmentation-offload: on"
+      ],
+      "napi_runtime_ns": {
+        "1525934": 0
+      }
+    },
+    {
+      "mode": "tso-off",
+      "receiver_affinity": [
+        9
+      ],
+      "observed_cpu_and_napi_id": [
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ],
+        [
+          9,
+          8288
+        ]
+      ],
+      "peer_features": [
+        "tcp-segmentation-offload: off",
+        "tx-tcp-segmentation: off",
+        "tx-tcp-ecn-segmentation: off",
+        "tx-tcp-mangleid-segmentation: off",
+        "tx-tcp6-segmentation: off",
+        "generic-segmentation-offload: on"
+      ],
+      "napi_runtime_ns": {
+        "1525934": 1304141
+      }
+    }
+  ],
+  "activation": {
+    "namespace_inode": 4026533457,
+    "device": "npdc33",
+    "ifindex": 2,
+    "rx_rps_cpus": [
+      "0000"
+    ],
+    "threaded": "1",
+    "napi": [
+      {
+        "ifindex": 2,
+        "id": 8288,
+        "pid": 1525934,
+        "comm": "napi/npdc33-8288",
+        "cpus": [
+          9
+        ],
+        "starttime": "5152016"
+      }
+    ]
+  },
+  "kernel_threads_reclaimed": true,
+  "namespaces_reclaimed": true
+}

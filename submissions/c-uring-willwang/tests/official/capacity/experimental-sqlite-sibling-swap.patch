@@ -1,0 +1,77 @@
+--- a/vendor/sqlite3.c
++++ b/vendor/sqlite3.c
+@@ -57184,7 +57184,7 @@
+   unsigned int nMin;                  /* Minimum number of pages reserved */
+   unsigned int nMax;                  /* Configured "cache_size" value */
+   unsigned int n90pct;                /* nMax*9/10 */
+-  unsigned int iMaxKey;               /* Largest key seen since xTruncate() */
++  unsigned int iMaxKey;               /* Upper bound on the keys in this cache */
+   unsigned int nPurgeableDummy;       /* pnPurgeable points here when not used*/
+
+   /* Hash table of all pages. The following variables may only be accessed
+@@ -58189,12 +58189,7 @@
+   sqlite3_free(pCache);
+ }
+
+-/*
+-** This function is called during initialization (sqlite3_initialize()) to
+-** install the default pluggable cache module, assuming the user has not
+-** already provided an alternative.
+-*/
+-SQLITE_PRIVATE void sqlite3PCacheSetDefault(void){
++static const sqlite3_pcache_methods2 *pcache1DefaultMethods(void){
+   static const sqlite3_pcache_methods2 defaultMethods = {
+     1,                       /* iVersion */
+     0,                       /* pArg */
+@@ -58210,7 +58205,37 @@
+     pcache1Destroy,          /* xDestroy */
+     pcache1Shrink            /* xShrink */
+   };
+-  sqlite3_config(SQLITE_CONFIG_PCACHE2, &defaultMethods);
++  return &defaultMethods;
++}
++
++/*
++** This function is called during initialization (sqlite3_initialize()) to
++** install the default pluggable cache module, assuming the user has not
++** already provided an alternative.
++*/
++SQLITE_PRIVATE void sqlite3PCacheSetDefault(void){
++  sqlite3_config(SQLITE_CONFIG_PCACHE2, pcache1DefaultMethods());
++}
++
++/* A B-tree sibling swap renumbers two existing dirty pages through a temporary
++** key. The BtShared mutex excludes other users of this pager during all three
++** moves. A shared cache group can evict pages, but cannot add keys to this
++** cache. After the last move the old upper bound is therefore valid again.
++** Keep external page cache methods completely outside this optimization. */
++static PCache1 *pcache1BeginSiblingSwap(PgHdr *pPg, Pgno temp, Pgno *pOldMax){
++  PCache1 *pCache;
++  if( memcmp(&sqlite3GlobalConfig.pcache2, pcache1DefaultMethods(),
++             sizeof(sqlite3_pcache_methods2))!=0 ) return 0;
++  pCache = (PCache1*)pPg->pCache->pCache;
++  pcache1EnterMutex(pCache->pGroup);
++  *pOldMax = pCache->iMaxKey;
++  pcache1LeaveMutex(pCache->pGroup);
++  return *pOldMax<temp ? pCache : 0;
++}
++static void pcache1EndSiblingSwap(PCache1 *pCache, Pgno temp, Pgno oldMax){
++  pcache1EnterMutex(pCache->pGroup);
++  if( pCache->iMaxKey==temp ) pCache->iMaxKey = oldMax;
++  pcache1LeaveMutex(pCache->pGroup);
+ }
+
+ /*
+@@ -81488,9 +81513,12 @@
+       Pgno pgnoTemp = (PENDING_BYTE/pBt->pageSize)+1;
+       u16 fgA = apNew[i]->pDbPage->flags;
+       u16 fgB = apNew[iB]->pDbPage->flags;
++      Pgno oldMax;
++      PCache1 *pCache = pcache1BeginSiblingSwap(apNew[i]->pDbPage,pgnoTemp,&oldMax);
+       sqlite3PagerRekey(apNew[i]->pDbPage, pgnoTemp, fgB);
+       sqlite3PagerRekey(apNew[iB]->pDbPage, pgnoA, fgA);
+       sqlite3PagerRekey(apNew[i]->pDbPage, pgnoB, fgB);
++      if( pCache ) pcache1EndSiblingSwap(pCache,pgnoTemp,oldMax);
+       apNew[i]->pgno = pgnoB;
+       apNew[iB]->pgno = pgnoA;
+     }

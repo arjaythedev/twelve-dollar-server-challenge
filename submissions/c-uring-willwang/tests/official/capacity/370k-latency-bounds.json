@@ -1,0 +1,485 @@
+[
+  {
+    "tag": "large512k-quiet-leaf-cursor-370-p1",
+    "server_sha": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+    "hold_s": 120,
+    "eligible": true,
+    "qualified": false,
+    "full_ticks": 23,
+    "scored": {
+      "reqs": 6925011,
+      "fails": 0,
+      "p95_ms": 1072.6971176702946,
+      "p99_ms": 1597.0998356239188,
+      "dials": 370000
+    },
+    "phases": {
+      "130": {
+        "end_stock_second": 130,
+        "gates": {
+          "500": {
+            "whole_slow": 728120,
+            "whole_hist_n": 6925008,
+            "whole_allowed": 346250,
+            "deficit": 381870,
+            "first_failing_midpoint_ms": 503.5617175831953,
+            "certainly_above_threshold_whole": 728120,
+            "physical_threshold_straddling_bin_whole": 10820,
+            "straddler_reported_above_gate": false,
+            "remaining_slow_bounds_after_repair": [
+              19150,
+              243350
+            ],
+            "removable_early_slow_bounds": [
+              484770,
+              708970
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": true,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 0
+          },
+          "1000": {
+            "whole_slow": 378339,
+            "whole_hist_n": 6925008,
+            "whole_allowed": 69250,
+            "deficit": 309089,
+            "first_failing_midpoint_ms": 1000.5239688833846,
+            "certainly_above_threshold_whole": 375413,
+            "physical_threshold_straddling_bin_whole": 2926,
+            "straddler_reported_above_gate": true,
+            "remaining_slow_bounds_after_repair": [
+              0,
+              79304
+            ],
+            "removable_early_slow_bounds": [
+              299035,
+              378339
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": false,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 10054
+          }
+        },
+        "simultaneously_attainable_late_minima": [
+          19150,
+          0
+        ],
+        "simultaneous_pass_consistent_with_all_histograms_and_tick_ranks": true
+      },
+      "150": {
+        "end_stock_second": 150,
+        "gates": {
+          "500": {
+            "whole_slow": 728120,
+            "whole_hist_n": 6925008,
+            "whole_allowed": 346250,
+            "deficit": 381870,
+            "first_failing_midpoint_ms": 503.5617175831953,
+            "certainly_above_threshold_whole": 728120,
+            "physical_threshold_straddling_bin_whole": 10820,
+            "straddler_reported_above_gate": false,
+            "remaining_slow_bounds_after_repair": [
+              0,
+              71575
+            ],
+            "removable_early_slow_bounds": [
+              656545,
+              728120
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": true,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 0
+          },
+          "1000": {
+            "whole_slow": 378339,
+            "whole_hist_n": 6925008,
+            "whole_allowed": 69250,
+            "deficit": 309089,
+            "first_failing_midpoint_ms": 1000.5239688833846,
+            "certainly_above_threshold_whole": 375413,
+            "physical_threshold_straddling_bin_whole": 2926,
+            "straddler_reported_above_gate": true,
+            "remaining_slow_bounds_after_repair": [
+              0,
+              71575
+            ],
+            "removable_early_slow_bounds": [
+              306764,
+              378339
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": false,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 2325
+          }
+        },
+        "simultaneously_attainable_late_minima": [
+          0,
+          0
+        ],
+        "simultaneous_pass_consistent_with_all_histograms_and_tick_ranks": true
+      }
+    },
+    "cpu_windows": {
+      "95-120": {
+        "http": 893005,
+        "http_s": 35720.2,
+        "app_us_per_http": 14.54547481962709,
+        "whole_core_us_per_http": 27.984165179340998,
+        "napi_us_per_http": 13.41105696308049,
+        "napi_us_per_in_seg": 5.752888233165852,
+        "all_four_stock_and_native_observations_full": false,
+        "core_busy_pct": 99.95999770390962,
+        "median_shard_window_p95_ms": 1348.5551462240494,
+        "median_shard_window_p99_ms": 1375.6611046631526,
+        "shard_window_count": 20,
+        "shard_windows_p95_ge500ms": 20,
+        "shard_windows_p99_ge1s": 16,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 13.4550830718086,
+        "tcp_in_per_http": 2.3311867742822976,
+        "core_iowait_pct": 0.04000229609038015
+      },
+      "120-130": {
+        "http": 379438,
+        "http_s": 37943.8,
+        "app_us_per_http": 14.03897941142624,
+        "whole_core_us_per_http": 26.20434083146853,
+        "napi_us_per_http": 12.137177700484136,
+        "napi_us_per_in_seg": 5.627467915570268,
+        "all_four_stock_and_native_observations_full": true,
+        "core_busy_pct": 99.42922676410758,
+        "median_shard_window_p95_ms": 221.0901268941368,
+        "median_shard_window_p99_ms": 250.42653055247828,
+        "shard_window_count": 8,
+        "shard_windows_p95_ge500ms": 0,
+        "shard_windows_p99_ge1s": 0,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 6.146525793065921,
+        "tcp_in_per_http": 2.1567742157894108,
+        "core_iowait_pct": 0.5707732358924273
+      },
+      "130-150": {
+        "http": 773583,
+        "http_s": 38679.15,
+        "app_us_per_http": 13.986418845931082,
+        "whole_core_us_per_http": 25.819127988045583,
+        "napi_us_per_http": 11.81837083216993,
+        "napi_us_per_in_seg": 5.3254282079694635,
+        "all_four_stock_and_native_observations_full": true,
+        "core_busy_pct": 99.86619243188134,
+        "median_shard_window_p95_ms": 467.705923847607,
+        "median_shard_window_p99_ms": 490.85268824474826,
+        "shard_window_count": 16,
+        "shard_windows_p95_ge500ms": 8,
+        "shard_windows_p99_ge1s": 0,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 12.018599719573128,
+        "tcp_in_per_http": 2.2192339039485733,
+        "core_iowait_pct": 0.13380756811865369
+      },
+      "150-220": {
+        "http": 2699767,
+        "http_s": 38568.1,
+        "app_us_per_http": 13.888468695113792,
+        "whole_core_us_per_http": 25.888797459819877,
+        "napi_us_per_http": 11.986690195912546,
+        "napi_us_per_in_seg": 5.405557521609469,
+        "all_four_stock_and_native_observations_full": true,
+        "core_busy_pct": 99.84817293100788,
+        "median_shard_window_p95_ms": 181.79578302417121,
+        "median_shard_window_p99_ms": 205.32070113744038,
+        "shard_window_count": 56,
+        "shard_windows_p95_ge500ms": 0,
+        "shard_windows_p99_ge1s": 0,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 8.60838664934033,
+        "tcp_in_per_http": 2.217475283168125,
+        "core_iowait_pct": 0.15182706899211962
+      }
+    },
+    "per_route_first_response_cap": {
+      "500": {
+        "slow_by_route": {
+          "GET /feed": 339084,
+          "GET /posts/:id": 332332,
+          "POST /posts/:id/like": 50062,
+          "POST /posts": 6642
+        },
+        "slow_first_response_upper": 339084,
+        "established_improvements_required_at_least": 42786
+      },
+      "1000": {
+        "slow_by_route": {
+          "GET /feed": 180060,
+          "GET /posts/:id": 169191,
+          "POST /posts/:id/like": 25692,
+          "POST /posts": 3396
+        },
+        "slow_first_response_upper": 180060,
+        "established_improvements_required_at_least": 129029
+      }
+    },
+    "native_shard_sha256": [
+      "a71e6fe414049d320ad53ec3ca84138c4eab89e0c08afabd6563efc8dae12849",
+      "7e8d9ed31c3cd775090a9954fba08775c23778b50fe368f5382888906cce0b94",
+      "67393704b93e6bb0fdde5c3df205240c7afea3794563a7abedbb4ee3c698549a",
+      "94cf2c029a4327b3c42ea57a6e6a54b5636bb63e3e3386d383540ef169489787"
+    ],
+    "merged_sha256": "6cc3835208f6c390f262c0f11e4874973c71daa2b32cc69a4d566a7fd755dfe9"
+  },
+  {
+    "tag": "large512k-quiet-leaf-cursor-370-h1",
+    "server_sha": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+    "hold_s": 300,
+    "eligible": true,
+    "qualified": false,
+    "full_ticks": 59,
+    "scored": {
+      "reqs": 13832490,
+      "fails": 0,
+      "p95_ms": 685.5123659961642,
+      "p99_ms": 1678.5679782537973,
+      "dials": 370000
+    },
+    "phases": {
+      "130": {
+        "end_stock_second": 130,
+        "gates": {
+          "500": {
+            "whole_slow": 1413370,
+            "whole_hist_n": 13832490,
+            "whole_allowed": 691624,
+            "deficit": 721746,
+            "first_failing_midpoint_ms": 503.5617175831953,
+            "certainly_above_threshold_whole": 1413370,
+            "physical_threshold_straddling_bin_whole": 32765,
+            "straddler_reported_above_gate": false,
+            "remaining_slow_bounds_after_repair": [
+              328110,
+              1016065
+            ],
+            "removable_early_slow_bounds": [
+              397305,
+              1085260
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": false,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 324441
+          },
+          "1000": {
+            "whole_slow": 413799,
+            "whole_hist_n": 13832490,
+            "whole_allowed": 138324,
+            "deficit": 275475,
+            "first_failing_midpoint_ms": 1000.5239688833846,
+            "certainly_above_threshold_whole": 409173,
+            "physical_threshold_straddling_bin_whole": 4626,
+            "straddler_reported_above_gate": true,
+            "remaining_slow_bounds_after_repair": [
+              0,
+              147346
+            ],
+            "removable_early_slow_bounds": [
+              266453,
+              413799
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": false,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 9022
+          }
+        },
+        "simultaneously_attainable_late_minima": [
+          328110,
+          0
+        ],
+        "simultaneous_pass_consistent_with_all_histograms_and_tick_ranks": true
+      },
+      "150": {
+        "end_stock_second": 150,
+        "gates": {
+          "500": {
+            "whole_slow": 1413370,
+            "whole_hist_n": 13832490,
+            "whole_allowed": 691624,
+            "deficit": 721746,
+            "first_failing_midpoint_ms": 503.5617175831953,
+            "certainly_above_threshold_whole": 1413370,
+            "physical_threshold_straddling_bin_whole": 32765,
+            "straddler_reported_above_gate": false,
+            "remaining_slow_bounds_after_repair": [
+              320411,
+              1008366
+            ],
+            "removable_early_slow_bounds": [
+              405004,
+              1092959
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": false,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 316742
+          },
+          "1000": {
+            "whole_slow": 413799,
+            "whole_hist_n": 13832490,
+            "whole_allowed": 138324,
+            "deficit": 275475,
+            "first_failing_midpoint_ms": 1000.5239688833846,
+            "certainly_above_threshold_whole": 409173,
+            "physical_threshold_straddling_bin_whole": 4626,
+            "straddler_reported_above_gate": true,
+            "remaining_slow_bounds_after_repair": [
+              0,
+              139647
+            ],
+            "removable_early_slow_bounds": [
+              274152,
+              413799
+            ],
+            "possible_if_only_this_gate": true,
+            "guaranteed_if_all_early_repaired": false,
+            "proven_late_excess_over_whole_allowance": 0,
+            "possible_late_excess_over_whole_allowance": 1323
+          }
+        },
+        "simultaneously_attainable_late_minima": [
+          320411,
+          0
+        ],
+        "simultaneous_pass_consistent_with_all_histograms_and_tick_ranks": true
+      }
+    },
+    "cpu_windows": {
+      "95-120": {
+        "http": 873394,
+        "http_s": 34935.76,
+        "app_us_per_http": 14.705867826818706,
+        "whole_core_us_per_http": 28.61501627739743,
+        "napi_us_per_http": 13.876325541705643,
+        "napi_us_per_in_seg": 5.897503187514264,
+        "all_four_stock_and_native_observations_full": false,
+        "core_busy_pct": 99.968734106325,
+        "median_shard_window_p95_ms": 1504.54029037479,
+        "median_shard_window_p99_ms": 1534.7815502113228,
+        "shard_window_count": 20,
+        "shard_windows_p95_ge500ms": 20,
+        "shard_windows_p99_ge1s": 16,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 12.808560670536568,
+        "tcp_in_per_http": 2.352915310174571,
+        "core_iowait_pct": 0.031265893674998886
+      },
+      "120-130": {
+        "http": 383073,
+        "http_s": 38307.3,
+        "app_us_per_http": 14.092015280001428,
+        "whole_core_us_per_http": 26.017370450307464,
+        "napi_us_per_http": 11.913612588904149,
+        "napi_us_per_in_seg": 5.601250258073956,
+        "all_four_stock_and_native_observations_full": true,
+        "core_busy_pct": 99.66552150510631,
+        "median_shard_window_p95_ms": 500.5970057455077,
+        "median_shard_window_p99_ms": 548.6128566174572,
+        "shard_window_count": 8,
+        "shard_windows_p95_ge500ms": 4,
+        "shard_windows_p99_ge1s": 0,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 7.954862184820037,
+        "tcp_in_per_http": 2.126955954473057,
+        "core_iowait_pct": 0.3344784948936818
+      },
+      "130-150": {
+        "http": 770857,
+        "http_s": 38542.85,
+        "app_us_per_http": 13.839944252809236,
+        "whole_core_us_per_http": 25.910645215790918,
+        "napi_us_per_http": 12.058633728042823,
+        "napi_us_per_in_seg": 5.396972293372167,
+        "all_four_stock_and_native_observations_full": true,
+        "core_busy_pct": 99.86701119554469,
+        "median_shard_window_p95_ms": 229.43261862485488,
+        "median_shard_window_p99_ms": 303.15353952241173,
+        "shard_window_count": 16,
+        "shard_windows_p95_ge500ms": 0,
+        "shard_windows_p99_ge1s": 0,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 9.969224466452891,
+        "tcp_in_per_http": 2.234333080207139,
+        "core_iowait_pct": 0.13298880445531186
+      },
+      "150-220": {
+        "http": 2730768,
+        "http_s": 39010.97142857143,
+        "app_us_per_http": 13.889746861342882,
+        "whole_core_us_per_http": 25.58430733536329,
+        "napi_us_per_http": 11.678808591849153,
+        "napi_us_per_in_seg": 5.297112049791871,
+        "all_four_stock_and_native_observations_full": true,
+        "core_busy_pct": 99.80686824796477,
+        "median_shard_window_p95_ms": 139.5068357306773,
+        "median_shard_window_p99_ms": 159.66045057843496,
+        "shard_window_count": 56,
+        "shard_windows_p95_ge500ms": 0,
+        "shard_windows_p99_ge1s": 0,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 7.622420798425544,
+        "tcp_in_per_http": 2.2047501510390037,
+        "core_iowait_pct": 0.19313175203522207
+      },
+      "150-330": {
+        "http": 6952780,
+        "http_s": 38626.555555555555,
+        "app_us_per_http": 13.908567183411478,
+        "whole_core_us_per_http": 25.84708251206885,
+        "napi_us_per_http": 11.924216449636168,
+        "napi_us_per_in_seg": 5.397722601064421,
+        "all_four_stock_and_native_observations_full": true,
+        "core_busy_pct": 99.83837686014559,
+        "median_shard_window_p95_ms": 161.9631053452185,
+        "median_shard_window_p99_ms": 184.32912187150214,
+        "shard_window_count": 144,
+        "shard_windows_p95_ge500ms": 16,
+        "shard_windows_p99_ge1s": 0,
+        "tcp_timeouts": 0.0,
+        "tcp_retrans_per_1k": 8.450817370834573,
+        "tcp_in_per_http": 2.209119906844552,
+        "core_iowait_pct": 0.16162313985441168
+      }
+    },
+    "per_route_first_response_cap": {
+      "500": {
+        "slow_by_route": {
+          "GET /feed": 652000,
+          "GET /posts/:id": 645836,
+          "POST /posts/:id/like": 101963,
+          "POST /posts": 13571
+        },
+        "slow_first_response_upper": 370000,
+        "established_improvements_required_at_least": 351746
+      },
+      "1000": {
+        "slow_by_route": {
+          "GET /feed": 196265,
+          "GET /posts/:id": 185417,
+          "POST /posts/:id/like": 28361,
+          "POST /posts": 3756
+        },
+        "slow_first_response_upper": 196265,
+        "established_improvements_required_at_least": 79210
+      }
+    },
+    "native_shard_sha256": [
+      "9e1744d3132cad890d812458b01349d7802a7eb18eae8aa9645546c850a3d60d",
+      "968f1092d692ba08beac348127f192bbf09ed47bcebd1b2d49287cd20e1f285a",
+      "f7fd3b1d47ba365d14d3ee1702161e1cec2b559901d33758ea073dd798c5b80f",
+      "aa1628df9e8250dd1c72743dc2c64d041d22ce879f07c3787632295ec0e8d5d3"
+    ],
+    "merged_sha256": "120ca56d814c7892ba45ac84c8c6f0ac374632ef5685b8deb5f41f6224848665"
+  }
+]

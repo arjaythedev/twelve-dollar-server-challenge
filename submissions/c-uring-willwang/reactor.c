@@ -29,7 +29,7 @@ enum {
     SQ_SIZE = 4096, CQ_SIZE = 32768, BUFFER_COUNT = 1024, BUFFER_SIZE = 2048,
     PASS_REPLIES = 512, MAX_OUT = 2048, INPUT_LIMIT = 9 * 16384, CQ_QUANTUM = 2048
 };
-enum { ACCEPT = 1, MULTIRECV, TRYRECV, SEND, CLOSE, IGNORE, WAKE, INSTALL, PARKWAKE, PARKRECV, CREDITRECV, NORMAL_ACCEPT, IMPORT, IMPORT_PROBE };
+enum { ACCEPT = 1, MULTIRECV, TRYRECV, SEND, CLOSE, IGNORE, WAKE, INSTALL, PARKWAKE, PARKRECV, CREDITRECV, NORMAL_ACCEPT, IMPORT, IMPORT_PROBE, WATCH_IMPORT, NAMED_IMPORT, NAMED_WATCH };
 enum { PARK_WINDOW = 256, PARK_BATCH = 1024, PARK_BATCHES = 8, CREDIT_BYTES = 768 };
 /* Each nonblocking read explicitly owns a small, reusable buffer until its
  * completion. The same LIFO pool serves every readiness bank. Only multishot
@@ -41,7 +41,7 @@ enum { IMPORT_WIDTH = 64, ALIAS_LIMIT = LISTENERS * ACCEPTS_PER_LISTENER };
 enum {
     OPEN = 1, EOF_READ = 2, CLOSE_AFTER = 4, READY = 8, RETRY = 16,
     STAGED = 32, WRITABLE = 64, HELD_WRITE = 128, PARKED = 256,
-    READING = 512, REDO = 1024, HANGUP = 2048
+    READING = 512, REDO = 1024, HANGUP = 2048, NAMING = 4096, EARLY_EDGE = 8192, FRAGMENT_ACK = 16384
 };
 
 typedef struct {
@@ -64,6 +64,7 @@ typedef struct {
     int fd, wake, parked_fd;
     Connection *conns;
     unsigned live, accepting, admission_batch;
+    unsigned next_named_slot, named_inflight, kernel_allocates;
     unsigned *sq_head, *sq_tail, *sq_flags, sq_mask, tail;
     unsigned *cq_head, *cq_tail, *cq_flags, cq_mask;
     struct io_uring_sqe *sqes;
@@ -103,12 +104,15 @@ static uint64_t next_accept_retry;
  * kernel-writable; the issuing thread always retains the original fd numbers. */
 typedef struct {
     int fds[IMPORT_WIDTH], indices[IMPORT_WIDTH];
-    unsigned count, ring, next;
-    uint64_t retry_at;
+    struct epoll_event watches[IMPORT_WIDTH];
+    unsigned count, ring, next, prefix, pending_watches;
+    uint64_t retry_at, rejected_watches;
+    unsigned first_slot;
+    int update_result;
 } AdmissionBatch;
 static AdmissionBatch admissions[ALIAS_LIMIT+1];
 static unsigned admission_free, admission_used, delayed_imports, ordinary_pending, alias_limit;
-static int ordinary_accept;
+static int ordinary_accept, named_imports, ring_watches = 1;
 static int closing_alias[ALIAS_LIMIT];
 static unsigned closing_count;
 
@@ -289,8 +293,50 @@ static struct io_uring_sqe *sqe(Ring *r, unsigned code, uint64_t user, int fd) {
     s->user_data = user;
     return s;
 }
+static void defer_import(unsigned id) {
+    AdmissionBatch *b = &admissions[id];
+    b->retry_at = monotonic_ns() + 1000000;
+    b->next = delayed_imports;
+    delayed_imports = id;
+}
+
+/* Only virgin slots have predictable ownership without a second free table.
+ * An exhausted bank permanently returns allocation to the kernel. */
 static void submit_import(Ring *r, unsigned id) {
     AdmissionBatch *b = &admissions[id];
+    if (named_imports && ordinary_accept && ring_watches && !r->kernel_allocates &&
+        b->count <= slots - r->next_named_slot) {
+        reserve(r, 1 + b->count);
+        b->first_slot = r->next_named_slot;
+        r->next_named_slot += b->count;
+        ++r->named_inflight;
+        b->pending_watches = b->count;
+        b->update_result = INT32_MIN;
+        b->rejected_watches = 0;
+        struct io_uring_sqe *s = sqe(r, IORING_OP_FILES_UPDATE, op(NAMED_IMPORT, id), -1);
+        s->off = b->first_slot;
+        s->addr = (uintptr_t)b->fds;
+        s->len = b->count;
+        for (unsigned i = 0; i < b->count; ++i) {
+            unsigned slot = b->first_slot + i;
+            Connection *c = &r->conns[slot];
+            if (c->flags) { errno = EBUSY; fatal("occupied virgin admission slot"); }
+            c->flags = NAMING;
+            b->watches[i] = (struct epoll_event){
+                .events = EPOLLIN | EPOLLRDHUP | EPOLLET,
+                .data.u64 = key(b->ring, slot, ++c->generation)
+            };
+            s = sqe(r, IORING_OP_EPOLL_CTL, op(NAMED_WATCH, (uint64_t)id * IMPORT_WIDTH + i), r->parked_fd);
+            s->addr = (uintptr_t)&b->watches[i];
+            s->off = (unsigned)b->fds[i];
+            s->len = EPOLL_CTL_ADD;
+        }
+        return;
+    }
+    r->kernel_allocates = 1;
+    /* INDEX_ALLOC may choose any unused fixed slot, including an explicitly
+     * reserved slot whose update has not yet run. Barrier only at handoff. */
+    if (r->named_inflight) { defer_import(id); return; }
     memcpy(b->indices, b->fds, b->count * sizeof(int));
     struct io_uring_sqe *s = sqe(r, IORING_OP_FILES_UPDATE, op(IMPORT, id), -1);
     s->off = IORING_FILE_INDEX_ALLOC;
@@ -488,6 +534,10 @@ static void replenish_accepts(void) {
                 accept_ring = i;
                 r = &rings[i];
             }
+            if (!ordinary_accept) {
+                r->kernel_allocates = 1;
+                if (r->named_inflight) return;
+            }
             unsigned kind = ordinary_accept ? NORMAL_ACCEPT : ACCEPT;
             struct io_uring_sqe *s = sqe(r, IORING_OP_ACCEPT, op(kind, key(accept_ring, l, 0)), listeners[l]);
             if (ordinary_accept) { s->accept_flags = SOCK_CLOEXEC; ++ordinary_pending; }
@@ -563,6 +613,26 @@ static int append_input(Connection *c, const char *p, size_t n) {
 
 enum DispatchSource { READY_INPUT, OLDEST_HELD_WRITE };
 
+/* When the request is incomplete there is no response to carry the ACK.
+ * A peer using Nagle may be waiting for it before sending the next bytes.
+ * The fixed socket can receive the same option without installing an alias. */
+static void acknowledge_fragment(uint64_t k) {
+    static const int quick = 1;
+    if (epoll_mode) {
+        (void)setsockopt((int)which_slot(k), IPPROTO_TCP, TCP_QUICKACK, &quick, sizeof(quick));
+        return;
+    }
+    struct io_uring_sqe *s = sqe(&rings[which_ring(k)], IORING_OP_URING_CMD,
+                                 op(IGNORE, k), which_slot(k));
+    s->flags = IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
+    s->cmd_op = SOCKET_URING_OP_SETSOCKOPT;
+    s->level = IPPROTO_TCP;
+    s->optname = TCP_QUICKACK;
+    s->optval = (uintptr_t)&quick;
+    s->optlen = sizeof(quick);
+}
+
+
 /* The common case calls the HTTP parser directly on the kernel-selected buffer.
  * Only fragments, pipelined bytes and requests deferred by a budget get copied. */
 static void dispatch(uint64_t k, Connection *c, const char *input, size_t n, enum DispatchSource source) {
@@ -602,11 +672,16 @@ static void dispatch(uint64_t k, Connection *c, const char *input, size_t n, enu
     Output *o = get_output();
     int result = app_request(input, n, &consumed, &o->bytes, &close_after);
     if (result <= 0) {
+        if (!result && !(c->flags & (FRAGMENT_ACK | EOF_READ))) {
+            c->flags |= FRAGMENT_ACK;
+            acknowledge_fragment(k);
+        }
         put_output(o);
         if (result < 0 || (c->flags & EOF_READ) ||
             (input != c->input && append_input(c, input, n) < 0)) close_conn(k, c);
         return;
     }
+    c->flags &= ~FRAGMENT_ACK;
     if (!consumed || consumed > n || !o->bytes.len) {
         put_output(o);
         close_conn(k, c);
@@ -797,7 +872,17 @@ static unsigned collect_bank(Ring *r, unsigned max) {
         if (i + 6 < n) __builtin_prefetch(&r->conns[which_slot(events[i+6].data.u64)], 1, 1);
         uint64_t k = events[i].data.u64;
         Connection *c = find_conn(k);
-        if (!c || !(c->flags & PARKED) || (c->flags & (CLOSE_AFTER | EOF_READ))) continue;
+        if (!c) {
+            /* A watch can post an edge before its explicit fixed-table update
+             * even executes. Preserve it without operating on that slot. */
+            Connection *provisional = &r->conns[which_slot(k)];
+            if ((provisional->flags & NAMING) && provisional->generation == (unsigned)(k >> 24)) {
+                provisional->flags |= EARLY_EDGE;
+                if (events[i].events & (EPOLLHUP | EPOLLRDHUP | EPOLLERR)) provisional->flags |= HANGUP;
+            }
+            continue;
+        }
+        if (!(c->flags & PARKED) || (c->flags & (CLOSE_AFTER | EOF_READ))) continue;
         if (events[i].events & (EPOLLHUP | EPOLLRDHUP | EPOLLERR)) c->flags |= HANGUP;
         if (c->flags & READING) c->flags |= REDO;
         else if (!(c->flags & RETRY)) {
@@ -849,21 +934,12 @@ static unsigned issue_park(void) {
     pending.inflight += issued;
     return issued;
 }
-static void finish_import(Ring *r, unsigned id, int res) {
+/* Return ordinary aliases only after every asynchronous watch for the prefix
+ * has completed. close_aliases() will close each contiguous owned run at once.
+ * The unreleased suffix still owns its original descriptors and ring credits. */
+static void retire_import(Ring *r, unsigned id, unsigned done, int res) {
     AdmissionBatch *b = &admissions[id];
-    unsigned done = res > 0 ? (unsigned)res : 0;
-    if (done > b->count) { errno = EOVERFLOW; fatal("fixed admission prefix"); }
-    for (unsigned i = 0; i < done; ++i) {
-        unsigned index = (unsigned)b->indices[i];
-        if (index >= slots) { errno = EOVERFLOW; fatal("fixed admission slot"); }
-        --r->accepting;
-        uint64_t k = accept_conn(b->ring, index);
-        struct epoll_event ev = {.events = EPOLLIN | EPOLLRDHUP | EPOLLET, .data.u64 = k};
-        if (epoll_ctl(r->parked_fd, EPOLL_CTL_ADD, b->fds[i], &ev) == 0)
-            r->conns[index].flags |= PARKED;
-        else receive(k, MULTIRECV);
-        queue_alias_close(b->fds[i]);
-    }
+    for (unsigned i = 0; i < done; ++i) queue_alias_close(b->fds[i]);
     if (done < b->count) {
         unsigned left = b->count - done;
         memmove(b->fds, b->fds + done, left * sizeof(int));
@@ -872,9 +948,7 @@ static void finish_import(Ring *r, unsigned id, int res) {
             res == -EBUSY || res == -EAGAIN || res == -EINTR) {
             /* A positive short result installed precisely its prefix. Retain
              * ownership and bank reservation for each untouched suffix fd. */
-            b->retry_at = monotonic_ns() + 1000000;
-            b->next = delayed_imports;
-            delayed_imports = id;
+            defer_import(id);
             return;
         }
         /* Preflight excludes unsupported kernels before the first real accept.
@@ -886,6 +960,96 @@ static void finish_import(Ring *r, unsigned id, int res) {
     }
     b->next = admission_free;
     admission_free = id;
+}
+
+/* A duplicate can retain an old epoll data key. Refresh that existing
+ * registration using the still-owned fd and the current generation. */
+static int add_import_watch(Ring *r, int fd, struct epoll_event *event) {
+    if (epoll_ctl(r->parked_fd, EPOLL_CTL_ADD, fd, event) == 0) return 1;
+    return errno == EEXIST && epoll_ctl(r->parked_fd, EPOLL_CTL_MOD, fd, event) == 0;
+}
+
+static void finish_import(Ring *r, unsigned id, int res) {
+    AdmissionBatch *b = &admissions[id];
+    unsigned done = res > 0 ? (unsigned)res : 0;
+    if (done > b->count) { errno = EOVERFLOW; fatal("fixed admission prefix"); }
+    /* Small prefixes cannot amortize a registration enter and its result CQEs. */
+    int batch_watches = ring_watches && done >= 4;
+    if (batch_watches) {
+        reserve(r, done);
+        b->pending_watches = b->prefix = done;
+    }
+    for (unsigned i = 0; i < done; ++i) {
+        unsigned index = (unsigned)b->indices[i];
+        if (index >= slots) { errno = EOVERFLOW; fatal("fixed admission slot"); }
+        --r->accepting;
+        uint64_t k = accept_conn(b->ring, index);
+        struct epoll_event ev = {.events = EPOLLIN | EPOLLRDHUP | EPOLLET, .data.u64 = k};
+        if (batch_watches) {
+            b->watches[i] = ev;
+            uint64_t tag = (uint64_t)id * IMPORT_WIDTH + i;
+            struct io_uring_sqe *s = sqe(r, IORING_OP_EPOLL_CTL, op(WATCH_IMPORT, tag), r->parked_fd);
+            s->addr = (uintptr_t)&b->watches[i];
+            s->off = (unsigned)b->fds[i];
+            s->len = EPOLL_CTL_ADD;
+            /* An edge can precede the registration CQE. Only a successful ADD
+             * can expose this socket to the bank; authorize its edge now. */
+            r->conns[index].flags |= PARKED;
+        } else if (add_import_watch(r, b->fds[i], &ev)) {
+            r->conns[index].flags |= PARKED;
+        } else receive(k, MULTIRECV);
+    }
+    if (!batch_watches) retire_import(r, id, done, res);
+}
+
+static void finish_watch(Ring *r, uint64_t tag, int res) {
+    unsigned id = (unsigned)(tag / IMPORT_WIDTH), index = (unsigned)(tag % IMPORT_WIDTH);
+    AdmissionBatch *b = &admissions[id];
+    if (res < 0) {
+        if (res == -EINVAL || res == -EOPNOTSUPP || res == -EPERM) ring_watches = 0;
+        struct epoll_event *ev = &b->watches[index];
+        uint64_t key = ev->data.u64;
+        Connection *c = find_conn(key);
+        if (c && !add_import_watch(r, b->fds[index], ev)) {
+            c->flags &= ~PARKED;
+            receive(key, MULTIRECV);
+        }
+    }
+    if (!--b->pending_watches) retire_import(r, id, b->prefix, (int)b->prefix);
+}
+
+/* Completion order is immaterial. Ordinary aliases and provisional keys stay
+ * exclusively owned until the update and every individual ADD have returned. */
+static void finish_named(Ring *r, unsigned id) {
+    AdmissionBatch *b = &admissions[id];
+    int res = b->update_result;
+    if (res == INT32_MIN || b->pending_watches) return;
+    unsigned done = res > 0 ? (unsigned)res : 0;
+    if (done > b->count) { errno = EOVERFLOW; fatal("named admission prefix"); }
+    for (unsigned i = 0; i < b->count; ++i) {
+        Connection *c = &r->conns[b->first_slot + i];
+        unsigned initial = c->flags;
+        c->flags = 0;
+        if (i >= done) continue;
+        struct epoll_event *ev = &b->watches[i];
+        uint64_t k = ev->data.u64;
+        ++r->live;
+        --r->accepting;
+        c->flags = OPEN | (initial & HANGUP);
+        if (!(b->rejected_watches & (UINT64_C(1) << i)) || add_import_watch(r, b->fds[i], ev)) {
+            c->flags |= PARKED;
+            if (initial & EARLY_EDGE) retry_receive(r, k, c);
+        } else receive(k, MULTIRECV);
+    }
+    --r->named_inflight;
+    if (done != b->count) {
+        r->kernel_allocates = 1;
+        if (res == -EINVAL || res == -EPERM || res == -EOPNOTSUPP || res == -EACCES)
+            named_imports = 0;
+        /* A watch on a still-owned suffix alias can have consumed its edge.
+         * The original importer refreshes an existing registration with MOD. */
+    }
+    retire_import(r, id, done, (int)done);
 }
 
 static void on_cqe(Ring *r, const struct io_uring_cqe *event) {
@@ -900,6 +1064,23 @@ static void on_cqe(Ring *r, const struct io_uring_cqe *event) {
     }
     unsigned slot = which_slot(k);
     int res = event->res;
+    if (kind == NAMED_IMPORT) {
+        admissions[k].update_result = res;
+        finish_named(r, (unsigned)k);
+        return;
+    }
+    if (kind == NAMED_WATCH) {
+        unsigned id = (unsigned)(k / IMPORT_WIDTH), i = (unsigned)(k % IMPORT_WIDTH);
+        AdmissionBatch *b = &admissions[id];
+        if (res < 0) {
+            b->rejected_watches |= UINT64_C(1) << i;
+            if (res == -EINVAL || res == -EOPNOTSUPP || res == -EPERM) ring_watches = 0;
+        }
+        --b->pending_watches;
+        finish_named(r, id);
+        return;
+    }
+    if (kind == WATCH_IMPORT) { finish_watch(r, k, res); return; }
     if (kind == IMPORT) { finish_import(r, (unsigned)k, res); return; }
     if (kind == NORMAL_ACCEPT) {
         --active_accept[slot];
@@ -1019,6 +1200,13 @@ static int start_listener(const char *host, const char *port) {
         close(fd);
         return -1;
     }
+    /* listen() initializes the listener's delayed-ACK state. Setting the
+     * interactive hint afterwards lets children inherit it during the TCP
+     * handshake, even when their first request arrives before accept().
+     * Linux can then acknowledge that request in the first response. Its
+     * usual delayed-ACK timer still handles slow applications and loss. */
+    int quick_ack = 0;
+    (void)setsockopt(fd, IPPROTO_TCP, TCP_QUICKACK, &quick_ack, sizeof(quick_ack));
     return fd;
 }
 
@@ -1058,6 +1246,7 @@ static void ring_loop(void) {
     alias_limit = slots / 4;
     if (alias_limit > ALIAS_LIMIT) alias_limit = ALIAS_LIMIT;
     ordinary_accept = probe_import(&rings[0]);
+    named_imports = ordinary_accept;
     fprintf(stderr, "socket admission: %s (up to %u temporary descriptors)\n",
             ordinary_accept ? "bulk fixed-file updates" : "direct accepts", alias_limit);
     for (;;) {

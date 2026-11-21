@@ -1,0 +1,86 @@
+{
+  "kernel": "6.8.0-147-generic",
+  "service": {
+    "entrypoint": "/home/dev-user/code/twelve-dollar-server-challenge/submissions/c-uring-willwang/start.sh",
+    "process_executable": "/home/dev-user/code/twelve-dollar-server-challenge/submissions/c-uring-willwang/bin/server",
+    "running_elf_sha256": "b4ed5678e37895d8323ecacf67707e2bdd08a4d499efcbfd7ee2e5b1a8362bdb",
+    "uids": [
+      1000,
+      1000,
+      1000,
+      1000
+    ],
+    "effective_capabilities": "0000000000000000",
+    "cpu_allowed": "9",
+    "io_uring_fds": 1,
+    "owned_ipv4_tcp_loopback_listener": true,
+    "healthy_sqlite_http_200": true,
+    "new_temp_seed_open_by_service": true,
+    "subprocess_cmdline": "/home/dev-user/code/twelve-dollar-server-challenge/submissions/c-uring-willwang/bin/server",
+    "network_namespace": "net:[4026533800]"
+  },
+  "checker_affinity": [
+    15
+  ],
+  "seed_sha256_before_after": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+  "host_network_namespace": "net:[4026531840]",
+  "private_interfaces": [
+    "lo"
+  ],
+  "soft_hard_nofile": [
+    65535,
+    65535
+  ],
+  "scratch": "private tmpfs /dev/shm",
+  "official": {
+    "command": [
+      "/bin/bash",
+      "test/run.sh",
+      "submissions/c-uring-willwang"
+    ],
+    "cwd": "/home/dev-user/code/twelve-dollar-server-challenge",
+    "passed": 42,
+    "failed": 0
+  },
+  "differential": {
+    "command": [
+      "/usr/bin/python3",
+      "-IB",
+      "/home/dev-user/code/twelve-dollar-server-challenge/submissions/c-uring-willwang/tests/differential.py",
+      "--server",
+      "/tmp/twelve-revisit/public-pcache/checkout-qa/issuer9"
+    ],
+    "cwd": "/",
+    "passed": 13,
+    "layouts": [
+      "empty",
+      "short",
+      "dense",
+      "no-likes",
+      "no-recent-likes",
+      "partial",
+      "disorder",
+      "time-ties",
+      "sparse",
+      "sparse-ordered",
+      "small-pages",
+      "overflow",
+      "orphan"
+    ]
+  },
+  "organizer_and_differential_removed_all_temporary_databases": true,
+  "evidence_sha256": {
+    "checkout.log": "494bab94a13aa7bc0af5990dbbcbad78eb73b7a83d0af025f7ff9591814c1b4d",
+    "official.log": "7b4cecf45228b5a13519640ce0f44d27b67ffc01589b4be059957a149a33ce14",
+    "differential.log": "c9b01abe68559cc6f239907e102f1e8b3408f868f9deccb3345c9051be106ee8",
+    "runtime.json": "80fe1387560534d206c6346f94aaadbba93bc9804e3d84a27ca3a1fe7cccfffb"
+  },
+  "pristine_sqlite_sha256": {
+    "sqlite3.c": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+    "sqlite3.h": "d6c84557261893439b341d2e6c35187ae3ea24fbfd843ad94616f72d89242b8c"
+  },
+  "build_command": [
+    "bash",
+    "submissions/c-uring-willwang/build.sh"
+  ]
+}

@@ -1,0 +1,254 @@
+{
+  "base_elf_sha256": "34ab432cbb839271fafcfd11c59d3fd780d5bfdbebbf474322afb9f958385411",
+  "gate": {
+    "favorable_gross_ns_per_captured_operation": 74.50711392841072,
+    "any_normal_reach": true,
+    "build_threshold_ns": 10,
+    "worth_screening": true
+  },
+  "reach": {
+    "moving": {
+      "measured_operations": 120000,
+      "feed_reads": 55326,
+      "point_reads": 55280,
+      "maximum_proves_empty": 98048,
+      "initial_seeks": 12558,
+      "locally_provable": 12558,
+      "nonroot_first_equals": 0,
+      "outside_nonroot_first": 0,
+      "generic_ended_right": 12558,
+      "reseeks": 0,
+      "all_seeks_gross_ns_per_request": 16.05,
+      "captured_gross_locally_proven_ns_per_request": 16.05,
+      "clock_bracket_ns": 27.8,
+      "first_decode_plus_checks_bracket_ns": 35.15,
+      "generic_proven_seek_bracket_ns": 153.39,
+      "projected_first_decode_at_outside_ns_per_request": 0.0
+    },
+    "http": {
+      "measured_operations": 179999,
+      "feed_reads": 83153,
+      "point_reads": 82795,
+      "maximum_proves_empty": 17358,
+      "initial_seeks": 148590,
+      "locally_provable": 148590,
+      "nonroot_first_equals": 0,
+      "outside_nonroot_first": 0,
+      "generic_ended_right": 148590,
+      "reseeks": 0,
+      "all_seeks_gross_ns_per_request": 74.51,
+      "captured_gross_locally_proven_ns_per_request": 74.51,
+      "clock_bracket_ns": 28.46,
+      "first_decode_plus_checks_bracket_ns": 31.47,
+      "generic_proven_seek_bracket_ns": 90.26,
+      "projected_first_decode_at_outside_ns_per_request": 0.0
+    },
+    "hot": {
+      "measured_operations": 600,
+      "feed_reads": 300,
+      "point_reads": 300,
+      "maximum_proves_empty": 0,
+      "initial_seeks": 600,
+      "locally_provable": 28,
+      "nonroot_first_equals": 14,
+      "outside_nonroot_first": 558,
+      "generic_ended_right": 28,
+      "reseeks": 0,
+      "all_seeks_gross_ns_per_request": 148.12,
+      "captured_gross_locally_proven_ns_per_request": 4.12,
+      "clock_bracket_ns": 27.44,
+      "first_decode_plus_checks_bracket_ns": 69.77,
+      "generic_proven_seek_bracket_ns": 88.39,
+      "projected_first_decode_at_outside_ns_per_request": 40.36
+    }
+  },
+  "timings": {
+    "moving": {
+      "feed": {
+        "base_ns": 2828.05,
+        "direct_ns": 2833.1,
+        "within_pair_pct": 0.08,
+        "wins": 3,
+        "n": 6,
+        "all_paired_pct": [
+          -1.86,
+          0.55,
+          -0.39,
+          1.53,
+          -0.63,
+          1.29
+        ]
+      },
+      "point": {
+        "base_ns": 1643.55,
+        "direct_ns": 1648.05,
+        "within_pair_pct": 0.61,
+        "wins": 1,
+        "n": 6,
+        "all_paired_pct": [
+          1.36,
+          1.2,
+          0.64,
+          0.57,
+          -0.17,
+          0.38
+        ]
+      },
+      "weighted_read": {
+        "base_ns": 2234.97,
+        "direct_ns": 2242.87,
+        "within_pair_pct": 0.39,
+        "wins": 3,
+        "n": 6,
+        "all_paired_pct": [
+          -0.68,
+          0.79,
+          -0.01,
+          1.18,
+          -0.46,
+          0.96
+        ]
+      }
+    },
+    "http": {
+      "process": {
+        "base_ns": 2713.43,
+        "direct_ns": 2718.24,
+        "within_pair_pct": 0.34,
+        "wins": 2,
+        "n": 6,
+        "all_paired_pct": [
+          2.47,
+          -0.19,
+          0.42,
+          -0.58,
+          0.25,
+          0.94
+        ]
+      },
+      "issuer": {
+        "base_ns": 2471.28,
+        "direct_ns": 2475.63,
+        "within_pair_pct": 0.59,
+        "wins": 1,
+        "n": 6,
+        "all_paired_pct": [
+          2.94,
+          0.4,
+          0.09,
+          -1.77,
+          0.77,
+          0.9
+        ]
+      },
+      "feed_service_p99": {
+        "base_ns": 4997.0,
+        "direct_ns": 4937.5,
+        "within_pair_pct": 1.31,
+        "wins": 2,
+        "n": 6,
+        "all_paired_pct": [
+          6.31,
+          1.78,
+          -4.36,
+          -7.51,
+          0.83,
+          6.53
+        ]
+      },
+      "point_service_p99": {
+        "base_ns": 1046.5,
+        "direct_ns": 1061.0,
+        "within_pair_pct": 2.87,
+        "wins": 2,
+        "n": 6,
+        "all_paired_pct": [
+          11.41,
+          2.78,
+          -3.09,
+          -6.33,
+          2.95,
+          7.28
+        ]
+      }
+    },
+    "hot": {
+      "feed": {
+        "base_ns": 15277.4,
+        "direct_ns": 15282.1,
+        "within_pair_pct": 0.15,
+        "wins": 3,
+        "n": 6,
+        "all_paired_pct": [
+          -0.1,
+          -0.24,
+          0.3,
+          -0.0,
+          1.82,
+          0.36
+        ]
+      },
+      "point": {
+        "base_ns": 6772.55,
+        "direct_ns": 6839.62,
+        "within_pair_pct": 0.91,
+        "wins": 1,
+        "n": 6,
+        "all_paired_pct": [
+          -0.41,
+          0.92,
+          1.68,
+          0.91,
+          5.21,
+          0.01
+        ]
+      },
+      "feed_p99": {
+        "base_ns": 38943.0,
+        "direct_ns": 39093.0,
+        "within_pair_pct": 0.39,
+        "wins": 2,
+        "n": 6,
+        "all_paired_pct": [
+          -0.15,
+          -0.31,
+          2.13,
+          0.67,
+          1.2,
+          0.1
+        ]
+      },
+      "point_p99": {
+        "base_ns": 24606.5,
+        "direct_ns": 25318.0,
+        "within_pair_pct": 3.68,
+        "wins": 1,
+        "n": 6,
+        "all_paired_pct": [
+          5.45,
+          7.42,
+          3.07,
+          -0.04,
+          4.29,
+          2.4
+        ]
+      }
+    }
+  },
+  "oracle": {
+    "oracle": {
+      "cases": 22,
+      "returns_bytes": 3451
+    },
+    "oracle-san": {
+      "cases": 22,
+      "returns_bytes": 3451
+    },
+    "captured": {
+      "all": 200001,
+      "sha256": "72c63241d806a8589eae2949361684d9f9478c73d9e58e04edfe2b2f2aabec60",
+      "independent_row_hash": "5d8aaa429f0192b5eb8d9b1b76b8b314d606cafdcfd96bff11491536fa203d05",
+      "bytes": 330735981
+    }
+  }
+}

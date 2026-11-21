@@ -1,0 +1,784 @@
+{
+  "runs": {
+    "five4096-named-slot-sqlite-swap-quiet-350-h1": {
+      "tag": "five4096-named-slot-sqlite-swap-quiet-350-h1",
+      "server": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+      "users": 350000,
+      "measurement_s": [
+        300,
+        400
+      ],
+      "score_eligible": true,
+      "score_whole_latency_mean_ms_bounds": [
+        838.35837,
+        846.74296
+      ],
+      "stock_p95_p99_ms": [
+        1460.29198,
+        2959.76506
+      ],
+      "icmp_received_by_emission_elapsed_s": [
+        99,
+        98,
+        98,
+        98
+      ],
+      "rtt_all_ranks_p50_p95_p99_max_ms": [
+        0.455,
+        4.28,
+        27.9,
+        31.7
+      ],
+      "rtt_per_lane_p50_p95_p99_max_ms": [
+        [
+          0.426,
+          3.72,
+          27.5,
+          27.5
+        ],
+        [
+          0.464,
+          3.19,
+          28.2,
+          28.2
+        ],
+        [
+          0.479,
+          3.37,
+          27.6,
+          27.6
+        ],
+        [
+          0.429,
+          26.6,
+          31.7,
+          31.7
+        ]
+      ],
+      "stock_sample_number": 13,
+      "bounded_socket_scan_min_median_max": {
+        "rows_seen": [
+          1024,
+          1024,
+          1024
+        ],
+        "established": [
+          1016,
+          1016,
+          1016
+        ],
+        "rx_queued_sockets": [
+          54,
+          91,
+          116
+        ],
+        "tx_queued_sockets": [
+          0,
+          0,
+          2
+        ],
+        "rx_payload_bytes": [
+          3903,
+          7948,
+          9304
+        ],
+        "tx_payload_bytes": [
+          0,
+          0,
+          3996
+        ]
+      },
+      "physical_counter_read_endpoints_elapsed_s": [
+        301.2216,
+        399.29646
+      ],
+      "workers": [
+        {
+          "cpu": 14,
+          "destination": null,
+          "events": 7160459,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.0
+        },
+        {
+          "cpu": 2,
+          "destination": null,
+          "events": 3635114,
+          "over1ms_pct": 0.0203,
+          "over250us_pct": 0.07562
+        },
+        {
+          "cpu": 5,
+          "destination": null,
+          "events": 3632094,
+          "over1ms_pct": 0.02368,
+          "over250us_pct": 0.07519
+        },
+        {
+          "cpu": 8,
+          "destination": null,
+          "events": 3635631,
+          "over1ms_pct": 0.00655,
+          "over250us_pct": 0.07465
+        },
+        {
+          "cpu": 9,
+          "destination": null,
+          "events": 3636064,
+          "over1ms_pct": 0.04345,
+          "over250us_pct": 0.13553
+        }
+      ],
+      "handoffs": [
+        {
+          "cpu": 2,
+          "destination": 1,
+          "events": 1790286,
+          "over1ms_pct": 0.03927,
+          "over250us_pct": 0.11674
+        },
+        {
+          "cpu": 5,
+          "destination": 2,
+          "events": 1788487,
+          "over1ms_pct": 0.04574,
+          "over250us_pct": 0.10087
+        },
+        {
+          "cpu": 8,
+          "destination": 3,
+          "events": 1790264,
+          "over1ms_pct": 0.01128,
+          "over250us_pct": 0.10853
+        },
+        {
+          "cpu": 9,
+          "destination": 4,
+          "events": 1790492,
+          "over1ms_pct": 0.08216,
+          "over250us_pct": 0.18392
+        }
+      ]
+    },
+    "five4096-batch-watch-quiet-350-h1": {
+      "tag": "five4096-batch-watch-quiet-350-h1",
+      "server": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+      "users": 350000,
+      "measurement_s": [
+        300,
+        400
+      ],
+      "score_eligible": true,
+      "score_whole_latency_mean_ms_bounds": [
+        747.95044,
+        755.43094
+      ],
+      "stock_p95_p99_ms": [
+        1348.55515,
+        2816.1149
+      ],
+      "icmp_received_by_emission_elapsed_s": [
+        99,
+        98,
+        99,
+        98
+      ],
+      "rtt_all_ranks_p50_p95_p99_max_ms": [
+        0.35,
+        23.5,
+        30.4,
+        40.0
+      ],
+      "rtt_per_lane_p50_p95_p99_max_ms": [
+        [
+          0.395,
+          24.7,
+          40.0,
+          40.0
+        ],
+        [
+          0.345,
+          5.27,
+          29.7,
+          29.7
+        ],
+        [
+          0.357,
+          28.9,
+          38.2,
+          38.2
+        ],
+        [
+          0.311,
+          5.29,
+          28.1,
+          28.1
+        ]
+      ],
+      "stock_sample_number": 12,
+      "bounded_socket_scan_min_median_max": {
+        "rows_seen": [
+          1024,
+          1024.0,
+          1024
+        ],
+        "established": [
+          1016,
+          1016.0,
+          1016
+        ],
+        "rx_queued_sockets": [
+          30,
+          80.5,
+          125
+        ],
+        "tx_queued_sockets": [
+          0,
+          0.0,
+          1
+        ],
+        "rx_payload_bytes": [
+          2202,
+          6217.0,
+          13135
+        ],
+        "tx_payload_bytes": [
+          0,
+          0.0,
+          264
+        ]
+      },
+      "physical_counter_read_endpoints_elapsed_s": [
+        306.44265,
+        396.22139
+      ],
+      "workers": [
+        {
+          "cpu": 14,
+          "destination": null,
+          "events": 6663569,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.0
+        },
+        {
+          "cpu": 2,
+          "destination": null,
+          "events": 3383878,
+          "over1ms_pct": 0.01602,
+          "over250us_pct": 0.08159
+        },
+        {
+          "cpu": 5,
+          "destination": null,
+          "events": 3383043,
+          "over1ms_pct": 0.01375,
+          "over250us_pct": 0.07212
+        },
+        {
+          "cpu": 8,
+          "destination": null,
+          "events": 3384582,
+          "over1ms_pct": 0.01882,
+          "over250us_pct": 0.07327
+        },
+        {
+          "cpu": 9,
+          "destination": null,
+          "events": 3383712,
+          "over1ms_pct": 0.00709,
+          "over250us_pct": 0.08263
+        }
+      ],
+      "handoffs": [
+        {
+          "cpu": 2,
+          "destination": 1,
+          "events": 1666374,
+          "over1ms_pct": 0.03007,
+          "over250us_pct": 0.10778
+        },
+        {
+          "cpu": 5,
+          "destination": 2,
+          "events": 1665717,
+          "over1ms_pct": 0.02575,
+          "over250us_pct": 0.07931
+        },
+        {
+          "cpu": 8,
+          "destination": 3,
+          "events": 1666517,
+          "over1ms_pct": 0.03606,
+          "over250us_pct": 0.08641
+        },
+        {
+          "cpu": 9,
+          "destination": 4,
+          "events": 1666552,
+          "over1ms_pct": 0.01362,
+          "over250us_pct": 0.05958
+        }
+      ]
+    },
+    "ring4096-batch-watch-quiet-350-h1": {
+      "tag": "ring4096-batch-watch-quiet-350-h1",
+      "server": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+      "users": 350000,
+      "measurement_s": [
+        300,
+        400
+      ],
+      "score_eligible": true,
+      "score_whole_latency_mean_ms_bounds": [
+        553.66343,
+        559.20106
+      ],
+      "stock_p95_p99_ms": [
+        1270.39995,
+        2401.64266
+      ],
+      "icmp_received_by_emission_elapsed_s": [
+        99,
+        99,
+        98,
+        99
+      ],
+      "rtt_all_ranks_p50_p95_p99_max_ms": [
+        0.485,
+        3.63,
+        24.0,
+        28.1
+      ],
+      "rtt_per_lane_p50_p95_p99_max_ms": [
+        [
+          0.46,
+          3.64,
+          24.0,
+          24.0
+        ],
+        [
+          0.441,
+          3.92,
+          24.5,
+          24.5
+        ],
+        [
+          0.353,
+          2.53,
+          22.4,
+          22.4
+        ],
+        [
+          0.601,
+          11.1,
+          28.1,
+          28.1
+        ]
+      ],
+      "stock_sample_number": 12,
+      "bounded_socket_scan_min_median_max": {
+        "rows_seen": [
+          1024,
+          1024.0,
+          1024
+        ],
+        "established": [
+          1016,
+          1016.0,
+          1016
+        ],
+        "rx_queued_sockets": [
+          34,
+          82.0,
+          105
+        ],
+        "tx_queued_sockets": [
+          0,
+          0.0,
+          1
+        ],
+        "rx_payload_bytes": [
+          2192,
+          7005.0,
+          9851
+        ],
+        "tx_payload_bytes": [
+          0,
+          0.0,
+          3750
+        ]
+      },
+      "physical_counter_read_endpoints_elapsed_s": [
+        306.75673,
+        396.45985
+      ],
+      "workers": [
+        {
+          "cpu": 14,
+          "destination": null,
+          "events": 6589156,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 2e-05
+        },
+        {
+          "cpu": 2,
+          "destination": null,
+          "events": 5042730,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 2.15939
+        },
+        {
+          "cpu": 5,
+          "destination": null,
+          "events": 4992049,
+          "over1ms_pct": 0.13846,
+          "over250us_pct": 3.20179
+        },
+        {
+          "cpu": 8,
+          "destination": null,
+          "events": 3344802,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.18288
+        }
+      ],
+      "handoffs": [
+        {
+          "cpu": 2,
+          "destination": 1,
+          "events": 1647270,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 1.17667
+        },
+        {
+          "cpu": 5,
+          "destination": 2,
+          "events": 1647250,
+          "over1ms_pct": 0.26802,
+          "over250us_pct": 3.65992
+        },
+        {
+          "cpu": 8,
+          "destination": 3,
+          "events": 1647314,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.21235
+        },
+        {
+          "cpu": 5,
+          "destination": 4,
+          "events": 1647603,
+          "over1ms_pct": 0.15155,
+          "over250us_pct": 3.47517
+        }
+      ]
+    },
+    "ring4096-named-slot-sqlite-swap-quiet-315-h1": {
+      "tag": "ring4096-named-slot-sqlite-swap-quiet-315-h1",
+      "server": "d04db164867e0dfadd12d497b41ce5333535f92f381f425d81f967426e1145a5",
+      "users": 315000,
+      "measurement_s": [
+        290,
+        390
+      ],
+      "score_eligible": true,
+      "score_whole_latency_mean_ms_bounds": [
+        32.39932,
+        32.72432
+      ],
+      "stock_p95_p99_ms": [
+        131.42175,
+        811.85533
+      ],
+      "icmp_received_by_emission_elapsed_s": [
+        97,
+        98,
+        97,
+        97
+      ],
+      "rtt_all_ranks_p50_p95_p99_max_ms": [
+        0.468,
+        1.44,
+        2.75,
+        2.98
+      ],
+      "rtt_per_lane_p50_p95_p99_max_ms": [
+        [
+          0.481,
+          1.44,
+          2.44,
+          2.44
+        ],
+        [
+          0.456,
+          1.73,
+          2.75,
+          2.75
+        ],
+        [
+          0.432,
+          1.23,
+          2.98,
+          2.98
+        ],
+        [
+          0.506,
+          1.63,
+          2.81,
+          2.81
+        ]
+      ],
+      "stock_sample_number": 12,
+      "bounded_socket_scan_min_median_max": {
+        "rows_seen": [
+          1024,
+          1024.0,
+          1024
+        ],
+        "established": [
+          1016,
+          1016.0,
+          1016
+        ],
+        "rx_queued_sockets": [
+          0,
+          0.0,
+          3
+        ],
+        "tx_queued_sockets": [
+          0,
+          0.0,
+          1
+        ],
+        "rx_payload_bytes": [
+          0,
+          0.0,
+          444
+        ],
+        "tx_payload_bytes": [
+          0,
+          0.0,
+          3730
+        ]
+      },
+      "physical_counter_read_endpoints_elapsed_s": [
+        291.43823,
+        383.36274
+      ],
+      "workers": [
+        {
+          "cpu": 14,
+          "destination": null,
+          "events": 3941858,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.0
+        },
+        {
+          "cpu": 2,
+          "destination": null,
+          "events": 4335572,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 2.54693
+        },
+        {
+          "cpu": 5,
+          "destination": null,
+          "events": 3646234,
+          "over1ms_pct": 0.17018,
+          "over250us_pct": 4.67507
+        },
+        {
+          "cpu": 8,
+          "destination": null,
+          "events": 2668824,
+          "over1ms_pct": 0.00202,
+          "over250us_pct": 0.22302
+        }
+      ],
+      "handoffs": [
+        {
+          "cpu": 2,
+          "destination": 1,
+          "events": 984242,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 2.39768
+        },
+        {
+          "cpu": 5,
+          "destination": 2,
+          "events": 984924,
+          "over1ms_pct": 0.32094,
+          "over250us_pct": 6.06778
+        },
+        {
+          "cpu": 8,
+          "destination": 3,
+          "events": 988720,
+          "over1ms_pct": 0.00546,
+          "over250us_pct": 0.33103
+        },
+        {
+          "cpu": 5,
+          "destination": 4,
+          "events": 984198,
+          "over1ms_pct": 0.30888,
+          "over250us_pct": 6.41771
+        }
+      ]
+    },
+    "ring4096-batch-watch-quiet-400-h1": {
+      "tag": "ring4096-batch-watch-quiet-400-h1",
+      "server": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+      "users": 400000,
+      "measurement_s": [
+        315,
+        415
+      ],
+      "score_eligible": true,
+      "score_whole_latency_mean_ms_bounds": [
+        2258.73781,
+        2281.32619
+      ],
+      "stock_p95_p99_ms": [
+        3302.11619,
+        4234.73946
+      ],
+      "icmp_received_by_emission_elapsed_s": [
+        98,
+        98,
+        98,
+        98
+      ],
+      "rtt_all_ranks_p50_p95_p99_max_ms": [
+        0.642,
+        17.3,
+        25.8,
+        29.2
+      ],
+      "rtt_per_lane_p50_p95_p99_max_ms": [
+        [
+          0.785,
+          11.1,
+          25.8,
+          25.8
+        ],
+        [
+          0.635,
+          21.1,
+          29.2,
+          29.2
+        ],
+        [
+          0.512,
+          16.7,
+          20.4,
+          20.4
+        ],
+        [
+          0.642,
+          19.2,
+          25.3,
+          25.3
+        ]
+      ],
+      "stock_sample_number": 12,
+      "bounded_socket_scan_min_median_max": {
+        "rows_seen": [
+          1024,
+          1024.0,
+          1024
+        ],
+        "established": [
+          1016,
+          1016.0,
+          1016
+        ],
+        "rx_queued_sockets": [
+          190,
+          210.5,
+          277
+        ],
+        "tx_queued_sockets": [
+          0,
+          0.0,
+          1
+        ],
+        "rx_payload_bytes": [
+          15433,
+          17770.0,
+          21308
+        ],
+        "tx_payload_bytes": [
+          0,
+          0.0,
+          3737
+        ]
+      },
+      "physical_counter_read_endpoints_elapsed_s": [
+        322.87889,
+        412.85546
+      ],
+      "workers": [
+        {
+          "cpu": 14,
+          "destination": null,
+          "events": 6605802,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.0
+        },
+        {
+          "cpu": 2,
+          "destination": null,
+          "events": 4982762,
+          "over1ms_pct": 0.0004,
+          "over250us_pct": 1.89529
+        },
+        {
+          "cpu": 5,
+          "destination": null,
+          "events": 4971023,
+          "over1ms_pct": 0.01696,
+          "over250us_pct": 1.96754
+        },
+        {
+          "cpu": 8,
+          "destination": null,
+          "events": 3319156,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.07583
+        }
+      ],
+      "handoffs": [
+        {
+          "cpu": 2,
+          "destination": 1,
+          "events": 1650865,
+          "over1ms_pct": 0.00042,
+          "over250us_pct": 0.85761
+        },
+        {
+          "cpu": 5,
+          "destination": 2,
+          "events": 1651653,
+          "over1ms_pct": 0.04735,
+          "over250us_pct": 2.29958
+        },
+        {
+          "cpu": 8,
+          "destination": 3,
+          "events": 1651848,
+          "over1ms_pct": 0.0,
+          "over250us_pct": 0.06702
+        },
+        {
+          "cpu": 5,
+          "destination": 4,
+          "events": 1652157,
+          "over1ms_pct": 0.00369,
+          "over250us_pct": 2.0167
+        }
+      ]
+    }
+  },
+  "ineligible_for_clean_path": []
+}

@@ -1,0 +1,125 @@
+{
+  "entry": "Mojo",
+  "tag": "mojo-280-h1",
+  "target_vus": 280000,
+  "ramp_s": 84,
+  "hold_s": 300,
+  "app_limit_mib": 1750.0,
+  "actual_host_available_at_setup_kib": 46286444,
+  "actual_pause_log_count": 0,
+  "implementation": {
+    "sample_seconds_min": 1,
+    "pause_if_nonzero_kib_less_than": 163840,
+    "resume_if_kib_greater_than": 262144,
+    "zero_while_paused": "eligible to resume if another accept ring is available",
+    "lxcfs_5_0_4_cgroup2": "memory.max/1024 - memory.current/1024 + memory.stat[file]/1024, all quantities in KiB with integer division",
+    "half_clean_cache_sensitivity": "(memory.max - memory.current) + max(0, file - file_dirty - file_writeback) / 2. No reclaimable slab credited. This sensitivity is separate from the actual guest kernel estimate."
+  },
+  "all": {
+    "samples": 191,
+    "lxcfs_mib": {
+      "min_mib": 819.5,
+      "min_time_s": 382.311,
+      "samples_below_160_mib": 0,
+      "samples_below_256_mib": 0
+    },
+    "raw_free_mib": {
+      "min_mib": 0.004,
+      "min_time_s": 328.017,
+      "samples_below_160_mib": 47,
+      "samples_below_256_mib": 54
+    },
+    "half_clean_cache_mib": {
+      "min_mib": 382.676,
+      "min_time_s": 336.062,
+      "samples_below_160_mib": 0,
+      "samples_below_256_mib": 0
+    }
+  },
+  "ramp": {
+    "samples": 42,
+    "lxcfs_mib": {
+      "min_mib": 1273.535,
+      "min_time_s": 82.608,
+      "samples_below_160_mib": 0,
+      "samples_below_256_mib": 0
+    },
+    "raw_free_mib": {
+      "min_mib": 1162.793,
+      "min_time_s": 82.608,
+      "samples_below_160_mib": 0,
+      "samples_below_256_mib": 0
+    },
+    "half_clean_cache_mib": {
+      "min_mib": 1193.236,
+      "min_time_s": 82.608,
+      "samples_below_160_mib": 0,
+      "samples_below_256_mib": 0
+    }
+  },
+  "hold": {
+    "samples": 149,
+    "lxcfs_mib": {
+      "min_mib": 819.5,
+      "min_time_s": 382.311,
+      "samples_below_160_mib": 0,
+      "samples_below_256_mib": 0
+    },
+    "raw_free_mib": {
+      "min_mib": 0.004,
+      "min_time_s": 328.017,
+      "samples_below_160_mib": 47,
+      "samples_below_256_mib": 54
+    },
+    "half_clean_cache_mib": {
+      "min_mib": 382.676,
+      "min_time_s": 336.062,
+      "samples_below_160_mib": 0,
+      "samples_below_256_mib": 0
+    }
+  },
+  "max_sample_gap_s": 2.075,
+  "max_observed_nonfile_charge_rise_between_samples_mib": 40.402,
+  "sample_at_min_lxcfs": {
+    "t": 382.311,
+    "lxcfs_mib": 819.5,
+    "raw_free_mib": 7.207,
+    "half_clean_cache_mib": 398.674,
+    "non_file_mib": 930.5,
+    "file_mib": 812.293,
+    "dirty_mib": 29.359,
+    "writeback_mib": 0.0
+  },
+  "limitations": [
+    "The two-second sample cadence cannot rule out a subinterval memory spike between observations.",
+    "A real guest calculates file LRUs, reclaimable slab, other reclaimable memory, zone low watermarks and reserves. The archived run did not capture all of those, and a shared host does not have guest-specific zone watermarks.",
+    "Lxcfs counts file cache including dirty and shared pages. The alternate estimate credits half the observed clean cache, and excludes reclaimable slab.",
+    "Benchmark service log records pause transitions only. Host MemAvailable was saved before service start; literal values read on later one-second ticks are unavailable."
+  ],
+  "inputs": {
+    "telemetry.jsonl": "6c6a10c7a92aac4f118f78021e6cce903446e4e6d8b0d150ab71006dc4ee3ae5",
+    "server.log": "bc6f19676bf7a1e9174d9c0b3a9d9aa8d247507a08bb44d728078e6e788085f9",
+    "shape.json": "832eca8e8b1b5bd1b69d64967b16174678188db62e8a62cf1773bfadc44ae6c3",
+    "timing.json": "b59f3ae7ff291a1e0cce2e197241e2a7bfb899cff27120d5dfdf0102cfc9d83c"
+  },
+  "sources": [
+    "https://github.com/lxc/lxcfs/blob/lxcfs-5.0.4/src/proc_fuse.c#L1180",
+    "https://github.com/lxc/lxcfs/blob/lxcfs-5.0.4/src/proc_fuse.c#L1308",
+    "https://github.com/torvalds/linux/blob/v6.8/mm/show_mem.c#L32"
+  ],
+  "separate_service_readback": {
+    "separate_unscored_readback": {
+      "uid": 1000,
+      "proc_meminfo_kib": {
+        "MemTotal": 51393584,
+        "MemAvailable": 39381528
+      },
+      "memory_max": 1835008000,
+      "memory_swap_max": 0,
+      "memory_current": 5718016,
+      "netns_inode": 4026533455
+    },
+    "host_netns_inode": 4026531840,
+    "cgroup_private_network": true
+  }
+}

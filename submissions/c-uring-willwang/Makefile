@@ -7,7 +7,7 @@ SQLITE_FLAGS = -DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DQS=0
                -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_OMIT_LOAD_EXTENSION \
                -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_USE_ALLOCA -DHAVE_FDATASYNC=1
 BUILD ?= build
-objects = $(addprefix $(BUILD)/,main.o buffer.o database.o wal.o reader.o app.o reactor.o)
+objects = $(addprefix $(BUILD)/,main.o buffer.o database.o wal.o reader.o app.o reactor.o pcache.o)
 all: bin/server
 bin/server: $(objects) | bin
 	$(CC) $(CFLAGS) $(LDFLAGS) $^ $(LDLIBS) -o $@

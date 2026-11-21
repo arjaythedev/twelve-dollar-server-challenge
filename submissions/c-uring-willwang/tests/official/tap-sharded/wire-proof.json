@@ -1,0 +1,309 @@
+{
+  "source": "Private four-generator TCP and ICMP preflight. Counts below come from the checked source files of this run.",
+  "profile": "single-queue-sharded-polling-tap",
+  "delay_us_per_direction": 75,
+  "application_cpu": 10,
+  "relay_worker_cpus": [
+    2,
+    5,
+    8,
+    14
+  ],
+  "server_private_tcp_hash_entries": 16384,
+  "server_ingress_rps_masks": [
+    "0000"
+  ],
+  "server_threaded": 1,
+  "service_napi_threads": 1,
+  "all_interfaces": [
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    },
+    {
+      "mtu": 1500,
+      "num_rx_queues": 1,
+      "num_tx_queues": 1,
+      "txqlen": 1000
+    }
+  ],
+  "worker_assignments": [
+    {
+      "role": "server-egress",
+      "cpu": 14,
+      "sources": [
+        0
+      ]
+    },
+    {
+      "role": "client-ingress",
+      "cpu": 2,
+      "sources": [
+        1,
+        4
+      ]
+    },
+    {
+      "role": "client-ingress",
+      "cpu": 5,
+      "sources": [
+        2
+      ]
+    },
+    {
+      "role": "client-ingress",
+      "cpu": 8,
+      "sources": [
+        3
+      ]
+    }
+  ],
+  "independent_socket_placement_tuples_per_lane": [
+    [
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ]
+    ],
+    [
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ]
+    ],
+    [
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ]
+    ],
+    [
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ],
+      [
+        10,
+        0
+      ]
+    ]
+  ],
+  "checked_tcp": [
+    {
+      "client": {
+        "bytes": 86296,
+        "count": 32,
+        "mss": 1448,
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      },
+      "service": {
+        "count": 32,
+        "cpus": [
+          10
+        ],
+        "mss": 1448,
+        "napi_ids": [
+          0
+        ]
+      }
+    },
+    {
+      "client": {
+        "bytes": 86296,
+        "count": 32,
+        "mss": 1448,
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      },
+      "service": {
+        "count": 32,
+        "cpus": [
+          10
+        ],
+        "mss": 1448,
+        "napi_ids": [
+          0
+        ]
+      }
+    },
+    {
+      "client": {
+        "bytes": 86296,
+        "count": 32,
+        "mss": 1448,
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      },
+      "service": {
+        "count": 32,
+        "cpus": [
+          10
+        ],
+        "mss": 1448,
+        "napi_ids": [
+          0
+        ]
+      }
+    },
+    {
+      "client": {
+        "bytes": 86296,
+        "count": 32,
+        "mss": 1448,
+        "sha256": "d53e8b1caeda00a88770b99733b77a0f669ef0722d4fdbd168bdec428c939fad"
+      },
+      "service": {
+        "count": 32,
+        "cpus": [
+          10
+        ],
+        "mss": 1448,
+        "napi_ids": [
+          0
+        ]
+      }
+    }
+  ],
+  "rtt_ms_by_lane": [
+    {
+      "lane": 1,
+      "received": 20,
+      "min": 0.213,
+      "median": 0.2415,
+      "max": 0.285
+    },
+    {
+      "lane": 2,
+      "received": 20,
+      "min": 0.22,
+      "median": 0.2675,
+      "max": 0.299
+    },
+    {
+      "lane": 3,
+      "received": 20,
+      "min": 0.214,
+      "median": 0.2565,
+      "max": 0.306
+    },
+    {
+      "lane": 4,
+      "received": 20,
+      "min": 0.256,
+      "median": 0.281,
+      "max": 0.327
+    }
+  ],
+  "counters_after_relay_exit": {
+    "forwarded_events": 618,
+    "gso": 52,
+    "partial_checksum": 416,
+    "bad_frame": 0,
+    "queue_overflow": 0,
+    "full_polls": 0,
+    "retry_expired": 0,
+    "write_retries": 0
+  },
+  "port_writes_dropped_after_exit": [
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "interface_drops_at_proof": {
+    "c0": {
+      "rx": 0,
+      "tx": 0
+    },
+    "c1": {
+      "rx": 0,
+      "tx": 0
+    },
+    "c2": {
+      "rx": 0,
+      "tx": 0
+    },
+    "c3": {
+      "rx": 0,
+      "tx": 0
+    },
+    "service": {
+      "rx": 0,
+      "tx": 0
+    }
+  },
+  "cleanup": {
+    "created_threads": 1,
+    "unreclaimed_threads": []
+  },
+  "source_file_sha256": {
+    "shape.json": "451874e162912efe229b230c27641534cdec1ea3e13e1b7b1443306b3db7c2fb",
+    "wire-proof.json": "d399940a8ebdc8b3a802c26b58c00f3c26ba836101371ccfdfef4007dcb5159c",
+    "tap-relay-current.json": "7c58373598e8d5b2e13d752148572caad3dc8ad2e2eb8aad7d2b5b8e1562f52f",
+    "tap-cleanup.json": "5a9fcdce0555ccf94e141c27933e9e32b6e6a2502c188f3f2e3db116dc805447"
+  },
+  "tested_relay_elf_sha256": "f46881d1bbd568f9154e2314c73ae4150713549ed4052edbfd23ac98ea9aafe4"
+}

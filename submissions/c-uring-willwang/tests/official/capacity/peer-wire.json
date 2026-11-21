@@ -1,0 +1,355 @@
+{
+  "status": "complete",
+  "pending": [],
+  "summary": "At 280k, guarded C had the lowest full-run p99 at 152.58 ms, ahead of Mojo at 416.82 ms. All six implementations maintained the full population throughout the common 280-second interval and completed the stock run with zero HTTP failures. Retain the current listener ACK policy. Incoming ACK counts and GSO expansion were similar. The cohort associates additional outgoing control records with queuing and admits run-to-run variation.",
+  "cohorts": {
+    "280000": {
+      "matched_20s_windows": [
+        [
+          94,
+          114
+        ],
+        [
+          114,
+          134
+        ],
+        [
+          134,
+          154
+        ],
+        [
+          154,
+          174
+        ],
+        [
+          174,
+          194
+        ],
+        [
+          194,
+          214
+        ],
+        [
+          214,
+          234
+        ],
+        [
+          234,
+          254
+        ],
+        [
+          254,
+          274
+        ],
+        [
+          274,
+          294
+        ],
+        [
+          294,
+          314
+        ],
+        [
+          314,
+          334
+        ],
+        [
+          334,
+          354
+        ],
+        [
+          354,
+          374
+        ]
+      ],
+      "implementations": {
+        "C guarded": {
+          "scored_p99_ms": 152.58,
+          "scored_p95_ms": 33.62,
+          "scored_rps": 26754.7,
+          "scored_requests": 10273811,
+          "http_failures": 0,
+          "stock_pass": true,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+          "rps": 29617.72,
+          "in_segs_per_req": 2.2066,
+          "ack_paths_per_req": 1.0043,
+          "orig_data_segs_per_req": 1.922,
+          "tx_frames_req": 1.2571,
+          "ctrl_out_proxy_per_req": 0.2524,
+          "delayed_ack_1000": 24.0511,
+          "retrans_1000": 4.3993,
+          "tx_bytes_req": 1938.0821,
+          "napi_us_inseg": 6.9077,
+          "app_us_req": 16.5382,
+          "avg_sock_mib": 0.3394,
+          "sampled_rx_queued_pct": 0.0281
+        },
+        "Mojo": {
+          "scored_p99_ms": 416.82,
+          "scored_p95_ms": 148.09,
+          "scored_rps": 26667.83,
+          "scored_requests": 10240476,
+          "http_failures": 0,
+          "stock_pass": true,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+          "rps": 29556.8064,
+          "in_segs_per_req": 2.2078,
+          "ack_paths_per_req": 1.0059,
+          "orig_data_segs_per_req": 1.9211,
+          "tx_frames_req": 1.5414,
+          "ctrl_out_proxy_per_req": 0.5351,
+          "delayed_ack_1000": 129.9786,
+          "retrans_1000": 6.3315,
+          "tx_bytes_req": 1955.9582,
+          "napi_us_inseg": 5.9794,
+          "app_us_req": 18.6528,
+          "avg_sock_mib": 0.836,
+          "sampled_rx_queued_pct": 0.067
+        },
+        "C Pavly": {
+          "scored_p99_ms": 757.23,
+          "scored_p95_ms": 90.94,
+          "scored_rps": 26660.04,
+          "scored_requests": 10237469,
+          "http_failures": 0,
+          "stock_pass": true,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+          "rps": 29518.7293,
+          "in_segs_per_req": 2.2089,
+          "ack_paths_per_req": 1.0062,
+          "orig_data_segs_per_req": 1.9225,
+          "tx_frames_req": 1.4566,
+          "ctrl_out_proxy_per_req": 0.4529,
+          "delayed_ack_1000": 116.474,
+          "retrans_1000": 6.3294,
+          "tx_bytes_req": 1952.2834,
+          "napi_us_inseg": 6.0505,
+          "app_us_req": 16.9027,
+          "avg_sock_mib": 0.8846,
+          "sampled_rx_queued_pct": 0.0956
+        },
+        "Rust Kensac": {
+          "scored_p99_ms": 3540.32,
+          "scored_p95_ms": 135.4,
+          "scored_rps": 26393.35,
+          "scored_requests": 10135056,
+          "http_failures": 0,
+          "stock_pass": false,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+          "rps": 29177.3529,
+          "in_segs_per_req": 2.2125,
+          "ack_paths_per_req": 1.0102,
+          "orig_data_segs_per_req": 1.921,
+          "tx_frames_req": 1.8893,
+          "ctrl_out_proxy_per_req": 0.8781,
+          "delayed_ack_1000": 184.7639,
+          "retrans_1000": 10.4527,
+          "tx_bytes_req": 1982.112,
+          "napi_us_inseg": 6.4424,
+          "app_us_req": 17.6467,
+          "avg_sock_mib": 2.2458,
+          "sampled_rx_queued_pct": 0.1679
+        },
+        "Rust RKK": {
+          "scored_p99_ms": 5822.52,
+          "scored_p95_ms": 3647.59,
+          "scored_rps": 23678.07,
+          "scored_requests": 9092391,
+          "http_failures": 0,
+          "stock_pass": false,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "615b36997cd8429bc31c183d567e8a156c4b1b4daa3ff3bc425873795ea63e63",
+          "rps": 25961.9979,
+          "in_segs_per_req": 2.2085,
+          "ack_paths_per_req": 1.0103,
+          "orig_data_segs_per_req": 1.9203,
+          "tx_frames_req": 2.2083,
+          "ctrl_out_proxy_per_req": 1.1978,
+          "delayed_ack_1000": 13.986,
+          "retrans_1000": 10.2408,
+          "tx_bytes_req": 2000.5966,
+          "napi_us_inseg": 7.9932,
+          "app_us_req": 20.853,
+          "avg_sock_mib": 32.7455,
+          "sampled_rx_queued_pct": 3.0396
+        },
+        "Swift": {
+          "scored_p99_ms": 14543.77,
+          "scored_p95_ms": 4450.75,
+          "scored_rps": 25033.52,
+          "scored_requests": 9612891,
+          "http_failures": 0,
+          "stock_pass": false,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "3640c15706243a4fa39a7643914a7ac57860fa6140051f942633262be8f8cb4f",
+          "rps": 27497.7257,
+          "in_segs_per_req": 2.2196,
+          "ack_paths_per_req": 1.0088,
+          "orig_data_segs_per_req": 1.921,
+          "tx_frames_req": 2.2195,
+          "ctrl_out_proxy_per_req": 1.2108,
+          "delayed_ack_1000": 3.6031,
+          "retrans_1000": 9.2067,
+          "tx_bytes_req": 2002.818,
+          "napi_us_inseg": 8.0206,
+          "app_us_req": 18.4981,
+          "avg_sock_mib": 4.1726,
+          "sampled_rx_queued_pct": 0.4106
+        }
+      }
+    },
+    "300000": {
+      "matched_20s_windows": [
+        [
+          120,
+          140
+        ],
+        [
+          140,
+          160
+        ],
+        [
+          160,
+          180
+        ],
+        [
+          180,
+          200
+        ],
+        [
+          200,
+          220
+        ],
+        [
+          220,
+          240
+        ],
+        [
+          240,
+          260
+        ],
+        [
+          320,
+          340
+        ],
+        [
+          340,
+          360
+        ],
+        [
+          360,
+          380
+        ]
+      ],
+      "implementations": {
+        "C guarded": {
+          "scored_p99_ms": 1150.08,
+          "scored_p95_ms": 614.44,
+          "scored_rps": 28145.06,
+          "scored_requests": 10976586,
+          "http_failures": 0,
+          "stock_pass": false,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f",
+          "rps": 31366.44,
+          "in_segs_per_req": 2.2136,
+          "ack_paths_per_req": 1.0101,
+          "orig_data_segs_per_req": 1.9209,
+          "tx_frames_req": 1.8431,
+          "ctrl_out_proxy_per_req": 0.8285,
+          "delayed_ack_1000": 210.6777,
+          "retrans_1000": 10.0636,
+          "tx_bytes_req": 1980.6831,
+          "napi_us_inseg": 7.2421,
+          "app_us_req": 15.3602,
+          "avg_sock_mib": 11.9408,
+          "sampled_rx_queued_pct": 1.4805
+        },
+        "C worker": {
+          "scored_p99_ms": 2217.88,
+          "scored_p95_ms": 961.48,
+          "scored_rps": 27911.57,
+          "scored_requests": 10885523,
+          "http_failures": 0,
+          "stock_pass": false,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "932db156fbfc5c1832fe702d1dbb9bb1178b061af1ed9f90b8153c39f26caa2d",
+          "rps": 31182.715,
+          "in_segs_per_req": 2.2113,
+          "ack_paths_per_req": 1.0092,
+          "orig_data_segs_per_req": 1.9188,
+          "tx_frames_req": 1.9309,
+          "ctrl_out_proxy_per_req": 0.9191,
+          "delayed_ack_1000": 215.7717,
+          "retrans_1000": 9.3882,
+          "tx_bytes_req": 1988.0582,
+          "napi_us_inseg": 7.2555,
+          "app_us_req": 15.5013,
+          "avg_sock_mib": 19.8112,
+          "sampled_rx_queued_pct": 2.3786
+        },
+        "Mojo": {
+          "scored_p99_ms": 20398.76,
+          "scored_p95_ms": 10473.01,
+          "scored_rps": 22983.81,
+          "scored_requests": 8963695,
+          "http_failures": 76,
+          "stock_pass": false,
+          "full_ticks": 48,
+          "ticks": 59,
+          "sha256": "c196256720a851e344270c13b4aadc4cf8116fea3877d401756579c4efd1f732",
+          "rps": 24198.82,
+          "in_segs_per_req": 2.2614,
+          "ack_paths_per_req": 1.0089,
+          "orig_data_segs_per_req": 1.926,
+          "tx_frames_req": 2.2609,
+          "ctrl_out_proxy_per_req": 1.2526,
+          "delayed_ack_1000": 19.5314,
+          "retrans_1000": 9.5591,
+          "tx_bytes_req": 2012.8043,
+          "napi_us_inseg": 8.5806,
+          "app_us_req": 21.8068,
+          "avg_sock_mib": 235.5333,
+          "sampled_rx_queued_pct": 20.2713
+        },
+        "C Pavly": {
+          "scored_p99_ms": 11117.32,
+          "scored_p95_ms": 234.05,
+          "scored_rps": 27346.17,
+          "scored_requests": 10665018,
+          "http_failures": 0,
+          "stock_pass": false,
+          "full_ticks": 59,
+          "ticks": 59,
+          "sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+          "rps": 30604.915,
+          "in_segs_per_req": 2.2213,
+          "ack_paths_per_req": 1.0107,
+          "orig_data_segs_per_req": 1.9214,
+          "tx_frames_req": 2.0282,
+          "ctrl_out_proxy_per_req": 1.0175,
+          "delayed_ack_1000": 183.1844,
+          "retrans_1000": 10.9657,
+          "tx_bytes_req": 1994.4974,
+          "napi_us_inseg": 6.9133,
+          "app_us_req": 16.4656,
+          "avg_sock_mib": 3.9423,
+          "sampled_rx_queued_pct": 0.3281
+        }
+      }
+    }
+  }
+}

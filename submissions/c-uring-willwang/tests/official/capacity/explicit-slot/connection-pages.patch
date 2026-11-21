@@ -1,0 +1,91 @@
+--- a/submissions/c-uring-willwang/reactor.c
++++ b/submissions/c-uring-willwang/reactor.c
+@@ -61,7 +61,7 @@
+ } Queue;
+
+ typedef struct {
+-    int fd, wake, parked_fd;
++    int fd, wake, parked_fd, conns_mapped;
+     Connection *conns;
+     unsigned live, accepting, admission_batch;
+     unsigned next_named_slot, named_inflight, kernel_allocates;
+@@ -195,6 +195,34 @@
+     b->bid = bid;
+ }
+
++enum { CONNECTION_BANK_BYTES = 2 * 1024 * 1024 };
++
++static Connection *allocate_connections(Ring *r) {
++    const size_t size = CONNECTION_BANK_BYTES;
++    if (slots == 65535 && (size_t)(slots + 1) * sizeof(Connection) == size) {
++        /* The kernel zeroes an anonymous bank on first use. Align it to one
++         * PMD so ordinary transparent huge pages can cover the whole bank. */
++        char *base = mmap(NULL, 2 * size, PROT_READ | PROT_WRITE,
++                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++        if (base != MAP_FAILED) {
++            size_t prefix = -(uintptr_t)base & (size - 1);
++            char *aligned = base + prefix;
++            size_t suffix = size - prefix;
++            if (prefix && munmap(base, prefix)) {
++                munmap(base, 2 * size);
++            } else if (munmap(aligned + size, suffix)) {
++                munmap(aligned, size + suffix);
++            } else if (madvise(aligned, size, MADV_HUGEPAGE)) {
++                munmap(aligned, size);
++            } else {
++                r->conns_mapped = 1;
++                return (Connection *)aligned;
++            }
++        }
++    }
++    return calloc(slots, sizeof(Connection));
++}
++
+ /* The Ubuntu 6.8 stable series containing LP #2162843 rejects an all-zero
+  * reserved field. Other kernels accept the standard registration on the first try. */
+ static int new_ring(unsigned id) {
+@@ -232,7 +260,7 @@
+     struct io_uring_rsrc_register files = {.nr = slots, .flags = IORING_RSRC_REGISTER_SPARSE};
+     if (syscall(SYS_io_uring_register, r->fd, IORING_REGISTER_FILES2, &files, sizeof(files)) < 0)
+         goto fail;
+-    r->conns = calloc(slots, sizeof(Connection));
++    r->conns = allocate_connections(r);
+     r->buffers = malloc((size_t)BUFFER_COUNT * BUFFER_SIZE);
+     r->provided = mmap(NULL, BUFFER_COUNT * sizeof(struct io_uring_buf), PROT_READ | PROT_WRITE,
+                        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+@@ -261,7 +289,8 @@
+         if (r->sqes && r->sqes != MAP_FAILED) munmap(r->sqes, r->sqe_size);
+         if (r->provided && r->provided != MAP_FAILED) munmap(r->provided, BUFFER_COUNT * sizeof(struct io_uring_buf));
+         free(r->buffers);
+-        free(r->conns);
++        if (r->conns_mapped) munmap(r->conns, CONNECTION_BANK_BYTES);
++        else free(r->conns);
+         memset(r, 0, sizeof(*r));
+         errno = err;
+         return -1;
+@@ -308,6 +337,12 @@
+         b->count <= slots - r->next_named_slot) {
+         reserve(r, 1 + b->count);
+         b->first_slot = r->next_named_slot;
++        if (!b->first_slot && r->conns_mapped) {
++            /* A read fault can map the shared zero page. Fault the private
++             * bank on the padding record before checking virgin-slot ownership. */
++            ((volatile Connection *)r->conns)[slots].flags = 1;
++            __atomic_signal_fence(__ATOMIC_ACQ_REL);
++        }
+         r->next_named_slot += b->count;
+         ++r->named_inflight;
+         b->pending_watches = b->count;
+@@ -831,8 +866,11 @@
+ static uint64_t accept_conn(unsigned ri, unsigned slot) {
+     Ring *r = &rings[ri];
+     Connection *c = &r->conns[slot];
+-    ++c->generation;
++    /* A kernel-allocated slot already belongs to this connection. Store
++     * first so its bank can also take a private huge page on first use. */
+     c->flags = OPEN;
++    __atomic_signal_fence(__ATOMIC_ACQ_REL);
++    ++c->generation;
+     ++r->live;
+     return key(ri, slot, c->generation);
+ }

@@ -1,0 +1,96 @@
+{
+  "ring4096-guarded-quiet-310-h2": {
+    "users": 310000,
+    "p95_ms": 392.6615364711249,
+    "p99_ms": 1348.5551462240494,
+    "reqs": 11430867,
+    "dials": 310000,
+    "fails": 0,
+    "app_peak_mib": 862.4,
+    "qualified": false,
+    "stock_pass": false,
+    "scored_healthy_environment": true,
+    "infrastructure_flags": [],
+    "target_network_flags": [],
+    "population": {
+      "min_established": 310000,
+      "max_established": 310000,
+      "expected_5s_ticks": 59,
+      "full_ticks": 59,
+      "all_expected_full": true
+    },
+    "windows": {
+      "75-90": {
+        "requests": 430843,
+        "median_shard_p99_ms": 270.379,
+        "max_shard_p99_ms": 1072.697,
+        "peak_socket_mib_observed": 79.95,
+        "median_cgroup_mib": 567.98
+      },
+      "90-105": {
+        "requests": 489019,
+        "median_shard_p99_ms": 1629.202,
+        "max_shard_p99_ms": 1629.202,
+        "peak_socket_mib_observed": 171.13,
+        "median_cgroup_mib": 745.53
+      },
+      "150-385": {
+        "requests": 7671040,
+        "median_shard_p99_ms": 76.791,
+        "max_shard_p99_ms": 474.378,
+        "peak_socket_mib_observed": 42.28,
+        "median_cgroup_mib": 775.4
+      }
+    },
+    "ramp_seconds": 93,
+    "hold_seconds": 300,
+    "binary": "c543a1b27f1f4ef0015295b5c910379ebb9fbe8e000ebfa8caa4b23d1955bc6f"
+  },
+  "ring4096-batch-watch-quiet-310-h1": {
+    "users": 310000,
+    "p95_ms": 279.9572075850757,
+    "p99_ms": 720.4803861297981,
+    "reqs": 11475675,
+    "dials": 310000,
+    "fails": 0,
+    "app_peak_mib": 805.6,
+    "qualified": true,
+    "stock_pass": true,
+    "scored_healthy_environment": true,
+    "infrastructure_flags": [],
+    "target_network_flags": [],
+    "population": {
+      "min_established": 310000,
+      "max_established": 310000,
+      "expected_5s_ticks": 59,
+      "full_ticks": 59,
+      "all_expected_full": true
+    },
+    "windows": {
+      "75-90": {
+        "requests": 450528,
+        "median_shard_p99_ms": 151.066,
+        "max_shard_p99_ms": 381.113,
+        "peak_socket_mib_observed": 20.08,
+        "median_cgroup_mib": 542.91
+      },
+      "90-105": {
+        "requests": 486040,
+        "median_shard_p99_ms": 803.817,
+        "max_shard_p99_ms": 923.967,
+        "peak_socket_mib_observed": 89.7,
+        "median_cgroup_mib": 687.83
+      },
+      "150-385": {
+        "requests": 7685885,
+        "median_shard_p99_ms": 48.588,
+        "max_shard_p99_ms": 479.122,
+        "peak_socket_mib_observed": 44.75,
+        "median_cgroup_mib": 740.34
+      }
+    },
+    "ramp_seconds": 93,
+    "hold_seconds": 300,
+    "binary": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a"
+  }
+}

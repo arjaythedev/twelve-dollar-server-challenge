@@ -1,0 +1,830 @@
+{
+  "cutoff_utc": "2026-11-13T01:25:16.004000+00:00",
+  "elf_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+  "first_router_rx_loss": {
+    "delta": {
+      "rclient": 17,
+      "rserver": 165,
+      "tclient": 0,
+      "tserver": 0
+    },
+    "server_estab": 241620,
+    "softnet_delta": {
+      "0": 0,
+      "1": 0,
+      "2": 0,
+      "3": 0,
+      "4": 0,
+      "5": 0,
+      "6": 0,
+      "7": 0,
+      "8": 0,
+      "9": 182,
+      "10": 0,
+      "11": 0,
+      "12": 0,
+      "13": 0,
+      "14": 0,
+      "15": 0
+    },
+    "window": [
+      70,
+      75
+    ]
+  },
+  "full_scored": {
+    "known_service_scope_cpu_s": 288.430343,
+    "netdev_raw_rx_dropped": [
+      {
+        "rclient": 0,
+        "rserver": 0,
+        "tclient": 0,
+        "tserver": 0
+      },
+      {
+        "rclient": 206389,
+        "rserver": 341286,
+        "tclient": 0,
+        "tserver": 0
+      }
+    ],
+    "participant_drop_counts": {
+      "application": 0,
+      "generator_0": 0,
+      "generator_1": 0,
+      "generator_2": 0,
+      "generator_3": 0,
+      "middle_router": 547675,
+      "observer": 0
+    },
+    "per_cpu": {
+      "0": {
+        "busy_fraction": 0.3120884415653943,
+        "softnet_dropped": 0,
+        "softnet_processed": 1207039,
+        "softnet_raw_dropped": [
+          767,
+          767
+        ],
+        "ticks": {
+          "idle": 25663,
+          "iowait": 36,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 4437,
+          "steal": 11,
+          "system": 3719,
+          "user": 3491
+        },
+        "time_squeezed": 1
+      },
+      "1": {
+        "busy_fraction": 0.29347471451876017,
+        "softnet_dropped": 0,
+        "softnet_processed": 1211389,
+        "softnet_raw_dropped": [
+          3522,
+          3522
+        ],
+        "ticks": {
+          "idle": 25970,
+          "iowait": 16,
+          "irq": 0,
+          "nice": 2,
+          "softirq": 3829,
+          "steal": 11,
+          "system": 3733,
+          "user": 3219
+        },
+        "time_squeezed": 0
+      },
+      "2": {
+        "busy_fraction": 0.2886175530607228,
+        "softnet_dropped": 0,
+        "softnet_processed": 1209536,
+        "softnet_raw_dropped": [
+          802489,
+          802489
+        ],
+        "ticks": {
+          "idle": 26027,
+          "iowait": 16,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 3567,
+          "steal": 12,
+          "system": 3707,
+          "user": 3280
+        },
+        "time_squeezed": 1
+      },
+      "3": {
+        "busy_fraction": 0.301602055880584,
+        "softnet_dropped": 0,
+        "softnet_processed": 1215082,
+        "softnet_raw_dropped": [
+          21674,
+          21674
+        ],
+        "ticks": {
+          "idle": 25528,
+          "iowait": 18,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 3599,
+          "steal": 10,
+          "system": 3745,
+          "user": 3678
+        },
+        "time_squeezed": 1
+      },
+      "4": {
+        "busy_fraction": 0.2954352528820614,
+        "softnet_dropped": 0,
+        "softnet_processed": 1211835,
+        "softnet_raw_dropped": [
+          21525,
+          21525
+        ],
+        "ticks": {
+          "idle": 25715,
+          "iowait": 15,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 3468,
+          "steal": 11,
+          "system": 3773,
+          "user": 3536
+        },
+        "time_squeezed": 1
+      },
+      "5": {
+        "busy_fraction": 0.2864706205080375,
+        "softnet_dropped": 0,
+        "softnet_processed": 1217970,
+        "softnet_raw_dropped": [
+          762446,
+          762446
+        ],
+        "ticks": {
+          "idle": 26003,
+          "iowait": 8,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 3442,
+          "steal": 10,
+          "system": 3739,
+          "user": 3252
+        },
+        "time_squeezed": 1
+      },
+      "6": {
+        "busy_fraction": 0.28628279723350536,
+        "softnet_dropped": 0,
+        "softnet_processed": 1208037,
+        "softnet_raw_dropped": [
+          1598,
+          1598
+        ],
+        "ticks": {
+          "idle": 25982,
+          "iowait": 23,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 3469,
+          "steal": 11,
+          "system": 3734,
+          "user": 3216
+        },
+        "time_squeezed": 1
+      },
+      "7": {
+        "busy_fraction": 0.2919145669399281,
+        "softnet_dropped": 0,
+        "softnet_processed": 1216131,
+        "softnet_raw_dropped": [
+          1831,
+          1831
+        ],
+        "ticks": {
+          "idle": 25814,
+          "iowait": 12,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 3448,
+          "steal": 11,
+          "system": 3725,
+          "user": 3462
+        },
+        "time_squeezed": 3
+      },
+      "8": {
+        "busy_fraction": 0.2895573959304558,
+        "softnet_dropped": 0,
+        "softnet_processed": 1198150,
+        "softnet_raw_dropped": [
+          809032,
+          809032
+        ],
+        "ticks": {
+          "idle": 25883,
+          "iowait": 24,
+          "irq": 0,
+          "nice": 5,
+          "softirq": 3365,
+          "steal": 11,
+          "system": 3744,
+          "user": 3434
+        },
+        "time_squeezed": 1
+      },
+      "9": {
+        "busy_fraction": 0.6496317951374755,
+        "softnet_dropped": 280766,
+        "softnet_processed": 19823507,
+        "softnet_raw_dropped": [
+          7437,
+          288203
+        ],
+        "ticks": {
+          "idle": 9459,
+          "iowait": 9,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 16026,
+          "steal": 2,
+          "system": 453,
+          "user": 1074
+        },
+        "time_squeezed": 381
+      },
+      "10": {
+        "busy_fraction": 0.8257717492984098,
+        "softnet_dropped": 0,
+        "softnet_processed": 25071621,
+        "softnet_raw_dropped": [
+          45789104,
+          45789104
+        ],
+        "ticks": {
+          "idle": 236,
+          "iowait": 6469,
+          "irq": 0,
+          "nice": 49,
+          "softirq": 14654,
+          "steal": 3,
+          "system": 12994,
+          "user": 4079
+        },
+        "time_squeezed": 45
+      },
+      "11": {
+        "busy_fraction": 0.28748423880269725,
+        "softnet_dropped": 0,
+        "softnet_processed": 1210961,
+        "softnet_raw_dropped": [
+          808,
+          808
+        ],
+        "ticks": {
+          "idle": 25979,
+          "iowait": 15,
+          "irq": 0,
+          "nice": 2,
+          "softirq": 3375,
+          "steal": 11,
+          "system": 3710,
+          "user": 3390
+        },
+        "time_squeezed": 2
+      },
+      "12": {
+        "busy_fraction": 0.28221716604073577,
+        "softnet_dropped": 0,
+        "softnet_processed": 1199525,
+        "softnet_raw_dropped": [
+          5160,
+          5160
+        ],
+        "ticks": {
+          "idle": 26169,
+          "iowait": 15,
+          "irq": 0,
+          "nice": 5,
+          "softirq": 3365,
+          "steal": 12,
+          "system": 3668,
+          "user": 3245
+        },
+        "time_squeezed": 2
+      },
+      "13": {
+        "busy_fraction": 0.2840196159009343,
+        "softnet_dropped": 0,
+        "softnet_processed": 1199685,
+        "softnet_raw_dropped": [
+          1714,
+          1714
+        ],
+        "ticks": {
+          "idle": 26122,
+          "iowait": 12,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 3349,
+          "steal": 11,
+          "system": 3754,
+          "user": 3252
+        },
+        "time_squeezed": 3
+      },
+      "14": {
+        "busy_fraction": 0.6193197070215133,
+        "softnet_dropped": 266909,
+        "softnet_processed": 19746226,
+        "softnet_raw_dropped": [
+          25707531,
+          25974440
+        ],
+        "ticks": {
+          "idle": 9909,
+          "iowait": 18,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 14835,
+          "steal": 2,
+          "system": 408,
+          "user": 905
+        },
+        "time_squeezed": 351
+      },
+      "15": {
+        "busy_fraction": null,
+        "softnet_dropped": 0,
+        "softnet_processed": 683,
+        "softnet_raw_dropped": [
+          175,
+          175
+        ],
+        "ticks": {},
+        "time_squeezed": 0
+      }
+    },
+    "private_rx_dropped": {
+      "rclient": 206389,
+      "rserver": 341286,
+      "tclient": 0,
+      "tserver": 0
+    },
+    "router_private_over_router_softnet": 1.0,
+    "scheduled": [
+      0,
+      383.75
+    ],
+    "server_private_over_router_private": 0.0
+  },
+  "hold": {
+    "known_service_scope_cpu_s": 235.51203,
+    "netdev_raw_rx_dropped": [
+      {
+        "rclient": 687,
+        "rserver": 2427,
+        "tclient": 0,
+        "tserver": 0
+      },
+      {
+        "rclient": 206389,
+        "rserver": 341286,
+        "tclient": 0,
+        "tserver": 0
+      }
+    ],
+    "participant_drop_counts": {
+      "application": 0,
+      "generator_0": 0,
+      "generator_1": 0,
+      "generator_2": 0,
+      "generator_3": 0,
+      "middle_router": 544561,
+      "observer": 0
+    },
+    "per_cpu": {
+      "0": {
+        "busy_fraction": 0.30761369443025033,
+        "softnet_dropped": 0,
+        "softnet_processed": 1029919,
+        "softnet_raw_dropped": [
+          767,
+          767
+        ],
+        "ticks": {
+          "idle": 20300,
+          "iowait": 25,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 3619,
+          "steal": 9,
+          "system": 2896,
+          "user": 2505
+        },
+        "time_squeezed": 0
+      },
+      "1": {
+        "busy_fraction": 0.28590720221606647,
+        "softnet_dropped": 0,
+        "softnet_processed": 1032491,
+        "softnet_raw_dropped": [
+          3522,
+          3522
+        ],
+        "ticks": {
+          "idle": 20607,
+          "iowait": 16,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 3077,
+          "steal": 9,
+          "system": 2896,
+          "user": 2274
+        },
+        "time_squeezed": 0
+      },
+      "2": {
+        "busy_fraction": 0.2827334376630152,
+        "softnet_dropped": 0,
+        "softnet_processed": 1031570,
+        "softnet_raw_dropped": [
+          802489,
+          802489
+        ],
+        "ticks": {
+          "idle": 20613,
+          "iowait": 12,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 2893,
+          "steal": 10,
+          "system": 2856,
+          "user": 2371
+        },
+        "time_squeezed": 0
+      },
+      "3": {
+        "busy_fraction": 0.2892461120022317,
+        "softnet_dropped": 0,
+        "softnet_processed": 1036609,
+        "softnet_raw_dropped": [
+          21674,
+          21674
+        ],
+        "ticks": {
+          "idle": 20373,
+          "iowait": 10,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 2930,
+          "steal": 9,
+          "system": 2898,
+          "user": 2458
+        },
+        "time_squeezed": 0
+      },
+      "4": {
+        "busy_fraction": 0.2899682694654625,
+        "softnet_dropped": 0,
+        "softnet_processed": 1033978,
+        "softnet_raw_dropped": [
+          21525,
+          21525
+        ],
+        "ticks": {
+          "idle": 20349,
+          "iowait": 14,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 2820,
+          "steal": 10,
+          "system": 2890,
+          "user": 2595
+        },
+        "time_squeezed": 0
+      },
+      "5": {
+        "busy_fraction": 0.2783177178017061,
+        "softnet_dropped": 0,
+        "softnet_processed": 1039959,
+        "softnet_raw_dropped": [
+          762446,
+          762446
+        ],
+        "ticks": {
+          "idle": 20638,
+          "iowait": 5,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 2803,
+          "steal": 8,
+          "system": 2883,
+          "user": 2267
+        },
+        "time_squeezed": 1
+      },
+      "6": {
+        "busy_fraction": 0.27655107254085454,
+        "softnet_dropped": 0,
+        "softnet_processed": 1029351,
+        "softnet_raw_dropped": [
+          1598,
+          1598
+        ],
+        "ticks": {
+          "idle": 20661,
+          "iowait": 13,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 2812,
+          "steal": 8,
+          "system": 2858,
+          "user": 2224
+        },
+        "time_squeezed": 0
+      },
+      "7": {
+        "busy_fraction": 0.2851756162279171,
+        "softnet_dropped": 0,
+        "softnet_processed": 1037180,
+        "softnet_raw_dropped": [
+          1831,
+          1831
+        ],
+        "ticks": {
+          "idle": 20468,
+          "iowait": 6,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 2809,
+          "steal": 9,
+          "system": 2861,
+          "user": 2489
+        },
+        "time_squeezed": 1
+      },
+      "8": {
+        "busy_fraction": 0.2779642058165548,
+        "softnet_dropped": 0,
+        "softnet_processed": 1021986,
+        "softnet_raw_dropped": [
+          809032,
+          809032
+        ],
+        "ticks": {
+          "idle": 20641,
+          "iowait": 15,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 2753,
+          "steal": 9,
+          "system": 2881,
+          "user": 2308
+        },
+        "time_squeezed": 0
+      },
+      "9": {
+        "busy_fraction": 0.6526141661236152,
+        "softnet_dropped": 278772,
+        "softnet_processed": 16994804,
+        "softnet_raw_dropped": [
+          9431,
+          288203
+        ],
+        "ticks": {
+          "idle": 6924,
+          "iowait": 6,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 12407,
+          "steal": 2,
+          "system": 226,
+          "user": 384
+        },
+        "time_squeezed": 298
+      },
+      "10": {
+        "busy_fraction": 0.8525542570951585,
+        "softnet_dropped": 0,
+        "softnet_processed": 21553960,
+        "softnet_raw_dropped": [
+          45789104,
+          45789104
+        ],
+        "ticks": {
+          "idle": 201,
+          "iowait": 4215,
+          "irq": 0,
+          "nice": 45,
+          "softirq": 11396,
+          "steal": 2,
+          "system": 10739,
+          "user": 3352
+        },
+        "time_squeezed": 14
+      },
+      "11": {
+        "busy_fraction": 0.2804120111731844,
+        "softnet_dropped": 0,
+        "softnet_processed": 1033116,
+        "softnet_raw_dropped": [
+          808,
+          808
+        ],
+        "ticks": {
+          "idle": 20599,
+          "iowait": 10,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 2763,
+          "steal": 9,
+          "system": 2841,
+          "user": 2417
+        },
+        "time_squeezed": 0
+      },
+      "12": {
+        "busy_fraction": 0.2761319172722191,
+        "softnet_dropped": 0,
+        "softnet_processed": 1022842,
+        "softnet_raw_dropped": [
+          5160,
+          5160
+        ],
+        "ticks": {
+          "idle": 20710,
+          "iowait": 10,
+          "irq": 0,
+          "nice": 4,
+          "softirq": 2751,
+          "steal": 9,
+          "system": 2831,
+          "user": 2309
+        },
+        "time_squeezed": 2
+      },
+      "13": {
+        "busy_fraction": 0.2764383657234569,
+        "softnet_dropped": 0,
+        "softnet_processed": 1023011,
+        "softnet_raw_dropped": [
+          1714,
+          1714
+        ],
+        "ticks": {
+          "idle": 20729,
+          "iowait": 9,
+          "irq": 0,
+          "nice": 1,
+          "softirq": 2731,
+          "steal": 9,
+          "system": 2878,
+          "user": 2304
+        },
+        "time_squeezed": 1
+      },
+      "14": {
+        "busy_fraction": 0.6218741842860872,
+        "softnet_dropped": 265789,
+        "softnet_processed": 16925967,
+        "softnet_raw_dropped": [
+          25708651,
+          25974440
+        ],
+        "ticks": {
+          "idle": 7232,
+          "iowait": 11,
+          "irq": 0,
+          "nice": 0,
+          "softirq": 11371,
+          "steal": 1,
+          "system": 217,
+          "user": 323
+        },
+        "time_squeezed": 260
+      },
+      "15": {
+        "busy_fraction": null,
+        "softnet_dropped": 0,
+        "softnet_processed": 570,
+        "softnet_raw_dropped": [
+          175,
+          175
+        ],
+        "ticks": {},
+        "time_squeezed": 0
+      }
+    },
+    "private_rx_dropped": {
+      "rclient": 205702,
+      "rserver": 338859,
+      "tclient": 0,
+      "tserver": 0
+    },
+    "router_private_over_router_softnet": 1.0,
+    "scheduled": [
+      84,
+      383.75
+    ],
+    "server_private_over_router_private": 0.0
+  },
+  "host_softnet_backlog_drops_by_cpu": {
+    "0": 0,
+    "1": 0,
+    "2": 0,
+    "3": 0,
+    "4": 0,
+    "5": 0,
+    "6": 0,
+    "7": 0,
+    "8": 0,
+    "9": 280766,
+    "10": 0,
+    "11": 0,
+    "12": 0,
+    "13": 0,
+    "14": 266909,
+    "15": 0
+  },
+  "last_scored_sample_utc": "2026-11-13T01:25:15.754721+00:00",
+  "local": {
+    "full_presence": false,
+    "infrastructure_flags": [
+      "positive private scored RX/TX drop or error delta"
+    ],
+    "qualified": false
+  },
+  "occupancy_alignment": {
+    "complete_five_second_hold_windows": {
+      "all_full": true,
+      "available": 59,
+      "first": 90,
+      "full": 59
+    },
+    "routed_every_snapshot": {
+      "available": 60,
+      "first": 85,
+      "full": 59
+    }
+  },
+  "participant_cpus": {
+    "application": [
+      10
+    ],
+    "generator_0": [
+      0,
+      1,
+      2
+    ],
+    "generator_1": [
+      3,
+      4,
+      5
+    ],
+    "generator_2": [
+      6,
+      7,
+      8
+    ],
+    "generator_3": [
+      11,
+      12,
+      13
+    ],
+    "middle_router": [
+      9,
+      14
+    ],
+    "observer": [
+      15
+    ]
+  },
+  "router_rx_drops": {
+    "rclient": 206389,
+    "rserver": 341286,
+    "tclient": 0,
+    "tserver": 0
+  },
+  "scorer_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+  "server_listen_drops": 0,
+  "server_retransmits": 139837,
+  "start_utc": "2026-11-13T01:18:52.004000+00:00",
+  "stock": {
+    "dials": 280000,
+    "fails": 0,
+    "p95_ms": 23.03704833800125,
+    "p99_ms": 40.6204882459672,
+    "pass": true,
+    "req_per_s": 26757.783031003473,
+    "reqs": 10275018,
+    "users": 280000
+  },
+  "tag": "priorroute-stock-280-h1",
+  "until_native_sample_s": 383.75
+}

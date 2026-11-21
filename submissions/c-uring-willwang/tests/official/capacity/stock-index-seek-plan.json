@@ -1,0 +1,55 @@
+{
+  "purpose": "Test an application-only change that uses SQLite cursor functions to seek the full index key at the end of a consumed likes leaf. Six matched HTTP replays averaged 0.073 percent less pooled whole-process CPU; heavy-like feed CPU fell 58 percent. Measure cold-start full-system latency before selecting a release. The stock SQLite baseline is 458c3f0.",
+  "baseline_source": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+  "server_sha256": "5f295dac29915b7c0d8fdea5a91d1a4d3cb2209bc8c2277af1862394db6780c5",
+  "reader_sha256": "f583411d87254cf782c3ced11deb778d343dc0a1569076d2db9693fb79f7d4c0",
+  "application_patch_sha256": "92166959658fccb3e88740f37438e941c8cec72eb3f26fbe132e4fbecff58f25",
+  "vendor_sqlite_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52",
+  "frozen_peer_results_sha256": "692bd87874cf6519a2ae20e04720e8ce7511895e865667f0261a7f793364b9b1",
+  "previous_dispatch_sha256": "84bdd761bbf8640376506987d142a5d5aa238f322852cf5ed1483172f17b4ae5",
+  "new_dispatch_sha256": "f43741f8f06f85fdd25e40e5d641ccf397b2c7ac46b2b54fc1ca85a091b90160",
+  "runs": [
+    {
+      "tag": "large512k-quiet-stock-index-seek-350-h1",
+      "users": 350000,
+      "ramp_s": 105,
+      "hold_s": 300,
+      "dispatch_after": "large512k-quiet-stock-sqlite-350-h1"
+    },
+    {
+      "tag": "large512k-quiet-stock-index-seek-345-h1",
+      "users": 345000,
+      "ramp_s": 104,
+      "hold_s": 300,
+      "dispatch_after": "large512k-quiet-stock-sqlite-345-h2"
+    },
+    {
+      "tag": "large512k-quiet-stock-index-seek-345-p1",
+      "users": 345000,
+      "ramp_s": 104,
+      "hold_s": 120,
+      "dispatch_after": "large512k-quiet-stock-index-seek-345-h1"
+    },
+    {
+      "tag": "large512k-quiet-stock-index-seek-345-h2",
+      "users": 345000,
+      "ramp_s": 104,
+      "hold_s": 300,
+      "dispatch_after": "large512k-quiet-stock-index-seek-345-p1"
+    },
+    {
+      "tag": "large512k-quiet-stock-index-seek-350-h2",
+      "users": 350000,
+      "ramp_s": 105,
+      "hold_s": 300,
+      "dispatch_after": "large512k-quiet-stock-sqlite-350-h2"
+    },
+    {
+      "tag": "large512k-quiet-stock-index-seek-350-p1",
+      "users": 350000,
+      "ramp_s": 105,
+      "hold_s": 120,
+      "dispatch_after": "large512k-quiet-stock-index-seek-350-h2"
+    }
+  ]
+}

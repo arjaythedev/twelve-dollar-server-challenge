@@ -1,0 +1,66 @@
+{
+  "trial": "ring4096-pavlyhalim-quiet-volume-295-h2",
+  "requested_users": 295000,
+  "hold_s": 300,
+  "status": "interrupted before stock shard results",
+  "last_generator_ticks_s": {
+    "client-0.log": 290,
+    "client-1.log": 290,
+    "client-2.log": 290,
+    "client-3.log": 290
+  },
+  "stock_shard_file_count": 0,
+  "stock_summary_file_present": false,
+  "stock_start_unix": 1794527701.933,
+  "stock_cutoff_unix": 1794528090.933,
+  "earliest_sampled_disk_minimum": {
+    "unix": 1794527993.7200744,
+    "available_bytes": 663552,
+    "feed.db": {
+      "size": 297889792,
+      "allocated": 297897984,
+      "device": "253:1"
+    },
+    "feed.db-wal": {
+      "size": 3485302784,
+      "allocated": 3485749248,
+      "device": "253:1"
+    }
+  },
+  "minimum_available_before_exit_bytes": 663552,
+  "max_sampled_wal_bytes": 3485302784,
+  "seconds_before_cutoff_at_runner_exit": 92.983,
+  "sqlite_full_error_lines": 16,
+  "runner_exit": 1,
+  "explanation": "The service reported SQLite full errors and the observer received ENOSPC from ext4 before the planned cutoff. No stock shard finished. The raw evidence is preserved outside the scored standings.",
+  "raw_sha256": {
+    "timing.json": "012322e7cf26f75155166d3324feaf844820f238e09071ba05a4738bd60c8284",
+    "shape.json": "081acf387c12f43ce4b3b324ef391c61397b6e9cd7d93ded16dd5a53e2a18a70",
+    "database-volume.json": "7218fdff16d6efe9b60dfad938d381761a196867bb53def4c3d922a2aec1ecb9",
+    "component-test-lock.json": "8b44d19bb105fe538ae6d66e067d0c12e04afb3b24c2a3db0a300e80f15868e4",
+    "server.log": "d5be2798b2b3ffa367ce0f28351f0011fd361d9a0e21271189bd87b3d62e0e72",
+    "client-0.log": "c9aeb26b5603aa8cc762bbe0cf6bc723d88248e5a3589e1ae57af942af4e8aa9",
+    "client-1.log": "54d174793eeec79b911b7142897a0b48050f3d18af7be01dcea9cc72d1e8559a",
+    "client-2.log": "a6933791f2da550e7d3837df895f7a3fbd22c61cd38df55cf8fc38278e42ffd0",
+    "client-3.log": "8df45f296f7085991c5f3af6c8ef1dec0b263e5d4077ec722637fbca3639ec19"
+  },
+  "recorded_utc": "2026-11-13T00:01:05.923599+00:00",
+  "app_start": {
+    "uid": 1000,
+    "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "pid": 2917904,
+    "netns": "net:[4026533735]",
+    "affinity": [
+      10
+    ],
+    "cgroup": "0::/system.slice/twelve-revisit-tr40a086c.service"
+  },
+  "server_sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+  "remediation": {
+    "retained_file_paths": 377,
+    "verified_bytes_preserved_on_spare_disk": 2391838956,
+    "root_available_before_relocation": 3784458240,
+    "root_available_after_relocation": 6173642752,
+    "fresh_repeat": "ring4096-pavlyhalim-quiet-volume-295-h3"
+  }
+}

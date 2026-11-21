@@ -1,0 +1,639 @@
+{
+  "A_h1_B_h2": true,
+  "source_elf_sha256": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+  "stock_generator_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+  "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+  "relay_sha256": "54935ba0c1222b0f2a1267e051c84c7d6c07bfbf1be070121be541e28e58c4f1",
+  "fixture_bundle_sha256": "009e1242a10b1b0fb14ccc9f21ddb46fd47a79c73e2b8f61ba2ba080cf9c0059",
+  "users_ramp_hold": [
+    312500,
+    94,
+    300
+  ],
+  "score": {
+    "h1": {
+      "qualified": false,
+      "qps": 29275.93,
+      "p50_p95_p99_ms": [
+        6.319,
+        392.662,
+        1233.038
+      ],
+      "connect_p99_ms": 9.79,
+      "max_ms": 1764.192,
+      "http_counters": {
+        "merged_reported": 11534743,
+        "global_hist": 11534742,
+        "endpoint_hist": 11534743,
+        "endpoint_success_and_fail": 11534743
+      },
+      "whole_hist_ge1s": 236135,
+      "whole_hist_ge1s_pct": 2.047,
+      "p99_allowed": 115347,
+      "nonfeed_ge1s": 119269,
+      "per_route_ge1s": {
+        "GET /feed": 116866,
+        "GET /posts/:id": 102647,
+        "POST /posts/:id/like": 14686,
+        "POST /posts": 1936
+      },
+      "remaining_hist_after_t390": 131965,
+      "first_observed_all_stock_s": 100,
+      "first_observed_all_kernel_s": 99.355,
+      "first_observed_after_t70_socket_gt16MiB_s": 85.054,
+      "ramp_recovery_peak_s_mib": [
+        97.353,
+        161.516
+      ],
+      "target_relay_qdisc_softnet_drops": 0,
+      "device_app_io_bytes": {
+        "rbytes": 18038784,
+        "wbytes": 7245582336
+      },
+      "pressure_and_memory": {
+        "max_cgroup_swap_bytes": 0,
+        "cgroup_oom_kills": 0,
+        "cgroup_memory_max_events": 0,
+        "cgroup_pgscan_max": 0,
+        "cgroup_pgmajfault_max": 0
+      }
+    },
+    "h2": {
+      "qualified": true,
+      "qps": 29458.598,
+      "p50_p95_p99_ms": [
+        1.141,
+        115.475,
+        713.347
+      ],
+      "connect_p99_ms": 6.576,
+      "max_ms": 1041.149,
+      "http_counters": {
+        "merged_reported": 11606695,
+        "global_hist": 11606693,
+        "endpoint_hist": 11606695,
+        "endpoint_success_and_fail": 11606695
+      },
+      "whole_hist_ge1s": 2000,
+      "whole_hist_ge1s_pct": 0.017,
+      "p99_allowed": 116066,
+      "nonfeed_ge1s": 1183,
+      "per_route_ge1s": {
+        "GET /feed": 817,
+        "GET /posts/:id": 713,
+        "POST /posts/:id/like": 422,
+        "POST /posts": 48
+      },
+      "remaining_hist_after_t390": 131004,
+      "first_observed_all_stock_s": 100,
+      "first_observed_all_kernel_s": 100.779,
+      "first_observed_after_t70_socket_gt16MiB_s": 91.994,
+      "ramp_recovery_peak_s_mib": [
+        96.773,
+        112.215
+      ],
+      "target_relay_qdisc_softnet_drops": 0,
+      "device_app_io_bytes": {
+        "rbytes": 17895424,
+        "wbytes": 7325818880
+      },
+      "pressure_and_memory": {
+        "max_cgroup_swap_bytes": 0,
+        "cgroup_oom_kills": 0,
+        "cgroup_memory_max_events": 0,
+        "cgroup_pgscan_max": 0,
+        "cgroup_pgmajfault_max": 0
+      }
+    }
+  },
+  "external": {
+    "h1": {
+      "sampled_rx_and_tx": [
+        [
+          78.901,
+          1016,
+          5,
+          570,
+          0
+        ],
+        [
+          87.058,
+          1016,
+          34,
+          3612,
+          0
+        ],
+        [
+          95.211,
+          1016,
+          128,
+          9682,
+          0
+        ],
+        [
+          103.362,
+          1016,
+          27,
+          1990,
+          0
+        ]
+      ],
+      "over_1ms_late_pct_by_interval": [
+        [
+          78.901,
+          87.058,
+          0.039
+        ],
+        [
+          87.058,
+          95.211,
+          0.06
+        ],
+        [
+          95.211,
+          103.362,
+          0.004
+        ]
+      ],
+      "total_over_1ms_late_pct": 0.034,
+      "max_individual_worker_runqueue_wait_in_a_sample_interval_ms": 4.574,
+      "relay_cumulative_max_observed_at_last_sample_ms": 12.878,
+      "icmp_pings": 118,
+      "icmp_median_ms": 0.435,
+      "icmp_max_ms": 3.6
+    },
+    "h2": {
+      "sampled_rx_and_tx": [
+        [
+          77.683,
+          1016,
+          0,
+          0,
+          0
+        ],
+        [
+          85.844,
+          1016,
+          0,
+          0,
+          0
+        ],
+        [
+          93.999,
+          1016,
+          78,
+          7241,
+          0
+        ],
+        [
+          102.783,
+          1016,
+          0,
+          0,
+          0
+        ]
+      ],
+      "over_1ms_late_pct_by_interval": [
+        [
+          77.683,
+          85.844,
+          0.035
+        ],
+        [
+          85.844,
+          93.999,
+          0.061
+        ],
+        [
+          93.999,
+          102.783,
+          0.007
+        ]
+      ],
+      "total_over_1ms_late_pct": 0.035,
+      "max_individual_worker_runqueue_wait_in_a_sample_interval_ms": 4.674,
+      "relay_cumulative_max_observed_at_last_sample_ms": 2.003,
+      "icmp_pings": 117,
+      "icmp_median_ms": 0.554,
+      "icmp_max_ms": 2.94
+    }
+  },
+  "midpoint_ms_ge1s": 1000.524,
+  "counts_field_order": [
+    "t",
+    "h1_completed",
+    "h2_completed",
+    "h2_minus_h1_cumulative"
+  ],
+  "key_ticks": [
+    [
+      70,
+      127313,
+      127138,
+      204
+    ],
+    [
+      75,
+      136972,
+      137169,
+      401
+    ],
+    [
+      80,
+      145022,
+      144874,
+      253
+    ],
+    [
+      85,
+      148241,
+      150748,
+      2760
+    ],
+    [
+      90,
+      144767,
+      160744,
+      18737
+    ],
+    [
+      95,
+      143033,
+      149187,
+      24891
+    ],
+    [
+      100,
+      160764,
+      171116,
+      35243
+    ],
+    [
+      105,
+      181081,
+      170499,
+      24661
+    ],
+    [
+      110,
+      156317,
+      158200,
+      26544
+    ],
+    [
+      390,
+      170334,
+      163881,
+      72912
+    ]
+  ],
+  "sharp_ge1s_count_bounds_independently_by_phase": {
+    "h1": {
+      "0_85": [
+        0,
+        14087
+      ],
+      "85_105": [
+        24251,
+        236135
+      ],
+      "95_105": [
+        17097,
+        207093
+      ],
+      "105_395": [
+        0,
+        211884
+      ],
+      "390_395": [
+        0,
+        131965
+      ]
+    },
+    "h2": {
+      "0_85": [
+        0,
+        217
+      ],
+      "85_105": [
+        1783,
+        2000
+      ],
+      "95_105": [
+        1783,
+        2000
+      ],
+      "105_395": [
+        0,
+        217
+      ],
+      "390_395": [
+        0,
+        217
+      ]
+    }
+  },
+  "phase_fields": [
+    "http_s",
+    "gbusy_pct",
+    "app_us_http",
+    "napi_us_http",
+    "delay_ack_1k_http",
+    "net_control_proxy_http",
+    "net_data_http",
+    "cg_sock_mean_mib",
+    "io_psi_full_pct",
+    "whole_disk_busy_pct"
+  ],
+  "phases": {
+    "15_70": [
+      [
+        16613.764,
+        76.504,
+        23.796,
+        21.25,
+        1.41,
+        0.333,
+        1.983,
+        0.051,
+        30.905,
+        3.876
+      ],
+      [
+        16617.127,
+        75.156,
+        23.744,
+        20.514,
+        2.218,
+        0.335,
+        1.983,
+        0.036,
+        32.641,
+        3.937
+      ]
+    ],
+    "70_85": [
+      [
+        28682.333,
+        98.875,
+        16.584,
+        17.804,
+        59.924,
+        0.35,
+        1.954,
+        2.299,
+        3.017,
+        6.783
+      ],
+      [
+        28852.733,
+        98.313,
+        16.728,
+        17.221,
+        42.408,
+        0.318,
+        1.963,
+        0.325,
+        4.239,
+        5.223
+      ]
+    ],
+    "85_90": [
+      [
+        28953.4,
+        99.8,
+        15.976,
+        18.508,
+        936.632,
+        1.335,
+        1.933,
+        49.901,
+        0.044,
+        2.5
+      ],
+      [
+        32148.8,
+        100.0,
+        15.173,
+        15.846,
+        127.451,
+        0.455,
+        1.936,
+        3.05,
+        1.541,
+        4.74
+      ]
+    ],
+    "90_95": [
+      [
+        28606.6,
+        100.0,
+        16.29,
+        18.614,
+        615.967,
+        1.427,
+        2.036,
+        119.258,
+        0.048,
+        5.402
+      ],
+      [
+        29837.4,
+        99.928,
+        15.724,
+        17.739,
+        973.439,
+        1.421,
+        1.946,
+        54.538,
+        0.054,
+        7.543
+      ]
+    ],
+    "95_100": [
+      [
+        32152.8,
+        100.0,
+        15.193,
+        15.881,
+        299.416,
+        1.181,
+        1.937,
+        149.195,
+        0.036,
+        5.973
+      ],
+      [
+        34223.2,
+        99.872,
+        14.569,
+        14.627,
+        435.151,
+        1.131,
+        1.941,
+        87.586,
+        0.032,
+        11.931
+      ]
+    ],
+    "100_105": [
+      [
+        36216.2,
+        99.235,
+        14.221,
+        13.137,
+        78.974,
+        0.975,
+        1.835,
+        52.759,
+        1.84,
+        6.537
+      ],
+      [
+        34099.8,
+        98.359,
+        14.563,
+        14.201,
+        66.702,
+        0.929,
+        1.864,
+        6.966,
+        4.254,
+        6.77
+      ]
+    ],
+    "105_390": [
+      [
+        32847.081,
+        98.726,
+        15.344,
+        14.643,
+        185.691,
+        0.687,
+        1.921,
+        6.88,
+        3.479,
+        9.166
+      ],
+      [
+        33016.382,
+        97.437,
+        15.204,
+        14.179,
+        54.602,
+        0.33,
+        1.921,
+        1.213,
+        6.185,
+        9.472
+      ]
+    ],
+    "150_380": [
+      [
+        32850.891,
+        98.765,
+        15.379,
+        14.618,
+        184.302,
+        0.656,
+        1.923,
+        6.218,
+        3.45,
+        9.555
+      ],
+      [
+        33040.387,
+        97.44,
+        15.264,
+        14.1,
+        49.044,
+        0.308,
+        1.922,
+        1.074,
+        6.227,
+        9.658
+      ]
+    ]
+  },
+  "pre_divergence_t15_75_h1_over_h2": {
+    "napi_us_segment": {
+      "five_second_windows": 12,
+      "h1_greater": 11,
+      "median_paired_pct": 3.396
+    },
+    "napi_us_http": {
+      "five_second_windows": 12,
+      "h1_greater": 11,
+      "median_paired_pct": 3.547
+    },
+    "app_us_http": {
+      "five_second_windows": 12,
+      "h1_greater": 6,
+      "median_paired_pct": 0.267
+    },
+    "tap_tx_http_interpolated": {
+      "five_second_windows": 12,
+      "h1_greater": 6,
+      "median_paired_pct": 0.11
+    }
+  },
+  "nearby_controls": {
+    "310-h1": [
+      720.48,
+      89.703,
+      923.967
+    ],
+    "310-h2": [
+      665.352,
+      95.957,
+      942.539
+    ],
+    "315-h1": [
+      1062.076,
+      142.051,
+      1308.894
+    ],
+    "315-h2": [
+      1030.841,
+      138.754,
+      1295.935
+    ]
+  },
+  "nearby_control_fields": [
+    "whole_p99_ms",
+    "peak_socket_MiB_t95_105",
+    "max_shard_p99_ms_t95_105"
+  ],
+  "decision": "On the shared service CPU, receipt and reply fall behind near the end of admission. More ordinary ACK traffic and socket charge accompany the delay. No isolated app routine, disk stall, or relay failure was captured as its cause. Continue measuring matched repeats.",
+  "limits": [
+    "Seeded per-VU random PCG includes wall clock; same fixture does not replay identical arrivals.",
+    "Hists use bucket midpoints. Five-second stock windows retain count, p95 and p99 only, final four seconds have no window quantiles.",
+    "NAPI scheduling slices are not NAPI polls. Socket sample is bounded and nonrandom. No per-request kernel/app timestamps or call stacks in either trial."
+  ],
+  "source_digests": {
+    "h1": {
+      "summary.json": "542f8e2a79ec6fe4cc6fa469dcc1d4a71618942d3d4cf4b7f8306cdc3362347e",
+      "merged.json": "f33a6c2c0823c93cbaa63374e48dc0c1e91d822d1fb594cbe3683f2a63259d61",
+      "telemetry.jsonl": "3df206a9c38e633cd0e7ee06bfbe8b459934fc4322a0426831535566adab7405",
+      "network-samples.jsonl": "a9d63d884150bc8615440430090035430d9494345c233151cf0e6f8ee2dafdac",
+      "samples.jsonl": "1f062f698911e94140918794e2e1ee2c19f80b2e28d6b9745744f36ee67f4b12",
+      "shape.json": "ba5619d3f0459a41c1b177cc2759032152215ae882b1f21be36416cff8486711",
+      "shard-0.json": "4682537a0673f8ba955fc5b24cd44c5d4d43d0011c0feab4b7d3db2dc7ec5f5b",
+      "shard-1.json": "373e335abd4e6e2ac72fbd18e80c1186c0671a526f0b1f5b5a903d3bd8e409d5",
+      "shard-2.json": "d3bfca8d6742f0d7ae91ff5d479a4545ebd5f87bdf392c0af40f17fe0bb1e500",
+      "shard-3.json": "50f544b2df64349c07dc6ca1874fc0880edcb4947ccf12998b88ad1c229cfbad"
+    },
+    "h2": {
+      "summary.json": "3c294746704d8421c53c7894b248ef934a1e7661facf6b148272a9527c75b9e3",
+      "merged.json": "8aea20b5ff783a21166ac46afdc667c7a3ba7d6db14e435537ea5a4566b08d78",
+      "telemetry.jsonl": "e73e5d120e078862183220fc1694e49c7aa17d0c5900d89168e0c5f38480a203",
+      "network-samples.jsonl": "3ed0741f37f3783175a6853e173374585f7203248183d7b0c608619cd3287040",
+      "samples.jsonl": "ec428508e6ae0f0e4ce7fd2cdd32c565b1eccfc9d363d9c095ab922c3afc4cce",
+      "shape.json": "da6745f530e8f7a5e197f202efcddcd91d74cffb711ace48ccc183e4c3e9feb9",
+      "shard-0.json": "383ceee5926a8618e430bf5d30e1c096316140fe8c561e13fe07742a79d3395a",
+      "shard-1.json": "72d794b4acb77d0b038ae20e91338a5a1fc068774bd7ffab8c07010f3701100a",
+      "shard-2.json": "6703a6441893de5e549055eef6488ac82fcc83dce5b41f3ba86062f0e4760945",
+      "shard-3.json": "a4283bfb08df569a9de1e23365c0cc512c5bf6bb8b803f36f4f09559a27697a2"
+    }
+  }
+}

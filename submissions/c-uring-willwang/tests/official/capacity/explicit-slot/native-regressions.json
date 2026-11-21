@@ -1,0 +1,317 @@
+{
+  "release_revision": "43adbd73ec34bba4d3b0e3ea5bfbc064865c9e6e",
+  "source_fixtures_sha256": {
+    "tests/held-writes.c": "f1bd9a4a3123f12eb75d16e707991cad3ffed6ddc988558f6129cc967934d04e",
+    "tests/wake.c": "23bf3a713aad33f859ada29240a1778f24e986ac9fc9b2ed9d2fc1acd1f6b802",
+    "tests/batch-watch.c": "654706c1646f61a4c8dec40cecb4d1c77d464ab9f0b1f3e92989a2fe57dd2c96",
+    "tests/render-guard.c": "5b71a3bf3c8ffecab00606e9b9640a727cbef9339663cc3f0a255df7435f3d0c",
+    "tests/wal_recovery.c": "3d7d93dbd646cea961bfbf70099248211389973f824e0b9adc6b34bc4b665d25"
+  },
+  "compiler": "Ubuntu clang version 18.1.3 (1ubuntu1)",
+  "uid": 1000,
+  "cpu": 9,
+  "kernel": "6.8.0-147-generic",
+  "cgroup": "/user.slice/user-1000.slice/user@1000.service/app.slice/twelve-slot-native-regressions.service",
+  "io_uring_setup": true,
+  "arms": {
+    "explicit-slot": {
+      "reactor_source_sha256": "589c2f74c8abe3672d0ad43ac063c5742e0ea550f1feedc990c04114cc949687",
+      "frozen_elf_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "reactor_object_sha256": "9b80b313bb53ed02fb2e890e5fb7d9fae17edba856a4aa42595efb41cae73416"
+    },
+    "explicit-slot-connection-pages": {
+      "reactor_source_sha256": "275ecc2a0f74d38195077d98d58d119e3d6e16fc00481b627eecf39721dc482e",
+      "frozen_elf_sha256": "e921724678795b39b96840837af7ed8078e512e105cadc76b9e04a2b8979589b",
+      "reactor_object_sha256": "25b89308a70ed6ce058ce45dd3e18cd4a06385686054f9613ef8b594996b0faf"
+    }
+  },
+  "each_arm_shared_production_objects": {
+    "explicit-slot": {
+      "buffer": "381a10e453834fd6f3d362377a8fcf75e340328209aabd72e1a17b8318f09643",
+      "wal": "1a9a003d04107451db3e984572169298da07ce79bfe08c7719a008a09e0df844",
+      "reader": "4af37d10281bb50a6ad0305609bb15deafcc7d88d2804b7be5c5d7ccc289f14e"
+    },
+    "explicit-slot-connection-pages": {
+      "buffer": "381a10e453834fd6f3d362377a8fcf75e340328209aabd72e1a17b8318f09643",
+      "wal": "1a9a003d04107451db3e984572169298da07ce79bfe08c7719a008a09e0df844",
+      "reader": "4af37d10281bb50a6ad0305609bb15deafcc7d88d2804b7be5c5d7ccc289f14e"
+    }
+  },
+  "checks": {
+    "compile-explicit-slot-held-writes": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "clang-18",
+        "-D_GNU_SOURCE",
+        "-DNDEBUG",
+        "-I.",
+        "-Ivendor",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "tests/held-writes.c",
+        "-o",
+        "held-writes-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 0.77
+    },
+    "explicit-slot-held-writes": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "./held-writes-test"
+      ],
+      "exit": 0,
+      "log_sha256": "1e0856aae0c93e2db7ae2ec5f3a622895b8dbcf8dd1ed98742d3fbac202c22cf",
+      "seconds": 0.003,
+      "test_elf_sha256": "81f6d29762e0cf412ad2b85db4a816ecab61ec0b30d3200828d1c2f3265133d9"
+    },
+    "compile-explicit-slot-wake": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "clang-18",
+        "-D_GNU_SOURCE",
+        "-DNDEBUG",
+        "-I.",
+        "-Ivendor",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "tests/wake.c",
+        "-o",
+        "wake-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 0.719
+    },
+    "explicit-slot-wake": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "./wake-test"
+      ],
+      "exit": 0,
+      "log_sha256": "a1f60731f9e184dd2487df5b87aa69b0d2f3d5f5c19e9ba6514a45c55b4d3a93",
+      "seconds": 0.004,
+      "test_elf_sha256": "52edda6a0c0f16d8a8e01dfe79afc5610e59e43b50ac2efc4d2f210f02fe67ef"
+    },
+    "compile-explicit-slot-batch-watch": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "clang-18",
+        "-D_GNU_SOURCE",
+        "-DNDEBUG",
+        "-I.",
+        "-Ivendor",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "tests/batch-watch.c",
+        "-o",
+        "batch-watch-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 0.785
+    },
+    "explicit-slot-batch-watch": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "./batch-watch-test"
+      ],
+      "exit": 0,
+      "log_sha256": "7b157dd702a81922006562df18dafa362c62763580e271e544ee3aa32dffc875",
+      "seconds": 0.022,
+      "test_elf_sha256": "f118c52d60db6d46de4eaafa963dcc510a339174e2ae567d06a775f68acea1f0"
+    },
+    "compile-explicit-slot-connection-pages-held-writes": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot-connection-pages",
+      "command": [
+        "clang-18",
+        "-D_GNU_SOURCE",
+        "-DNDEBUG",
+        "-I.",
+        "-Ivendor",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "tests/held-writes.c",
+        "-o",
+        "held-writes-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 0.77
+    },
+    "explicit-slot-connection-pages-held-writes": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot-connection-pages",
+      "command": [
+        "./held-writes-test"
+      ],
+      "exit": 0,
+      "log_sha256": "1e0856aae0c93e2db7ae2ec5f3a622895b8dbcf8dd1ed98742d3fbac202c22cf",
+      "seconds": 0.003,
+      "test_elf_sha256": "778959c5c8acb07d5cd9423e2506fa6560347f3af5e2acc032b64f623c8f6ee9"
+    },
+    "compile-explicit-slot-connection-pages-wake": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot-connection-pages",
+      "command": [
+        "clang-18",
+        "-D_GNU_SOURCE",
+        "-DNDEBUG",
+        "-I.",
+        "-Ivendor",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "tests/wake.c",
+        "-o",
+        "wake-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 0.719
+    },
+    "explicit-slot-connection-pages-wake": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot-connection-pages",
+      "command": [
+        "./wake-test"
+      ],
+      "exit": 0,
+      "log_sha256": "a1f60731f9e184dd2487df5b87aa69b0d2f3d5f5c19e9ba6514a45c55b4d3a93",
+      "seconds": 0.005,
+      "test_elf_sha256": "752465145bcf55241a6249ef6381d832dcf225b1a6bf42816c086674dcece82f"
+    },
+    "compile-explicit-slot-connection-pages-batch-watch": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot-connection-pages",
+      "command": [
+        "clang-18",
+        "-D_GNU_SOURCE",
+        "-DNDEBUG",
+        "-I.",
+        "-Ivendor",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "-Wall",
+        "-Wextra",
+        "-Werror",
+        "tests/batch-watch.c",
+        "-o",
+        "batch-watch-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 0.668
+    },
+    "explicit-slot-connection-pages-batch-watch": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot-connection-pages",
+      "command": [
+        "./batch-watch-test"
+      ],
+      "exit": 0,
+      "log_sha256": "7b157dd702a81922006562df18dafa362c62763580e271e544ee3aa32dffc875",
+      "seconds": 0.005,
+      "test_elf_sha256": "fc41d40e4f1ddb948bdc8a3f11d93f32c8668f60c940357277a60c5908c20731"
+    },
+    "compile-shared-render-guard": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "clang-18",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "-UNDEBUG",
+        "-I.",
+        "tests/render-guard.c",
+        "build/buffer.o",
+        "-o",
+        "render-guard-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 0.369
+    },
+    "shared-render-guard": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "./render-guard-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e37cccf6f370fe0ffd4c8763e45e697912b9f9f999aaf711f96348809966d200",
+      "seconds": 0.035,
+      "test_elf_sha256": "be84b1a21cdcfdc625355e5fe1504b12180e03074148338994ad2388f96c5ba6"
+    },
+    "compile-shared-wal-recovery": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "clang-18",
+        "-O3",
+        "-march=native",
+        "-fno-plt",
+        "-std=gnu11",
+        "-flto",
+        "-fuse-ld=gold",
+        "-flto",
+        "-UNDEBUG",
+        "-Ivendor",
+        "tests/wal_recovery.c",
+        "build/wal.o",
+        "build/reader.o",
+        "build/buffer.o",
+        "-pthread",
+        "-ldl",
+        "-lm",
+        "-o",
+        "wal-recovery-test"
+      ],
+      "exit": 0,
+      "log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "seconds": 15.175
+    },
+    "shared-wal-recovery": {
+      "cwd": "/tmp/twelve-revisit/slot-native-regressions/explicit-slot",
+      "command": [
+        "./wal-recovery-test"
+      ],
+      "exit": 0,
+      "log_sha256": "7068af9a371d98fc0914126cc1cc20c9038649eb71e2bc207e9bf1d173cbce45",
+      "seconds": 0.366,
+      "test_elf_sha256": "6b14ec3ae35f37fd0eadc9bf1fa0dd35bc92856514720f45896e1d405bde1acb"
+    }
+  },
+  "reactor_dependent_invocations": 6,
+  "common_object_invocations": 2
+}

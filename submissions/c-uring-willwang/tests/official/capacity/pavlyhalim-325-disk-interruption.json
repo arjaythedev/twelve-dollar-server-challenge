@@ -1,0 +1,106 @@
+{
+  "trial": "large512k-quiet-pavlyhalim-325-h1",
+  "archived_attempt": "large512k-quiet-pavlyhalim-325-h1-interrupted-enospc-attempt1",
+  "result": "Infrastructure interruption; no stock score exists for this attempt.",
+  "native_stock_score": null,
+  "files_missing": [
+    "merged.json",
+    "summary.json",
+    "shard-0.json",
+    "shard-1.json",
+    "shard-2.json",
+    "shard-3.json"
+  ],
+  "sample_clock": {
+    "stock_start_unix": 1794557133.916,
+    "intended_cutoff_unix": 1794557531.916,
+    "runner_exit_unix": 1794557491.815729,
+    "last_complete_generator_second": 350
+  },
+  "sqlite_full_errors": 80,
+  "device": "253:1",
+  "first_observation_with_zero_available_space": {
+    "unix": 1794557489.889077,
+    "available_bytes": 0,
+    "feed.db": {
+      "size": 314793984,
+      "allocated": 314806272,
+      "device": "253:1"
+    },
+    "feed.db-wal": {
+      "size": 5221150720,
+      "allocated": 5221658624,
+      "device": "253:1"
+    }
+  },
+  "maximum_wal_allocated_before_exit_bytes": 5221658624,
+  "disk_samples_before_exit": 72,
+  "disk_observations_sha256": "0d1fc71d332d32b1390112b1fb8e7fccba6968f03c79a62443eeb4274b890f42",
+  "partial_files_sha256": {
+    "app-start.json": "65b2ea9750ec62bc9cbfb056ff7995a0e2959bacddf403531b7292192ae31f66",
+    "client-0.log": "5836f078465812a4dcc64c27cee4c5d97bb643abf6161a17b0e085e5856caf73",
+    "client-1.log": "a71d2c4a8eb1a55c87ab1ea8f0c0ce5b9e785f88c8466ae1333582a4f7a360ef",
+    "client-2.log": "5c3de64f5353c2db1388ab9c9ea1296d1ec8f95d6e8c7b3d9a8b0290c85ad778",
+    "client-3.log": "4b9bc7c06467b957b29d70714019403e3df0f7144f684960be8e13727fd43041",
+    "component-test-lock.json": "8058cf74157d99c1e9079c781234ed163bb2bfc41b63f5196a51c1282cdec601",
+    "network-samples.jsonl": "2ba6b52a97ca19708df5691fd0b2fdd1c1641c5097f862b02fc78e3143c6c250",
+    "preflight.json": "12dcf445d72c8c0076e5e21944855106712a087008b927a7e1d31b9e79350337",
+    "samples.jsonl": "9aa1f445e5fd2807e253f9919e18132a094aca016ef786aabee78d1e19ce8d52",
+    "server.log": "f9ca759e5f4b237643e581854fe63935a315f3b44b0fadd30413325f1b672242",
+    "shape.json": "c2ef41cf4e1959da63e67fc8ef95e1f197556aafe2c98cbea99fee02a5f9d216",
+    "telemetry.jsonl": "7072788efaab4cabc3875a4059b2319ccfcd677e2a0e43ea501fc57906746f2a",
+    "timing.json": "d1e20af4ba477c4230f0f1fda94bf120fcdca2ca7a417dcaa51b64bb5cb00277"
+  },
+  "interruption_sha256": "d577dc03ac42dac5ba97a5ea9b49b2e244497b5b8bf7786e122d5151b555fb17",
+  "recovery": {
+    "action": "Preserved completed challenge scratch files with verified hashes on a second volume and retained their original paths. The measured SQLite database and WAL stay on the original volume.",
+    "preserved_files": 832,
+    "allocated_bytes_transferred": 1861447680,
+    "available_bytes_before": 4870664192,
+    "available_bytes_after": 6728704000,
+    "verified_transfer_manifest_sha256": "f7b6b01ebac84bd1f5ea95981f9127382c701262b29114fe91c6533046a2810f",
+    "retry_start_unix": 1794557823.702,
+    "retry_fixture": {
+      "kernel": "6.8.0-147-generic",
+      "app_cpu": 10,
+      "app_memory_bytes": 1835008000,
+      "server_sha256": "a4758b5debdc1aa3d05dcd0879b345d815478f885c47a320ed81c5e57a7bb901",
+      "seed_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+      "mload_sha256": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+      "server_ehash_requested": 524288,
+      "users": 325000,
+      "ramp_s": 98,
+      "hold_s": 300,
+      "topology": "single-queue-split-polling-tap-external-txring4096",
+      "fd_limit": 65535,
+      "router_cpus": [
+        2,
+        5,
+        8,
+        14
+      ],
+      "client_cpus": [
+        "0,1",
+        "3,4",
+        "6,7",
+        "11,12,13"
+      ]
+    },
+    "completed_repeat": {
+      "stock_pass": true,
+      "verified_qualified_pass": true,
+      "requests": 12091882,
+      "p95_ms": 79.1183429098315,
+      "p99_ms": 359.0260802427826,
+      "errors": 0,
+      "full_hold_checks": 59,
+      "expected_hold_checks": 59,
+      "available_bytes_at_minimum": 2794422272,
+      "maximum_wal_allocated_bytes": 3600568320,
+      "disk_samples": 79,
+      "disk_sample_sha256": "d1478ad325b359f98003ad660493aa49cb04249ccbe06db42798cc547efded14",
+      "sqlite_full_errors": 0,
+      "raw_manifest_sha256": "7f6b00efea5e34be04d06a124c49e962aff14673f2fe2f34681b237b300b9d09"
+    }
+  }
+}

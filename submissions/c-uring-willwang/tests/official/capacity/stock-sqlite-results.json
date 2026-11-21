@@ -1,0 +1,2579 @@
+{
+  "build_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+  "build_source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+  "completed": 10,
+  "fixture": "Ubuntu 6.8.0-147, single application and receive CPU, 1,750 MiB service memory, 65,535 FD limit, 524,288 private established TCP buckets, four external stock generators in private namespaces.",
+  "frozen_geometry_sha256": "38ee68575fdb739e745c4f83cfa64be26dcab8f367fd8117c7d311bdac1b0b83",
+  "frozen_peer_receipt_sha256": "692bd87874cf6519a2ae20e04720e8ce7511895e865667f0261a7f793364b9b1",
+  "method": "Each result merges four native histograms, including ramp and hold. Separate signed kernel readbacks, occupancy, link, clock, memory and external scheduler checks apply to each run. Comparisons use the historical peer observations at the identical fixture. A SHA-256 manifest identifies the native files for each raw run. The peer maxima use registered 325,000-user and higher trials only.",
+  "plan_sha256": "767f957fdb2e092609df2e34d2622747013c3caec217c07aea26cb9cacbe4e93",
+  "published_peers": {
+    "kensac": {
+      "full_325k": [
+        false
+      ],
+      "highest_stock_pass_in_registered_325k_and_higher_trials": null,
+      "p99_ms_at_330k": [
+        13297.94954087551
+      ],
+      "p99_ms_at_350k": [
+        23215.69088377856
+      ]
+    },
+    "mojo": {
+      "full_325k": [
+        true,
+        false
+      ],
+      "highest_stock_pass_in_registered_325k_and_higher_trials": 325000,
+      "p99_ms_at_330k": [
+        1835.8250770157408
+      ],
+      "p99_ms_at_350k": [
+        22532.9208491291
+      ]
+    },
+    "pavlyhalim": {
+      "full_325k": [
+        true,
+        true
+      ],
+      "highest_stock_pass_in_registered_325k_and_higher_trials": 325000,
+      "p99_ms_at_330k": [
+        9671.653292767674
+      ],
+      "p99_ms_at_350k": [
+        13976.278613182847
+      ]
+    },
+    "rkkautsar": {
+      "full_325k": [
+        false
+      ],
+      "highest_stock_pass_in_registered_325k_and_higher_trials": null,
+      "p99_ms_at_330k": [
+        7926.349975107242
+      ],
+      "p99_ms_at_350k": [
+        11340.774112205349
+      ]
+    },
+    "swift": {
+      "full_325k": [
+        false
+      ],
+      "highest_stock_pass_in_registered_325k_and_higher_trials": null,
+      "p99_ms_at_330k": [
+        15906.308775126889
+      ],
+      "p99_ms_at_350k": [
+        28896.938638114058
+      ]
+    }
+  },
+  "registered": 10,
+  "runs": [
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6032625,
+          "p95_ms": 224.91655857996184,
+          "p99_ms": 749.7347789330165
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5947266,
+          "p95_ms": 227.16572416576147,
+          "p99_ms": 772.4524924694659
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 878360,
+          "p95_ms": 253.4416078990445,
+          "p99_ms": 787.9787875681022
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 117021,
+          "p95_ms": 250.9322850485589,
+          "p99_ms": 795.8585754437834
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.01405,
+          "app_sys_us_per_completion": 11.978921,
+          "app_us_per_completion": 14.569093,
+          "app_us_per_outgoing_tap_record": 9.721206,
+          "app_user_us_per_completion": 2.590171,
+          "completed_requests": 10552527,
+          "completions_per_s": 36388.024138,
+          "core_busy_pct": 98.971998,
+          "incoming_tcp_segments_per_completion": 2.205918,
+          "largest_minimum_of_four_shard_p99_ms": 377.3400185831735,
+          "max_individual_shard_window_p99_ms": 678.7251148476875,
+          "napi_cpu_pct": 45.760703,
+          "napi_slices_per_kcompletions": 268.182527,
+          "napi_us_per_completion": 12.575759,
+          "napi_us_per_incoming_tcp_segment": 5.700918,
+          "retransmitted_segments_interpolated": 40268.93,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.498692,
+          "whole_core_busy_us_per_completion": 27.199058,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.302718,
+          "app_sys_us_per_completion": 17.008308,
+          "app_us_per_completion": 20.61695,
+          "app_us_per_outgoing_tap_record": 14.570302,
+          "app_user_us_per_completion": 3.608642,
+          "completed_requests": 1903171,
+          "completions_per_s": 20033.378947,
+          "core_busy_pct": 79.354982,
+          "incoming_tcp_segments_per_completion": 2.484151,
+          "largest_minimum_of_four_shard_p99_ms": 503.56171758319704,
+          "max_individual_shard_window_p99_ms": 513.6833081066195,
+          "napi_cpu_pct": 35.790744,
+          "napi_slices_per_kcompletions": 612.987881,
+          "napi_us_per_completion": 17.865555,
+          "napi_us_per_incoming_tcp_segment": 7.191816,
+          "retransmitted_segments_interpolated": 4169.73,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.414998,
+          "whole_core_busy_us_per_completion": 39.611382,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "1c04c4d9d00c9592093aa740eb617584c97e3c99c396df8a057035ddbd271e74",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 911675392,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 402.2883,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2776,
+          402.1411
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29048917,
+          "OutSegs": 31399450,
+          "RetransSegs": 50582
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.178700154286226,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 129752,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12975272,
+        "over_1s": {
+          "over_threshold_lower": 15437,
+          "over_threshold_upper": 19484,
+          "stock_bucket_count_at_or_above": 19484,
+          "stock_quantile_allowance": 129752,
+          "stock_remaining": 110268,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 238521,
+          "over_threshold_upper": 240880,
+          "stock_bucket_count_at_or_above": 238521,
+          "stock_quantile_allowance": 648763,
+          "stock_remaining": 410242,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 227.16572416576147,
+        "p99_ms": 764.8044479895701,
+        "pass": true,
+        "requests": 12975272
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794562367.47,
+        "hold_starts_unix": 1794562067.47,
+        "stock_start_unix": 1794561963.47
+      },
+      "tag": "large512k-quiet-stock-sqlite-345-h1",
+      "target": 345000,
+      "verified_qualified_pass": true,
+      "whole_stock_requests_per_s": 32116.93006656968
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6119993,
+          "p95_ms": 362.6163410452104,
+          "p99_ms": 844.819914862182
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 6034684,
+          "p95_ms": 359.0260802427826,
+          "p99_ms": 836.4553612496852
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 891236,
+          "p95_ms": 388.7737984862623,
+          "p99_ms": 861.8007951509119
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 119013,
+          "p95_ms": 388.7737984862623,
+          "p99_ms": 870.418803102421
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.411893,
+          "app_sys_us_per_completion": 11.894407,
+          "app_us_per_completion": 14.46988,
+          "app_us_per_outgoing_tap_record": 9.170966,
+          "app_user_us_per_completion": 2.575472,
+          "completed_requests": 10704615,
+          "completions_per_s": 36912.465517,
+          "core_busy_pct": 99.191673,
+          "incoming_tcp_segments_per_completion": 2.203762,
+          "largest_minimum_of_four_shard_p99_ms": 933.2067699447765,
+          "max_individual_shard_window_p99_ms": 933.2067699447765,
+          "napi_cpu_pct": 45.615515,
+          "napi_slices_per_kcompletions": 249.972961,
+          "napi_us_per_completion": 12.357753,
+          "napi_us_per_incoming_tcp_segment": 5.607572,
+          "retransmitted_segments_interpolated": 51846.1,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.577792,
+          "whole_core_busy_us_per_completion": 26.872134,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.605986,
+          "app_sys_us_per_completion": 16.35291,
+          "app_us_per_completion": 19.952498,
+          "app_us_per_outgoing_tap_record": 14.134148,
+          "app_user_us_per_completion": 3.599588,
+          "completed_requests": 2085252,
+          "completions_per_s": 20852.52,
+          "core_busy_pct": 80.067401,
+          "incoming_tcp_segments_per_completion": 2.482664,
+          "largest_minimum_of_four_shard_p99_ms": 923.9670989552242,
+          "max_individual_shard_window_p99_ms": 923.9670989552242,
+          "napi_cpu_pct": 36.736691,
+          "napi_slices_per_kcompletions": 575.830326,
+          "napi_us_per_completion": 17.617387,
+          "napi_us_per_incoming_tcp_segment": 7.096162,
+          "retransmitted_segments_interpolated": 4195.15,
+          "scored_clock_s": [
+            5,
+            105
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.411652,
+          "whole_core_busy_us_per_completion": 38.39699,
+          "whole_windows": 20
+        }
+      },
+      "ramp_s": 105,
+      "raw_manifest_sha256": "19c3143b6005f9e6b9329e46e8ca4e1e17533fd23958d9d0961afd93e70e8ddc",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 922394624,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 404.2662,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2588,
+          404.0979
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29552767,
+          "OutSegs": 32710671,
+          "RetransSegs": 60147
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 4.68820969194186,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 131649,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 13164926,
+        "over_1s": {
+          "over_threshold_lower": 275,
+          "over_threshold_upper": 678,
+          "stock_bucket_count_at_or_above": 678,
+          "stock_quantile_allowance": 131649,
+          "stock_remaining": 130971,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 325324,
+          "over_threshold_upper": 330741,
+          "stock_bucket_count_at_or_above": 325324,
+          "stock_quantile_allowance": 658246,
+          "stock_remaining": 332922,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 362.6163410452104,
+        "p99_ms": 836.4553612496852,
+        "pass": true,
+        "requests": 13164926
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794563095.746,
+        "hold_starts_unix": 1794562795.746,
+        "stock_start_unix": 1794562690.746
+      },
+      "tag": "large512k-quiet-stock-sqlite-350-h1",
+      "target": 350000,
+      "verified_qualified_pass": true,
+      "whole_stock_requests_per_s": 32505.936390501844
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 105,
+        "last_end_s": 395,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        82500,
+        82500,
+        82500,
+        82500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5745881,
+          "p95_ms": 95.58357821362796,
+          "p99_ms": 291.3245928414322
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5665589,
+          "p95_ms": 94.6372061521069,
+          "p99_ms": 285.58434745753567
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 835710,
+          "p95_ms": 121.36578108850368,
+          "p99_ms": 309.24692566681216
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 111608,
+          "p95_ms": 118.97439573424536,
+          "p99_ms": 309.24692566681216
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 52.39457,
+          "app_sys_us_per_completion": 12.197042,
+          "app_us_per_completion": 15.023316,
+          "app_us_per_outgoing_tap_record": 11.268881,
+          "app_user_us_per_completion": 2.826274,
+          "completed_requests": 10113896,
+          "completions_per_s": 34875.503448,
+          "core_busy_pct": 97.961418,
+          "incoming_tcp_segments_per_completion": 2.204516,
+          "largest_minimum_of_four_shard_p99_ms": 306.1850749176358,
+          "max_individual_shard_window_p99_ms": 309.24692566681216,
+          "napi_cpu_pct": 45.227914,
+          "napi_slices_per_kcompletions": 308.627155,
+          "napi_us_per_completion": 12.96839,
+          "napi_us_per_incoming_tcp_segment": 5.882648,
+          "retransmitted_segments_interpolated": 25564.89,
+          "scored_clock_s": [
+            105,
+            395
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.333168,
+          "whole_core_busy_us_per_completion": 28.08889,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 40.902446,
+          "app_sys_us_per_completion": 17.288065,
+          "app_us_per_completion": 21.128533,
+          "app_us_per_outgoing_tap_record": 15.51344,
+          "app_user_us_per_completion": 3.840468,
+          "completed_requests": 1742298,
+          "completions_per_s": 19358.866667,
+          "core_busy_pct": 77.974034,
+          "incoming_tcp_segments_per_completion": 2.488089,
+          "largest_minimum_of_four_shard_p99_ms": 135.40396032875566,
+          "max_individual_shard_window_p99_ms": 138.1255799313637,
+          "napi_cpu_pct": 35.328712,
+          "napi_slices_per_kcompletions": 613.236048,
+          "napi_us_per_completion": 18.24937,
+          "napi_us_per_incoming_tcp_segment": 7.334693,
+          "retransmitted_segments_interpolated": 2353.55,
+          "scored_clock_s": [
+            5,
+            95
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.36195,
+          "whole_core_busy_us_per_completion": 40.278202,
+          "whole_windows": 18
+        }
+      },
+      "ramp_s": 99,
+      "raw_manifest_sha256": "acedf2fd732bba392abe38476353f79786b54489440e36eb90eb9e0a95aa7b60",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 828092416,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 398.1993,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2572,
+          398.065
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 27717018,
+          "OutSegs": 28194355,
+          "RetransSegs": 31517
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.835488957398012,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 123587,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12358788,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 123587,
+          "stock_remaining": 123587,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 27691,
+          "over_threshold_upper": 28170,
+          "stock_bucket_count_at_or_above": 27691,
+          "stock_quantile_allowance": 617939,
+          "stock_remaining": 590248,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 97.50480813572189,
+        "p99_ms": 291.3245928414322,
+        "pass": true,
+        "requests": 12358788
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794564203.309,
+        "hold_starts_unix": 1794563903.309,
+        "stock_start_unix": 1794563804.309
+      },
+      "tag": "large512k-quiet-stock-sqlite-330-h1",
+      "target": 330000,
+      "verified_qualified_pass": true,
+      "whole_stock_requests_per_s": 30974.378832885344
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 23,
+        "each_shard_scheduled": 23,
+        "expected": 23,
+        "first_end_s": 110,
+        "last_end_s": 220,
+        "missing_full": [],
+        "synchronized": 23
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 3013315,
+          "p95_ms": 438.0800471938029,
+          "p99_ms": 811.855332810203
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 2929369,
+          "p95_ms": 455.8678538108606,
+          "p99_ms": 819.9738861383051
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 425706,
+          "p95_ms": 474.37791670567526,
+          "p99_ms": 844.819914862182
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 56762,
+          "p95_ms": 465.0307976724588,
+          "p99_ms": 836.4553612496852
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 120,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 52.784257,
+          "app_sys_us_per_completion": 11.885436,
+          "app_us_per_completion": 14.493235,
+          "app_us_per_outgoing_tap_record": 10.643853,
+          "app_user_us_per_completion": 2.607799,
+          "completed_requests": 4006192,
+          "completions_per_s": 36419.927273,
+          "core_busy_pct": 98.92937,
+          "incoming_tcp_segments_per_completion": 2.203353,
+          "largest_minimum_of_four_shard_p99_ms": 271.7237075234089,
+          "max_individual_shard_window_p99_ms": 271.7237075234089,
+          "napi_cpu_pct": 45.940379,
+          "napi_slices_per_kcompletions": 277.881736,
+          "napi_us_per_completion": 12.614078,
+          "napi_us_per_incoming_tcp_segment": 5.724947,
+          "retransmitted_segments_interpolated": 9951.33,
+          "scored_clock_s": [
+            110,
+            220
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.361653,
+          "whole_core_busy_us_per_completion": 27.163528,
+          "whole_windows": 22
+        },
+        "ramp": {
+          "app_cpu_pct": 41.568776,
+          "app_sys_us_per_completion": 17.133653,
+          "app_us_per_completion": 20.784913,
+          "app_us_per_outgoing_tap_record": 14.286967,
+          "app_user_us_per_completion": 3.651261,
+          "completed_requests": 1899952,
+          "completions_per_s": 19999.494737,
+          "core_busy_pct": 78.842725,
+          "incoming_tcp_segments_per_completion": 2.48565,
+          "largest_minimum_of_four_shard_p99_ms": 614.4409922941081,
+          "max_individual_shard_window_p99_ms": 620.5854022170494,
+          "napi_cpu_pct": 35.680173,
+          "napi_slices_per_kcompletions": 586.588472,
+          "napi_us_per_completion": 17.840537,
+          "napi_us_per_incoming_tcp_segment": 7.177415,
+          "retransmitted_segments_interpolated": 4543.98,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.454816,
+          "whole_core_busy_us_per_completion": 39.422358,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "4639b069ea3c6b0814ea9365f925f8ff4edb538e120b651faff4651684815ca5",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 817446912,
+        "first_after_cutoff_memory_sample_s": 0.2002,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 222.7049,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2587,
+          222.5631
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 14622778,
+          "OutSegs": 15123082,
+          "RetransSegs": 19251
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 4.878569805155565,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 64251,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 6425152,
+        "over_1s": {
+          "over_threshold_lower": 10943,
+          "over_threshold_upper": 11379,
+          "stock_bucket_count_at_or_above": 11379,
+          "stock_quantile_allowance": 64251,
+          "stock_remaining": 52872,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 284575,
+          "over_threshold_upper": 286536,
+          "stock_bucket_count_at_or_above": 284575,
+          "stock_quantile_allowance": 321257,
+          "stock_remaining": 36682,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 446.8854561423983,
+        "p99_ms": 819.9738861383051,
+        "pass": true,
+        "requests": 6425152
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794564591.09,
+        "hold_starts_unix": 1794564471.09,
+        "stock_start_unix": 1794564367.09
+      },
+      "tag": "large512k-quiet-stock-sqlite-345-p1",
+      "target": 345000,
+      "verified_qualified_pass": true,
+      "whole_stock_requests_per_s": 28683.6023211934
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 23,
+        "each_shard_scheduled": 23,
+        "expected": 23,
+        "first_end_s": 110,
+        "last_end_s": 220,
+        "missing_full": [],
+        "synchronized": 23
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 3062258,
+          "p95_ms": 488.752041959774,
+          "p99_ms": 933.2067699447765
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 2976362,
+          "p95_ms": 513.6833081066195,
+          "p99_ms": 942.5388376442241
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 432550,
+          "p95_ms": 550.7380344083841,
+          "p99_ms": 971.0987069636822
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 57936,
+          "p95_ms": 550.7380344083841,
+          "p99_ms": 961.483868280873
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 120,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": false,
+        "raw_eligible": true,
+        "stock": false,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.130215,
+          "app_sys_us_per_completion": 11.806959,
+          "app_us_per_completion": 14.374846,
+          "app_us_per_outgoing_tap_record": 9.934512,
+          "app_user_us_per_completion": 2.567887,
+          "completed_requests": 4065660,
+          "completions_per_s": 36960.545455,
+          "core_busy_pct": 98.962092,
+          "incoming_tcp_segments_per_completion": 2.201526,
+          "largest_minimum_of_four_shard_p99_ms": 602.3340773395826,
+          "max_individual_shard_window_p99_ms": 602.3340773395826,
+          "napi_cpu_pct": 45.639108,
+          "napi_slices_per_kcompletions": 259.886716,
+          "napi_us_per_completion": 12.348061,
+          "napi_us_per_incoming_tcp_segment": 5.608865,
+          "retransmitted_segments_interpolated": 13290.99,
+          "scored_clock_s": [
+            110,
+            220
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.44696,
+          "whole_core_busy_us_per_completion": 26.775063,
+          "whole_windows": 22
+        },
+        "ramp": {
+          "app_cpu_pct": 41.937379,
+          "app_sys_us_per_completion": 16.652999,
+          "app_us_per_completion": 20.173015,
+          "app_us_per_outgoing_tap_record": 13.358397,
+          "app_user_us_per_completion": 3.520016,
+          "completed_requests": 2078885,
+          "completions_per_s": 20788.85,
+          "core_busy_pct": 79.86937,
+          "incoming_tcp_segments_per_completion": 2.485649,
+          "largest_minimum_of_four_shard_p99_ms": 1184.9249700434343,
+          "max_individual_shard_window_p99_ms": 1184.9249700434343,
+          "napi_cpu_pct": 36.382027,
+          "napi_slices_per_kcompletions": 559.545286,
+          "napi_us_per_completion": 17.500741,
+          "napi_us_per_incoming_tcp_segment": 7.040711,
+          "retransmitted_segments_interpolated": 6369.42,
+          "scored_clock_s": [
+            5,
+            105
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.510137,
+          "whole_core_busy_us_per_completion": 38.419331,
+          "whole_windows": 20
+        }
+      },
+      "ramp_s": 105,
+      "raw_manifest_sha256": "9f03798f24dd3155b1629ea68235090cf796447ed47941e698acd30d7de898d1",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 841592832,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 224.5818,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2778,
+          224.4421
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 14932193,
+          "OutSegs": 15799315,
+          "RetransSegs": 22544
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.442865908609245,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 65291,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 6529105,
+        "over_1s": {
+          "over_threshold_lower": 29772,
+          "over_threshold_upper": 32912,
+          "stock_bucket_count_at_or_above": 32912,
+          "stock_quantile_allowance": 65291,
+          "stock_remaining": 32379,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 329231,
+          "over_threshold_upper": 330782,
+          "stock_bucket_count_at_or_above": 329231,
+          "stock_quantile_allowance": 326455,
+          "stock_remaining": -2776,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 508.597334759029,
+        "p99_ms": 942.5388376442241,
+        "pass": false,
+        "requests": 6529106
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794564916.158,
+        "hold_starts_unix": 1794564796.158,
+        "stock_start_unix": 1794564691.158
+      },
+      "tag": "large512k-quiet-stock-sqlite-350-p1",
+      "target": 350000,
+      "verified_qualified_pass": false,
+      "whole_stock_requests_per_s": 29017.64499855187
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        86250,
+        86250,
+        86250,
+        86250
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6038833,
+          "p95_ms": 148.08931727469755,
+          "p99_ms": 529.2484260255582
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5954340,
+          "p95_ms": 149.5702104474445,
+          "p99_ms": 534.5409102858137
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 878634,
+          "p95_ms": 178.90802966463406,
+          "p99_ms": 567.4259475889926
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 116992,
+          "p95_ms": 177.13666303429113,
+          "p99_ms": 561.8078688999926
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 52.942141,
+          "app_sys_us_per_completion": 11.939915,
+          "app_us_per_completion": 14.532272,
+          "app_us_per_outgoing_tap_record": 9.66386,
+          "app_user_us_per_completion": 2.592357,
+          "completed_requests": 10564914,
+          "completions_per_s": 36430.737931,
+          "core_busy_pct": 99.149675,
+          "incoming_tcp_segments_per_completion": 2.204729,
+          "largest_minimum_of_four_shard_p99_ms": 534.5409102858137,
+          "max_individual_shard_window_p99_ms": 803.8171611982209,
+          "napi_cpu_pct": 46.025522,
+          "napi_slices_per_kcompletions": 262.724995,
+          "napi_us_per_completion": 12.633706,
+          "napi_us_per_incoming_tcp_segment": 5.730276,
+          "retransmitted_segments_interpolated": 38996.15,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.503775,
+          "whole_core_busy_us_per_completion": 27.215939,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 41.492859,
+          "app_sys_us_per_completion": 16.999958,
+          "app_us_per_completion": 20.615446,
+          "app_us_per_outgoing_tap_record": 14.734707,
+          "app_user_us_per_completion": 3.615488,
+          "completed_requests": 1912072,
+          "completions_per_s": 20127.073684,
+          "core_busy_pct": 78.518548,
+          "incoming_tcp_segments_per_completion": 2.477347,
+          "largest_minimum_of_four_shard_p99_ms": 170.22485146322967,
+          "max_individual_shard_window_p99_ms": 171.92709997786196,
+          "napi_cpu_pct": 35.411816,
+          "napi_slices_per_kcompletions": 613.710186,
+          "napi_us_per_completion": 17.59412,
+          "napi_us_per_incoming_tcp_segment": 7.102001,
+          "retransmitted_segments_interpolated": 3194.06,
+          "scored_clock_s": [
+            5,
+            100
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.399108,
+          "whole_core_busy_us_per_completion": 39.011408,
+          "whole_windows": 19
+        }
+      },
+      "ramp_s": 104,
+      "raw_manifest_sha256": "5fb7d9f9a7c201f59a18fae1e5d32c1eda55b738a405f428dcbc6cbd1d1e377b",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 892612608,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 402.2,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2883,
+          402.0487
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29060598,
+          "OutSegs": 31440896,
+          "RetransSegs": 46772
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.335619947661253,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 129887,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 12988799,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 1,
+          "stock_bucket_count_at_or_above": 1,
+          "stock_quantile_allowance": 129887,
+          "stock_remaining": 129886,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 175371,
+          "over_threshold_upper": 181087,
+          "stock_bucket_count_at_or_above": 175371,
+          "stock_quantile_allowance": 649439,
+          "stock_remaining": 474068,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 152.57657167743815,
+        "p99_ms": 534.5409102858137,
+        "pass": true,
+        "requests": 12988799
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794565915.435,
+        "hold_starts_unix": 1794565615.435,
+        "stock_start_unix": 1794565511.435
+      },
+      "tag": "large512k-quiet-stock-sqlite-345-h2",
+      "target": 345000,
+      "verified_qualified_pass": true,
+      "whole_stock_requests_per_s": 32150.31990770158
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          110
+        ],
+        "any_shard_p99_above_1s": [
+          110
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 110,
+        "last_end_s": 400,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        87500,
+        87500,
+        87500,
+        87500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6126473,
+          "p95_ms": 178.90802966463406,
+          "p99_ms": 980.8096940333187
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 6041866,
+          "p95_ms": 177.13666303429113,
+          "p99_ms": 1000.5239688833885
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 892872,
+          "p95_ms": 201.59804591770256,
+          "p99_ms": 1020.6345006579444
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 119205,
+          "p95_ms": 201.59804591770256,
+          "p99_ms": 1020.6345006579444
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 53.715916,
+          "app_sys_us_per_completion": 11.938124,
+          "app_us_per_completion": 14.518179,
+          "app_us_per_outgoing_tap_record": 10.079057,
+          "app_user_us_per_completion": 2.580055,
+          "completed_requests": 10729731,
+          "completions_per_s": 36999.072414,
+          "core_busy_pct": 99.308241,
+          "incoming_tcp_segments_per_completion": 2.203102,
+          "largest_minimum_of_four_shard_p99_ms": 836.4553612496852,
+          "max_individual_shard_window_p99_ms": 836.4553612496852,
+          "napi_cpu_pct": 45.438478,
+          "napi_slices_per_kcompletions": 248.77394,
+          "napi_us_per_completion": 12.280978,
+          "napi_us_per_incoming_tcp_segment": 5.574402,
+          "retransmitted_segments_interpolated": 39075.21,
+          "scored_clock_s": [
+            110,
+            400
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.44043,
+          "whole_core_busy_us_per_completion": 26.840738,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 42.283414,
+          "app_sys_us_per_completion": 16.986344,
+          "app_us_per_completion": 20.412373,
+          "app_us_per_outgoing_tap_record": 13.366317,
+          "app_user_us_per_completion": 3.426028,
+          "completed_requests": 2071460,
+          "completions_per_s": 20714.6,
+          "core_busy_pct": 80.699019,
+          "incoming_tcp_segments_per_completion": 2.48966,
+          "largest_minimum_of_four_shard_p99_ms": 1196.7742197438686,
+          "max_individual_shard_window_p99_ms": 1196.7742197438686,
+          "napi_cpu_pct": 36.791288,
+          "napi_slices_per_kcompletions": 546.964926,
+          "napi_us_per_completion": 17.761042,
+          "napi_us_per_incoming_tcp_segment": 7.133924,
+          "retransmitted_segments_interpolated": 6436.43,
+          "scored_clock_s": [
+            5,
+            105
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.52715,
+          "whole_core_busy_us_per_completion": 38.957556,
+          "whole_windows": 20
+        }
+      },
+      "ramp_s": 105,
+      "raw_manifest_sha256": "310b45aa9e6dfbdabd86e6c391e3212d112d0d04dd565f84a6f0d6e9d867e5eb",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 889761792,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 404.0904,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2717,
+          403.9282
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 29565322,
+          "OutSegs": 31398959,
+          "RetransSegs": 47988
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 5.442865908609245,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 131804,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 13180414,
+        "over_1s": {
+          "over_threshold_lower": 126040,
+          "over_threshold_upper": 130805,
+          "stock_bucket_count_at_or_above": 130805,
+          "stock_quantile_allowance": 131804,
+          "stock_remaining": 999,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 356243,
+          "over_threshold_upper": 357693,
+          "stock_bucket_count_at_or_above": 356243,
+          "stock_quantile_allowance": 659020,
+          "stock_remaining": 302777,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 180.6971099612804,
+        "p99_ms": 990.6177909736518,
+        "pass": true,
+        "requests": 13180416
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794567530.599,
+        "hold_starts_unix": 1794567230.599,
+        "stock_start_unix": 1794567125.599
+      },
+      "tag": "large512k-quiet-stock-sqlite-350-h2",
+      "target": 350000,
+      "verified_qualified_pass": true,
+      "whole_stock_requests_per_s": 32544.23383733618
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        92500,
+        92500,
+        92500,
+        92500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          120
+        ],
+        "any_shard_p99_above_1s": [
+          120
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 120,
+        "last_end_s": 410,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        92500,
+        92500,
+        92500,
+        92500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6461327,
+          "p95_ms": 503.56171758319704,
+          "p99_ms": 1489.6438518562277
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 6369887,
+          "p95_ms": 498.5759580031654,
+          "p99_ms": 1445.8336465326418
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 940560,
+          "p95_ms": 518.8201411876855,
+          "p99_ms": 1489.6438518562277
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 125108,
+          "p95_ms": 518.8201411876855,
+          "p99_ms": 1504.54029037479
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": false,
+        "raw_eligible": true,
+        "stock": false,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 54.340129,
+          "app_sys_us_per_completion": 11.664552,
+          "app_us_per_completion": 14.053814,
+          "app_us_per_outgoing_tap_record": 7.227814,
+          "app_user_us_per_completion": 2.389263,
+          "completed_requests": 11213068,
+          "completions_per_s": 38665.751724,
+          "core_busy_pct": 99.730716,
+          "incoming_tcp_segments_per_completion": 2.209786,
+          "largest_minimum_of_four_shard_p99_ms": 639.3897604896281,
+          "max_individual_shard_window_p99_ms": 795.8585754437834,
+          "napi_cpu_pct": 45.317802,
+          "napi_slices_per_kcompletions": 181.310184,
+          "napi_us_per_completion": 11.720398,
+          "napi_us_per_incoming_tcp_segment": 5.303862,
+          "retransmitted_segments_interpolated": 90661.71,
+          "scored_clock_s": [
+            120,
+            410
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.944407,
+          "whole_core_busy_us_per_completion": 25.793037,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 42.300846,
+          "app_sys_us_per_completion": 16.415455,
+          "app_us_per_completion": 19.736877,
+          "app_us_per_outgoing_tap_record": 12.381325,
+          "app_user_us_per_completion": 3.321422,
+          "completed_requests": 2250401,
+          "completions_per_s": 21432.390476,
+          "core_busy_pct": 81.172523,
+          "incoming_tcp_segments_per_completion": 2.486393,
+          "largest_minimum_of_four_shard_p99_ms": 1375.6611046631526,
+          "max_individual_shard_window_p99_ms": 1375.6611046631526,
+          "napi_cpu_pct": 37.277178,
+          "napi_slices_per_kcompletions": 524.783256,
+          "napi_us_per_completion": 17.392917,
+          "napi_us_per_incoming_tcp_segment": 6.995241,
+          "retransmitted_segments_interpolated": 10054.06,
+          "scored_clock_s": [
+            5,
+            110
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.594084,
+          "whole_core_busy_us_per_completion": 37.873761,
+          "whole_windows": 21
+        }
+      },
+      "ramp_s": 111,
+      "raw_manifest_sha256": "41464450a0ed19125336348041224480ac13ed2d367877259f7138c6103ac6f2",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 978059264,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 410.2704,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.2589,
+          410.1329
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 31247811,
+          "OutSegs": 39047758,
+          "RetransSegs": 105210
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 6.910995431474298,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 138968,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 13896880,
+        "over_1s": {
+          "over_threshold_lower": 344235,
+          "over_threshold_upper": 349911,
+          "stock_bucket_count_at_or_above": 349911,
+          "stock_quantile_allowance": 138968,
+          "stock_remaining": -210943,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 697540,
+          "over_threshold_upper": 711299,
+          "stock_bucket_count_at_or_above": 697540,
+          "stock_quantile_allowance": 694844,
+          "stock_remaining": -2696,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 503.56171758319704,
+        "p99_ms": 1474.8949028279476,
+        "pass": false,
+        "requests": 13896882
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794568688.774,
+        "hold_starts_unix": 1794568388.774,
+        "stock_start_unix": 1794568277.774
+      },
+      "tag": "large512k-quiet-stock-sqlite-370-h1",
+      "target": 370000,
+      "verified_qualified_pass": false,
+      "whole_stock_requests_per_s": 33812.31235417822
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        100000,
+        100000,
+        100000,
+        100000
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [
+          125,
+          130,
+          135,
+          150,
+          155,
+          160,
+          165,
+          170,
+          175,
+          180,
+          205,
+          235,
+          260,
+          265,
+          330,
+          335,
+          340,
+          355,
+          360,
+          365,
+          385,
+          395,
+          400,
+          405,
+          415
+        ],
+        "any_shard_p99_above_1s": [
+          125,
+          130,
+          135,
+          150,
+          155,
+          160,
+          165,
+          170,
+          175,
+          180,
+          205,
+          230,
+          235,
+          255,
+          260,
+          265,
+          330,
+          335,
+          340,
+          350,
+          355,
+          360,
+          365,
+          385,
+          395,
+          400,
+          405,
+          415
+        ],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 125,
+        "last_end_s": 415,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        100000,
+        100000,
+        100000,
+        100000
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 6647744,
+          "p95_ms": 1308.894338862186,
+          "p99_ms": 2285.0805890899487
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 6539502,
+          "p95_ms": 1308.894338862186,
+          "p99_ms": 2262.4560288019293
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 964286,
+          "p95_ms": 1321.9832822508079,
+          "p99_ms": 2285.0805890899487
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 128872,
+          "p95_ms": 1308.894338862186,
+          "p99_ms": 2285.0805890899487
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": false,
+        "raw_eligible": true,
+        "stock": false,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 54.518435,
+          "app_sys_us_per_completion": 11.641311,
+          "app_us_per_completion": 14.005981,
+          "app_us_per_outgoing_tap_record": 6.37808,
+          "app_user_us_per_completion": 2.36467,
+          "completed_requests": 11288282,
+          "completions_per_s": 38925.110345,
+          "core_busy_pct": 99.96895,
+          "incoming_tcp_segments_per_completion": 2.212124,
+          "largest_minimum_of_four_shard_p99_ms": 1891.452412674395,
+          "max_individual_shard_window_p99_ms": 2007.8148499567485,
+          "napi_cpu_pct": 45.408986,
+          "napi_slices_per_kcompletions": 139.027152,
+          "napi_us_per_completion": 11.665731,
+          "napi_us_per_incoming_tcp_segment": 5.273542,
+          "retransmitted_segments_interpolated": 140310.85,
+          "scored_clock_s": [
+            125,
+            415
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 2.195956,
+          "whole_core_busy_us_per_completion": 25.682381,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 43.753552,
+          "app_sys_us_per_completion": 15.662162,
+          "app_us_per_completion": 18.861736,
+          "app_us_per_outgoing_tap_record": 11.027536,
+          "app_user_us_per_completion": 3.199574,
+          "completed_requests": 2551669,
+          "completions_per_s": 23196.990909,
+          "core_busy_pct": 83.993685,
+          "incoming_tcp_segments_per_completion": 2.484839,
+          "largest_minimum_of_four_shard_p99_ms": 2401.6426644219646,
+          "max_individual_shard_window_p99_ms": 2449.915681976846,
+          "napi_cpu_pct": 39.009282,
+          "napi_slices_per_kcompletions": 477.870603,
+          "napi_us_per_completion": 16.816527,
+          "napi_us_per_incoming_tcp_segment": 6.767653,
+          "retransmitted_segments_interpolated": 16566.9,
+          "scored_clock_s": [
+            10,
+            120
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.710422,
+          "whole_core_busy_us_per_completion": 36.208871,
+          "whole_windows": 22
+        }
+      },
+      "ramp_s": 120,
+      "raw_manifest_sha256": "d7920b41e302b942775d25e9d06998e1e7594e7c09d1b4a46368f67e47f6fc49",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 1175859200,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 419.2742,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.996,
+          419.1373
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 32224710,
+          "OutSegs": 43110336,
+          "RetransSegs": 162233
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 14.28896893363518,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 142804,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 14280404,
+        "over_1s": {
+          "over_threshold_lower": 2533734,
+          "over_threshold_upper": 2662654,
+          "stock_bucket_count_at_or_above": 2662654,
+          "stock_quantile_allowance": 142804,
+          "stock_remaining": -2519850,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 11537281,
+          "over_threshold_upper": 11557426,
+          "stock_bucket_count_at_or_above": 11537281,
+          "stock_quantile_allowance": 714020,
+          "stock_remaining": -10823261,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 1308.894338862186,
+        "p99_ms": 2262.4560288019293,
+        "pass": false,
+        "requests": 14280404
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794569152.005,
+        "hold_starts_unix": 1794568852.005,
+        "stock_start_unix": 1794568732.005
+      },
+      "tag": "large512k-quiet-stock-sqlite-400-h1",
+      "target": 400000,
+      "verified_qualified_pass": false,
+      "whole_stock_requests_per_s": 34000.89777234948
+    },
+    {
+      "app": "stock-sqlite",
+      "assigned_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "complete_hold_intervals": {
+        "all_shard_p99_above_1s": [],
+        "any_shard_p99_above_1s": [],
+        "each_shard_connected": 59,
+        "each_shard_scheduled": 59,
+        "expected": 59,
+        "first_end_s": 100,
+        "last_end_s": 390,
+        "missing_full": [],
+        "synchronized": 59
+      },
+      "component_lock": {
+        "device": 64769,
+        "inode": 1110842,
+        "runner_exit": 0
+      },
+      "dials_by_shard": [
+        77500,
+        77500,
+        77500,
+        77500
+      ],
+      "eligible_head_to_head": true,
+      "endpoints": [
+        {
+          "fail": 0,
+          "name": "GET /feed",
+          "ok": 5358391,
+          "p95_ms": 6.774821518943535,
+          "p99_ms": 19.646484641122125
+        },
+        {
+          "fail": 0,
+          "name": "GET /posts/:id",
+          "ok": 5283005,
+          "p95_ms": 6.641330770457343,
+          "p99_ms": 19.068684434084922
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts/:id/like",
+          "ok": 781555,
+          "p95_ms": 35.6917037859167,
+          "p99_ms": 49.07397542133925
+        },
+        {
+          "fail": 0,
+          "name": "POST /posts",
+          "ok": 103937,
+          "p95_ms": 36.04862082377587,
+          "p99_ms": 49.07397542133925
+        }
+      ],
+      "exclusions": [],
+      "hold_s": 300,
+      "independent_native_wire_flags": [],
+      "native_eligibility": {
+        "eligible": true,
+        "healthy": true,
+        "infrastructure": [],
+        "qualified": true,
+        "raw_eligible": true,
+        "stock": true,
+        "target": []
+      },
+      "native_environment_healthy": true,
+      "ramp_and_hold_cost": {
+        "hold": {
+          "app_cpu_pct": 51.432753,
+          "app_sys_us_per_completion": 12.668004,
+          "app_us_per_completion": 15.68509,
+          "app_us_per_outgoing_tap_record": 12.957228,
+          "app_user_us_per_completion": 3.017086,
+          "completed_requests": 9509348,
+          "completions_per_s": 32790.855172,
+          "core_busy_pct": 96.199884,
+          "incoming_tcp_segments_per_completion": 2.203886,
+          "largest_minimum_of_four_shard_p99_ms": 34.29902579936887,
+          "max_individual_shard_window_p99_ms": 91.85393991863242,
+          "napi_cpu_pct": 44.23441,
+          "napi_slices_per_kcompletions": 361.15607,
+          "napi_us_per_completion": 13.489862,
+          "napi_us_per_incoming_tcp_segment": 6.120945,
+          "retransmitted_segments_interpolated": 12108.54,
+          "scored_clock_s": [
+            100,
+            390
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.210528,
+          "whole_core_busy_us_per_completion": 29.337412,
+          "whole_windows": 58
+        },
+        "ramp": {
+          "app_cpu_pct": 40.17298,
+          "app_sys_us_per_completion": 17.737867,
+          "app_us_per_completion": 21.678894,
+          "app_us_per_outgoing_tap_record": 16.401168,
+          "app_user_us_per_completion": 3.941027,
+          "completed_requests": 1575128,
+          "completions_per_s": 18530.917647,
+          "core_busy_pct": 76.384592,
+          "incoming_tcp_segments_per_completion": 2.497515,
+          "largest_minimum_of_four_shard_p99_ms": 74.53305795941519,
+          "max_individual_shard_window_p99_ms": 241.1409937278244,
+          "napi_cpu_pct": 34.371897,
+          "napi_slices_per_kcompletions": 651.720315,
+          "napi_us_per_completion": 18.548405,
+          "napi_us_per_incoming_tcp_segment": 7.426744,
+          "retransmitted_segments_interpolated": 1556.34,
+          "scored_clock_s": [
+            5,
+            90
+          ],
+          "timeline_failed": 0,
+          "tx_tap_records_per_completion": 1.32179,
+          "whole_core_busy_us_per_completion": 41.220081,
+          "whole_windows": 17
+        }
+      },
+      "ramp_s": 93,
+      "raw_manifest_sha256": "22516fd694d92fd86b56cc078ad975ecad298b10831b0a47ce32005f9688c5d4",
+      "resource_flags": [],
+      "scored_network_and_memory": {
+        "application_memory_peak_bytes": 772624384,
+        "first_after_cutoff_memory_sample_s": 0.2001,
+        "first_after_cutoff_oom_kill": 0,
+        "last_wire_elapsed_s": 391.9221,
+        "max_sampled_swap_bytes": 0,
+        "memory_events": {
+          "high": 0,
+          "low": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_group_kill": 0,
+          "oom_kill": 0
+        },
+        "memory_full_psi_us": 0,
+        "native_elapsed_s": [
+          0.4158,
+          391.7883
+        ],
+        "softnet_drops_nonzero_by_cpu": {},
+        "tap_and_relay_drops_or_errors": {
+          "generator_rx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "generator_tx": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "relay_invalid_frames": 0,
+          "relay_queue_overflow": 0,
+          "relay_write_drop_by_port": [
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "service_qdisc_drops": 0,
+          "service_rx": 0,
+          "service_tx": 0
+        },
+        "tcp": {
+          "AttemptFails": 0,
+          "EstabResets": 0,
+          "InSegs": 25822770,
+          "OutSegs": 24843098,
+          "RetransSegs": 14628
+        },
+        "tcpext": {
+          "ListenDrops": 0,
+          "ListenOverflows": 0,
+          "TCPBacklogDrop": 0,
+          "TCPMemoryPressures": 0,
+          "TCPRcvQDrop": 0,
+          "TCPSynRetrans": 0,
+          "TCPTimeouts": 0
+        }
+      },
+      "server_sha256": "1c7ad9b584a8c0116f74e10d579ad148c09c8886edbfa481d3c9f8469e3027cc",
+      "signed_tcp_tables": [
+        524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288,
+        -524288
+      ],
+      "source_revision": "458c3f0f46acbabf11cdfd8ca467ed018e573bd1",
+      "state": "final",
+      "stock": {
+        "connect_p99_ms": 3.9982049069697387,
+        "error_classes": {},
+        "error_max_for_strictly_below_one_pct": 115268,
+        "error_pct": 0.0,
+        "failed": 0,
+        "histogram_count": 11526888,
+        "over_1s": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 115268,
+          "stock_remaining": 115268,
+          "straddling_bucket": 1388
+        },
+        "over_500ms": {
+          "over_threshold_lower": 0,
+          "over_threshold_upper": 0,
+          "stock_bucket_count_at_or_above": 0,
+          "stock_quantile_allowance": 576344,
+          "stock_remaining": 576344,
+          "straddling_bucket": 1318
+        },
+        "p95_ms": 19.45196499121003,
+        "p99_ms": 34.98843621793618,
+        "pass": true,
+        "requests": 11526888
+      },
+      "stock_epoch": {
+        "cutoff_unix": 1794569588.781,
+        "hold_starts_unix": 1794569288.781,
+        "stock_start_unix": 1794569195.781
+      },
+      "tag": "large512k-quiet-stock-sqlite-310-h1",
+      "target": 310000,
+      "verified_qualified_pass": true,
+      "whole_stock_requests_per_s": 29330.482234410065
+    }
+  ],
+  "sqlite_source_sha256": "0c657666d819f261cc4007526ad57e1669de9949df7a8ea847aa284a2bf0ee52"
+}

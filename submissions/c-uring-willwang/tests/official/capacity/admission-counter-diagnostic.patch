@@ -1,0 +1,31 @@
+--- a/submissions/c-uring-willwang/reactor.c
++++ b/submissions/c-uring-willwang/reactor.c
+@@ -6,0 +7 @@
++#include <fcntl.h>
+@@ -112,0 +114,14 @@
++static uint64_t *admit_counters;
++static unsigned diagnostic_watch_min = 4;
++__attribute__((constructor)) static void begin_admit_counters(void) {
++    const char *path=getenv("FAST_STATS"); if(!path) abort();
++    int fd=open(path,O_RDWR|O_CLOEXEC); if (fd<0) abort();
++    admit_counters=mmap(NULL,4096,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
++    if (admit_counters==MAP_FAILED) abort();
++    close(fd);
++    const char *min = getenv("FAST_WATCH_MIN");
++    if (min && !strcmp(min, "0")) diagnostic_watch_min = 0;
++    else if (min && strcmp(min, "4")) { fputs("FAST_WATCH_MIN must be 0 or 4\n", stderr); abort(); }
++    admit_counters[72] = diagnostic_watch_min;
++    admit_counters[511] = UINT64_C(0x4257415443480002);
++}
+@@ -920 +935,7 @@
+-    int batch_watches = ring_watches && done >= 4;
++    int batch_watches = ring_watches && diagnostic_watch_min && done >= diagnostic_watch_min;
++    ++admit_counters[batch_watches ? 1:0];
++    admit_counters[batch_watches ? 3:2]+=done;
++    /* Slots 7..71 count exact finished FILES_UPDATE prefix lengths 0..64. */
++    ++admit_counters[7 + done];
++    if(ordinary_pending>admit_counters[4])admit_counters[4]=ordinary_pending;
++
+@@ -950,0 +972,2 @@
++    ++admit_counters[5];
++    if(res<0) ++admit_counters[6];

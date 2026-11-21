@@ -1,0 +1,303 @@
+{
+  "scope": "Rounded results recorded by the previous local router investigation on its separate executor. Values in milliseconds unless indicated.",
+  "source_threads": [
+    "6af58218-b608-8191-a6dd-1d8ca6ab20db",
+    "6af55b08-6b64-8191-9c90-cbb994f80012",
+    "6af55cab-60a8-8191-9873-fed1e8080014"
+  ],
+  "reported_official_load_holds": [
+    [
+      "entry",
+      "official_users",
+      "sampled_local_p99_at_280000",
+      "local_p99_at_official_users",
+      "organizer_p99_at_official_users"
+    ],
+    [
+      "Willwang C PR 403",
+      280000,
+      109,
+      109,
+      147
+    ],
+    [
+      "Kensac Rust",
+      310000,
+      210,
+      234,
+      190
+    ],
+    [
+      "Oh-meh Mojo",
+      304000,
+      212,
+      218,
+      545
+    ],
+    [
+      "Rkkautsar Rust",
+      300000,
+      216,
+      796,
+      345
+    ],
+    [
+      "Akbashev Swift",
+      300000,
+      220,
+      236,
+      943
+    ],
+    [
+      "Pavlyhalim C",
+      295000,
+      192,
+      210,
+      117
+    ]
+  ],
+  "reported_failed_official_probe_comparisons": [
+    {
+      "entry": "Willwang C PR 403",
+      "users": 290000,
+      "hold_s": 120,
+      "local_p99_ms": 208,
+      "official_p99_ms": 2960
+    },
+    {
+      "entry": "Kensac Rust",
+      "users": 320000,
+      "hold_s": 120,
+      "local_p99_ms": 309,
+      "official_p99_ms": 23000
+    }
+  ],
+  "historical_routed_smoke": [
+    {
+      "thread": "6af55cab-60a8-8191-9873-fed1e8080014",
+      "item": "exec-b02ef534-7bcc-4c0d-b5e7-759d3580ae17",
+      "tag": "router-smoke-8",
+      "server_process_cpu": 10,
+      "server_socket_incoming_cpu": {
+        "10": 24
+      },
+      "client_socket_incoming_cpu": {
+        "2": 24
+      },
+      "mtu": 1500,
+      "server_send_mss": 1448,
+      "server_receive_mss": 536,
+      "server_socket_rtt_us": 274,
+      "endpoint_qdisc": "noqueue",
+      "middle_netem_one_way_us": 44
+    },
+    {
+      "thread": "6af55cab-60a8-8191-9873-fed1e8080014",
+      "item": "exec-b3592965-aadd-4ce3-bb52-82e8839d391e",
+      "server_socket_incoming_cpu": {
+        "10": 24
+      },
+      "client_socket_incoming_cpu": {
+        "4": 24
+      }
+    }
+  ],
+  "historical_earlier_endpoint_delay_trial": {
+    "users": 280000,
+    "hold_s": 300,
+    "entry": "Willwang C PR 403",
+    "stock_p99_ms": 14116.041399314674,
+    "hold_cgroup_cpu_pct": 97.24676927708065,
+    "hold_cgroup_receipt": "exec-b927685f-2a62-4b34-8297-92288a571897",
+    "cpu10_between_sample_index_20_and_last_sample": {
+      "system_pct": 25.6,
+      "softirq_pct": 68.3,
+      "user_pct": 5.9,
+      "idle_pct": 0,
+      "steal_pct": 0,
+      "receipt": "exec-17d2d706-6a4c-4b8c-bf4f-8ddbe179577c"
+    }
+  },
+  "historical_routed_server_tcp_ehash_entries": null,
+  "historical_routed_client_tcp_ehash_entries": null,
+  "historical_routed_placement_during_full_holds": null,
+  "historical_routed_app_napi_cpu_split_at_full_load": null,
+  "recovered_configuration": {
+    "seven_historical_sha256": {
+      "run-native": "d2133fd9dbbccc1afba8d9bb7ce3c6c3fa3cc2a5138abaf46fc55105097a8187",
+      "eth_run.py": "d3fcdafc57b311cf05ad2b429166e8c62da00ba0c32cbb6f1f6173df2ba85ffc",
+      "private_net.py": "dfba97db8349c14cad3c6f8841c34502ed9c9ce852f37f11af70b433d45f5295",
+      "launch.py": "dd401e10e5f247ea3f0ca28d50addda34a6c08b109ef82e833fd8880cc22b53e",
+      "icmp.py": "4289aa4709a01921916b7ed5712406eb6cc94f51a83c595a3df8b6aa0936e357",
+      "placement": "fd91f952e653505d46d36f7bb50c57fa3f04175eb1e22e6d81eb3390e70487d9",
+      "calibrate.py": "d8d3565748f6af19d7dc9d6f46910ea97b2db27361afd0826eeddc0d1651139b"
+    },
+    "private_network_namespaces": [
+      "server",
+      "middle router",
+      "shared generators"
+    ],
+    "veth_pairs": 2,
+    "server_mtu": 1500,
+    "middle_netem_us_each_way": 30,
+    "netem_queue_packets": 32768,
+    "rtt_idle_median_ms": 0.2485305,
+    "load_generator_processes": 4,
+    "aliases_per_process": 12,
+    "rps_server_cpu": 10,
+    "router_ingress_cpus": [
+      9,
+      14
+    ],
+    "generator_groups": [
+      [
+        0,
+        1,
+        2
+      ],
+      [
+        3,
+        4,
+        5
+      ],
+      [
+        6,
+        7,
+        8
+      ],
+      [
+        11,
+        12,
+        13
+      ]
+    ],
+    "private_server_ehash_requested": false,
+    "archived_ehash_read_location": "manager (initial network namespace)",
+    "historical_full_trials_source_readback_inside_server": false,
+    "logical_sqlite_rows_sha256": "738d11ab3164c13177e347f75038d1e80b43c64e754544a42d1c32bd8d7bcf1d",
+    "sqlite_bytes_both": 249192448,
+    "historical_db_sha256": "102193bcdb4ced52abb98f6bdfb19e06284273af30b74cccd009b257f09569cc",
+    "archived_public_token_file_sha256": "7c4eb45a67156ab3827d6fadab40c884fcab77d4bc4051bffe9e537a16fffa50",
+    "reconstructed_token_sha256": "7c4eb45a67156ab3827d6fadab40c884fcab77d4bc4051bffe9e537a16fffa50",
+    "current_db_sha256": "c0795b855e01f8a12b9cf10a69e38d8f6cd7e305ef9b67621a91932a2d7c717a",
+    "current_tokens_sha256": "bfe306e38a5c8ba0453ecafaed8188fb2225d211e35150d057aa631784588439",
+    "stock_mload_sha256_both": "48df1cd6242f55ee5be98238a54fbf7861fcc83c6e3cc91d334b7903d4f208e6",
+    "historical_database_reconstruction": {
+      "sqlite_source_id": "2024-01-30 16:01:20 e876e51a0ed5c5b3126f52e532044363a014bc594cfefa87ffb5b82257ccalt1",
+      "method": "SQLite VACUUM of the verified current rows, followed by restoration of the archived 100-byte WAL-mode database header",
+      "bytes": 249192448,
+      "sha256": "102193bcdb4ced52abb98f6bdfb19e06284273af30b74cccd009b257f09569cc"
+    }
+  },
+  "current_executor_routed_smokes": [
+    {
+      "tag": "priorroute-stock-smoke-128",
+      "reqs": 1103,
+      "req_per_s": 10.50464608023409,
+      "dials": 128,
+      "fails": 0,
+      "p95_ms": 0.916857259510938,
+      "p99_ms": 2.658818688686565,
+      "qualified": false,
+      "stock_pass": true,
+      "full_presence": true,
+      "service_scope_samples": 0,
+      "infrastructure_flags": [
+        "service scope/state or descendant affinity"
+      ],
+      "private_hash_by_role": {
+        "client": "-524288",
+        "manager": "524288",
+        "router": "-524288",
+        "server": "-524288"
+      },
+      "assigned_users_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "actual_dials_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "full_connection_checks": 8,
+      "expected_connection_checks": 8,
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "source_receipts_sha256": {
+        "shape.json": "31a17e492895943ce91bbf2f8c83365defd50bbdc45427d4e1bb95ed061367a5",
+        "summary.json": "c53d8ac3ebf7d2e9d6f32371894a00274fd39df508bb3f5ef9454305a4b8c41c",
+        "placements.json": "4358a81bb1e2a040de966b04d29db3e9cd327d898314b69182986b05b364a4c4",
+        "component-test-lock.json": "bd67d88b8bbad4ace48629cf083f413a0ff40b19ec541a274f29f92b6ea0e22a",
+        "serial-lock.json": "e836de07055ca2f71dd7a2059690882ec5e7a1f2860f17f337bad2427f15c4fb",
+        "raw/score.json": "f44b7be31b0bc5eeec54807cf42c866d8da3d98fc4d65e63f0ee7d869f30e144",
+        "raw/shard0.json": "693823b9e8f1ef0507b3f009e686d8879e8e60b6e0cdf205ea18562454626a5b",
+        "raw/shard1.json": "43d20c542ba1f741f181bd8803763aa3ec9edb80894794ce1a7857546e4a235d",
+        "raw/shard2.json": "88416b7eac538afb0b63c7ae93a594ff062c6250494d3c0a33d656c4c6b9307f",
+        "raw/shard3.json": "97d83f330bc98d46dd0b8f3f2aab9af92a8d060c211364c8a03529f66194ae54"
+      }
+    },
+    {
+      "tag": "priorroute-stock-smoke-128-v2",
+      "reqs": 1075,
+      "req_per_s": 10.237961341161599,
+      "dials": 128,
+      "fails": 0,
+      "p95_ms": 2.2008103554819587,
+      "p99_ms": 9.222750194240898,
+      "qualified": true,
+      "stock_pass": true,
+      "full_presence": true,
+      "service_scope_samples": 22,
+      "infrastructure_flags": [],
+      "private_hash_by_role": {
+        "client": "-524288",
+        "manager": "524288",
+        "router": "-524288",
+        "server": "-524288"
+      },
+      "assigned_users_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "actual_dials_by_shard": [
+        32,
+        32,
+        32,
+        32
+      ],
+      "full_connection_checks": 8,
+      "expected_connection_checks": 8,
+      "server_sha256": "a9c98f927fdf6d22ea7aa11e2cb02ce3c8f584426308e30a5a01a2d6fa3f736c",
+      "source_receipts_sha256": {
+        "shape.json": "0075d04e72f2c4adb670349619858630216a0c26215a891cd9120fefa5c9b6ef",
+        "summary.json": "e202214d840a9b40a37d867b06d0f7aca30e30f0f1523aacc30f64195ca13f34",
+        "placements.json": "14648b55fb4a431800e27be9b105f32e41154c994bf94cc28e571b5198ee7c4e",
+        "component-test-lock.json": "c4443df49e2629a9f647a6441d742240b89dab9f2a983f48c8da7b202b167434",
+        "serial-lock.json": "d5624a532c867ea2abae207c2b8f4f036d1577694c53c2ca8caec0b3da470e1b",
+        "raw/score.json": "e2d2f2a1059dc2d0dbddf621469c8816f72a8ae22bf68fca5183f72cf6539547",
+        "raw/shard0.json": "1d5b19c7636f0540f9135ec5a73c730864fb8670387b51bcac4b9d067ab2f546",
+        "raw/shard1.json": "34707532ad5dbddf1a9cc2e5adf662e6b170075059af4974788d2f913aa7a759",
+        "raw/shard2.json": "b70df9b4c3a2cabd1bda339b7ba87b7b11287482f8382e1069696d5d6404f200",
+        "raw/shard3.json": "0db2fecf6be381d5f5e85ff901f14447e19ef02b284732ee65fae4f1f88ca986"
+      },
+      "lifetime": "alive_at_cutoff",
+      "qdisc_states": {
+        "rclient": "clean",
+        "rserver": "clean",
+        "tclient": "clean",
+        "tserver": "clean"
+      },
+      "private_interface_states": {
+        "rclient": "clean",
+        "rserver": "clean",
+        "tclient": "clean",
+        "tserver": "clean"
+      }
+    }
+  ]
+}

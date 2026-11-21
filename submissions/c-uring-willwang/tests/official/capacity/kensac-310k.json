@@ -1,0 +1,290 @@
+{
+  "kensac_primary": {
+    "run": "ring4096-kensac-quiet-310-h1",
+    "elf": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+    "p99_ms": 16552.168695695225,
+    "reqs": 10562345,
+    "req_per_s": 26876.156983833967,
+    "failed": 0,
+    "hold_ticks": 59,
+    "all_shard_p99_over_1s_hold_ticks": 58,
+    "last_minute_complete_ticks": 11,
+    "all_shard_p99_over_1s_last_minute_ticks": 11,
+    "last_minute_lowest_through_highest_fastest_shard_p99_ms": {
+      "min": 6304.95,
+      "median": 13297.95,
+      "max": 17396.496
+    },
+    "hold_connections_min": 310000,
+    "hold_requests_per_s": 29927.38,
+    "whole_run_routes": [
+      {
+        "name": "GET /feed",
+        "ok": 4917979,
+        "fail": 0,
+        "p95_ms": 8413.980219292072,
+        "p99_ms": 16884.8672864787
+      },
+      {
+        "name": "GET /posts/:id",
+        "ok": 4835662,
+        "fail": 0,
+        "p95_ms": 7319.851217534632,
+        "p99_ms": 16065.371862878155
+      },
+      {
+        "name": "POST /posts/:id/like",
+        "ok": 713804,
+        "fail": 0,
+        "p95_ms": 7034.233144589391,
+        "p99_ms": 16065.371862878155
+      },
+      {
+        "name": "POST /posts",
+        "ok": 94900,
+        "fail": 0,
+        "p95_ms": 7034.233144589391,
+        "p99_ms": 15906.308775126889
+      }
+    ],
+    "hold_application_pct": 51.63,
+    "hold_private_napi_pct": 47.415,
+    "hold_cpu10_softirq_pct": 0.0,
+    "hold_application_us_per_request": 17.236,
+    "hold_private_napi_us_per_request": 15.829,
+    "hold_full_io_psi_pct": 1.159,
+    "hold_cgroup_wMiB_per_s": 15.102,
+    "peak_cgroup_MiB": 1623.4,
+    "hold_cgroup_file_MiB_end": 847.824,
+    "hold_outgoing_nondata_per_request": 1.217,
+    "hold_timer_delayedack_per_request": 0.0042,
+    "hold_TCPTimeouts": 0,
+    "hold_TcpRetransSegs": 151628,
+    "hold_sampled_rx_sockets_median_max": [
+      3.0,
+      27
+    ],
+    "max_latency_logbucket_upper_ms": 19121.1869,
+    "earliest_possible_issue_of_final_tick_s": 365.8788,
+    "conservative_requests_over_10s": 436923
+  },
+  "c_primary_1": {
+    "run": "ring4096-batch-watch-quiet-310-h1",
+    "elf": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+    "p99_ms": 720.4803861297981,
+    "reqs": 11475675,
+    "req_per_s": 29200.154965186714,
+    "failed": 0,
+    "hold_ticks": 59,
+    "all_shard_p99_over_1s_hold_ticks": 0,
+    "last_minute_complete_ticks": 11,
+    "all_shard_p99_over_1s_last_minute_ticks": 0,
+    "last_minute_lowest_through_highest_fastest_shard_p99_ms": {
+      "min": 36.773,
+      "median": 157.2,
+      "max": 479.122
+    },
+    "hold_connections_min": 310000,
+    "hold_requests_per_s": 32705.28,
+    "whole_run_routes": [
+      {
+        "name": "GET /feed",
+        "ok": 5336813,
+        "fail": 0,
+        "p95_ms": 279.9572075850757,
+        "p99_ms": 727.6851899910963
+      },
+      {
+        "name": "GET /posts/:id",
+        "ok": 5259619,
+        "fail": 0,
+        "p95_ms": 277.1853540446294,
+        "p99_ms": 713.3469169601964
+      },
+      {
+        "name": "POST /posts/:id/like",
+        "ok": 776637,
+        "fail": 0,
+        "p95_ms": 291.3245928414322,
+        "p99_ms": 720.4803861297981
+      },
+      {
+        "name": "POST /posts",
+        "ok": 102606,
+        "fail": 0,
+        "p95_ms": 294.2378387698465,
+        "p99_ms": 727.6851899910963
+      }
+    ],
+    "hold_application_pct": 49.775,
+    "hold_private_napi_pct": 48.097,
+    "hold_cpu10_softirq_pct": 0.014,
+    "hold_application_us_per_request": 15.216,
+    "hold_private_napi_us_per_request": 14.703,
+    "hold_full_io_psi_pct": 4.555,
+    "hold_cgroup_wMiB_per_s": 20.455,
+    "peak_cgroup_MiB": 805.6,
+    "hold_cgroup_file_MiB_end": 212.953,
+    "hold_outgoing_nondata_per_request": 0.48,
+    "hold_timer_delayedack_per_request": 0.1111,
+    "hold_TCPTimeouts": 0,
+    "hold_TcpRetransSegs": 78712,
+    "hold_sampled_rx_sockets_median_max": [
+      0.0,
+      73
+    ],
+    "max_latency_logbucket_upper_ms": 985.7025,
+    "earliest_possible_issue_of_final_tick_s": 384.0143,
+    "conservative_requests_over_10s": 0
+  },
+  "c_primary_2": {
+    "run": "ring4096-batch-watch-quiet-310-h2",
+    "elf": "35a92288628efe642778792fe4d317cce4ce876ba8a309db085859eb8354420a",
+    "p99_ms": 665.3515487184466,
+    "reqs": 11488127,
+    "req_per_s": 29231.873929886864,
+    "failed": 0,
+    "hold_ticks": 59,
+    "all_shard_p99_over_1s_hold_ticks": 0,
+    "last_minute_complete_ticks": 11,
+    "all_shard_p99_over_1s_last_minute_ticks": 0,
+    "last_minute_lowest_through_highest_fastest_shard_p99_ms": {
+      "min": 34.299,
+      "median": 36.773,
+      "max": 67.474
+    },
+    "hold_connections_min": 310000,
+    "hold_requests_per_s": 32784.63,
+    "whole_run_routes": [
+      {
+        "name": "GET /feed",
+        "ok": 5341871,
+        "fail": 0,
+        "p95_ms": 149.5702104474445,
+        "p99_ms": 672.005064205631
+      },
+      {
+        "name": "GET /posts/:id",
+        "ok": 5265951,
+        "fail": 0,
+        "p95_ms": 145.1713726837541,
+        "p99_ms": 652.2414946754695
+      },
+      {
+        "name": "POST /posts/:id/like",
+        "ok": 776591,
+        "fail": 0,
+        "p95_ms": 168.5394568942868,
+        "p99_ms": 665.3515487184466
+      },
+      {
+        "name": "POST /posts",
+        "ok": 103714,
+        "fail": 0,
+        "p95_ms": 165.21856376265734,
+        "p99_ms": 665.3515487184466
+      }
+    ],
+    "hold_application_pct": 50.096,
+    "hold_private_napi_pct": 47.338,
+    "hold_cpu10_softirq_pct": 0.01,
+    "hold_application_us_per_request": 15.292,
+    "hold_private_napi_us_per_request": 14.45,
+    "hold_full_io_psi_pct": 5.548,
+    "hold_cgroup_wMiB_per_s": 20.715,
+    "peak_cgroup_MiB": 783.7,
+    "hold_cgroup_file_MiB_end": 186.734,
+    "hold_outgoing_nondata_per_request": 0.361,
+    "hold_timer_delayedack_per_request": 0.0643,
+    "hold_TCPTimeouts": 0,
+    "hold_TcpRetransSegs": 71363,
+    "hold_sampled_rx_sockets_median_max": [
+      0.0,
+      79
+    ],
+    "max_latency_logbucket_upper_ms": 1005.5151,
+    "earliest_possible_issue_of_final_tick_s": 383.9945,
+    "conservative_requests_over_10s": 0
+  },
+  "kensac_rps": {
+    "run": "rps4096-kensac-quiet-310-h1",
+    "elf": "b5cf9b042a4d1237e97438f863e72992ff4d81de01312bbc4249d0f48a2e1557",
+    "p99_ms": 28610.830334766393,
+    "reqs": 9983186,
+    "req_per_s": 25402.483431169054,
+    "failed": 0,
+    "hold_ticks": 59,
+    "all_shard_p99_over_1s_hold_ticks": 58,
+    "last_minute_complete_ticks": 11,
+    "all_shard_p99_over_1s_last_minute_ticks": 11,
+    "last_minute_lowest_through_highest_fastest_shard_p99_ms": {
+      "min": 22758.25,
+      "median": 28327.555,
+      "max": 33883.933
+    },
+    "hold_connections_min": 310000,
+    "hold_requests_per_s": 28141.53,
+    "whole_run_routes": [
+      {
+        "name": "GET /feed",
+        "ok": 4651441,
+        "fail": 0,
+        "p95_ms": 16884.8672864787,
+        "p99_ms": 29185.908024495195
+      },
+      {
+        "name": "GET /posts/:id",
+        "ok": 4570205,
+        "fail": 0,
+        "p95_ms": 14689.20928545286,
+        "p99_ms": 28327.554786897417
+      },
+      {
+        "name": "POST /posts/:id/like",
+        "ok": 672185,
+        "fail": 0,
+        "p95_ms": 14543.771569755307,
+        "p99_ms": 28327.554786897417
+      },
+      {
+        "name": "POST /posts",
+        "ok": 89355,
+        "fail": 0,
+        "p95_ms": 14116.041399314674,
+        "p99_ms": 28327.554786897417
+      }
+    ],
+    "hold_application_pct": 96.316,
+    "hold_private_napi_pct": null,
+    "hold_cpu10_softirq_pct": 54.295,
+    "hold_application_us_per_request": 34.237,
+    "hold_private_napi_us_per_request": null,
+    "hold_full_io_psi_pct": 1.214,
+    "hold_cgroup_wMiB_per_s": 13.717,
+    "peak_cgroup_MiB": 1437.3,
+    "hold_cgroup_file_MiB_end": 702.691,
+    "hold_outgoing_nondata_per_request": 1.263,
+    "hold_timer_delayedack_per_request": 0.0004,
+    "hold_TCPTimeouts": 0,
+    "hold_TcpRetransSegs": 18850,
+    "hold_sampled_rx_sockets_median_max": [
+      3,
+      8
+    ],
+    "max_latency_logbucket_upper_ms": 36509.3526,
+    "earliest_possible_issue_of_final_tick_s": 348.4906,
+    "conservative_requests_over_10s": 546844
+  },
+  "official_kensac": {
+    "commit": "42981018dc0d4b157d48c22ba15da5c361bf3168",
+    "users": 310000,
+    "req_s": 29284,
+    "p95_ms": 61.7,
+    "p99_ms": 189.9,
+    "failed_pct": 0,
+    "reported_app_cpu_pct": 82,
+    "reported_us_per_request": 25,
+    "reported_ram_MB": 1114,
+    "url": "https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264#issuecomment-6566431071"
+  }
+}

@@ -24,4 +24,6 @@ export HTTP_BUFSZ="${HTTP_BUFSZ:-8192}"
 # so one io_uring_enter serves a batch instead of a single completion.
 export HTTP_WAIT_MIN="${HTTP_WAIT_MIN:-256}"
 export HTTP_WAIT_US="${HTTP_WAIT_US:-1000}"
+export HTTP_DEFER_TASKRUN="${HTTP_DEFER_TASKRUN:-1}"
+export SQLITE_IO_INLINE="${SQLITE_IO_INLINE:-1}"
 exec ./feed_server.x

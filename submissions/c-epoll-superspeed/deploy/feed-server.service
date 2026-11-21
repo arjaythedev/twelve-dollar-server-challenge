@@ -1,0 +1,44 @@
+[Unit]
+Description=12 Dollar Server Challenge feed API (c-epoll-superspeed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=deploy
+Group=deploy
+WorkingDirectory=/opt/feed
+
+Environment=SQLITE_PATH=/opt/feed/feed.db
+Environment=JWT_SECRET=twelve-dollar-challenge
+Environment=HOST=0.0.0.0
+Environment=PORT=80
+# 4 workers when serving direct; each can hold ~60k connections with nofile 65535.
+# Set WORKERS=1 if you put Nginx in front instead.
+Environment=WORKERS=4
+
+ExecStart=/opt/feed/bin/server
+Restart=always
+RestartSec=1
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+# Challenge contract: 65,535 descriptors per process, bind :80 as non-root.
+LimitNOFILE=65535
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# The database and its -wal/-shm files are written next to feed.db.
+ProtectSystem=strict
+ReadWritePaths=/opt/feed
+PrivateTmp=true
+ProtectHome=true
+
+# 2 GB box; leave headroom for the kernel and SQLite's file-backed mmap.
+MemoryHigh=1700M
+MemoryMax=1900M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

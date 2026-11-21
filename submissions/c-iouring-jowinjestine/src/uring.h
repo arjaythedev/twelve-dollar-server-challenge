@@ -240,11 +240,23 @@ static inline unsigned ring_pending_submit(const struct ring *r) { return r->sq_
 
 /* Publishes the SQEs written so far and enters the kernel: submits them, runs the ring's
  * deferred task work (GETEVENTS), and waits for min completions or timeout_ns (0: no wait). */
+/* Most SQEs one io_uring_enter submits (SUBMIT_CHUNK; 0: all of them). The box's kernel is
+ * PREEMPT_VOLUNTARY: a system call is only preempted where it chooses to be, and submitting a
+ * batch's thousand sends in one call keeps ksoftirqd, which refills the NIC's receive ring, off
+ * the only CPU for milliseconds. The 1,024-slot ring then overflows on the host side, the packets
+ * are lost without a trace in the guest, and clients wait out retransmission timeouts (200 ms,
+ * then 400, 800...). Back in user space between pieces, the scheduler can run it. */
+static unsigned submit_chunk = 128;
 static long ring_enter(struct ring *r, unsigned min, uint64_t timeout_ns) {
   unsigned n = r->sq_local - r->sq_pushed;
   if (n) {
     STORE_REL(r->sq_tail, r->sq_local);
     r->sq_pushed = r->sq_local;
+  }
+  while (submit_chunk && n > submit_chunk) {
+    long k = sys_io_uring_enter(r->fd, submit_chunk, 0, 0, NULL, 0);
+    if (k <= 0) break; /* the call below reports the error */
+    n -= (unsigned)k;
   }
   long rc;
   if (timeout_ns) {
@@ -321,6 +333,23 @@ static inline void sqe_recv_once(struct io_uring_sqe *s, unsigned slot, uint64_t
   s->fd = (int)slot;
   s->buf_group = 0;
   s->msg_flags = MSG_DONTWAIT;
+  s->user_data = ud;
+}
+/* setsockopt(TCP_QUICKACK, 0) on a direct descriptor (IORING_OP_URING_CMD on a socket, 6.7+):
+ * the socket goes back to delayed-ACK ("pingpong") mode. A success posts no completion. */
+#ifndef SOCKET_URING_OP_SETSOCKOPT
+#define SOCKET_URING_OP_SETSOCKOPT 3
+#endif
+#define OP_URING_CMD 46 /* IORING_OP_URING_CMD, as a number: older headers lack the socket fields */
+static const int quickack_zero = 0;
+static inline void sqe_delack_mode(struct io_uring_sqe *s, unsigned slot, uint64_t ud) {
+  s->opcode = OP_URING_CMD;
+  s->flags = IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
+  s->fd = (int)slot;
+  s->off = SOCKET_URING_OP_SETSOCKOPT;                          /* cmd_op */
+  s->addr = ((uint64_t)TCP_QUICKACK << 32) | (uint32_t)SOL_TCP; /* level, optname */
+  s->splice_fd_in = (int32_t)sizeof quickack_zero;              /* optlen */
+  s->addr3 = (uint64_t)(uintptr_t)&quickack_zero;               /* optval */
   s->user_data = ud;
 }
 /* MSG_WAITALL: io_uring retries a short send itself, so the completion means all or nothing. */

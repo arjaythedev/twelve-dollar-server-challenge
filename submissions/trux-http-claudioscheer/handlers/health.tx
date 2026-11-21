@@ -1,0 +1,67 @@
+package handlers
+
+import "errors"
+import "http"
+import "io"
+import "json"
+import "sqlite"
+import "time"
+
+func readText(path string) string {
+  let text string, err error = io.readFile(path)
+  if err != nil {
+    return ""
+  }
+  return text
+}
+
+func degraded(request int, msg string) int {
+  let doc *json.MutDoc = json.newDoc()
+  let obj *json.MutVal = json.newObject(doc)
+  json.setRoot(doc, obj)
+  json.addString(doc, obj, "status", "degraded")
+  json.addString(doc, obj, "db", "unreachable")
+  json.addString(doc, obj, "error", msg)
+  http.json(request, 503, json.write(doc))
+  return 0
+}
+
+func uptime() int {
+  let start int = parseInt(readText("/tmp/trux-feed-started"))
+  if start < 0 {
+    return 0
+  }
+  let now int = time.monotonicNanos()
+  if now <= start {
+    return 0
+  }
+  return (now - start) / 1000000000
+}
+
+pub func health(request int) int {
+  let db *sqlite.DB, err error = openDB()
+  if err != nil {
+    return degraded(request, errors.message(err))
+  }
+  let stmt *sqlite.Stmt, perr error = sqlite.prepare(db, "SELECT 1")
+  if perr != nil {
+    return degraded(request, errors.message(perr))
+  }
+  let has bool, serr error = sqlite.step(stmt)
+  let _ error = sqlite.finalize(stmt)
+  if serr != nil || !has {
+    let msg string = "select failed"
+    if serr != nil {
+      msg = errors.message(serr)
+    }
+    return degraded(request, msg)
+  }
+  let doc *json.MutDoc = json.newDoc()
+  let obj *json.MutVal = json.newObject(doc)
+  json.setRoot(doc, obj)
+  json.addString(doc, obj, "status", "ok")
+  json.addString(doc, obj, "db", "ok")
+  json.addInt(doc, obj, "uptime_s", uptime())
+  http.json(request, 200, json.write(doc))
+  return 0
+}

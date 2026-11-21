@@ -1,0 +1,92 @@
+package handlers
+
+func digit(ch string) int {
+  let digits string = "0123456789"
+  let i int = 0
+  for i < 10 {
+    if digits[i] == ch {
+      return i
+    }
+    i = i + 1
+  }
+  return -1
+}
+
+func intToString(n int) string {
+  if n == 0 {
+    return "0"
+  }
+  let v int = n
+  let neg bool = false
+  if v < 0 {
+    neg = true
+    v = -v
+  }
+  let digits string = "0123456789"
+  let out string = ""
+  for v > 0 {
+    let d int = v % 10
+    out = digits[d:d + 1] + out
+    v = v / 10
+  }
+  if neg {
+    return "-" + out
+  }
+  return out
+}
+
+func parseInt(s string) int {
+  if len(s) == 0 {
+    return -1
+  }
+  let n int = 0
+  let i int = 0
+  for i < len(s) {
+    let d int = digit(s[i])
+    if d < 0 {
+      return -1
+    }
+    n = n * 10 + d
+    i = i + 1
+  }
+  return n
+}
+
+func positiveId(s string) int {
+  if len(s) == 0 {
+    return -1
+  }
+  let n int = 0
+  let i int = 0
+  for i < len(s) {
+    let d int = digit(s[i])
+    if d < 0 {
+      return -1
+    }
+    if n > 922337203685477580 || (n == 922337203685477580 && d > 7) {
+      return -1
+    }
+    n = n * 10 + d
+    i = i + 1
+  }
+  if n <= 0 {
+    return -1
+  }
+  return n
+}
+
+func isSpace(ch string) bool {
+  return ch == " " || ch == "\t" || ch == "\n"
+}
+
+func trim(s string) string {
+  let start int = 0
+  let end int = len(s)
+  for start < end && isSpace(s[start]) {
+    start = start + 1
+  }
+  for end > start && isSpace(s[end - 1]) {
+    end = end - 1
+  }
+  return s[start:end]
+}

@@ -1,0 +1,16 @@
+package handlers
+
+import "http"
+
+func fail(request int, status int, msg string) int {
+  http.json(request, status, "{\"error\":\"" + msg + "\"}")
+  return 0
+}
+
+func serverError(request int) int {
+  return fail(request, 500, "internal server error")
+}
+
+pub func notFound(request int) int {
+  return fail(request, 404, "not found")
+}

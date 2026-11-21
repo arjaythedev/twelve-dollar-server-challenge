@@ -13,6 +13,7 @@
 #include <linux/io_uring.h>
 #include <netdb.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
@@ -48,25 +49,153 @@
 #define RING_POOL_SIZE 20
 #define RING_ACCEPT_LISTENER_COUNT 8
 #define RING_FILE_LIMIT 65535
-#define RING_BUFFER_COUNT 256
+#define RING_BUFFER_COUNT 1024
 #define RING_BUFFER_SIZE 2048
 #define RING_CQ_ENTRIES 4096
-#define RING_CQ_BATCH 64
+#define RING_CQ_BATCH 256
+#define RING_CQ_WAIT 64
 #define RING_CQ_DRAIN_PER_RING 1024
 #define RING_CQ_DRAIN_BUDGET 32768
 #define PIPELINE_INPUT_PAUSE_THRESHOLD \
     (PIPELINE_INPUT_CAP - (RING_CQ_ENTRIES * RING_BUFFER_SIZE) - \
      RING_BUFFER_SIZE)
-#define RING_READY_ANSWER_BUDGET 256
-#define RING_RECOVERY_INFLIGHT_LIMIT 64
+#define RING_READY_ANSWER_BUDGET 2048
+#define RING_RECOVERY_INFLIGHT_LIMIT 1024
 #define RESPONSE_POOL_LIMIT 256
 #define SECRET_DEFAULT "twelve-dollar-challenge"
 #define WAL_HOLD_THRESHOLD_FRAMES 4096
 #define WAL_HOLD_MAX_NS 250000000ULL
 #define WAL_HOLD_RETRY_NS 1000000L
 #define WAL_HOLD_RETRY_LIMIT 250U
+#define WAL_DATABASE_CHUNK_SIZE (64 * 1024 * 1024)
 #define WAL_CHECKPOINT_IDLE_NS 250000000L
 #define WAL_RESUME_BATCH 128
+
+/* SQLite's default cache, wrapped to avoid scans after a B-tree page's temporary
+ * lock-byte-page rekey has inflated pcache1's high-water mark. */
+typedef struct {
+    /* Each NOMUTEX connection is thread-confined: g_db belongs to the event loop,
+     * and the checkpoint worker owns a separate connection and cache. */
+    sqlite3_pcache *base;
+    unsigned max_page;
+    unsigned lock_page;
+    bool may_have_parked_lock_page; /* conservative; cleared by rekey/truncate */
+} PageCacheWrapper;
+
+static sqlite3_pcache_methods2 g_page_cache_base;
+
+static int page_cache_wrapper_init(void *arg) {
+    (void)arg;
+    return g_page_cache_base.xInit
+        ? g_page_cache_base.xInit(g_page_cache_base.pArg) : SQLITE_OK;
+}
+
+static void page_cache_wrapper_shutdown(void *arg) {
+    (void)arg;
+    if (g_page_cache_base.xShutdown)
+        g_page_cache_base.xShutdown(g_page_cache_base.pArg);
+}
+
+static sqlite3_pcache *page_cache_wrapper_create(int page_size, int extra,
+                                                  int purgeable) {
+    if (page_size <= 0) return NULL;
+    PageCacheWrapper *wrapper = sqlite3_malloc(sizeof(*wrapper));
+    if (!wrapper) return NULL;
+    wrapper->base = g_page_cache_base.xCreate(page_size, extra, purgeable);
+    if (!wrapper->base) {
+        sqlite3_free(wrapper);
+        return NULL;
+    }
+    wrapper->max_page = 0;
+    wrapper->lock_page = 0x40000000U / (unsigned)page_size + 1U;
+    wrapper->may_have_parked_lock_page = false;
+    return (sqlite3_pcache *)wrapper;
+}
+
+#define PAGE_CACHE_BASE(p) (((PageCacheWrapper *)(p))->base)
+
+static void page_cache_wrapper_cachesize(sqlite3_pcache *cache, int pages) {
+    g_page_cache_base.xCachesize(PAGE_CACHE_BASE(cache), pages);
+}
+
+static int page_cache_wrapper_pagecount(sqlite3_pcache *cache) {
+    return g_page_cache_base.xPagecount(PAGE_CACHE_BASE(cache));
+}
+
+static sqlite3_pcache_page *page_cache_wrapper_fetch(sqlite3_pcache *cache,
+                                                      unsigned key,
+                                                      int create) {
+    PageCacheWrapper *wrapper = (PageCacheWrapper *)cache;
+    sqlite3_pcache_page *page =
+        g_page_cache_base.xFetch(wrapper->base, key, create);
+    if (page && create) {
+        if (key == wrapper->lock_page)
+            wrapper->may_have_parked_lock_page = true;
+        else if (key > wrapper->max_page) wrapper->max_page = key;
+    }
+    return page;
+}
+
+static void page_cache_wrapper_unpin(sqlite3_pcache *cache,
+                                      sqlite3_pcache_page *page,
+                                      int discard) {
+    g_page_cache_base.xUnpin(PAGE_CACHE_BASE(cache), page, discard);
+}
+
+static void page_cache_wrapper_rekey(sqlite3_pcache *cache,
+                                      sqlite3_pcache_page *page,
+                                      unsigned from, unsigned to) {
+    PageCacheWrapper *wrapper = (PageCacheWrapper *)cache;
+    g_page_cache_base.xRekey(wrapper->base, page, from, to);
+    if (to == wrapper->lock_page)
+        wrapper->may_have_parked_lock_page = true;
+    else {
+        if (from == wrapper->lock_page)
+            wrapper->may_have_parked_lock_page = false;
+        if (to > wrapper->max_page) wrapper->max_page = to;
+    }
+}
+
+static void page_cache_wrapper_truncate(sqlite3_pcache *cache,
+                                         unsigned limit) {
+    PageCacheWrapper *wrapper = (PageCacheWrapper *)cache;
+    if (!wrapper->may_have_parked_lock_page && wrapper->max_page < limit) return;
+    g_page_cache_base.xTruncate(wrapper->base, limit);
+    if (limit > 0U && wrapper->max_page >= limit)
+        wrapper->max_page = limit - 1U;
+    if (wrapper->lock_page >= limit) wrapper->may_have_parked_lock_page = false;
+}
+
+static void page_cache_wrapper_destroy(sqlite3_pcache *cache) {
+    g_page_cache_base.xDestroy(PAGE_CACHE_BASE(cache));
+    sqlite3_free(cache);
+}
+
+static void page_cache_wrapper_shrink(sqlite3_pcache *cache) {
+    g_page_cache_base.xShrink(PAGE_CACHE_BASE(cache));
+}
+
+#undef PAGE_CACHE_BASE
+
+static int page_cache_wrapper_install(void) {
+    static sqlite3_pcache_methods2 methods;
+    int rc = sqlite3_config(SQLITE_CONFIG_GETPCACHE2, &g_page_cache_base);
+    if (rc != SQLITE_OK) return rc;
+    methods = g_page_cache_base;
+    methods.pArg = NULL;
+    methods.xInit = page_cache_wrapper_init;
+    methods.xShutdown = page_cache_wrapper_shutdown;
+    methods.xCreate = page_cache_wrapper_create;
+    methods.xCachesize = page_cache_wrapper_cachesize;
+    methods.xPagecount = page_cache_wrapper_pagecount;
+    methods.xFetch = page_cache_wrapper_fetch;
+    methods.xUnpin = page_cache_wrapper_unpin;
+    methods.xRekey = page_cache_wrapper_rekey;
+    methods.xTruncate = page_cache_wrapper_truncate;
+    methods.xDestroy = page_cache_wrapper_destroy;
+    methods.xShrink = page_cache_wrapper_shrink;
+    return sqlite3_config(SQLITE_CONFIG_PCACHE2, &methods);
+}
 
 typedef struct {
     char key[64];
@@ -217,6 +346,7 @@ typedef struct {
     bool accept_sqe_retry;
     bool rearm_sqe_retry;
     bool cancel_sqe_retry;
+    bool eventfd_poll_armed;
     struct io_uring_buf_ring *buf_ring;
     unsigned char *buf_storage;
     size_t buf_ring_bytes;
@@ -280,7 +410,6 @@ static sqlite3_stmt *g_post_exists_stmt;
 static sqlite3_stmt *g_insert_like_stmt;
 static sqlite3_stmt *g_health_stmt;
 static int g_epoll = -1;
-static int g_ring_epoll = -1;
 static RingCtx g_rings[RING_POOL_SIZE];
 static unsigned g_ring_count;
 static unsigned g_ring_file_slots;
@@ -310,6 +439,67 @@ static unsigned g_listener_count;
 static time_t g_started;
 static const char *g_secret = SECRET_DEFAULT;
 static size_t g_secret_len;
+static void ring_consume_eventfd(RingCtx *ctx);
+static EVP_MD_CTX *g_hmac_inner_state;
+static EVP_MD_CTX *g_hmac_outer_state;
+static EVP_MD_CTX *g_hmac_work;
+
+/* The event loop verifies tokens on one thread. Precompute only the HS256 key
+ * pads; every request still hashes its signing input and checks its signature. */
+static int auth_hmac_init(void) {
+    enum { HMAC_BLOCK_LEN = 64, HMAC_DIGEST_LEN = 32 };
+    unsigned char key[HMAC_BLOCK_LEN] = {0};
+    unsigned char pad[HMAC_BLOCK_LEN];
+    unsigned int key_len = 0;
+    if (g_secret_len > HMAC_BLOCK_LEN) {
+        if (EVP_Digest(g_secret, g_secret_len, key, &key_len,
+                       EVP_sha256(), NULL) != 1 || key_len != HMAC_DIGEST_LEN) {
+            OPENSSL_cleanse(key, sizeof(key));
+            return -1;
+        }
+    } else if (g_secret_len != 0U) {
+        memcpy(key, g_secret, g_secret_len);
+    }
+    g_hmac_inner_state = EVP_MD_CTX_new();
+    g_hmac_outer_state = EVP_MD_CTX_new();
+    g_hmac_work = EVP_MD_CTX_new();
+    if (!g_hmac_inner_state || !g_hmac_outer_state || !g_hmac_work) goto fail;
+    for (size_t i = 0; i < HMAC_BLOCK_LEN; ++i) pad[i] = key[i] ^ 0x36U;
+    if (EVP_DigestInit_ex2(g_hmac_inner_state, EVP_sha256(), NULL) != 1 ||
+        EVP_DigestUpdate(g_hmac_inner_state, pad, sizeof(pad)) != 1) goto fail;
+    for (size_t i = 0; i < HMAC_BLOCK_LEN; ++i) pad[i] = key[i] ^ 0x5cU;
+    if (EVP_DigestInit_ex2(g_hmac_outer_state, EVP_sha256(), NULL) != 1 ||
+        EVP_DigestUpdate(g_hmac_outer_state, pad, sizeof(pad)) != 1) goto fail;
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(pad, sizeof(pad));
+    return 0;
+fail:
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(pad, sizeof(pad));
+    EVP_MD_CTX_free(g_hmac_inner_state);
+    EVP_MD_CTX_free(g_hmac_outer_state);
+    EVP_MD_CTX_free(g_hmac_work);
+    g_hmac_inner_state = NULL;
+    g_hmac_outer_state = NULL;
+    g_hmac_work = NULL;
+    return -1;
+}
+
+static int auth_hmac_sha256(const unsigned char *message, size_t message_len,
+                            unsigned char digest[32]) {
+    unsigned char inner_digest[32];
+    unsigned int digest_len = 0;
+    int ok = EVP_MD_CTX_copy_ex(g_hmac_work, g_hmac_inner_state) == 1 &&
+             EVP_DigestUpdate(g_hmac_work, message, message_len) == 1 &&
+             EVP_DigestFinal_ex(g_hmac_work, inner_digest, &digest_len) == 1 &&
+             digest_len == sizeof(inner_digest) &&
+             EVP_MD_CTX_copy_ex(g_hmac_work, g_hmac_outer_state) == 1 &&
+             EVP_DigestUpdate(g_hmac_work, inner_digest, sizeof(inner_digest)) == 1 &&
+             EVP_DigestFinal_ex(g_hmac_work, digest, &digest_len) == 1 &&
+             digest_len == 32U;
+    OPENSSL_cleanse(inner_digest, sizeof(inner_digest));
+    return ok ? 1 : 0;
+}
 static char *g_listener_tag = "listener";
 
 static void ring_release_direct(Conn *c);
@@ -1121,10 +1311,9 @@ static int verify_auth(const char *header, size_t header_len, Auth *auth) {
         base64url_decode(dot2 + 1, right, sig, sizeof(sig), &siglen) != 0) return AUTH_INVALID;
     hbuf[hlen] = '\0';
     pbuf[plen] = '\0';
-    unsigned int digest_len = 0;
-    if (!HMAC(EVP_sha256(), g_secret, (int)g_secret_len, (const unsigned char *)token,
-              (size_t)(dot2 - token), digest, &digest_len) || digest_len != 32 ||
-        siglen != digest_len || CRYPTO_memcmp(sig, digest, digest_len) != 0)
+    if (!auth_hmac_sha256((const unsigned char *)token,
+                          (size_t)(dot2 - token), digest) ||
+        siglen != 32U || CRYPTO_memcmp(sig, digest, 32U) != 0)
         return AUTH_INVALID;
     JsonObject hobj;
     if (parse_json_object((const char *)hbuf, hlen, &hobj) != 0) return AUTH_INVALID;
@@ -1807,6 +1996,17 @@ static bool wal_checkpoint_needed(int log_frames, int checkpointed_frames) {
            checkpointed_frames >= 0 && checkpointed_frames < log_frames;
 }
 
+static void sqlite_set_database_chunk_size(sqlite3 *db) {
+    int chunk_size = WAL_DATABASE_CHUNK_SIZE;
+    int rc = sqlite3_file_control(db, "main", SQLITE_FCNTL_CHUNK_SIZE,
+                                  &chunk_size);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr,
+                "SQLite database chunk-size hint unavailable: %s (%d)\n",
+                sqlite3_errmsg(db), rc);
+    }
+}
+
 static int wal_checkpoint_passive(sqlite3 *db, int *log_frames,
                                  int *checkpointed_frames,
                                  int *checkpoint_rc) {
@@ -1819,8 +2019,8 @@ static int wal_checkpoint_passive(sqlite3 *db, int *log_frames,
 
 static void *wal_checkpoint_main(void *arg) {
     sqlite3 *db = (sqlite3 *)arg;
-    if (setpriority(PRIO_PROCESS, 0, 19) != 0) {
-        fprintf(stderr, "could not lower SQLite checkpoint thread priority: %s\n",
+    if (setpriority(PRIO_PROCESS, 0, 5) != 0) {
+        fprintf(stderr, "could not set SQLite checkpoint thread priority: %s\n",
                 strerror(errno));
     }
 
@@ -1927,6 +2127,7 @@ static int start_wal_checkpoint_thread(void) {
                     err ? err : sqlite3_errmsg(checkpoint_db));
         }
         sqlite3_free(err);
+        if (rc == SQLITE_OK) sqlite_set_database_chunk_size(checkpoint_db);
     }
     if (rc != SQLITE_OK) {
         if (checkpoint_db) sqlite3_close(checkpoint_db);
@@ -1960,9 +2161,10 @@ static int start_wal_checkpoint_thread(void) {
     }
     (void)pthread_detach(g_wal_checkpoint_thread);
     fprintf(stderr,
-            "SQLite catch-up checkpoint thread started (%u frames, %llu ms max hold, nice 19)\n",
+            "SQLite catch-up checkpoint thread started (%u frames, %llu ms max hold, nice 5, %d MiB DB chunks)\n",
             WAL_HOLD_THRESHOLD_FRAMES,
-            (unsigned long long)(WAL_HOLD_MAX_NS / 1000000ULL));
+            (unsigned long long)(WAL_HOLD_MAX_NS / 1000000ULL),
+            WAL_DATABASE_CHUNK_SIZE / (1024 * 1024));
     return 0;
 }
 
@@ -2009,6 +2211,7 @@ static int init_db(void) {
         fprintf(stderr, "sqlite pragmas failed: %s\n", err ? err : sqlite3_errmsg(g_db));
         return -1;
     }
+    sqlite_set_database_chunk_size(g_db);
     if (prepare(g_db, &g_feed_stmt,
         "SELECT p.id,p.body,p.created_at,u.username,"
         "(SELECT count(*) FROM likes l WHERE l.post_id=p.id) "
@@ -2321,7 +2524,8 @@ enum {
     RING_TAG_CLOSE = 4,
     RING_TAG_RECV_MULTISHOT = 5,
     RING_TAG_CANCEL_RECV = 6,
-    RING_TAG_CANCEL_SEND = 7
+    RING_TAG_CANCEL_SEND = 7,
+    RING_TAG_EVENTFD = 8
 };
 
 #define RING_TAG_MASK ((uintptr_t)0x0f)
@@ -2336,6 +2540,20 @@ static struct io_uring_sqe *ring_sqe(RingCtx *ctx) {
     int rc = ring_submit(&ctx->io);
     if (rc < 0 && rc != -EAGAIN && rc != -ENOMEM) return NULL;
     return ring_get_sqe(&ctx->io);
+}
+
+static int ring_queue_eventfd_poll(unsigned target_ring) {
+    RingCtx *target = ring_ctx(target_ring);
+    if (!target || target->event_fd < 0) return -EINVAL;
+    struct io_uring_sqe *sqe = ring_sqe(&g_rings[0]);
+    if (!sqe) return -ENOSPC;
+    sqe->opcode = IORING_OP_POLL_ADD;
+    sqe->fd = target->event_fd;
+    sqe->poll_events = POLLIN;
+    sqe->len = IORING_POLL_ADD_MULTI;
+    sqe->user_data = ((uint64_t)target_ring << 4) | RING_TAG_EVENTFD;
+    target->eventfd_poll_armed = true;
+    return 0;
 }
 
 static int ring_queue_accept(RingCtx *ctx, unsigned ring_index) {
@@ -3763,6 +3981,32 @@ static void ring_handle_accept(unsigned ring_index, int result, unsigned flags) 
     ring_start_recv(c);
 }
 
+static void ring_handle_eventfd_poll(uint64_t user_data, int result,
+                                     unsigned flags) {
+    unsigned target_index = (unsigned)(user_data >> 4);
+    RingCtx *target = ring_ctx(target_index);
+    if (!target) return;
+    if (result < 0) {
+        target->eventfd_poll_armed = false;
+        if (result != -ECANCELED) {
+            fprintf(stderr, "ring %u eventfd poll failed: %s\n",
+                    target_index, strerror(-result));
+        }
+        return;
+    }
+    /* Ring zero's eventfd wakes the checkpoint helper and is drained here.
+     * Secondary counters stay unread; their multishot polls wake ring zero. */
+    if (target_index == 0U) ring_consume_eventfd(target);
+    if ((flags & IORING_CQE_F_MORE) == 0U) {
+        target->eventfd_poll_armed = false;
+        int rc = ring_queue_eventfd_poll(target_index);
+        if (rc != 0) {
+            fprintf(stderr, "ring %u eventfd poll rearm failed: %s\n",
+                    target_index, strerror(-rc));
+        }
+    }
+}
+
 static void ring_dispatch_cqe(RingCtx *ctx, unsigned ring_index,
                               const struct io_uring_cqe *cqe) {
     uint64_t user_data = cqe->user_data;
@@ -3773,6 +4017,8 @@ static void ring_dispatch_cqe(RingCtx *ctx, unsigned ring_index,
         ring_handle_accept(ring_index, result, flags);
     } else if (tag == RING_TAG_CLOSE) {
         ring_handle_close(ctx, (unsigned)(user_data >> 4), result);
+    } else if (tag == RING_TAG_EVENTFD) {
+        ring_handle_eventfd_poll(user_data, result, flags);
     } else {
         Conn *c = (Conn *)(uintptr_t)(user_data & ~(uint64_t)RING_TAG_MASK);
         if (tag == RING_TAG_RECV) ring_handle_recv(c, result, flags, false);
@@ -4200,36 +4446,10 @@ static void ring_consume_eventfd(RingCtx *ctx) {
     }
 }
 
-static int ring_wait_for_batch(int retry_timeout_ms) {
-    struct epoll_event events[RING_POOL_SIZE];
-    int ready;
-    do {
-        ready = epoll_wait(g_ring_epoll, events, RING_POOL_SIZE, retry_timeout_ms);
-    } while (ready < 0 && errno == EINTR);
-    if (ready < 0) return -errno;
-    if (ready == 0) return 0;
-    for (int i = 0; i < ready; ++i) {
-        ring_consume_eventfd((RingCtx *)events[i].data.ptr);
-    }
-
-    uint64_t deadline = ring_monotonic_ns() + 1000000ULL;
-    while (ring_pending_total() < RING_CQ_BATCH && !ring_accept_cqe_pending()) {
-        uint64_t now = ring_monotonic_ns();
-        if (now == 0 || now >= deadline) break;
-        uint64_t remaining = deadline - now;
-        int timeout_ms = (int)((remaining + 999999ULL) / 1000000ULL);
-        if (timeout_ms < 1) timeout_ms = 1;
-        ready = epoll_wait(g_ring_epoll, events, RING_POOL_SIZE, timeout_ms);
-        if (ready < 0) {
-            if (errno == EINTR) continue;
-            return -errno;
-        }
-        if (ready == 0) continue;
-        for (int i = 0; i < ready; ++i) {
-            ring_consume_eventfd((RingCtx *)events[i].data.ptr);
-        }
-    }
-    return 0;
+static int ring_wait_for_batch(unsigned min_complete, unsigned timeout_ms) {
+    int rc = ring_wait_timeout(&g_rings[0].io, min_complete, timeout_ms);
+    if (rc == -ETIME) return 0;
+    return rc < 0 ? rc : 0;
 }
 
 static void close_ring_pool(void) {
@@ -4269,7 +4489,8 @@ static int init_ring_pool(unsigned pool_size) {
     if (slots >= 1024U) {
         bool direct_ready = true;
         for (unsigned i = 0; i < pool_size; ++i) {
-            int rc = ring_init(&g_rings[i].io, 2048, RING_CQ_ENTRIES);
+            int rc = ring_init_ex(&g_rings[i].io, 2048, RING_CQ_ENTRIES,
+                                  i == 0U);
             if (rc != 0) {
                 direct_ready = false;
                 break;
@@ -4298,7 +4519,7 @@ static int init_ring_pool(unsigned pool_size) {
         close_ring_pool();
     }
 
-    int rc = ring_init(&g_rings[0].io, 2048, RING_CQ_ENTRIES);
+    int rc = ring_init_ex(&g_rings[0].io, 2048, RING_CQ_ENTRIES, true);
     if (rc != 0) return rc;
     g_ring_count = 1;
     g_ring_file_slots = 0;
@@ -4311,11 +4532,6 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
     g_listener_count = listener_count;
     for (unsigned i = 0; i < listener_count; ++i)
         g_listener_fds[i] = listeners[i];
-    g_ring_epoll = epoll_create1(EPOLL_CLOEXEC);
-    if (g_ring_epoll < 0) {
-        fprintf(stderr, "could not create ring epoll: %s\n", strerror(errno));
-        return -1;
-    }
     bool defer_taskrun_active = false;
     for (unsigned i = 0; i < g_ring_count; ++i) {
         RingCtx *ctx = &g_rings[i];
@@ -4336,24 +4552,24 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
             atomic_store_explicit(&g_wal_wakeup_fd, ctx->event_fd,
                                   memory_order_release);
         }
-        int event_rc = ring_register_eventfd(&ctx->io, ctx->event_fd);
-        if (event_rc != 0) {
-            fprintf(stderr, "could not register ring eventfd %u: %s\n",
-                    i, strerror(-event_rc));
+        if (i != 0U) {
+            int event_rc = ring_register_eventfd(&ctx->io, ctx->event_fd);
+            if (event_rc != 0) {
+                fprintf(stderr, "could not register ring eventfd %u: %s\n",
+                        i, strerror(-event_rc));
+                return -1;
+            }
+        }
+        int poll_rc = ring_queue_eventfd_poll(i);
+        if (poll_rc != 0) {
+            fprintf(stderr, "could not poll ring %u eventfd: %s\n",
+                    i, strerror(-poll_rc));
             return -1;
         }
 #ifdef RING_DIAG
         ring_diag_set_send_accept_observed_callback(
             &ctx->io, ring_diag_send_accept_observed);
 #endif
-        struct epoll_event ev;
-        memset(&ev, 0, sizeof(ev));
-        ev.events = EPOLLIN;
-        ev.data.ptr = ctx;
-        if (epoll_ctl(g_ring_epoll, EPOLL_CTL_ADD, ctx->event_fd, &ev) != 0) {
-            fprintf(stderr, "could not watch ring eventfd %u: %s\n", i, strerror(errno));
-            return -1;
-        }
     }
     if (ring_schedule_accept() != 0) {
         fprintf(stderr, "could not prime io_uring accept\n");
@@ -4379,6 +4595,7 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
     uint64_t diag_next_ns = diag_start_ns + 10000000000ULL;
 #endif
     unsigned dispatch_start = 0;
+    unsigned last_cqes = 0U;
     for (;;) {
         wal_checkpoint_fallback_if_needed();
         (void)ring_schedule_accept();
@@ -4424,11 +4641,13 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
             }
         }
         if (ring_pending_total() == 0U && !g_ready_head) {
-            int wait_timeout_ms = (retry_submit || defer_taskrun_active) ? 1 : -1;
-            int wait_rc = ring_wait_for_batch(wait_timeout_ms);
+            unsigned min_complete = last_cqes >= 8U ? RING_CQ_WAIT : 1U;
+            unsigned wait_timeout_ms = retry_submit ? 1U :
+                (last_cqes >= 8U ? 2U : 1000U);
+            int wait_rc = ring_wait_for_batch(min_complete, wait_timeout_ms);
             if (wait_rc != 0) {
                 if (wait_rc == -EINTR) continue;
-                fprintf(stderr, "ring epoll wait failed: %s\n", strerror(-wait_rc));
+                fprintf(stderr, "ring wait failed: %s\n", strerror(-wait_rc));
                 return -1;
             }
         }
@@ -4456,6 +4675,7 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
             dispatch_ready[j] = ready;
         }
         unsigned recovery_cq_budget = RING_CQ_DRAIN_BUDGET;
+        unsigned processed_cqes = 0U;
         for (unsigned dispatch_offset = 0; dispatch_offset < g_ring_count; ++dispatch_offset) {
             unsigned ring_index = dispatch_order[dispatch_offset];
             RingCtx *ctx = &g_rings[ring_index];
@@ -4491,6 +4711,7 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
                         fprintf(stderr, "io_uring CQ advance failed\n");
                         return -1;
                     }
+                    processed_cqes += batch;
                     recovery_cq_budget -= batch;
                 }
             }
@@ -4504,6 +4725,7 @@ static int run_ring_server(const int *listeners, unsigned listener_count) {
             fprintf(stderr, "could not finish SQLite write batch; stopping server\n");
             return -1;
         }
+        last_cqes = processed_cqes;
 #ifdef RING_DIAG
         ring_diag_report(diag_start_ns, &diag_next_ns, &diag_previous);
 #endif
@@ -4520,6 +4742,16 @@ int main(void) {
     if (secret && *secret) g_secret = secret;
     const unsigned ring_pool_size = 6;
     g_secret_len = strlen(g_secret);
+    if (auth_hmac_init() != 0) {
+        fprintf(stderr, "could not initialize HS256 verifier\n");
+        return 1;
+    }
+    int pcache_rc = page_cache_wrapper_install();
+    if (pcache_rc != SQLITE_OK) {
+        fprintf(stderr, "SQLite page-cache wrapper install failed: %s\n",
+                sqlite3_errstr(pcache_rc));
+        return 1;
+    }
     if (init_db() != 0) return 1;
     (void)start_wal_checkpoint_thread();
     const char *host = getenv("HOST");
@@ -4571,7 +4803,6 @@ int main(void) {
     if (use_ring) {
         int rc = run_ring_server(listeners, listener_count);
         for (unsigned i = 0; i < listener_count; ++i) close(listeners[i]);
-        if (g_ring_epoll >= 0) close(g_ring_epoll);
         close_ring_pool();
         sqlite3_close(g_db);
         return rc == 0 ? 0 : 1;

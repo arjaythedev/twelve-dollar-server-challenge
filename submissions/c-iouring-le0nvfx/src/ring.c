@@ -46,6 +46,7 @@ typedef struct ring_state {
     unsigned sq_mask;
     unsigned cq_entries;
     unsigned cq_mask;
+    unsigned features;
     unsigned sqe_tail;
     unsigned published_tail;
     unsigned pending_submit;
@@ -164,7 +165,8 @@ static ring_state *get_state(ring *r) {
     return (ring_state *)r->_state;
 }
 
-int ring_init(ring *r, unsigned sq_entries, unsigned cq_entries) {
+int ring_init_ex(ring *r, unsigned sq_entries, unsigned cq_entries,
+                 bool request_defer_taskrun) {
     if (r == NULL || sq_entries == 0U) return -EINVAL;
 
     /* Permit a fresh, uninitialized stack object; re-init live rings via close. */
@@ -181,11 +183,14 @@ int ring_init(ring *r, unsigned sq_entries, unsigned cq_entries) {
         base_flags |= IORING_SETUP_CQSIZE;
         params.cq_entries = cq_entries;
     }
-    params.flags = base_flags | RING_DEFER_TASKRUN_SETUP_FLAGS;
+    params.flags = base_flags |
+        (request_defer_taskrun ? RING_DEFER_TASKRUN_SETUP_FLAGS : 0U);
 
     int fd = setup_ring(sq_entries, &params);
-    unsigned defer_taskrun = fd >= 0 && RING_DEFER_TASKRUN_SETUP_FLAGS != 0U;
-    if (fd < 0 && RING_DEFER_TASKRUN_SETUP_FLAGS != 0U) {
+    unsigned defer_taskrun = fd >= 0 && request_defer_taskrun &&
+                             RING_DEFER_TASKRUN_SETUP_FLAGS != 0U;
+    if (fd < 0 && request_defer_taskrun &&
+        RING_DEFER_TASKRUN_SETUP_FLAGS != 0U) {
         /* Older or restricted kernels can still use the ordinary ring path. */
         memset(&params, 0, sizeof(params));
         params.flags = base_flags;
@@ -209,6 +214,7 @@ int ring_init(ring *r, unsigned sq_entries, unsigned cq_entries) {
     s->sq_mask = params.sq_entries - 1U;
     s->cq_entries = params.cq_entries;
     s->cq_mask = params.cq_entries - 1U;
+    s->features = params.features;
 
     int rc = ring_bytes(params.sq_off.array, params.sq_entries,
                         sizeof(unsigned), &s->sq_ring_size);
@@ -285,6 +291,10 @@ int ring_init(ring *r, unsigned sq_entries, unsigned cq_entries) {
     s->cq_head_local = load_acquire(s->cq_head);
     r->_state = s;
     return 0;
+}
+
+int ring_init(ring *r, unsigned sq_entries, unsigned cq_entries) {
+    return ring_init_ex(r, sq_entries, cq_entries, true);
 }
 
 int ring_register_files_sparse(ring *r, unsigned slots) {
@@ -535,6 +545,57 @@ int ring_wait(ring *r, unsigned min_complete) {
             return (int)ready;
         }
     }
+}
+
+int ring_wait_timeout(ring *r, unsigned min_complete, unsigned timeout_ms) {
+    ring_state *s = get_state(r);
+    if (s == NULL) return -EBADF;
+    if (min_complete > s->cq_entries) return -EINVAL;
+    unsigned ready = cq_ready_count(s);
+    if (ready >= min_complete) {
+        if (ready > (unsigned)INT32_MAX) return -EOVERFLOW;
+        return (int)ready;
+    }
+    if (min_complete == 0U) return (int)ready;
+    if ((s->features & IORING_FEAT_EXT_ARG) == 0U) return -ENOSYS;
+
+#if defined(SYS_io_uring_enter) && defined(IORING_ENTER_EXT_ARG)
+    struct __kernel_timespec timeout = {
+        .tv_sec = (int64_t)(timeout_ms / 1000U),
+        .tv_nsec = (int64_t)(timeout_ms % 1000U) * 1000000LL,
+    };
+    struct io_uring_getevents_arg arg;
+    memset(&arg, 0, sizeof(arg));
+    arg.ts = (uint64_t)(uintptr_t)&timeout;
+    for (;;) {
+#ifdef RING_DIAG
+        ++s->diag_enter_syscalls;
+#endif
+        long ret = syscall(SYS_io_uring_enter, s->fd, 0U, min_complete,
+                           IORING_ENTER_GETEVENTS | IORING_ENTER_EXT_ARG,
+                           &arg, sizeof(arg));
+        if (ret < 0) {
+            if (errno == EINTR) {
+                ready = cq_ready_count(s);
+                if (ready >= min_complete) {
+                    if (ready > (unsigned)INT32_MAX) return -EOVERFLOW;
+                    return (int)ready;
+                }
+                continue;
+            }
+            return -errno;
+        }
+        ready = cq_ready_count(s);
+        if (ready >= min_complete) {
+            if (ready > (unsigned)INT32_MAX) return -EOVERFLOW;
+            return (int)ready;
+        }
+        return -ETIME;
+    }
+#else
+    (void)timeout_ms;
+    return -ENOSYS;
+#endif
 }
 
 unsigned ring_cq_ready(ring *r) {

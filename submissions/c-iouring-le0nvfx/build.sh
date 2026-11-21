@@ -27,7 +27,8 @@ cc -O3 -DNDEBUG -flto -fno-plt -fomit-frame-pointer -march=x86-64-v3 \
   -DSQLITE_DQS=0 -DSQLITE_LIKE_DOESNT_MATCH_BLOBS -DSQLITE_MAX_EXPR_DEPTH=0 \
   -DSQLITE_OMIT_DECLTYPE -DSQLITE_OMIT_UTF16 -DSQLITE_OMIT_TRACE \
   -DSQLITE_OMIT_GET_TABLE -DSQLITE_OMIT_COMPLETE -DSQLITE_OMIT_JSON \
-  -DSQLITE_TEMP_STORE=3 -DHAVE_FDATASYNC=1 -DHAVE_USLEEP=1 \
+  -DSQLITE_TEMP_STORE=3 -DHAVE_FDATASYNC=1 -DHAVE_POSIX_FALLOCATE=1 \
+  -DHAVE_USLEEP=1 \
   -Isrc -Isrc/vendor/sqlite-3.54.1 -I"$openssl_dir/include" \
   src/server.c src/ring.c src/wal_vfs.c "$openssl_dir/libcrypto.a" -o bin/server \
   -Wl,-O1 -Wl,--as-needed -ldl -lm -pthread

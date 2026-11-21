@@ -1,4 +1,6 @@
 bin/
 .build/
+pgo/
+*.gcda
 __pycache__/
 *.py[cod]

@@ -6,7 +6,7 @@ folder plus `seed/`) is on the server and that you are root.
 ## 1. Install the toolchain and build
 
 ```bash
-cd submissions/c-epoll-superspeed
+cd submissions/c-epoll-festoinc
 sudo bash install.sh          # build-essential, curl, unzip, ca-certificates
 bash build.sh                 # downloads pinned SQLite 3.54.1, builds bin/server
 ```
@@ -63,7 +63,7 @@ and likes, so a second run on the same database fails the golden checks.
 
 ```bash
 cd /path/to/twelve-dollar-server-challenge
-bash test/run.sh submissions/c-epoll-superspeed
+bash test/run.sh submissions/c-epoll-festoinc
 ```
 
 That is exactly what CI runs. It builds, starts on `127.0.0.1:3000` with a

@@ -1,4 +1,4 @@
-// c-epoll-superspeed: a single-threaded epoll + SQLite feed server for the $12 Server Challenge.
+// c-epoll-festoinc: a single-threaded epoll + SQLite feed server for the $12 Server Challenge.
 //
 // Design:
 //   * one process, one thread, one epoll loop (the box has one vCPU)
@@ -1870,7 +1870,7 @@ static void worker_main(void) {
     epfd = epoll_create1(EPOLL_CLOEXEC);
     if (epfd < 0) { perror("epoll_create1"); exit(1); }
 
-    fprintf(stderr, "c-epoll-superspeed: listening %s:%d (worker pid %d, nofile %d)\n",
+    fprintf(stderr, "c-epoll-festoinc: listening %s:%d (worker pid %d, nofile %d)\n",
             g_host, g_port, (int)getpid(), max_fd);
 
     event_loop();

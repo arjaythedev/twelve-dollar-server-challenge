@@ -1,5 +1,5 @@
 [Unit]
-Description=12 Dollar Server Challenge feed API (c-epoll-superspeed)
+Description=12 Dollar Server Challenge feed API (c-epoll-festoinc)
 After=network-online.target
 Wants=network-online.target
 

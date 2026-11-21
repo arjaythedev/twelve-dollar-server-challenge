@@ -1,4 +1,4 @@
-# c-epoll-superspeed
+# c-epoll-festoinc
 
 A single-threaded `epoll` + SQLite implementation of the $12 Server Challenge API.
 
@@ -10,7 +10,7 @@ A single-threaded `epoll` + SQLite implementation of the $12 Server Challenge AP
 | **Reads** | fixed plans on SQLite's own B-tree cursors (`sqlite3Btree*`), prepared SQL fallback |
 | **Other dependencies** | none (SHA-256/HMAC and JSON are in `server.c`) |
 | **Nginx or direct** | **Direct** on `HOST:PORT` (`0.0.0.0:80` on the challenge box) |
-| **Tests** | 42/42 pass with `bash test/run.sh submissions/c-epoll-superspeed` |
+| **Tests** | 42/42 pass with `bash test/run.sh submissions/c-epoll-festoinc` |
 
 ## Running it
 

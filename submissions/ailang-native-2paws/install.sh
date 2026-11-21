@@ -3,8 +3,8 @@
 # self-hosted binary published in the AILANG repository, pinned here by commit and sha256.
 set -euo pipefail
 REPO=https://github.com/AiLang-Author/Ailang-Self-Hosting-
-COMMIT=6ced82fa98637c80a490381f86578b2eff0ce3b8
-SHA256=81c9077b6467176bb2e0ede107986ef8f789a8f2d51a8ffac1f2a32f2f54331f
+COMMIT=0117d392c54333c62366aac0a9585629982c4509
+SHA256=6e4f069f809f9b2bb3491bf0fb5d9f55f479417574874d60d947db9115b66daa
 DEST=/usr/local/bin/ailang.x
 if ! command -v curl >/dev/null; then
   apt-get update -qq && apt-get install -y -qq curl ca-certificates

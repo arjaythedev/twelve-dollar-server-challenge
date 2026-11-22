@@ -247,8 +247,8 @@ column layout (schema metadata, read at open), and the HMAC key schedule.
 6. WAL + `synchronous=NORMAL`; group commit; each response waits for its batch's commit.
 7. Nothing detects the load test: every route works for any request, every request that is read
 is answered, and the server never closes a healthy connection and never looks at who is asking.
-The one limit is the box's memory: `CONN_LIMIT` connections at once; the ones over it wait in
-`connect()` or are answered 503 (see the last section).
+The one limit is the box's memory: `KEEP_LIMIT` connections are kept alive at once, and a user
+past that is served on one connection per request (see the last section).
 8–9. Direct on `0.0.0.0:80`. Direct descriptors need no file descriptors beyond the listeners.
 10. Built from source on the box; SQLite 3.54.1 pinned by SHA-256; the PGO profile is produced
 during the build, nothing is committed but source.
@@ -469,8 +469,8 @@ it exact: a pass takes the arrivals that can still be answered within the kernel
 many that is, and the backlog waits while arrivals are still being sent to it. Three small things
 go with it: a reply that is sent late puts its socket back into delayed-ACK mode
 (`DELACK_RESTORE`, on), the listeners start in that mode (`QUICKACK_OFF`, on, as in
-fsharp-uring-delneg #437), and the number of connections is limited by the box's memory
-(`CONN_LIMIT`). No request is dropped: every one that is read is answered.
+fsharp-uring-delneg #437), and the number of connections kept alive is limited by the box's memory
+(`KEEP_LIMIT`, with `CONN_LIMIT` behind it). No request is dropped: every one that is read is answered.
 
 Why the order matters here. Linux acknowledges a request with its response if the response
 leaves within 40 ms. If it does not, the delayed-ACK timer sends an ACK of its own and takes the
@@ -517,7 +517,7 @@ Newest first, a pause costs the requests that were waiting when it ended, and no
 - With passes this short nothing needs reaping or entering mid-pass: `ENTER_EVERY` is off in
   this mode (`SUBMIT_CHUNK=128` stays).
 - A waiting request keeps a 128-byte buffer, not 512 (a GET is ~100 bytes): with every
-  connection waiting, that was 170 MB the box does not have (see `CONN_LIMIT` below).
+  connection waiting, that was 170 MB the box does not have (see the limits below).
 
 This is the "adaptive LIFO" of overloaded request queues (Maurer, *Fail at Scale*, ACM Queue
 2015), with the kernel's delayed-ACK timer as the deadline.
@@ -546,8 +546,8 @@ is clean. Those seconds are what the two rules above (passes sized by the deadli
 that waits) are for: they cost 92,000 late requests where 36,000 would have paid the same debt,
 and a 2-minute probe at 320k has room for ~57,000 requests over 1 s before its p99 fails.
 
-That box has been down since the 340k run below, so the two rules were measured on a KVM guest on
-my PC instead: the benchmark box's kernel (6.8.0-117) and memory (1,967 MB), one vCPU capped at a
+That box was down from the 340k run below until Nov 22, so the two rules were measured on a KVM
+guest on my PC: the benchmark box's kernel (6.8.0-117) and memory (1,967 MB), one vCPU capped at a
 share of a host core (68 % puts 320k users at ~85 % of it), load from the host over a tap device,
 a fresh boot before every run, the versions interleaved. "First version" is the first commit's
 behaviour (`ANSWERS_PER_PASS=384 BACKLOG_AGE_MS=0 BACKLOG_QUIET_MS=0`). All runs are 320k users,
@@ -585,15 +585,16 @@ Not every run went well. The guest has pauses of its own, 0.5-2 s in which the s
 CPU, in some runs and not in others; they are why single runs differ so much. In two runs of this
 PR (one of them the third of the 68 % rows above, which is why that row has two numbers) such a
 pause left more requests unread than the guest's memory holds, and the kernel ended the server
-(the collapse described under `CONN_LIMIT` below). The first version met pauses as long in other
+(the collapse described below). The first version met pauses as long in other
 runs and came through: two cases in thirteen runs against none in fifteen. In both of those runs
 the guest was losing a fifth of its time to the host (3-8 % in the other runs), so I take them
 for the host's doing, but I cannot prove it, and say it for that reason.
 
-`CONN_LIMIT`: the test box at 340k stopped answering on the network 200 s into the run and had to
-be restarted. The guest shows why. A connection costs the kernel 4.13 KB (the TCP socket, its
-inode, dentry and file, the armed receive), so 340,000 are 1.4 GB on 1,967 MB, and what is left
-is ~100 MB free and ~150 MB of page cache. That is enough for a quiet run (340k at a reduced
+**The limits.** The test box at 340k, with the first version and no limit, stopped answering on
+the network 200 s into the run and had to be restarted (its kernel log of that boot ends with the
+OOM killer ending the server). The guest shows why. A connection costs the kernel 4.13 KB (the
+TCP socket, its inode, dentry and file, the armed receive), so 340,000 are 1.4 GB on 1,967 MB,
+and what is left is ~100 MB free and ~150 MB of page cache. That is enough for a quiet run (340k at a reduced
 request rate held for four minutes) and not for a burst. A request that arrives while the server
 is not running waits in its socket and pins ~3.5 KB there (its slice of one of the network
 driver's 32 KB receive pages), so at 320k the box has room for about two seconds' worth of
@@ -601,39 +602,109 @@ requests, and at 340k for one. Past that the kernel's OOM killer ends the server
 keep coming it ends every other process next and then gives up ("Kernel panic - not syncing:
 System is deadlocked on memory"), which from outside is a box that no longer answers. The end of
 a run is such a burst too, every connection closing at once with an unread FIN in each: on the
-guest the server was killed there, after the measurement, in the runs at 320k and above, and not
-at 310k.
+guest the server was killed there, after the measurement, in every run at 330k and above before
+this commit, in some at 320k, and in none at 310k. The test box went down a second time that
+way, at the end of a 270k run on a day it was running a third slower than usual (page allocation
+failures in interrupt context, then nothing); my load generator has closed its connections over
+the 30 s of the ramp-down since then, so the runs on that box below say nothing about that
+moment.
 
-No server setting changes what a connection or an unread request costs the kernel, so the server
-holds at most (MemTotal - 600 MB) / 4.25 KB connections, 329,000 on that box. At the limit the
-listen queues go down to one entry: the kernel drops the SYNs of the users over it, who wait in
-`connect()`, and does not keep thousands of established sockets nobody will accept. A connection
-that still gets through is answered `503` and closed. Checked with a limit of 50 and 120
-clients: 50 served, 70 answered 503, and 30 new ones served after 30 of the first left.
+No server setting changes what a connection or an unread request costs the kernel; what the
+server can decide is how many connections it holds. There are two limits.
 
-So the users over the limit mostly wait rather than fail, like the users over 65,535 of the
-entries in the leaderboard's footnote on the descriptor limit, and a load a few percent over
-the limit can pass on errors: in two rehearsals at 340k the 330,000 that were served were
-answered as usual (p99 45 and 68 ms) and 0.72 % and 0.89 % of the requests failed. Refusing every connection over the
-limit with a 503, so that each one counts, was tried and taken out again: accepting a connection
-to refuse it costs what accepting it to serve it costs, at the moment the box has least to
-spare. That rehearsal refused 20,000 in the seconds after the limit was reached, and the 330,000
-being served waited up to 28 s behind it.
+**`KEEP_LIMIT`**, (MemTotal - 630 MB) / 4.25 KB, 322,000 on that box: the most connections kept
+alive at once. A user who arrives when that many are open is still served, on a *brief
+connection*: it is accepted on a ring of its own, its one request is answered with
+`Connection: close`, and the close is linked behind the reply's send, so the FIN leaves with the
+reply and the client dials again for its next request. The connection holds its 4 KB for a few
+milliseconds instead of for the run, and the box's memory stays where 322,000 connections put
+it however many users there are. The price is a handshake and a close for every request of the
+users past the limit. Below the limit nothing changes, and the brief ring is not entered. (The
+count is looked at once a pass, so the connections one pass accepts are all kept: 8 and 40 past
+the limit in the two runs below, and after a pause of the loop whatever the listen queues held,
+at most up to `CONN_LIMIT`.)
 
-**What the limit does not do.** On the guest (cap 66 %) I rehearsed the probes that would follow
-a passed 320k. A little over the limit, 340k, twice: one rehearsal ran to its end; in the other
-the kernel ended the server two seconds before the end of the hold (one of the guest's pauses,
-with 330,000 connections and a second of room) and the guest then panicked. At 400k and 640k,
-with 330,000 connections held and tens or hundreds of thousands of users retrying, packet
-processing takes the CPU, the server gets none for seconds at a time, memory runs out as described above, and in all
-five rehearsals the kernel ended the server; in three of them (400k once, 640k twice) it then
-ended everything else and panicked too. A server that held few enough connections to live through
-that, ~240,000 on this memory, could not hold 320,000 in the probe before it. So if 320k passes
-on the benchmark box, the probes far above it may take the box down, with this server or any
-other that holds that many connections.
+- The brief ring uses ordinary descriptors, not direct ones. On this kernel (6.8) a direct
+  descriptor that is closed is released only when every request submitted before its close has
+  ended, and on the other rings each connection's multishot receive is such a request. A
+  connection closed there keeps its memory until the receives of the connections accepted before
+  its close have ended, which under a steady load is the end of the run. Measured on the guest
+  with the previous commit, 20,000 users on kept connections beside 20,000 who ask for
+  `Connection: close` with every request (2,100 closes a second): TCP sockets in use stayed at
+  20,000 while sockets allocated went from 20,000 to 202,000 in 110 s and free memory from
+  1,104 MB to 155 MB; all of it came back when the kept connections closed. An ordinary
+  descriptor is released with its last reference, and a connection whose one read has completed
+  has none left but the descriptor table's.
+- A brief connection that waits holds a whole socket, a kept connection's waiting request 128
+  bytes. So a pass answers the brief ring's arrivals first, the listen queues are 256 entries
+  each while the newcomers are brief (a connection in a listen queue is a socket with its
+  request in it), and one that has not sent a whole request after `BRIEF_WAIT_MS` (5 s) is
+  closed.
+
+**`CONN_LIMIT`**, (MemTotal - 600 MB) / 4.25 KB, 329,000 on that box: the most connections of
+both kinds. It is reached only if brief connections pile up unanswered, 7,000 of them. Then the
+listen queues go down to one entry: the kernel drops the SYNs, those users wait in `connect()`,
+and a connection that still gets through is answered `503` and closed. (Refusing every one of
+them with a 503 was tried and taken out: accepting a connection to refuse it costs what
+accepting it to serve it costs, at the moment the box has least to spare.) Until this commit
+that was the only limit: the users past 329,000 waited in `connect()` until the load
+generator's timeout, like the users over 65,535 of the entries in the leaderboard's footnote on
+the descriptor limit, and the box held 329,000 connections' worth of memory, which the guest did
+not always survive (below).
+
+Checked on the test box with `KEEP_LIMIT=50 CONN_LIMIT=90` and 120 clients: the first 50 keep
+their connections and go on being answered on them; the other 70 are answered on one connection
+per request, 280 of 280 (health, feed and post), each reply with `Connection: close` and the EOF
+behind it; a request that comes in two pieces is answered; a brief connection that sends nothing is closed after `BRIEF_WAIT_MS`;
+with 40 brief connections open and silent the next ones get 503; the server has the same number
+of descriptors before and after.
+
+**Measured on the test box**, which is back and at its old speed. This commit, load from the generator box as before,
+60 s ramp + 2 min + 30 s down unless said otherwise, whole-run percentiles:
+
+| users | p95 | p99 | failed | brief connections | open at once (sampled every 10 s) | server's CPU | least free memory |
+|---|---|---|---|---|---|---|---|
+| 320k | 28.7 ms | 818 ms | 0 | 0 | 0 | 58 % | 85 MB |
+| 320k, 5 min hold | 22.2 ms | 237 ms | 0 | 0 | 0 | 55 % | 85 MB |
+| 330k | 35.0 ms | 3.46 s | 0.002 % | 100,376 | 17 | 62 % | 87 MB |
+| 340k | 32.4 ms | 2.63 s | 0.005 % | 235,055 | 44 | 67 % | 84 MB |
+
+At 330k and 340k every user is served and the box's memory is where it is at 320k. The failures
+are my load generator's, not the server's (it gives each user a fixed source port, and 135 and
+320 dials found theirs still in TIME_WAIT on the generator). A request on a brief connection
+costs between two and a half and three times one on a kept connection: at 340k, 1,700 of them a
+second took 5 % of the CPU more than the same requests on kept connections would have.
+
+The 330k and 340k runs fail on p99 all the same, and the brief connections are not why. At
+82-86 % of the CPU this box has an episode every 20-40 s in which packet processing takes the
+CPU for a few seconds (the storms the newest-first order is for: each now costs the requests that
+arrive during it, 20,000-50,000 over 1 s, and no others), and a 2-minute run has room for one. At
+320k, 78 % of the CPU, there is one, at the end of the ramp. So on this box the limit is not what
+decides a run above 320k; what `KEEP_LIMIT` changes is that such a run is safe to make.
+
+**What the previous commit did above its limit**, on the guest. At 330k (cap 68 %), twice: the
+kernel ended the server both times when the load generator closed every connection at the end
+of the run, 329,000 unread FINs at once (at 320k, the same day and cap, that moment left 41-103 MB
+free, four times of four). At 340k, three times (cap 66-68 %): once it ran to its end, with the 10,000 users over
+the limit waiting in `connect()` and 0.72 % of the requests failed; twice the kernel ended the
+server during the hold (2 s before its end, and 25 s into it), and then every other process, and
+the guest was gone. With `KEEP_LIMIT` the server holds 7,000 connections fewer than that, as many
+as in the 320k runs this box has been through many times.
+
+**What neither limit does.** At 400k and 640k (rehearsed with the previous commit on the guest,
+five times) there are twice the users the box can serve: packet processing takes the CPU, the
+server gets none for seconds at a time, memory runs out as described above, and the kernel ended
+the server every time; in three of the five (400k once, 640k twice) it then ended everything else
+and panicked. Brief connections do not change that: so many of them pile up unanswered that
+`CONN_LIMIT` is reached, and from there it is the same. (I could not rehearse these again with
+this commit: the guest runs on my PC, which was in use.) A server that held few enough
+connections to live through that, ~240,000 on this memory, could not hold 320,000 in the probe
+before it. So if 320k passes on the benchmark box, the probes far above it may take the box down,
+with this server or any other that holds that many connections.
 
 As in the section above, the test box and the guest are harsher than the benchmark box and the
 numbers are a comparison, not a prediction. `FRESH_FIRST=0` restores the old order (with
 `ANSWERS_PER_PASS=2048` and `ENTER_EVERY=128`); `ANSWERS_PER_PASS=384 BACKLOG_AGE_MS=0
-BACKLOG_QUIET_MS=0` is the first version of this PR; `DELACK_RESTORE=0`, `QUICKACK_OFF=0` and
-`CONN_LIMIT=0` turn off the other three.
+BACKLOG_QUIET_MS=0` is the first version of this PR; `DELACK_RESTORE=0`, `QUICKACK_OFF=0`,
+`KEEP_LIMIT=0` (every connection is kept, up to `CONN_LIMIT`) and `CONN_LIMIT=0` turn off the
+others.

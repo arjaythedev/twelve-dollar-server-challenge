@@ -335,6 +335,27 @@ static inline void sqe_recv_once(struct io_uring_sqe *s, unsigned slot, uint64_t
   s->msg_flags = MSG_DONTWAIT;
   s->user_data = ud;
 }
+/* The same three for a connection on an ordinary descriptor (see keep_limit in server.c): accepts
+ * that return descriptor numbers, one read that waits for its bytes, the close. */
+static inline void sqe_accept_multishot_fd(struct io_uring_sqe *s, int lfd, uint64_t ud) {
+  s->opcode = IORING_OP_ACCEPT;
+  s->fd = lfd;
+  s->ioprio = IORING_ACCEPT_MULTISHOT;
+  s->accept_flags = SOCK_CLOEXEC;
+  s->user_data = ud;
+}
+static inline void sqe_recv_fd(struct io_uring_sqe *s, int fd, uint64_t ud) {
+  s->opcode = IORING_OP_RECV;
+  s->flags = IOSQE_BUFFER_SELECT;
+  s->fd = fd;
+  s->buf_group = 0;
+  s->user_data = ud;
+}
+static inline void sqe_close_fd(struct io_uring_sqe *s, int fd, uint64_t ud) {
+  s->opcode = IORING_OP_CLOSE;
+  s->fd = fd;
+  s->user_data = ud;
+}
 /* setsockopt(TCP_QUICKACK, 0) on a direct descriptor (IORING_OP_URING_CMD on a socket, 6.7+):
  * the socket goes back to delayed-ACK ("pingpong") mode. A success posts no completion. */
 #ifndef SOCKET_URING_OP_SETSOCKOPT

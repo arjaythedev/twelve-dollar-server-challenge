@@ -336,8 +336,8 @@ function feed!(::BtreeBackend, b::Buf)
     own = bt_enter()
     n = Int(GC.@preserve FEED_ROWS ccall((:jr_bt_feed, LIBJR), Cint, (Ptr{JRow},), FEED_ROWS))
     if n < 0
-        bt_leave(own)
-        return n == -2 ? feed_plain!(b) : false     # -2: a post without its user, which the join skips
+        bt_leave(own)                               # -2: a post without its user, which the join skips;
+        return n == -2 ? feed_plain!(b) : feed!(SqlBackend(), b)    # -1: a B-tree error, the SQL query
     end
     putstr!(b, "{\"posts\":[")
     for k in 1:n
@@ -358,14 +358,14 @@ function post!(::BtreeBackend, b::Buf, id::Int)
         pushb!(b, UInt8('}'))
     end
     bt_leave(own)
-    r
+    r < 0 ? post!(SqlBackend(), b, id) : r      # a B-tree error: the SQL query answers instead
 end
 
 function post_exists(::BtreeBackend, id::Int)
     own = bt_enter()
     r = Int(ccall((:jr_bt_exists, LIBJR), Cint, (Int64,), id))
     bt_leave(own)
-    r
+    r < 0 ? post_exists(SqlBackend(), id) : r
 end
 
 const READ = BTREE ? BtreeBackend() : SqlBackend()

@@ -37,6 +37,8 @@
 #      ENTRY (another submission folder, run with this harness to calibrate against the leaderboard; rows go to calibration.csv),
 #      DATA (volume: the DB copy on a per-run podman volume on the host's disk; overlay: on the container's
 #      fuse-overlayfs, as before 2026-11-08, which blocks the loop on every write),
+#      KEEPDB (1: stress keeps the grown DB in its results/ folder), BTDB (that folder, relative to the
+#      submission: btreediff runs on its DB instead of the seed),
 #      LABEL (free text for the CSV row), NOTES, CPUS (1), MEM (2g), RAMP_UP (30s, k6 only),
 #      WARMUP (5s, blast only), WRK_THREADS (4, per wrk process), SHARDS (parallel wrk processes;
 #      default N / CONNS_PER_SHARD), CONNS_PER_SHARD (5000), SECCOMP (unconfined; "default" to test without io_uring).
@@ -190,6 +192,10 @@ stress_run() { # stress_run <n> <duration>
   statpid=$!
   "run_$GEN" "$name" "$gname" "$n" "$dur" "$out" || rc=$?
   podman logs "$name" > "$out/server.log" 2>&1 || true
+  if [ -n "${KEEPDB:-}" ] && [ "$DATA" = volume ]; then   # the grown DB, for BTDB= dev/ct.sh btreediff
+    podman stop -t 10 "$name" >/dev/null 2>&1 || true
+    podman run --rm --user 0 -v "$vol:/data" -v "$out:/out" "$IMAGE" sh -c 'cp /data/feed.db* /out/' || true
+  fi
   podman rm -f "$name" >/dev/null 2>&1 || true
   podman volume rm -f "$vol" >/dev/null 2>&1 || true
   wait "$statpid" 2>/dev/null || true
@@ -238,7 +244,7 @@ elif [ "$GEN" = users ]; then def_n=20000 def_start=10000 def_max=320000 def_dur
 else def_n=1000 def_start=2500 def_max=320000 def_dur=1m; fi
 case "$cmd" in
   image) image; echo "$IMAGE" ;;
-  build|test|feedbench|feedbench-pgo|jwtbench|btreediff) image; box -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_READTXN="${READTXN:-}" -e JR_PRAGMAS="${PRAGMAS:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" -e JR_BACKEND="${BACKEND:-}" "$IMAGE" bash /src/submissions/$SELF/dev/in-container.sh "$cmd" ;;
+  build|test|feedbench|feedbench-pgo|jwtbench|btreediff) image; box -e JR_SQLITE_OPT="${SQLITE_OPT:-}" -e JR_READTXN="${READTXN:-}" -e JR_PRAGMAS="${PRAGMAS:-}" -e JR_WRITER="${WRITER:-}" -e JR_HMAC="${HMAC:-}" -e JR_AOT="${AOT:-}" -e JR_BACKEND="${BACKEND:-}" -e JR_BTDB="${BTDB:-}" "$IMAGE" bash /src/submissions/$SELF/dev/in-container.sh "$cmd" ;;
   shell) image; box -it "$IMAGE" bash ;;
   stress) only_run; image; stress_run "${1:-$def_n}" "${2:-$def_dur}"; report >/dev/null; [ "$RUN_PASS" = 1 ] ;;
   ladder) only_run; image; ladder "${1:-$def_start}" "${2:-$def_max}" "${3:-$def_dur}"; report ;;

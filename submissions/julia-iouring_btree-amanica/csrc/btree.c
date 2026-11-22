@@ -40,6 +40,7 @@ typedef struct {            /* mirrored by JRow in src/db.jl */
 } jr_row;
 
 static long bt_reads, bt_errors;
+static long faults;     /* dev only (dev/btreediff.jl, jr_bt_fault): the next `faults` reads fail */
 
 static Pgno rootpage(const char *name) {
     sqlite3_stmt *s;
@@ -117,6 +118,7 @@ void jr_bt_close(void) {
 /* In a transaction the loop has begun (BEGIN): the B-tree read transaction and the cursors, once per
  * transaction. If the transaction already writes, BeginTrans(read) leaves it as it is. 0 ok, -1 error. */
 static int ensure(void) {
+    if (faults > 0) { faults--; return -1; }
     if (cur_open) return 0;
     if (sqlite3_get_autocommit(bdb)) return -1;        /* no BEGIN: COMMIT would end it under the cursors */
     if (sqlite3BtreeBeginTrans(bt, 0, 0) != SQLITE_OK) return -1;
@@ -385,3 +387,4 @@ int jr_bt_feed(jr_row *rows) {
 
 long jr_bt_reads(void) { return bt_reads; }
 long jr_bt_errors(void) { return bt_errors; }
+void jr_bt_fault(long n) { faults = n; }

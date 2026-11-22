@@ -80,6 +80,53 @@ function main(path)
     J.db_exec("PRAGMA foreign_keys=OFF")
     J.db_exec("INSERT INTO posts (user_id, body) VALUES (999999999, 'orphan')")
     check_reads("orphan", rng, m + 2)
+    # B-tree errors: each read falls back to the SQL query, so the bytes stay the same (jr_bt_fault: the
+    # next n reads fail as if a B-tree call had failed)
+    e0 = ccall((:jr_bt_errors, J.LIBJR), Clong, ())
+    for (k, f) in enumerate((b -> J.feed!(BT, b), b -> J.post!(BT, b, 1), b -> J.post!(BT, b, 10^12)))
+        ref = json(k == 1 ? (b -> J.feed!(SQL, b)) : k == 2 ? (b -> J.post!(SQL, b, 1)) : (b -> J.post!(SQL, b, 10^12)))
+        ccall((:jr_bt_fault, J.LIBJR), Cvoid, (Clong,), 1); same("fault read $k", ref, json(f))
+        ccall((:jr_bt_fault, J.LIBJR), Cvoid, (Clong,), 1); pass!(() -> same("fault read $k txn", ref, json(f)))
+    end
+    ccall((:jr_bt_fault, J.LIBJR), Cvoid, (Clong,), 1); same("fault exists", J.post_exists(SQL, 1), J.post_exists(BT, 1))
+    same("fault reads counted", 7, ccall((:jr_bt_errors, J.LIBJR), Clong, ()) - e0)
+    same("after faults", json(b -> J.feed!(SQL, b)), json(b -> J.feed!(BT, b)))
+    # a record on overflow pages: the copy into spill. The schema's CHECK caps bodies at 500 chars (< 2.1 KB),
+    # so a real row never overflows; this dev copy lifts the CHECK to run that path anyway.
+    J.db_exec("PRAGMA ignore_check_constraints=ON")
+    J.db_exec("INSERT INTO posts (user_id, body) VALUES (5, '" * "long body ✓ "^320 * "')")
+    J.db_exec("PRAGMA ignore_check_constraints=OFF")
+    big = maxid()
+    J.db_exec("INSERT INTO likes (user_id, post_id) VALUES (1, $big), (2, $big)")
+    check_reads("overflow", rng, big)
+    pass!(() -> check_reads("overflow-txn", rng, big))
+    # the checkpoint thread (csrc/shim.c) on its own connection, as on the server: passes of writes and
+    # reads while it checkpoints and restarts the WAL under the read snapshots
+    J.ckpt_start(path)
+    rd = 0
+    for p in 1:1500
+        while J.write_hold(); yield(); end                  # the loop's write hold
+        pass!() do
+            for k in 1:2
+                body = "ckpt $p.$k " * "y"^rand(rng, 0:450)
+                GC.@preserve body J.create_post!(J.Buf(), rand(rng, 1:20000), pointer(body), sizeof(body), author)
+            end
+            mm = maxid()
+            for k in 1:5
+                J.insert_like(rand(rng, 1:20000), mm - rand(rng, 0:40))
+            end
+        end
+        pass!() do                                          # a read-only pass, as most passes are
+            same("ckpt p$p feed", json(b -> J.feed!(SQL, b)), json(b -> J.feed!(BT, b)))
+            for id in (maxid(), rand(rng, 1:maxid()))
+                same("ckpt p$p post $id", json(b -> J.post!(SQL, b, id)), json(b -> J.post!(BT, b, id)))
+            end
+        end
+    end
+    ck = ccall((:jr_ckpt_count, J.LIBJR), Clong, ()); rs = ccall((:jr_ckpt_restarts, J.LIBJR), Clong, ())
+    println("checkpoint thread: $ck checkpoints, $rs WAL restarts")
+    same("checkpoints ran", true, ck > 0)
+    check_reads("after-ckpt-thread", rng, maxid())
     println("btreediff: $(checks[]) checks, $(fails[]) mismatches, B-tree reads=$(ccall((:jr_bt_reads, J.LIBJR), Clong, ())) errors=$(ccall((:jr_bt_errors, J.LIBJR), Clong, ()))")
     bench("after the writes (newest ids not contiguous)")
     fails[] == 0 || exit(1)

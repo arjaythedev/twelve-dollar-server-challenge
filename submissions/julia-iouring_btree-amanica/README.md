@@ -69,13 +69,17 @@ roughly 250–290k on the benchmark box. See "Running locally" for how that was 
   usual case: ids and created_at both grow with every insert), else one seek per post; rows: one seek to
   the lowest id and then the next rows when the ids are contiguous, else a seek each; authors by rowid
   in `users`. A post whose user is missing (the SQL join would skip it) falls back to the SQL query.
+- Any B-tree call that fails makes that read fall back to the same request's SQL statement (cursors
+  closed, reopened by the next read), so an unexpected error costs one slower read, not a 500.
 - Records are decoded from SQLite's record format (varint serial types); startup checks the exact
   column layout, index order and UTF-8 encoding, and refuses to start on anything else.
 - Writes, BEGIN/COMMIT and /health stay on SQL. `JR_BACKEND=sql` (dev A/B, `dev/ct.sh BACKEND=sql`)
   builds the original's prepared-statement reads instead.
-- `dev/ct.sh btreediff` (`dev/btreediff.jl`) compares both backends byte for byte (4,605 checks: seed,
+- `dev/ct.sh btreediff` (`dev/btreediff.jl`) compares both backends byte for byte (10,960 checks: seed,
   reads mixed with inserts and likes in one transaction, after a checkpoint, non-contiguous newest ids,
-  a post without its user) and times them in-process, hot cache, one thread:
+  a post without its user, injected B-tree failures (SQL fallback), a record on overflow pages, and
+  1,500 write+read passes with the server's checkpoint thread running on its own connection: 899
+  checkpoints under the read snapshots) and times them in-process, hot cache, one thread:
 
 | per call (µs) | SQL statements | B-tree reads |
 |---|---|---|
@@ -87,7 +91,9 @@ Same local harness, both backends alternating (2026-11-19): blast (1,024 connect
 72.6k / 73.2k req/s vs 56.8k / 58.2k (+27%); 260,000 users both pass at 26.5k req/s, at 72% vs 84% CPU
 (p95 9.8 vs 14.5 ms). B-tree: 330,000 users passed (33.7k req/s, p95 32 / p99 180 ms, 83% CPU); a
 300,000 run failed once on a memory stall at the end of ramp-up (the 2 GB cgroup limit), as the
-original also does at 300k about half the time.
+original also does at 300k about half the time. A 5-minute hold at 300,000 (2026-11-22, host freshly
+rebooted) passed: 31.1k req/s, p95 54 / p99 174 ms, 0 errors, 92% CPU, cgroup memory peak 1.4 GB.
+btreediff also passes on a database grown by a stress run (with its 62 MB WAL not yet checkpointed).
 
 ## Credits
 
@@ -317,4 +323,6 @@ wrk users (`GEN=users`, think time per connection) are cheap, so they reach the 
 | btree A/B: btree | – | 260,000 (237 MB) | 72,876 (+43%), n=2 |
 | btree A/B: sql | – | 260,000 (242 MB) | 57,483 (-21%), n=2 |
 | btree probe | – | 330,000 (282 MB) | – |
+| btree hold 5m | – | 300,000 (273 MB) | – |
+| grow db for btreediff | – | 100,000 (146 MB) | – |
 <!-- results:end -->

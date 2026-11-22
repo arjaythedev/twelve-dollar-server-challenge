@@ -14,7 +14,9 @@ case "${1:-test}" in
   test)  bash test/run.sh "submissions/$SUB" ;;
   feedbench) # dev/feedbench.jl on a fresh seed copy (PLAN 5.5)
          bash "submissions/$SUB/build.sh" >/dev/null
-         mkdir -p /work/data && cp /src/seed/feed.db /work/data/feed.db
+         mkdir -p /work/data && rm -f /work/data/feed.db*
+         if [ -n "${JR_BTDB:-}" ]; then cp "/src/submissions/$SUB/$JR_BTDB"/feed.db* /work/data/
+         else cp /src/seed/feed.db /work/data/feed.db; fi
          . "submissions/$SUB/config.sh"
          exec "$JULIA_HOME/bin/julia" --startup-file=no -O3 "submissions/$SUB/dev/feedbench.jl" /work/data/feed.db ;;
   btreediff) # dev/btreediff.jl: B-tree reads vs the SQL statements, byte for byte, on a fresh seed copy

@@ -303,3 +303,5 @@ timestamp,commit,label,gen,debug,julia,backend,transport,cpus,mem,vus,ramp,durat
 2026-11-19T00:41:21Z,a19d62f+dirty,btree A/B: sql,users,0,1.13.3,sql,uring,1,2g,260000,60s,2m,3986625,26532.4,,14.491,94.467,821.6,0.000,1,,84,100,81,32,1,52,0,,242,1500,,,,,5015MB,181,DATA=volume; DATA=volume
 2026-11-19T00:45:42Z,a19d62f+dirty,btree probe,users,0,1.13.3,btree,uring,1,2g,300000,60s,2m,4059738,26898.6,,70.971,3873.619,9999.8,6.536,0,p(99)<1000 errors<1%,74,98,71,37,2,32,0,,381,2025,,,,,6048MB,75,DATA=volume; DATA=volume
 2026-11-19T00:49:58Z,a19d62f+dirty,btree probe,users,0,1.13.3,btree,uring,1,2g,330000,60s,2m,5053673,33656.5,,32.001,180.389,1315.0,0.000,1,,83,100,81,43,2,27,0,,282,1614,,,,,6401MB,280,DATA=volume; DATA=volume
+2026-11-21T23:52:25Z,0923f38+dirty,btree hold 5m,users,0,1.13.3,btree,uring,1,2g,300000,30s,5m,9797964,31094.9,,53.720,173.748,1735.4,0.000,1,,92,101,89,48,3,62,0,,273,1397,,,,,5906MB,71,DATA=volume
+2026-11-21T23:56:40Z,0923f38+dirty,grow db for btreediff,users,0,1.13.3,btree,uring,1,2g,100000,30s,2m,1382680,10196.4,,0.742,15.907,861.3,0.000,1,,44,82,42,19,1,37,0,,146,1183,,,,,1905MB,90,DATA=volume

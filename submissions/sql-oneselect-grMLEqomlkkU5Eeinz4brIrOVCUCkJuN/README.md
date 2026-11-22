@@ -57,7 +57,7 @@ headers) and checks the HS256 signature; `server.sql` decides everything else.
 
 ## Testing
 
-CI runs `bash test/run.sh submissions/sql-oneselect-grMLEqomlkkU5Eeinz4brIrOVCUCkJuN`.
+CI runs `bash test/run.sh submissions/sql-oneselect-grmlqSOTFTtk`.
 
 `./build.sh harness && ./test-harness.sh` runs the repo's `test/test.sh` (42/42) without a network. It
 replaces the script's curl calls with `bin/harness`, which feeds the same HTTP bytes through the parser,

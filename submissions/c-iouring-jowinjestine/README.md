@@ -655,19 +655,28 @@ not always survive (below).
 Checked on the test box with `KEEP_LIMIT=50 CONN_LIMIT=90` and 120 clients: the first 50 keep
 their connections and go on being answered on them; the other 70 are answered on one connection
 per request, 280 of 280 (health, feed and post), each reply with `Connection: close` and the EOF
-behind it; a request that comes in two pieces is answered; a brief connection that sends nothing is closed after `BRIEF_WAIT_MS`;
-with 40 brief connections open and silent the next ones get 503; the server has the same number
-of descriptors before and after.
+behind it; a request that comes in two pieces is answered; a brief connection that sends nothing
+is closed after `BRIEF_WAIT_MS`; with 40 brief connections open and silent the next ones get
+503; the server has the same number of descriptors before and after.
 
-**Measured on the test box**, which is back and at its old speed. This commit, load from the generator box as before,
-60 s ramp + 2 min + 30 s down unless said otherwise, whole-run percentiles:
+**Measured on the test box**, which is back and at its old speed. This commit, load from the
+generator box as before, 60 s ramp + 2 min + 30 s down unless said otherwise, whole-run
+percentiles:
 
 | users | p95 | p99 | failed | brief connections | open at once (sampled every 10 s) | server's CPU | least free memory |
 |---|---|---|---|---|---|---|---|
-| 320k | 28.7 ms | 818 ms | 0 | 0 | 0 | 58 % | 85 MB |
-| 320k, 5 min hold | 22.2 ms | 237 ms | 0 | 0 | 0 | 55 % | 85 MB |
+| 320k, five runs | 22-53 ms | 818 ms, 6.3 s, 540 ms, 3.8 s, 4.5 s | 0 | 0 | 0 | 55-59 % | 84-99 MB |
+| 320k, 5 min hold, two runs | 22.2 / 18.8 ms | 237 / 61 ms | 0 | 0 | 0 | 55 / 57 % | 85 / 86 MB |
 | 330k | 35.0 ms | 3.46 s | 0.002 % | 100,376 | 17 | 62 % | 87 MB |
 | 340k | 32.4 ms | 2.63 s | 0.005 % | 235,055 | 44 | 67 % | 84 MB |
+
+The 2-minute runs at 320k differ mostly in one place, the last ten seconds of the ramp, where the new
+connections (5,300 a second) and the requests together need more CPU than there is: that leaves
+39,000 to 180,000 requests over 1 s, a 2-minute run has room for 57,000 (two of the five pass)
+and a 5-minute run for 117,000 (both pass, with 42,000 and 20,000). What that moment costs is
+mostly kernel work per packet, which grows with the number of connections: in a profile at
+330k, looking up the connection of each arriving packet (`__inet_lookup_established`, a hash
+table of 16,384 chains for 330,000 sockets) is 16.6 % of all the CPU the box has.
 
 At 330k and 340k every user is served and the box's memory is where it is at 320k. The failures
 are my load generator's, not the server's (it gives each user a fixed source port, and 135 and
@@ -679,14 +688,14 @@ The 330k and 340k runs fail on p99 all the same, and the brief connections are n
 82-86 % of the CPU this box has an episode every 20-40 s in which packet processing takes the
 CPU for a few seconds (the storms the newest-first order is for: each now costs the requests that
 arrive during it, 20,000-50,000 over 1 s, and no others), and a 2-minute run has room for one. At
-320k, 78 % of the CPU, there is one, at the end of the ramp. So on this box the limit is not what
+320k, 76-79 % of the CPU, there is the one at the end of the ramp. So on this box the limit is not what
 decides a run above 320k; what `KEEP_LIMIT` changes is that such a run is safe to make.
 
 **What the previous commit did above its limit**, on the guest. At 330k (cap 68 %), twice: the
 kernel ended the server both times when the load generator closed every connection at the end
 of the run, 329,000 unread FINs at once (at 320k, the same day and cap, that moment left 41-103 MB
-free, four times of four). At 340k, three times (cap 66-68 %): once it ran to its end, with the 10,000 users over
-the limit waiting in `connect()` and 0.72 % of the requests failed; twice the kernel ended the
+free, four times of four). At 340k, three times (cap 66-68 %): once it ran to its end, with the
+10,000 users over the limit waiting in `connect()` and 0.72 % of the requests failed; twice the kernel ended the
 server during the hold (2 s before its end, and 25 s into it), and then every other process, and
 the guest was gone. With `KEEP_LIMIT` the server holds 7,000 connections fewer than that, as many
 as in the 320k runs this box has been through many times.

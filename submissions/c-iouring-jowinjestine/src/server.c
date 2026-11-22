@@ -104,21 +104,16 @@ static unsigned ring_slots, accept_next, accept_stop, recv_bufs;
  * memory holds: a connection costs ~4.2 KB of kernel memory whatever the server does (the TCP
  * socket, its inode and file), so the memory, not the server, decides how many there can be. On a
  * box like the benchmark one 320,000 left 458 MB available, and 340,000 ended with the box out of
- * memory and off the network. At the limit a new connection is closed at once, so its client
- * learns it now instead of timing out (refuse_per_s below bounds what that costs). */
+ * memory and off the network. At the limit the listen queues go down to one entry, so the kernel
+ * drops the SYNs of the users over it (they wait in connect()) and does not keep thousands of
+ * established sockets nobody will accept; a connection that still gets through is answered 503
+ * and closed. Refusing every one of them that way was tried: accepting a connection to refuse it
+ * costs what accepting it to serve it costs, at the moment the box has least to spare (a rehearsal
+ * of a 340k-user probe refused 20,000 in the seconds after the limit was reached, and the 330,000
+ * being served waited up to 28 s behind that). */
 static unsigned conn_limit, open_total;
 static int listen_short;
 static uint64_t refused_total;
-/* A client refused at the limit must learn it, as an error it counts; but accepting a connection
- * to close it costs what accepting it to serve it costs. So REFUSE_PER_S (1000; 0: no bound) a
- * second are answered 503 and closed at once, and past that the listen queues go down to one entry:
- * the kernel drops the SYNs of the rest, who wait in connect() until the allowance is back. (With
- * the queues that short the whole time, a run 3 % over the limit went by with 0.35 % errors: the
- * users over the limit sat in connect(), which a load test does not count as a failed request.) */
-static long refuse_per_s = 1000;
-static double refuse_allow = 200.0; /* refusals that may still be made */
-static uint64_t refuse_t;           /* when the allowance was last topped up */
-static int limit_said;
 static int ring_grow_failed;
 static int LFD[NLISTEN];
 static struct app A;
@@ -575,21 +570,10 @@ static void cancel_accepts(unsigned ri) {
  * kernel then drops it. */
 static void accept_policy(void) {
   if (conn_limit) {
-    /* the listen queues: full size until the last 1.5 % under the limit; from there on 64 entries
-     * (a burst of connections is then at most a few hundred to refuse), and one entry while the
-     * allowance for refusals is used up (see refuse_per_s) */
-    uint64_t tn = now_ns();
-    if (refuse_t) refuse_allow += (double)(tn - refuse_t) * 1e-9 * (double)refuse_per_s;
-    if (refuse_allow > 200.0) refuse_allow = 200.0;
-    refuse_t = tn;
-    int full = open_total >= conn_limit, near = open_total + conn_limit / 64 >= conn_limit;
-    int want = !near ? 0 : refuse_per_s && refuse_allow <= 0.0 ? 2 : !refuse_per_s || refuse_allow >= 100.0 || !listen_short ? 1 : listen_short;
-    if (want != listen_short) {
-      listen_short = want;
-      for (unsigned l = 0; l < NLISTEN; l++) listen(LFD[l], want == 2 ? 1 : want ? 64 : LISTEN_BACKLOG);
-    }
-    if (full != limit_said && (full || open_total + conn_limit / 64 < conn_limit)) {
-      limit_said = full;
+    int full = open_total >= conn_limit;
+    if (full != listen_short && (full || open_total + conn_limit / 64 < conn_limit)) {
+      listen_short = full;
+      for (unsigned l = 0; l < NLISTEN; l++) listen(LFD[l], full ? 1 : LISTEN_BACKLOG);
       fprintf(stderr, "connection limit %u %s: %u open, %llu refused so far\n", conn_limit, full ? "reached" : "cleared",
               open_total, (unsigned long long)refused_total);
     }
@@ -637,7 +621,6 @@ static void on_accept(unsigned ri, struct io_uring_cqe *cqe) {
     q->file_index = slot + 1;
     q->user_data = UD(UD_CANCEL, ri, 0, slot);
     refused_total++;
-    refuse_allow -= 1.0;
     return;
   }
   c->flags = CF_OPEN;
@@ -1297,7 +1280,6 @@ int main(int argc, char **argv) {
   fresh_reserve = (unsigned)env_long("FRESH_RESERVE", 24);
   backlog_age_ms = (unsigned)env_long("BACKLOG_AGE_MS", 20000);
   backlog_quiet_ms = (unsigned)env_long("BACKLOG_QUIET_MS", 30);
-  refuse_per_s = env_long("REFUSE_PER_S", 1000);
   late_ms = (unsigned)env_long("LATE_MS", 20);
   delack_restore = env_long("DELACK_RESTORE", 1) != 0;
   quickack_off = env_long("QUICKACK_OFF", 1) != 0;

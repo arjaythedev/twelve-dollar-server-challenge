@@ -247,8 +247,8 @@ column layout (schema metadata, read at open), and the HMAC key schedule.
 6. WAL + `synchronous=NORMAL`; group commit; each response waits for its batch's commit.
 7. Nothing detects the load test: every route works for any request, every request that is read
 is answered, and the server never closes a healthy connection and never looks at who is asking.
-The one limit is the box's memory: `CONN_LIMIT` connections at once, and a 503 for the next one
-(see the last section).
+The one limit is the box's memory: `CONN_LIMIT` connections at once; the ones over it wait in
+`connect()` or are answered 503 (see the last section).
 8–9. Direct on `0.0.0.0:80`. Direct descriptors need no file descriptors beyond the listeners.
 10. Built from source on the box; SQLite 3.54.1 pinned by SHA-256; the PGO profile is produced
 during the build, nothing is committed but source.
@@ -605,19 +605,29 @@ guest the server was killed there, after the measurement, in the runs at 320k an
 at 310k.
 
 No server setting changes what a connection or an unread request costs the kernel, so the server
-holds at most (MemTotal - 600 MB) / 4.25 KB connections, 329,000 on that box. At the limit a new
-connection is answered `503` and closed at once, so that its client has a failed request to count
-and not a wait in `connect()` that nobody counts. `REFUSE_PER_S` (1,000) bounds what that costs:
-past it the listen queues go down to one entry and the kernel drops the rest's SYNs until the
-allowance is back. Checked with a limit of 50 and 120 clients: 50 served, 70 answered 503, and
-30 new ones served after 30 of the first left.
+holds at most (MemTotal - 600 MB) / 4.25 KB connections, 329,000 on that box. At the limit the
+listen queues go down to one entry: the kernel drops the SYNs of the users over it, who wait in
+`connect()`, and does not keep thousands of established sockets nobody will accept. A connection
+that still gets through is answered `503` and closed. Checked with a limit of 50 and 120
+clients: 50 served, 70 answered 503, and 30 new ones served after 30 of the first left.
+
+So the users over the limit mostly wait rather than fail, like the users over 65,535 of the
+entries in the leaderboard's footnote on the descriptor limit, and a load a few percent over
+the limit can pass on errors: in two rehearsals at 340k the 330,000 that were served were
+answered as usual (p99 45 and 68 ms) and 0.72 % and 0.89 % of the requests failed. Refusing every connection over the
+limit with a 503, so that each one counts, was tried and taken out again: accepting a connection
+to refuse it costs what accepting it to serve it costs, at the moment the box has least to
+spare. That rehearsal refused 20,000 in the seconds after the limit was reached, and the 330,000
+being served waited up to 28 s behind it.
 
 **What the limit does not do.** On the guest (cap 66 %) I rehearsed the probes that would follow
-a passed 320k. A little over the limit, 340k, the server stays up. At 400k and 640k, with 330,000
-connections held and tens or hundreds of thousands of users retrying, packet processing takes the
-CPU, the server gets none for seconds at a time, memory runs out as described above, and in all
+a passed 320k. A little over the limit, 340k, twice: one rehearsal ran to its end; in the other
+the kernel ended the server two seconds before the end of the hold (one of the guest's pauses,
+with 330,000 connections and a second of room) and the guest then panicked. At 400k and 640k,
+with 330,000 connections held and tens or hundreds of thousands of users retrying, packet
+processing takes the CPU, the server gets none for seconds at a time, memory runs out as described above, and in all
 five rehearsals the kernel ended the server; in three of them (400k once, 640k twice) it then
-ended everything else and panicked. A server that held few enough connections to live through
+ended everything else and panicked too. A server that held few enough connections to live through
 that, ~240,000 on this memory, could not hold 320,000 in the probe before it. So if 320k passes
 on the benchmark box, the probes far above it may take the box down, with this server or any
 other that holds that many connections.

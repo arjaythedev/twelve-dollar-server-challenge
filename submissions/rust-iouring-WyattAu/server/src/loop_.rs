@@ -432,26 +432,36 @@ impl Server {
                     }
                 }
                 QueuedKind::Feed => {
-                    let feed = handlers::read_feed(&self.store, &self.store.writer_conn(), 20);
-                    let mut body = Vec::with_capacity(4096);
-                    body.extend_from_slice(b"{\"posts\":[");
-                    for (i, p) in feed.iter().enumerate() {
-                        if i > 0 {
-                            body.push(b',');
+                    // E18 zero-copy emission: rows streamed from the mmap
+                    // during the backward walk (no PostFull intermediates)
+                    let mut body = Vec::with_capacity(6144);
+                    match handlers::reader_feed_emit(&self.store, 20, &mut body) {
+                        Ok(()) => (200u16, body),
+                        Err(_) => {
+                            // degradation ladder: fallback feed (SPEC SQL)
+                            let mut b = Vec::with_capacity(6144);
+                            b.extend_from_slice(b"{\"posts\":[");
+                            let feed =
+                                handlers::fallback_feed(&self.store.writer_conn(), 20);
+                            for (i, p) in feed.iter().enumerate() {
+                                if i > 0 {
+                                    b.push(b',');
+                                }
+                                let pref = json::PostRef {
+                                    id: p.id,
+                                    body: &p.body,
+                                    created_at: &p.created_at,
+                                    author: &p.author,
+                                    like_count: p.like_count,
+                                };
+                                let mut tmp = [0u8; 2048];
+                                let n = json::write_post_json(&mut tmp, &pref);
+                                b.extend_from_slice(&tmp[..n]);
+                            }
+                            b.extend_from_slice(b"]}");
+                            (200u16, b)
                         }
-                        let pref = json::PostRef {
-                            id: p.id,
-                            body: &p.body,
-                            created_at: &p.created_at,
-                            author: &p.author,
-                            like_count: p.like_count,
-                        };
-                        let mut tmp = [0u8; 2048];
-                        let n = json::write_post_json(&mut tmp, &pref);
-                        body.extend_from_slice(&tmp[..n]);
                     }
-                    body.extend_from_slice(b"]}");
-                    (200u16, body)
                 }
                 QueuedKind::PostGet(id) => match handlers::read_post(&self.store, &self.store.writer_conn(), *id) {
                     Some(row) => {

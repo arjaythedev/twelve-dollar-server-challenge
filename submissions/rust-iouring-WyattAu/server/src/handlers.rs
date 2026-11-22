@@ -163,6 +163,96 @@ pub fn reader_username(store: &Store, user_id: i64) -> Result<Option<Vec<u8>>, R
     decode_username(cur.payload()?).map(Some)
 }
 
+/// Zero-copy feed emitter (E18): walks the posts table backward and writes
+/// the SPEC feed JSON straight into `out`, pulling body/created_at bytes as
+/// views into the mmap and resolving authors/counts per row. No PostFull
+/// intermediates. JOIN semantics preserved (posts without users drop).
+pub fn reader_feed_emit(store: &Store, max: usize, out: &mut Vec<u8>) -> Result<(), ReaderError> {
+    let r = store.reader().ok_or(ReaderError::OutOfRange)?;
+    let roots = &store.roots;
+    let mut cur = Cursor::table(r, roots.posts)?;
+    out.reserve(4096);
+    out.extend_from_slice(b"{\"posts\":[");
+    let mut emitted = 0usize;
+    if cur.last()? != Step::Moved {
+        out.push(b']');
+        out.push(b'}');
+        return Ok(());
+    }
+    let mut ucur = Cursor::table(r, roots.users)?;
+    let mut scan = IndexScan::new(r, roots.likes_idx)?;
+    loop {
+        let id = cur.rowid()?;
+        let payload = cur.payload()?;
+        let (f, nf) = {
+            let mut buf = [Field { serial_type: 0, offset: 0, len: 0 }; 8];
+            let (_, n) = decode_header(payload, &mut buf).map_err(|_| ReaderError::Corrupt("posts record"))?;
+            (buf, n)
+        };
+        if nf < 4 || f[0].serial_type != 0 {
+            return Err(ReaderError::Corrupt("unexpected posts record shape"));
+        }
+        let user_id = {
+            let b = &payload[f[1].offset..f[1].offset + f[1].len];
+            match f[1].serial_type {
+                1 => b[0] as i8 as i64,
+                2 => i16::from_be_bytes([b[0], b[1]]) as i64,
+                3 => ((b[0] as i64) << 16) | ((b[1] as i64) << 8) | (b[2] as i64),
+                4 => i32::from_be_bytes([b[0], b[1], b[2], b[3]]) as i64,
+                8 => 0,
+                9 => 1,
+                _ => return Err(ReaderError::Corrupt("user_id type")),
+            }
+        };
+        let created = &payload[f[3].offset..f[3].offset + f[3].len];
+        // author resolve (users seek by rowid)
+        if ucur.table_seek(user_id)? != TableSeek::Found {
+            // JOIN drops author-less posts
+            if cur.prev()? != Step::Moved {
+                break;
+            }
+            continue;
+        }
+        let username = {
+            let up = ucur.payload()?;
+            let (uf, unf) = {
+                let mut ub = [Field { serial_type: 0, offset: 0, len: 0 }; 4];
+                let (_, un) = decode_header(up, &mut ub).map_err(|_| ReaderError::Corrupt("users record"))?;
+                (ub, un)
+            };
+            if unf < 2 {
+                return Err(ReaderError::Corrupt("users record short"));
+            }
+            &up[uf[1].offset..uf[1].offset + uf[1].len]
+        };
+        let like_count = scan.count_prefix(id)?;
+        // emit row: {"id":N,"body":"…","created_at":"…","author":"…","like_count":N}
+        if emitted > 0 {
+            out.push(b',');
+        }
+        out.extend_from_slice(b"{\"id\":");
+        out.extend_from_slice(id.to_string().as_bytes());
+        out.extend_from_slice(b",\"body\":\"");
+        // JSON-escape (quotes/control chars); SPEC passes <>&/ and non-ASCII raw
+        let mut esc = [0u8; 2048];
+        let nesc = uring_http::json::write_escaped(&mut esc, &payload[f[2].offset..f[2].offset + f[2].len]);
+        out.extend_from_slice(&esc[..nesc]);
+        out.extend_from_slice(b"\",\"created_at\":\"");
+        out.extend_from_slice(created);
+        out.extend_from_slice(b"\",\"author\":\"");
+        out.extend_from_slice(username);
+        out.extend_from_slice(b"\",\"like_count\":");
+        out.extend_from_slice(like_count.to_string().as_bytes());
+        out.push(b'}');
+        emitted += 1;
+        if emitted == max || cur.prev()? != Step::Moved {
+            break;
+        }
+    }
+    out.extend_from_slice(b"]}");
+    Ok(())
+}
+
 // ---- fallback-path reads (bundled SQLite) -----------------------------------
 
 pub fn fallback_post(conn: &Connection, id: i64) -> Option<PostRow> {

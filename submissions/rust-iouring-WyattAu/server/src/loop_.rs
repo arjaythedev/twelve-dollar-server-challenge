@@ -24,7 +24,6 @@ use std::time::Duration;
 
 use uring_http::http::{parse, ParseError};
 use uring_http::json;
-use uring_kit::buffer::BufferPool;
 use uring_kit::engine::{Engine, Cqe};
 use uring_kit::net;
 use uring_kit::token::{Op, Token};
@@ -34,17 +33,19 @@ use crate::handlers;
 use crate::router::{self, errors, Dispatch, Route};
 use crate::store::Store;
 
-const POOL_CAPACITY: usize = 16_384;
-const POOL_BUF_SIZE: usize = 2048;
+const RECV_BUF_SIZE: usize = 2048;
 const RING_ENTRIES: u32 = 4096;
+const POOL_CAPACITY: usize = 16_384; // max concurrent connections (F55 budget)
 /// hard cap on request head+body bytes (SPEC bodies <= 500 chars)
 const MAX_REQUEST: usize = 64 * 1024;
 /// pipelined requests drained per read burst
 const MAX_PIPELINED: usize = 8;
 
 struct Conn {
-    slot: u32,
+    fd: RawFd,
     generation: u16,
+    /// fixed per-connection receive buffer (unregistered; stable address)
+    recv_buf: Vec<u8>,
     /// request-stream accumulation
     buf: Vec<u8>,
     /// consumed prefix of `buf`
@@ -56,7 +57,6 @@ struct Conn {
 
 struct Queued {
     fd: RawFd,
-    slot: u32,
     generation: u16,
     kind: QueuedKind,
 }
@@ -75,12 +75,15 @@ pub struct Server {
     cfg: Config,
     store: Store,
     engine: uring_kit::uring::UringEngine,
-    pool: BufferPool,
     #[allow(dead_code)]
     listener: std::net::TcpListener,
     accept_fd: RawFd,
     conns: HashMap<RawFd, Conn>,
-    slot_conn: HashMap<u32, RawFd>,
+    /// generation -> fd (one live conn per generation)
+    gen_conn: HashMap<u16, RawFd>,
+    /// closed conns awaiting their close(2) CQE; buffers stay alive so an
+    /// in-flight kernel write/read can never touch freed memory
+    graveyard: Vec<(Token, Conn)>,
     queue: Vec<Queued>,
     now_ms: u64,
 }
@@ -88,10 +91,9 @@ pub struct Server {
 impl Server {
     pub fn new(cfg: Config) -> Result<Self, String> {
         let store = Store::open(&cfg.sqlite_path, &cfg.jwt_secret)?;
-        let pool =
-            BufferPool::new(POOL_CAPACITY, POOL_BUF_SIZE).ok_or("buffer registration rejected")?;
-        let engine = uring_kit::uring::UringEngine::new(RING_ENTRIES, Some(&pool), false)
-            .map_err(|e| format!("ring setup: {e}"))?;
+        let engine =
+            uring_kit::uring::UringEngine::new(RING_ENTRIES, None, false)
+                .map_err(|e| format!("ring setup: {e}"))?;
         let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port)
             .parse()
             .map_err(|e| format!("bind addr: {e}"))?;
@@ -102,11 +104,11 @@ impl Server {
             cfg,
             store,
             engine,
-            pool,
             listener,
             accept_fd,
             conns: HashMap::new(),
-            slot_conn: HashMap::new(),
+            gen_conn: HashMap::new(),
+            graveyard: Vec::new(),
             queue: Vec::new(),
             now_ms: 0,
         })
@@ -146,64 +148,74 @@ impl Server {
                 // the engine re-arms the listener itself (drain path)
             }
             Op::Read => {
-                let slot = cqe.token.slot();
                 let generation = cqe.token.generation();
                 let n = match cqe.result {
                     Ok(n) => n as usize,
                     Err(_) => {
-                        self.close_conn(slot, generation);
+                        self.close_conn(generation);
                         return;
                     }
                 };
-                let Some(&fd) = self.slot_conn.get(&slot) else {
+                let Some(&fd) = self.gen_conn.get(&generation) else {
                     return;
                 };
                 if n == 0 {
                     // peer closed
-                    self.close_conn(slot, generation);
+                    self.close_conn(generation);
                     return;
                 }
-                let bytes = self.pool_slot_bytes(slot, n).to_vec();
+                let bytes: &[u8] = {
+                    let conn = match self.conns.get(&fd) {
+                        Some(c) if c.generation == generation => c,
+                        _ => return,
+                    };
+                    &conn.recv_buf[..n.min(conn.recv_buf.len())]
+                };
+                let bytes = bytes.to_vec();
                 let conn = match self.conns.get_mut(&fd) {
                     Some(c) if c.generation == generation => c,
                     _ => return,
                 };
                 conn.last_active = self.now_ms;
                 conn.buf.extend_from_slice(&bytes);
-                self.consume(fd, slot, generation);
+                self.consume(fd, generation);
             }
             Op::Write => {
-                let slot = cqe.token.slot();
                 let generation = cqe.token.generation();
                 if cqe.result.is_err() {
-                    self.close_conn(slot, generation);
+                    self.close_conn(generation);
                     return;
                 }
                 // response sent: pop the outbox front; send next or re-arm read
-                let Some(&fd) = self.slot_conn.get(&slot) else { return };
+                let Some(&fd) = self.gen_conn.get(&generation) else { return };
                 let Some(conn) = self.conns.get_mut(&fd) else { return };
                 if conn.generation != generation {
                     return;
                 }
                 conn.outbox.pop_front();
                 if conn.outbox.front().is_some() {
-                    self.submit_write_front(fd, slot, generation);
+                    self.submit_write_front(fd, generation);
                 } else {
-                    self.submit_read(fd, slot, generation);
+                    self.submit_read(fd, generation);
                 }
             }
-            Op::Close | Op::Connect | Op::Splice => {}
+            Op::Close => {
+                // close(2) landed: free the graveyard entry now
+                if let Some(pos) = self
+                    .graveyard
+                    .iter()
+                    .position(|(t, _)| *t == cqe.token)
+                {
+                    self.graveyard.swap_remove(pos);
+                }
+            }
+            Op::Connect | Op::Splice => {}
         }
-    }
-
-    fn pool_slot_bytes(&self, slot: u32, n: usize) -> &[u8] {
-        let s = self.pool.slot(slot);
-        &s[..n.min(s.len())]
     }
 
     /// Parse accumulated bytes; queue every complete request. Unconsumed
     /// bytes stay in `conn.buf` (compacted periodically).
-    fn consume(&mut self, fd: RawFd, slot: u32, generation: u16) {
+    fn consume(&mut self, fd: RawFd, generation: u16) {
         for _ in 0..MAX_PIPELINED {
             let (buf, consumed) = {
                 let Some(conn) = self.conns.get(&fd) else { return };
@@ -234,17 +246,17 @@ impl Server {
                     let content_length = req.content_length.unwrap_or(0);
                     let total = head_end.saturating_add(content_length);
                     if total > MAX_REQUEST {
-                        self.queue_error(fd, slot, generation, errors::NOT_FOUND);
-                        self.close_conn(slot, generation);
+                        self.queue_error(fd, generation, errors::NOT_FOUND);
+                        self.close_conn(generation);
                         return;
                     }
                     if slice.len() < total {
                         // body incomplete: wait for more bytes
-                        self.submit_read(fd, slot, generation);
+                        self.submit_read(fd, generation);
                         return;
                     }
                     let body = &slice[head_end..total];
-                    self.enqueue(fd, slot, generation, &req, body);
+                    self.enqueue(fd, generation, &req, body);
                     if let Some(conn) = self.conns.get_mut(&fd) {
                         conn.consumed = total;
                         if conn.consumed > 32 * 1024 {
@@ -255,16 +267,16 @@ impl Server {
                 }
                 Err(ParseError::Incomplete) => {
                     if slice.len() > MAX_REQUEST {
-                        self.close_conn(slot, generation);
+                        self.close_conn(generation);
                         return;
                     }
-                    self.submit_read(fd, slot, generation);
+                    self.submit_read(fd, generation);
                     return;
                 }
                 Err(_) => {
                     // malformed head: not a SPEC route
-                    self.queue_error(fd, slot, generation, errors::NOT_FOUND);
-                    self.close_conn(slot, generation);
+                    self.queue_error(fd, generation, errors::NOT_FOUND);
+                    self.close_conn(generation);
                     return;
                 }
             }
@@ -274,7 +286,6 @@ impl Server {
     fn enqueue(
         &mut self,
         fd: RawFd,
-        slot: u32,
         generation: u16,
         req: &uring_http::http::Request<'_>,
         body: &[u8],
@@ -293,7 +304,7 @@ impl Server {
                 let claims = match crate::jwt::verify(req.authorization, mac, now) {
                     Ok(c) => c,
                     Err(e) => {
-                        self.queue_error(fd, slot, generation, router::jwt_row(e));
+                        self.queue_error(fd, generation, router::jwt_row(e));
                         return;
                     }
                 };
@@ -316,7 +327,7 @@ impl Server {
                 let claims = match crate::jwt::verify(req.authorization, mac, now) {
                     Ok(c) => c,
                     Err(e) => {
-                        self.queue_error(fd, slot, generation, router::jwt_row(e));
+                        self.queue_error(fd, generation, router::jwt_row(e));
                         return;
                     }
                 };
@@ -326,7 +337,7 @@ impl Server {
                 let post = match parse_positive(id_seg) {
                     Some(v) => v,
                     None => {
-                        self.queue_error(fd, slot, generation, errors::INVALID_POST_ID);
+                        self.queue_error(fd, generation, errors::INVALID_POST_ID);
                         return;
                     }
                 };
@@ -334,71 +345,88 @@ impl Server {
             }
             Dispatch::Error(err) => QueuedKind::Error(err),
         };
-        self.queue.push(Queued { fd, slot, generation, kind });
+        self.queue.push(Queued { fd, generation, kind });
     }
 
-    fn queue_error(&mut self, fd: RawFd, slot: u32, generation: u16, err: (u16, &'static str)) {
-        self.queue.push(Queued { fd, slot, generation, kind: QueuedKind::Error(err) });
+    fn queue_error(&mut self, fd: RawFd, generation: u16, err: (u16, &'static str)) {
+        self.queue.push(Queued { fd, generation, kind: QueuedKind::Error(err) });
     }
 
-    fn submit_read(&mut self, fd: RawFd, slot: u32, generation: u16) {
-        let token = Token::new(Op::Read, slot, generation, 0);
-        let _ = self.engine.read(token, fd, slot);
+    fn submit_read(&mut self, fd: RawFd, generation: u16) {
+        // unregistered vectored read into the connection's own stable buffer
+        let iov = Box::new([libc::iovec {
+            iov_base: self.recv_ptr(fd),
+            iov_len: RECV_BUF_SIZE,
+        }]);
+        let token = Token::new(Op::Read, 0, generation, 0);
+        if self.engine.read_vectored(token, fd, iov).is_err() {
+            self.close_conn(generation);
+        }
+    }
+
+    /// Raw recv-buffer pointer for the in-flight read. SAFETY (uring-kit
+    /// contract): the buffer is a fixed-capacity Vec that is never resized,
+    /// its address is stable for the connection's lifetime, and the kernel
+    /// writes only between the read submission and its CQE on this thread.
+    fn recv_ptr(&self, fd: RawFd) -> *mut libc::c_void {
+        self.conns
+            .get(&fd)
+            .map(|c| c.recv_buf.as_ptr() as *mut libc::c_void)
+            .unwrap_or(std::ptr::null_mut())
     }
 
     /// Submit the outbox front. SAFETY (uring-kit contract): the frame is
     /// owned by the outbox and stays at a stable address until its write
     /// CQE pops it — the iov must not outlive that.
-    fn submit_write_front(&mut self, fd: RawFd, slot: u32, generation: u16) {
+    fn submit_write_front(&mut self, fd: RawFd, generation: u16) {
         let Some(conn) = self.conns.get(&fd) else { return };
         let Some(front) = conn.outbox.front() else { return };
         let iov = Box::new([libc::iovec {
             iov_base: front.as_ptr() as *mut libc::c_void,
             iov_len: front.len(),
         }]);
-        let token = Token::new(Op::Write, slot, generation, 0);
         let _ = conn; // borrow ends here; iov points at outbox-owned memory
+        let token = Token::new(Op::Write, 0, generation, 0);
         if self.engine.write_vectored(token, fd, iov).is_err() {
-            self.close_conn(slot, generation);
+            self.close_conn(generation);
         }
     }
 
     fn admit(&mut self, fd: RawFd) {
-        if std::env::var_os("LOOP_DEBUG").is_some() {
-            eprintln!("admit fd {fd}");
-        }
-        let Some(slot) = self.pool.take() else {
-            // slot budget exhausted (F55): close; k6 reconnects
+        if self.conns.len() >= POOL_CAPACITY {
+            // connection budget exhausted (F55): close; k6 reconnects
             unsafe { libc::close(fd) };
             return;
-        };
+        }
         self.engine
-            .add_stream(fd, Token::new(Op::Read, slot, 0, 0));
+            .add_stream(fd, Token::new(Op::Read, 0, 0, 0));
+        let generation = 0;
         self.conns.insert(
             fd,
             Conn {
-                slot,
-                generation: 0,
+                fd,
+                generation,
+                recv_buf: vec![0u8; RECV_BUF_SIZE],
                 buf: Vec::new(),
                 consumed: 0,
                 outbox: VecDeque::new(),
                 last_active: self.now_ms,
             },
         );
-        self.slot_conn.insert(slot, fd);
-        self.submit_read(fd, slot, 0);
+        self.gen_conn.insert(generation, fd);
+        self.submit_read(fd, generation);
     }
 
-    fn close_conn(&mut self, slot: u32, generation: u16) {
-        let Some(&fd) = self.slot_conn.get(&slot) else { return };
-        match self.conns.get(&fd) {
-            Some(c) if c.generation == generation => {}
-            _ => return,
-        }
-        self.conns.remove(&fd);
-        self.slot_conn.remove(&slot);
-        self.pool.release(slot);
-        let token = Token::new(Op::Close, slot, generation, 0);
+    fn close_conn(&mut self, generation: u16) {
+        let Some(&fd) = self.gen_conn.get(&generation) else { return };
+        let Some(conn) = self.conns.remove(&fd) else { return };
+        self.gen_conn.remove(&generation);
+        // DEFERRED FREE: the conn (and its recv_buf) stays alive in the
+        // graveyard until the close CQE lands; any in-flight kernel op on
+        // this fd then completes into memory we still own, or fails EBADF
+        // if close(2) executed first. Either way: no use-after-free.
+        let token = Token::new(Op::Close, 0, generation, 0);
+        self.graveyard.push((token, conn));
         let _ = self.engine.close(token, fd);
     }
 
@@ -572,7 +600,7 @@ impl Server {
             if std::env::var_os("LOOP_DEBUG").is_some() {
                 eprintln!("send fd={} status={} len={}", q.fd, status, body.len());
             }
-            self.send_response(q.fd, q.slot, q.generation, *status, body);
+            self.send_response(q.fd, q.generation, *status, body);
         }
 
         // snapshot advances AFTER commit for the next pass (ADR 0003)
@@ -582,7 +610,6 @@ impl Server {
     fn send_response(
         &mut self,
         fd: RawFd,
-        slot: u32,
         generation: u16,
         status: u16,
         body: &[u8],
@@ -605,12 +632,12 @@ impl Server {
                 was_idle
             }
             None => {
-                self.close_conn(slot, generation);
+                self.close_conn(generation);
                 return;
             }
         };
         if was_idle {
-            self.submit_write_front(fd, slot, generation);
+            self.submit_write_front(fd, generation);
         }
     }
 
@@ -624,11 +651,11 @@ impl Server {
             .collect();
         for fd in stale {
             if let Some(c) = self.conns.remove(&fd) {
-                self.slot_conn.remove(&c.slot);
-                self.pool.release(c.slot);
-                let _ = self
-                    .engine
-                    .close(Token::new(Op::Close, c.slot, c.generation, 0), fd);
+                self.gen_conn.remove(&c.generation);
+                // DEFERRED FREE: keep the conn alive until the close CQE
+                let token = Token::new(Op::Close, 0, c.generation, 0);
+                self.graveyard.push((token, c));
+                let _ = self.engine.close(token, fd);
             }
         }
     }

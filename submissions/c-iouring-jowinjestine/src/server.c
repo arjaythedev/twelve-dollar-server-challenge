@@ -32,6 +32,8 @@ static unsigned recv_buf_size = RECV_BUF_SIZE_DEFAULT;
 /* Optional soft wall-clock budget for processing a pre-existing ready backlog.
  * Experimental: 0 disables it. Does not interrupt a SQLite transaction or send. */
 static unsigned backlog_slice_us = 0;
+/* Cap one-shot reads per round while answer backlog is deep; 0 disables. */
+static unsigned read_backlog_limit = 1024;
 static uint64_t sliced_ready_passes;
 static uint64_t wait_ns = 1000000ULL;
 #define PEND_MAX (HTTP_MAX_HEAD + HTTP_MAX_BODY)
@@ -617,7 +619,9 @@ static unsigned issue_reads(unsigned budget) {
 static unsigned read_rounds(void) {
   unsigned n = 0, budget = READS_PER_PASS;
   while (budget && rq_head < nrq) {
-    unsigned k = issue_reads(budget < recv_bufs ? budget : recv_bufs);
+    unsigned cap = budget < recv_bufs ? budget : recv_bufs;
+    if (read_backlog_limit && nready > 1024 && cap > read_backlog_limit) cap = read_backlog_limit;
+    unsigned k = issue_reads(cap);
     if (!k) break;
     budget -= k;
     S.reads += k;
@@ -1081,6 +1085,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "RECV_SIZE must be a power of 2 between 256 and 2048\n");
     return 1;
   }
+  read_backlog_limit = (unsigned)env_long("READ_BACKLOG_LIMIT", 1024);
   backlog_slice_us = (unsigned)env_long("BACKLOG_SLICE_US", 0); /* 0: a ready backlog is answered without a time limit */
   /* Ring 0 waits for 64 completions or 2 ms: fewer, fuller passes (each pass enters every ring).
    * Measured at 300k connections: ~4 % less loop CPU than 256 / 1 ms, p99 unchanged. */

@@ -1081,7 +1081,7 @@ int main(int argc, char **argv) {
     fprintf(stderr, "RECV_SIZE must be a power of 2 between 256 and 2048\n");
     return 1;
   }
-  backlog_slice_us = (unsigned)env_long("BACKLOG_SLICE_US", 0); /* 0: a ready backlog is answered without a time limit */
+  backlog_slice_us = (unsigned)env_long("BACKLOG_SLICE_US", 750); /* 0: a ready backlog is answered without a time limit */
   /* Ring 0 waits for 64 completions or 2 ms: fewer, fuller passes (each pass enters every ring).
    * Measured at 300k connections: ~4 % less loop CPU than 256 / 1 ms, p99 unchanged. */
   wait_min = (unsigned)env_long("WAIT_MIN", 64);

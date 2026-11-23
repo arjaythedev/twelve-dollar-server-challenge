@@ -126,7 +126,8 @@ mostly idle sockets under `LimitNOFILE=65535`.
     overflow pages, a cell not in the expected form, an index entry without its row, a post whose
     author row is gone) makes that request run the reference SQL instead. Only prepared statements,
     cursors, KeyInfo objects and the four root page numbers (schema metadata read at open) are
-    reused between requests; every request reads its rows from SQLite while it is served.
+    reused between requests, and within one batch the references to the pages of `users` it has
+    read (last section); every request reads its rows from SQLite while it is served.
 - Writes are prepared SQL: `INSERT … RETURNING id, created_at` for posts (`created_at` is the
   column default, sent as stored) and `INSERT … ON CONFLICT (user_id, post_id) DO NOTHING` for
   likes, `sqlite3_changes` telling 201 from 200.
@@ -801,3 +802,52 @@ the pages that packets are received into and sent from (`clear_page_erms`, the k
 receives 2.4 packets per request: the request, and 1.4 bare ACKs, because a feed response is
 three segments and the load generator's kernel acknowledges it twice. None of that is the
 server's to change.
+
+## A batch keeps its references to the pages of `users` (follow-up to #486)
+
+After the commit above, what was left of the author look-ups was mostly the pager: for each of a
+feed's 20 leaves a hash look-up, taking the page off the cache's list of unreferenced pages, and
+putting it back when the request is done. A batch asks for the same pages again and again: at
+320,000 users a batch has about 190 feeds, so 3,800 author look-ups, on the 300 leaves that hold
+the 20,000 users of the load test.
+
+A page of `users` that a batch has read now keeps one reference until the batch's cursors close,
+which is before its transaction ends: what an open cursor does with the page it is on. The
+references are in a table by page number (1,024 slots), and a look-up that arrives at a page in
+the table takes it from there instead of asking the pager again. The row is read from the page
+for every request, as before. No row, key or position is remembered, only that this page of
+SQLite's cache is already referenced in this transaction, and the table is empty again when the
+batch commits.
+
+Only `users`, because no statement here writes it: the two `INSERT`s write `posts`, `likes` and
+their indexes, so a page of `users` is not changed, freed or moved while it is referenced. (A
+changed page would be read as changed, since the table holds SQLite's own page object; but a
+write can free a page, and SQLite refuses to reuse a freed page that is still referenced, so
+pages of tables that are written are fetched and released per request as before.) A page whose
+slot is taken by another page is fetched and released as before too.
+
+**Checked** as above: the `SELFCHECK=1` build, 786,000 answers under 100,000 users with writes
+going in, none different from the reference SQL, no fallbacks; the 42 tests; no SQLite error in
+any of the runs below.
+
+**Measured** on the test box, on one evening (60 s ramp + 2 min + 30 s down at 320k). The runs
+of this commit alternated with runs of the commit above: both of its runs at 200k and the last
+four of its twelve at 320k.
+
+| | commit above | this commit |
+|---|---|---|
+| 200,000 users, user CPU per request | 4.94, 4.81 µs | 4.69, 4.72 µs |
+| 320,000 users, user CPU per request | 4.63-4.92 µs (12 runs) | 4.44-4.50 µs (7 runs) |
+| 320k, runs that pass | 7 of 12 | 6 of 7 |
+| 320k, p99 of each run | the eight above, then 6.4 s, 39 ms, 3.7 s, 56 ms | 61 ms, 224 ms, 53 ms, 51 ms, 230 ms, 112 ms, 1.16 s |
+| 320k, requests over 1 s per run | 77k, 11k, 46k, 61k, 45k, 49k, 88k, 31k, 116k, 0, 91k, 20k: mean 53k | 0, 14k, 14k, 10k, 46k, 22k, 64k: mean 24k |
+| 320k, p95 | 14-28 ms | 16-23 ms |
+
+and one 5-minute hold at 320k with this commit: p95 18.2 ms, p99 168 ms, nothing failed, least
+free memory 96 MB.
+
+The saving is 0.17 µs a request at 200k and 0.26 µs at 320k, where the batches are larger and
+more look-ups arrive at a page the batch already has; it is largest in the seconds when the
+server is behind and a batch holds thousands of requests, which is when it matters. That may be
+why the stall at the end of the ramp is shallower in most of these runs. Seven runs are few, the
+stall is still there in every one, and the one failure shows it can still go the other way.

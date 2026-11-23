@@ -2,13 +2,19 @@
  * transaction. Compiled in the same translation unit as the unmodified amalgamation. Every page
  * comes through SQLite's pager, WAL and page cache; only the bytecode interpreter is skipped,
  * because both queries are known ahead of time. Anything unexpected returns -1 and the caller
- * runs the reference SQL instead. Nothing read here outlives the request. */
+ * runs the reference SQL instead. Nothing read here outlives the request; references to the
+ * pages of users a batch has read are kept until its cursors close (struct bt). */
 #ifndef BTREE_H
 #define BTREE_H
 
 #define FEED_N 20
 #define LIKES_SPAN 512 /* count likes with one index walk when the feed's ids lie within this span */
 static const int opt_tail = 1, opt_batch = 1; /* the two read-path variants (both measured; see README) */
+#ifndef BT_HOLD
+#define BT_HOLD 1
+#endif
+static const int opt_hold = BT_HOLD; /* pages of users stay referenced until the batch's cursors close */
+#define BT_HELD 1024 /* slots, by page number */
 static inline int cell_pid_rowid(MemPage *pg, int i, i64 *pid, i64 *rowid);
 
 enum { CUR_POSTS = 0, CUR_USERS, CUR_FEED_IDX, CUR_LIKES_IDX, NCUR };
@@ -22,6 +28,13 @@ struct bt {
   int ok;   /* the schema matches; plans are enabled */
   uint8_t *spill;
   uint32_t spill_cap;
+  /* Pages of users read since bt_open, one reference each, released in bt_close (before the
+   * transaction ends), the way an open cursor keeps the page it is on. users is not written by
+   * any statement here. A look-up that lands on one of them takes it from this table instead
+   * of asking the pager again; its row is read from the page as always. */
+  MemPage *held[BT_HELD];
+  u16 held_slot[BT_HELD];
+  int nheld;
 };
 
 static Pgno bt_rootpage(sqlite3 *c, const char *name) {
@@ -99,6 +112,12 @@ static int bt_open(struct bt *b) {
   return 0;
 }
 static void bt_close(struct bt *b) {
+  for (int i = 0; i < b->nheld; i++) {
+    MemPage **slot = &b->held[b->held_slot[i]];
+    if (*slot) releasePageNotNull(*slot);
+    *slot = NULL;
+  }
+  b->nheld = 0;
   if (!b->open) return;
   for (int i = 0; i < NCUR; i++) sqlite3BtreeCloseCursor(b->cur[i]);
   b->open = 0;
@@ -349,6 +368,7 @@ static int bt_count_likes_tail(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
 struct bt_hit {
   MemPage *pg;
   int ix;
+  int own; /* the hit holds a reference of its own (else the page is in bt.held) */
 };
 static inline i64 bt_cell_key(MemPage *pg, int i) {
   const u8 *c = findCellPastPtr(pg, i);
@@ -365,6 +385,7 @@ static inline i64 bt_cell_key(MemPage *pg, int i) {
 struct bt_pageinfo {
   MemPage *pg;
   Pgno pgno;
+  int kept;     /* the reference belongs to bt.held */
   int bounds;   /* k0, kn and scale are set (they are read when a search first needs them) */
   i64 k0, kn;   /* the page's first and last key */
   double scale; /* cells per key: (nCell - 1) / (kn - k0) */
@@ -400,7 +421,7 @@ static int bt_lower_bound(struct bt_pageinfo *pi, i64 k) {
 }
 static void bt_release_hits(struct bt_hit *h, int n) {
   for (int i = 0; i < n; i++)
-    if (h[i].pg) releasePageNotNull(h[i].pg);
+    if (h[i].pg && h[i].own) releasePageNotNull(h[i].pg);
 }
 static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct bt_hit *hit) {
   BtShared *bs = b->bt->pBt;
@@ -409,6 +430,7 @@ static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct b
   Pgno next[FEED_N];
   i64 below[FEED_N]; /* the parent's key before each key's page: every key in the page is larger */
   u8 has_below[FEED_N];
+  int hold = opt_hold && root == b->root[CUR_USERS];
   if (n < 1 || n > FEED_N) return -1;
   for (int i = 0; i < n; i++) {
     next[i] = root;
@@ -420,16 +442,30 @@ static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct b
       int p = 0;
       while (p < np && pages[p].pgno != next[i]) p++;
       if (p == np) {
-        MemPage *pg;
-        if (getAndInitPage(bs, next[i], &pg, PAGER_GET_READONLY) != SQLITE_OK) pg = NULL;
+        MemPage *pg = NULL;
+        int kept = 0;
+        if (hold) {
+          unsigned si = next[i] & (BT_HELD - 1);
+          if (b->held[si] && b->held[si]->pgno == next[i]) {
+            pg = b->held[si];
+            kept = 1;
+          } else if (!b->held[si] && getAndInitPage(bs, next[i], &pg, PAGER_GET_READONLY) == SQLITE_OK) {
+            b->held[si] = pg; /* the table's reference from here on */
+            b->held_slot[b->nheld++] = (u16)si;
+            kept = 1;
+          }
+        }
+        if (!pg && getAndInitPage(bs, next[i], &pg, PAGER_GET_READONLY) != SQLITE_OK) pg = NULL;
         if (!pg || !pg->intKey || pg->nCell == 0 || pg->nOverflow || depth >= BTCURSOR_MAX_DEPTH || (leaf >= 0 && pg->leaf != leaf)) {
-          if (pg) releasePageNotNull(pg);
-          for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
+          if (pg && !kept) releasePageNotNull(pg);
+          for (int k = 0; k < np; k++)
+            if (!pages[k].kept) releasePageNotNull(pages[k].pg);
           return -1;
         }
         leaf = pg->leaf;
         pages[np].pg = pg;
         pages[np].pgno = next[i];
+        pages[np].kept = kept;
         pages[np].bounds = 0;
         np++;
       }
@@ -455,10 +491,12 @@ static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct b
         if (ix >= 0) {
           hit[i].pg = pg;
           hit[i].ix = ix;
-          sqlite3PagerRef(pg->pDbPage);
+          hit[i].own = !pi->kept;
+          if (hit[i].own) sqlite3PagerRef(pg->pDbPage);
         }
       }
-      for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
+      for (int k = 0; k < np; k++)
+        if (!pages[k].kept) releasePageNotNull(pages[k].pg);
       return 0;
     }
     for (int i = 0; i < n; i++) {
@@ -471,7 +509,8 @@ static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct b
         has_below[i] = 1;
       }
     }
-    for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
+    for (int k = 0; k < np; k++)
+      if (!pages[k].kept) releasePageNotNull(pages[k].pg);
   }
 }
 /* usernames for n user ids: 0 with every name found (release the hits after use), 1 if one is
@@ -664,7 +703,7 @@ static int bt_post_direct(struct bt *b, struct ob *o, i64 id) {
       rc = 1;
     }
   }
-  releasePageNotNull(ph.pg);
+  bt_release_hits(&ph, 1);
   return rc;
 }
 

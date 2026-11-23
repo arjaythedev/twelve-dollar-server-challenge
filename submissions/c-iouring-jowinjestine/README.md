@@ -407,3 +407,29 @@ seed and PGO binary, preferably from a separate k6 host, and collect
 p95/p99, errors, CPU/request, RAM, `enobufs`, retransmissions and TCP
 memory. A smaller receive window may hurt throughput, so **do not enable
 without an A/B win**. No performance claim until the official benchmark.
+
+
+## Follow-up to merged #486: restore 16,384 responses per pass
+
+This A/B changes **only** the default answer cap back to 16,384, the value
+used before #484. #486's PSI-guided receive-buffer governor, 16 KiB normal /
+8 KiB pressure-mode requested socket buffer sizes, checkpoints, wait times,
+receive buffers, SQLite code, and SHA-256 remain unchanged.
+
+- Scored default: `ANSWERS_PER_PASS=16384 TCP_MEM_GOVERNOR=1`
+- Reproduce #486 without recompiling: `ANSWERS_PER_PASS=2048 TCP_MEM_GOVERNOR=1`
+- Verify the original 42-check test suite: `bash test/run.sh submissions/c-iouring-jowinjestine`
+
+Benchmark on a separate k6 machine with a fresh matching seed database for
+each configuration. Use the official `bench/load.js` settings: 60 s ramp,
+five-minute hold, p95 <500ms, p99 <1000ms and errors <1%. The benchmark
+command from the challenge root is:
+
+```bash
+k6 run -e BASE_URL=http://SERVER_IP:80 -e VUS=320000 -e RAMP_UP=60s -e DURATION=5m bench/load.js
+```
+
+Try a 300K and a 310K hold before the 320K candidate; record p95, p99,
+throughput, CPU/request, peak RAM, `enobufs`, `ready_max`, `max_turn`,
+WAL checkpoints and memory PSI. Do not interpret a 2-minute probe as a
+five-minute score. This is an independent experiment, not a claimed gain.

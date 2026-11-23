@@ -716,7 +716,7 @@ static void flush_replies(int commit_failed) {
 }
 
 static struct {
-  int enabled, normal_rcvbuf, pressure_rcvbuf, current_rcvbuf;
+  int enabled, fixed, normal_rcvbuf, pressure_rcvbuf, current_rcvbuf;
   uint64_t last_sample_ns, samples, changes, cg_current, cg_limit, cg_sock;
   unsigned high_streak, low_streak;
   double psi_some10, psi_full10;
@@ -765,8 +765,8 @@ static void stats(uint64_t dt_ns) {
           (unsigned long long)S.poll_ends, (unsigned long long)S.poll_rearmed,
           (unsigned long long)S.eventfd_events);
   if (MG.enabled) fprintf(stderr,
-      " tcp_memgov rcvbuf=%d pressure=%d psi_some10=%.2f psi_full10=%.2f cg_mem=%lluMB cg_max=%lluMB cg_sock=%lluMB tcp_mem_pages=%lu changes=%llu samples=%llu\n",
-      MG.current_rcvbuf, MG.current_rcvbuf == MG.pressure_rcvbuf, MG.psi_some10, MG.psi_full10,
+      " tcp_memgov fixed=%d rcvbuf=%d pressure=%d psi_some10=%.2f psi_full10=%.2f cg_mem=%lluMB cg_max=%lluMB cg_sock=%lluMB tcp_mem_pages=%lu changes=%llu samples=%llu\n",
+      MG.fixed, MG.current_rcvbuf, !MG.fixed && MG.current_rcvbuf == MG.pressure_rcvbuf, MG.psi_some10, MG.psi_full10,
       (unsigned long long)(MG.cg_current >> 20), (unsigned long long)(MG.cg_limit >> 20),
       (unsigned long long)(MG.cg_sock >> 20), MG.tcp_mem_pages,
       (unsigned long long)MG.changes, (unsigned long long)MG.samples);
@@ -814,6 +814,19 @@ static int apply_listener_rcvbuf(int requested) {
   return 0;
 }
 static int memgov_start(void) {
+  /* Fixed mode replaces adaptive governance for this experiment. Keep PSI
+   * sampling for comparable metrics; never dynamically change the cap. */
+  long fixed = env_long("TCP_RCVBUF_FIXED", 16384);
+  if (fixed) {
+    if (fixed != 8192 && fixed != 16384) {
+      fputs("TCP_RCVBUF_FIXED must be 0 (adaptive), 8192 or 16384\n", stderr);
+      return -1;
+    }
+    MG.fixed = 1;
+    MG.enabled = 1;
+    MG.normal_rcvbuf = MG.pressure_rcvbuf = (int)fixed;
+    return apply_listener_rcvbuf((int)fixed);
+  }
   MG.enabled = env_long("TCP_MEM_GOVERNOR", 1) != 0;
   if (!MG.enabled) return 0;
   MG.normal_rcvbuf = (int)env_long("TCP_RCVBUF_NORMAL", 16384);
@@ -853,6 +866,7 @@ static void memgov_tick(uint64_t now) {
       if (mem && (!line_end || mem < line_end)) MG.tcp_mem_pages = strtoul(mem + 5, NULL, 10);
     }
   }
+  if (MG.fixed) return; /* monitor memory, do not adjust established policy */
   int high = (psi_available && (MG.psi_full10 >= 2.0 || MG.psi_some10 >= 10.0)) ||
              (MG.cg_limit && MG.cg_current > MG.cg_limit * 85 / 100);
   if (high) { MG.high_streak++; MG.low_streak = 0; }

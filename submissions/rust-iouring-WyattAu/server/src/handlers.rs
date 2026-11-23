@@ -231,7 +231,9 @@ pub fn reader_feed_emit(store: &Store, max: usize, out: &mut Vec<u8>) -> Result<
             out.push(b',');
         }
         out.extend_from_slice(b"{\"id\":");
-        out.extend_from_slice(id.to_string().as_bytes());
+        let mut num = [0u8; 20];
+        let nd = uring_http::json::write_decimal(&mut num, 0, id);
+        out.extend_from_slice(&num[..nd]);
         out.extend_from_slice(b",\"body\":\"");
         // JSON-escape (quotes/control chars); SPEC passes <>&/ and non-ASCII raw
         let mut esc = [0u8; 2048];
@@ -242,7 +244,8 @@ pub fn reader_feed_emit(store: &Store, max: usize, out: &mut Vec<u8>) -> Result<
         out.extend_from_slice(b"\",\"author\":\"");
         out.extend_from_slice(username);
         out.extend_from_slice(b"\",\"like_count\":");
-        out.extend_from_slice(like_count.to_string().as_bytes());
+        let nd2 = uring_http::json::write_decimal(&mut num, 0, like_count);
+        out.extend_from_slice(&num[..nd2]);
         out.push(b'}');
         emitted += 1;
         if emitted == max || cur.prev()? != Step::Moved {
@@ -251,6 +254,68 @@ pub fn reader_feed_emit(store: &Store, max: usize, out: &mut Vec<u8>) -> Result<
     }
     out.extend_from_slice(b"]}");
     Ok(())
+}
+
+/// Zero-copy single-post GET (E19): seeks the posts row, resolves the
+/// author, counts likes, and writes the SPEC `{"post":{...}}` body straight
+/// into `out` from mmap views. No PostRow intermediates. Byte-parity with
+/// the fallback composite path (write_post_json format; author escaped).
+/// Ok(true) = emitted, Ok(false) = post or author not found.
+pub fn reader_post_get_emit(
+    store: &Store,
+    id: i64,
+    out: &mut Vec<u8>,
+) -> Result<bool, ReaderError> {
+    let r = store.reader().ok_or(ReaderError::OutOfRange)?;
+    let mut cur = Cursor::table(r, store.roots.posts)?;
+    if cur.table_seek(id)? != TableSeek::Found {
+        return Ok(false);
+    }
+    let payload = cur.payload()?;
+    let (f, nf) = decode_fields(payload)?;
+    if nf < 4 || f[0].serial_type != 0 {
+        return Err(ReaderError::Corrupt("unexpected posts record shape"));
+    }
+    let user_id = field_int(payload, &f[1]).ok_or(ReaderError::Corrupt("user_id type"))?;
+    let body = &payload[f[2].offset..f[2].offset + f[2].len];
+    let created = &payload[f[3].offset..f[3].offset + f[3].len];
+    // author resolve (JOIN semantics: author-less posts 404 like the feed drop)
+    let mut ucur = Cursor::table(r, store.roots.users)?;
+    if ucur.table_seek(user_id)? != TableSeek::Found {
+        return Ok(false);
+    }
+    let up = ucur.payload()?;
+    let (uf, unf) = {
+        let mut ub = [Field { serial_type: 0, offset: 0, len: 0 }; 4];
+        let (_, un) = decode_header(up, &mut ub)
+            .map_err(|_| ReaderError::Corrupt("users record"))?;
+        (ub, un)
+    };
+    if unf < 2 {
+        return Err(ReaderError::Corrupt("users record short"));
+    }
+    let username = &up[uf[1].offset..uf[1].offset + uf[1].len];
+    let mut scan = IndexScan::new(r, store.roots.likes_idx)?;
+    let like_count = scan.count_prefix(id)?;
+    // emit {"post":{...}} — write_post_json byte format
+    out.extend_from_slice(b"{\"post\":{\"id\":");
+    let mut num = [0u8; 20];
+    let mut nd = uring_http::json::write_decimal(&mut num, 0, id);
+    out.extend_from_slice(&num[..nd]);
+    out.extend_from_slice(b",\"body\":\"");
+    let mut esc = [0u8; 2048];
+    let nesc = uring_http::json::write_escaped(&mut esc, body);
+    out.extend_from_slice(&esc[..nesc]);
+    out.extend_from_slice(b"\",\"created_at\":\"");
+    out.extend_from_slice(created);
+    out.extend_from_slice(b"\",\"author\":\"");
+    let na = uring_http::json::write_escaped(&mut esc, username);
+    out.extend_from_slice(&esc[..na]);
+    out.extend_from_slice(b"\",\"like_count\":");
+    nd = uring_http::json::write_decimal(&mut num, 0, like_count);
+    out.extend_from_slice(&num[..nd]);
+    out.extend_from_slice(b"}}");
+    Ok(true)
 }
 
 // ---- fallback-path reads (bundled SQLite) -----------------------------------

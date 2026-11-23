@@ -125,7 +125,7 @@ pub fn write_post_json(out: &mut [u8], p: &PostRef<'_>) -> usize {
 }
 
 /// i64 decimal into `out[off..]`, returns bytes written. -0 emits "0".
-fn write_decimal(out: &mut [u8], off: usize, v: i64) -> usize {
+pub fn write_decimal(out: &mut [u8], off: usize, v: i64) -> usize {
     if v == 0 {
         out[off] = b'0';
         return 1;

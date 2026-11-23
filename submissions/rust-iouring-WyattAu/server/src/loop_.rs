@@ -61,12 +61,12 @@ struct Queued {
     kind: QueuedKind,
 }
 
-#[derive(Clone)]
 enum QueuedKind {
     Health,
     Feed,
     PostGet(i64),
-    PostCreate { user: i64, username: Vec<u8>, body: Vec<u8> },
+    /// username/body live in `Server::scratch` as (start,end) ranges
+    PostCreate { user: i64, username: (u32, u32), body: (u32, u32) },
     PostLike { user: i64, post: i64 },
     Error((u16, &'static str)),
 }
@@ -87,6 +87,9 @@ pub struct Server {
     graveyard: Vec<(Token, Conn)>,
     queue: Vec<Queued>,
     now_ms: u64,
+    /// per-pass byte arena: JWT usernames + PostCreate bodies as (start,end)
+    /// ranges into this buffer; cleared after each work_pass drains the queue
+    scratch: Vec<u8>,
 }
 
 impl Server {
@@ -113,6 +116,7 @@ impl Server {
             graveyard: Vec::new(),
             queue: Vec::new(),
             now_ms: 0,
+            scratch: Vec::new(),
         })
     }
 
@@ -219,46 +223,106 @@ impl Server {
     /// bytes stay in `conn.buf` (compacted periodically).
     fn consume(&mut self, fd: RawFd, generation: u16) {
         for _ in 0..MAX_PIPELINED {
-            let (buf, consumed) = {
-                let Some(conn) = self.conns.get(&fd) else { return };
-                (conn.buf.clone(), conn.consumed)
-            };
-            let slice = &buf[consumed..];
-            if slice.is_empty() {
-                if let Some(conn) = self.conns.get_mut(&fd) {
-                    conn.buf.clear();
-                    conn.consumed = 0;
-                }
-                return;
+            // ---- phase A: parse + validate + route against conn.buf IN
+            // PLACE (immutable borrow; zero copies). `total` is computed
+            // HERE — the reverted-draft lesson: the Outcome carries it. ----
+            enum Outcome {
+                /// conn vanished: stop consuming
+                Gone,
+                /// buffer drained past `consumed`: reset
+                Drained,
+                /// head+body incomplete: re-arm read
+                NeedMore,
+                /// malformed head or oversize: respond + close (the byte
+                /// stream is unusable; keep-alive cannot resync)
+                Fatal((u16, &'static str)),
+                /// SPEC error row (404/400/401): respond and KEEP the
+                /// connection — the stream stays parseable; carries the
+                /// request end offset to advance `consumed` past it
+                RouteErr((u16, &'static str), usize),
+                /// complete validated request; `total` = request end offset
+                Ready { total: usize, kind: QueuedKind },
             }
-            match parse(slice) {
-                Ok(req) => {
-                    if std::env::var_os("LOOP_DEBUG").is_some() {
-                        eprintln!(
-                            "parsed fd={fd} consumed={consumed} slice_len={} total={} method={:?} target={:?} cl={:?} head={:?}",
-                            slice.len(),
-                            head_len(slice).saturating_add(req.content_length.unwrap_or(0)),
-                            req.method,
-                            req.target,
-                            req.content_length,
-                            &slice[..slice.len().min(60)]
-                        );
+            let outcome = {
+                let Some(conn) = self.conns.get(&fd) else { return };
+                let slice = &conn.buf[conn.consumed..];
+                if slice.is_empty() {
+                    Outcome::Drained
+                } else {
+                    match parse(slice) {
+                        Ok(req) => {
+                            let head_end = head_len(slice);
+                            let total =
+                                head_end.saturating_add(req.content_length.unwrap_or(0));
+                            if total > MAX_REQUEST {
+                                Outcome::Fatal(errors::NOT_FOUND)
+                            } else if slice.len() < total {
+                                Outcome::NeedMore
+                            } else {
+                                let now = (self.now_ms / 1000) as i64;
+                                let body = &slice[head_end..total];
+                                match route_kind(
+                                    &req,
+                                    body,
+                                    &self.store.keyed_mac,
+                                    now,
+                                    &mut self.scratch,
+                                ) {
+                                    Ok(kind) => Outcome::Ready { total, kind },
+                                    // SPEC error row: queued, conn kept
+                                    // (the gate catch: Fatal closed the
+                                    // conn before the row flushed -> 000)
+                                    Err(err) => Outcome::RouteErr(err, total),
+                                }
+                            }
+                        }
+                        Err(ParseError::Incomplete) => {
+                            if slice.len() > MAX_REQUEST {
+                                Outcome::Fatal(errors::NOT_FOUND)
+                            } else {
+                                Outcome::NeedMore
+                            }
+                        }
+                        Err(_) => Outcome::Fatal(errors::NOT_FOUND),
                     }
-                    let head_end = head_len(slice);
-                    let content_length = req.content_length.unwrap_or(0);
-                    let total = head_end.saturating_add(content_length);
-                    if total > MAX_REQUEST {
-                        self.queue_error(fd, generation, errors::NOT_FOUND);
-                        self.close_conn(generation);
-                        return;
+                }
+            };
+            // ---- phase B: mutate (phase-A borrows have ended) ----
+            match outcome {
+                Outcome::Gone => return,
+                Outcome::Drained => {
+                    if let Some(conn) = self.conns.get_mut(&fd) {
+                        conn.buf.clear();
+                        conn.consumed = 0;
                     }
-                    if slice.len() < total {
-                        // body incomplete: wait for more bytes
-                        self.submit_read(fd, generation);
-                        return;
+                    return;
+                }
+                Outcome::NeedMore => {
+                    self.submit_read(fd, generation);
+                    return;
+                }
+                Outcome::RouteErr(err, total) => {
+                    // respond with the SPEC row and keep the connection:
+                    // work_pass flushes it; advance past the complete
+                    // request so the keep-alive stream stays in sync
+                    // (old enqueue semantics)
+                    self.queue_error(fd, generation, err);
+                    if let Some(conn) = self.conns.get_mut(&fd) {
+                        conn.consumed = total;
+                        if conn.consumed > 32 * 1024 {
+                            conn.buf.drain(..conn.consumed);
+                            conn.consumed = 0;
+                        }
                     }
-                    let body = &slice[head_end..total];
-                    self.enqueue(fd, generation, &req, body);
+                    return;
+                }
+                Outcome::Fatal(err) => {
+                    self.queue_error(fd, generation, err);
+                    self.close_conn(generation);
+                    return;
+                }
+                Outcome::Ready { total, kind } => {
+                    self.queue.push(Queued { fd, generation, kind });
                     if let Some(conn) = self.conns.get_mut(&fd) {
                         conn.consumed = total;
                         if conn.consumed > 32 * 1024 {
@@ -267,88 +331,10 @@ impl Server {
                         }
                     }
                 }
-                Err(ParseError::Incomplete) => {
-                    if slice.len() > MAX_REQUEST {
-                        self.close_conn(generation);
-                        return;
-                    }
-                    self.submit_read(fd, generation);
-                    return;
-                }
-                Err(_) => {
-                    // malformed head: not a SPEC route
-                    self.queue_error(fd, generation, errors::NOT_FOUND);
-                    self.close_conn(generation);
-                    return;
-                }
             }
         }
     }
 
-    fn enqueue(
-        &mut self,
-        fd: RawFd,
-        generation: u16,
-        req: &uring_http::http::Request<'_>,
-        body: &[u8],
-    ) {
-        let now = (self.now_ms / 1000) as i64;
-        let mac = &self.store.keyed_mac;
-        let kind = match router::dispatch(req) {
-            Dispatch::Route(Route::Health, _) => QueuedKind::Health,
-            Dispatch::Route(Route::Feed, _) => QueuedKind::Feed,
-            Dispatch::Route(Route::PostGet, _) => {
-                let id = parse_positive(&req.target[7..]).unwrap_or(0);
-                QueuedKind::PostGet(id)
-            }
-            Dispatch::Route(Route::PostCreate, _) => {
-                // auth FIRST (SPEC precedence)
-                let claims = match crate::jwt::verify(req.authorization, mac, now) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        self.queue_error(fd, generation, router::jwt_row(e));
-                        return;
-                    }
-                };
-                match body_field(body) {
-                    Err(_) => QueuedKind::Error(errors::MALFORMED_JSON),
-                    Ok(BodyExtract::Missing) => QueuedKind::Error(errors::BODY_REQUIRED),
-                    Ok(BodyExtract::TooLong) => QueuedKind::Error(errors::BODY_TOO_LONG),
-                    Ok(BodyExtract::Body(b)) if b.is_empty() => {
-                        QueuedKind::Error(errors::BODY_REQUIRED)
-                    }
-                    Ok(BodyExtract::Body(b)) => QueuedKind::PostCreate {
-                        user: claims.user_id,
-                        username: claims.username,
-                        body: b,
-                    },
-                }
-            }
-            Dispatch::Route(Route::PostLike, _) => {
-                // auth BEFORE id parse (SPEC)
-                let claims = match crate::jwt::verify(req.authorization, mac, now) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        self.queue_error(fd, generation, router::jwt_row(e));
-                        return;
-                    }
-                };
-                // id from the target: /posts/<id>/like
-                let t = &req.target[7..];
-                let id_seg = &t[..t.len().saturating_sub(5)];
-                let post = match parse_positive(id_seg) {
-                    Some(v) => v,
-                    None => {
-                        self.queue_error(fd, generation, errors::INVALID_POST_ID);
-                        return;
-                    }
-                };
-                QueuedKind::PostLike { user: claims.user_id, post }
-            }
-            Dispatch::Error(err) => QueuedKind::Error(err),
-        };
-        self.queue.push(Queued { fd, generation, kind });
-    }
 
     fn queue_error(&mut self, fd: RawFd, generation: u16, err: (u16, &'static str)) {
         self.queue.push(Queued { fd, generation, kind: QueuedKind::Error(err) });
@@ -494,29 +480,57 @@ impl Server {
                         }
                     }
                 }
-                QueuedKind::PostGet(id) => match handlers::read_post(&self.store, &self.store.writer_conn(), *id) {
-                    Some(row) => {
-                        let author = handlers::read_username(&self.store, &self.store.writer_conn(), row.user_id)
-                            .unwrap_or_default();
-                        let lc = handlers::read_like_count(&self.store, &self.store.writer_conn(), row.id).unwrap_or(0);
-                        let pref = json::PostRef {
-                            id: row.id,
-                            body: &row.body,
-                            created_at: &row.created_at,
-                            author: &author,
-                            like_count: lc,
-                        };
-                        let mut tmp = [0u8; 2048];
-                        let n = json::write_post_json(&mut tmp, &pref);
-                        // SPEC: GET /posts/:id responds {"post":{...}}
-                        let mut wrapped = Vec::with_capacity(n + 10);
-                        wrapped.extend_from_slice(b"{\"post\":");
-                        wrapped.extend_from_slice(&tmp[..n]);
-                        wrapped.push(b'}');
-                        (200u16, wrapped)
+                QueuedKind::PostGet(id) => {
+                    // E19 fused emit: one reader pass, mmap views, no row
+                    // intermediates; ladder to the composite SQL path on error
+                    let mut out = Vec::with_capacity(512);
+                    match handlers::reader_post_get_emit(&self.store, *id, &mut out) {
+                        Ok(true) => (200u16, out),
+                        Ok(false) => {
+                            (404u16, error_body(errors::POST_NOT_FOUND))
+                        }
+                        Err(_) => {
+                            self.store.note_fallback();
+                            match handlers::read_post(
+                                &self.store,
+                                &self.store.writer_conn(),
+                                *id,
+                            ) {
+                                Some(row) => {
+                                    let author = handlers::read_username(
+                                        &self.store,
+                                        &self.store.writer_conn(),
+                                        row.user_id,
+                                    )
+                                    .unwrap_or_default();
+                                    let lc = handlers::read_like_count(
+                                        &self.store,
+                                        &self.store.writer_conn(),
+                                        row.id,
+                                    )
+                                    .unwrap_or(0);
+                                    let pref = json::PostRef {
+                                        id: row.id,
+                                        body: &row.body,
+                                        created_at: &row.created_at,
+                                        author: &author,
+                                        like_count: lc,
+                                    };
+                                    let mut tmp = [0u8; 2048];
+                                    let n = json::write_post_json(&mut tmp, &pref);
+                                    let mut wrapped = Vec::with_capacity(n + 10);
+                                    wrapped.extend_from_slice(b"{\"post\":");
+                                    wrapped.extend_from_slice(&tmp[..n]);
+                                    wrapped.push(b'}');
+                                    (200u16, wrapped)
+                                }
+                                None => {
+                                    (404u16, error_body(errors::POST_NOT_FOUND))
+                                }
+                            }
+                        }
                     }
-                    None => (404u16, error_body(errors::POST_NOT_FOUND).into_bytes()),
-                },
+                }
                 _ => (200u16, Vec::new()), // writes + errors below
             };
             results[i] = (status, body);
@@ -526,7 +540,9 @@ impl Server {
         let _ = self.store.writer.execute_batch("BEGIN DEFERRED");
         for (i, q) in queue.iter().enumerate() {
             match &q.kind {
-                QueuedKind::PostCreate { user, username, body } => {
+                QueuedKind::PostCreate { user, username: (us, ue), body: (bs, be) } => {
+                    let username = &self.scratch[*us as usize..*ue as usize];
+                    let body = &self.scratch[*bs as usize..*be as usize];
                     match handlers::insert_post(&self.store.writer, *user, body) {
                         Ok((pid, created)) => {
                             let pref = json::PostRef {
@@ -545,7 +561,7 @@ impl Server {
                             wrapped.push(b'}');
                             results[i] = (201, wrapped);
                         }
-                        Err(_) => results[i] = (500, error_body(errors::INTERNAL).into_bytes()),
+                        Err(_) => results[i] = (500, error_body(errors::INTERNAL)),
                     }
                 }
                 QueuedKind::PostLike { user, post } => {
@@ -556,7 +572,7 @@ impl Server {
                         .query_row("SELECT 1 FROM posts WHERE id = ?1", [post], |_| Ok(()))
                         .is_ok();
                     if !exists {
-                        results[i] = (404, error_body(errors::POST_NOT_FOUND).into_bytes());
+                        results[i] = (404, error_body(errors::POST_NOT_FOUND));
                         continue;
                     }
                     results[i] = match handlers::insert_like(&self.store.writer, *user, *post) {
@@ -576,7 +592,7 @@ impl Server {
                             )
                             .into_bytes(),
                         ),
-                        Err(_) => (500, error_body(errors::INTERNAL).into_bytes()),
+                        Err(_) => (500, error_body(errors::INTERNAL)),
                     };
                 }
                 _ => {}
@@ -586,7 +602,7 @@ impl Server {
         if !commit_ok {
             for (i, q) in queue.iter().enumerate() {
                 if matches!(q.kind, QueuedKind::PostCreate { .. } | QueuedKind::PostLike { .. }) {
-                    results[i] = (500, error_body(errors::INTERNAL).into_bytes());
+                    results[i] = (500, error_body(errors::INTERNAL));
                 }
             }
         }
@@ -594,7 +610,7 @@ impl Server {
         // phase 3: errors keep their SPEC rows even if a read ran first
         for (i, q) in queue.iter().enumerate() {
             if let QueuedKind::Error(err) = &q.kind {
-                results[i] = (err.0, error_body(*err).into_bytes());
+                results[i] = (err.0, error_body(*err));
             }
         }
 
@@ -608,6 +624,8 @@ impl Server {
 
         // snapshot advances AFTER commit for the next pass (ADR 0003)
         self.store.refresh_snapshot();
+        // pass arena retired: all queued ranges were consumed above
+        self.scratch.clear();
     }
 
     fn send_response(
@@ -620,13 +638,11 @@ impl Server {
         if std::env::var_os("LOOP_DEBUG").is_some() {
             eprintln!("send_response fd {fd} status {status} len {}", body.len());
         }
-        let head = format!(
-            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-            status,
-            reason_phrase(status),
-            body.len()
-        );
-        let mut frame = head.into_bytes();
+        let mut frame = Vec::with_capacity(112 + body.len());
+        frame.extend_from_slice(status_line(status));
+        frame.extend_from_slice(b"Content-Type: application/json\r\nContent-Length: ");
+        push_decimal(&mut frame, body.len());
+        frame.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
         frame.extend_from_slice(body);
         let was_idle = match self.conns.get_mut(&fd) {
             Some(conn) => {
@@ -664,21 +680,41 @@ impl Server {
     }
 }
 
-fn reason_phrase(status: u16) -> &'static str {
+fn status_line(status: u16) -> &'static [u8] {
     match status {
-        200 => "OK",
-        201 => "Created",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        404 => "Not Found",
-        500 => "Internal Server Error",
-        503 => "Service Unavailable",
-        _ => "OK",
+        200 => b"HTTP/1.1 200 OK\r\n",
+        201 => b"HTTP/1.1 201 Created\r\n",
+        400 => b"HTTP/1.1 400 Bad Request\r\n",
+        401 => b"HTTP/1.1 401 Unauthorized\r\n",
+        404 => b"HTTP/1.1 404 Not Found\r\n",
+        500 => b"HTTP/1.1 500 Internal Server Error\r\n",
+        503 => b"HTTP/1.1 503 Service Unavailable\r\n",
+        _ => b"HTTP/1.1 200 OK\r\n",
     }
 }
 
-fn error_body(err: (u16, &'static str)) -> String {
-    format!("{{\"error\":\"{}\"}}", err.1)
+/// usize decimal into `out` (itoa-style, no format! machinery)
+fn push_decimal(out: &mut Vec<u8>, mut v: usize) {
+    if v == 0 {
+        out.push(b'0');
+        return;
+    }
+    let mut tmp = [0u8; 20];
+    let mut i = tmp.len();
+    while v > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+    out.extend_from_slice(&tmp[i..]);
+}
+
+fn error_body(err: (u16, &'static str)) -> Vec<u8> {
+    let mut v = Vec::with_capacity(err.1.len() + 12);
+    v.extend_from_slice(b"{\"error\":\"");
+    v.extend_from_slice(err.1.as_bytes());
+    v.extend_from_slice(b"\"}");
+    v
 }
 
 fn parse_positive(seg: &[u8]) -> Option<i64> {
@@ -695,6 +731,53 @@ fn parse_positive(seg: &[u8]) -> Option<i64> {
     (v > 0).then_some(v)
 }
 
+
+/// Route one complete request to its queued kind. SPEC precedence enforced
+/// here: auth (401 rows) -> id parse (400) -> existence (404) -> body
+/// validation (400 rows). Username/body bytes append to `scratch`; the
+/// returned kind carries (start,end) ranges.
+fn route_kind(
+    req: &uring_http::http::Request<'_>,
+    body: &[u8],
+    mac: &crate::jwt::KeyedMac,
+    now: i64,
+    scratch: &mut Vec<u8>,
+) -> Result<QueuedKind, (u16, &'static str)> {
+    match router::dispatch(req) {
+        Dispatch::Route(Route::Health, _) => Ok(QueuedKind::Health),
+        Dispatch::Route(Route::Feed, _) => Ok(QueuedKind::Feed),
+        Dispatch::Route(Route::PostGet, _) => {
+            let id = parse_positive(&req.target[7..]).unwrap_or(0);
+            Ok(QueuedKind::PostGet(id))
+        }
+        Dispatch::Route(Route::PostCreate, _) => {
+            // auth FIRST (SPEC precedence)
+            let (user, urange) =
+                crate::jwt::verify_scratch(req.authorization, mac, now, scratch)
+                    .map_err(router::jwt_row)?;
+            match body_field_into(body, scratch) {
+                Err(_) => Err(errors::MALFORMED_JSON),
+                Ok(BodyExtract::Missing) => Err(errors::BODY_REQUIRED),
+                Ok(BodyExtract::TooLong) => Err(errors::BODY_TOO_LONG),
+                Ok(BodyExtract::Body(brange)) => {
+                    Ok(QueuedKind::PostCreate { user, username: urange, body: brange })
+                }
+            }
+        }
+        Dispatch::Route(Route::PostLike, _) => {
+            // auth BEFORE id parse (SPEC)
+            let (user, _) =
+                crate::jwt::verify_scratch(req.authorization, mac, now, scratch)
+                    .map_err(router::jwt_row)?;
+            let t = &req.target[7..];
+            let id_seg = &t[..t.len().saturating_sub(5)];
+            let post = parse_positive(id_seg).ok_or(errors::INVALID_POST_ID)?;
+            Ok(QueuedKind::PostLike { user, post })
+        }
+        Dispatch::Error(err) => Err(err),
+    }
+}
+
 fn head_len(slice: &[u8]) -> usize {
     memchr_find(slice, b"\r\n\r\n").map_or(0, |p| p + 4)
 }
@@ -707,18 +790,22 @@ fn memchr_find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 /// Body extraction outcome for POST /posts (SPEC error rows map 1:1).
+/// The body bytes are written into the caller's scratch arena; the outcome
+/// carries the trimmed range (no per-request allocation).
+#[derive(Debug)]
 enum BodyExtract {
     /// no "body" key, or empty after trim -> `body is required`
     Missing,
     /// trimmed length > 500 -> `body must be at most 500 characters`
     TooLong,
-    /// the trimmed body bytes
-    Body(Vec<u8>),
+    /// the trimmed body bytes as a (start,end) range into scratch
+    Body((u32, u32)),
 }
 
 /// Extract the `body` string field from a flat JSON object, JSON-unescape
-/// the minimal escape set, and trim ASCII whitespace.
-fn body_field(raw_body: &[u8]) -> Result<BodyExtract, ()> {
+/// the minimal escape set, and trim ASCII whitespace — appending the result
+/// to `scratch` and returning the trimmed range.
+fn body_field_into(raw_body: &[u8], scratch: &mut Vec<u8>) -> Result<BodyExtract, ()> {
     // a body that is not a JSON object at all is MALFORMED; a JSON object
     // without a usable "body" string is MISSING (SPEC error rows)
     let t = trim_ascii(raw_body);
@@ -734,20 +821,29 @@ fn body_field(raw_body: &[u8]) -> Result<BodyExtract, ()> {
                 j += 1;
             }
             if j < raw_body.len() && raw_body[j] == b'"' {
-                let mut out = Vec::new();
+                let wstart = scratch.len() as u32;
                 let mut k = j + 1;
                 while k < raw_body.len() {
                     let b = raw_body[k];
                     match b {
                         b'"' => {
-                            let t = trim_ascii(&out);
+                            let wend = scratch.len() as u32;
+                            let t = trim_ascii(
+                                &scratch[wstart as usize..wend as usize],
+                            );
                             if t.len() > 500 {
                                 return Ok(BodyExtract::TooLong);
                             }
                             if t.is_empty() {
                                 return Ok(BodyExtract::Missing);
                             }
-                            return Ok(BodyExtract::Body(t.to_vec()));
+                            // t.as_ptr() - scratch.as_ptr() is ALREADY the
+                            // absolute offset (double-counting wstart was the
+                            // 1206>645 range panic the official gate caught)
+                            let start = (t.as_ptr() as usize)
+                                - (scratch.as_ptr() as usize);
+                            let end = start + t.len();
+                            return Ok(BodyExtract::Body((start as u32, end as u32)));
                         }
                         b'\\' => {
                             k += 1;
@@ -755,14 +851,14 @@ fn body_field(raw_body: &[u8]) -> Result<BodyExtract, ()> {
                                 return Err(());
                             }
                             match raw_body[k] {
-                                b'"' => out.push(b'"'),
-                                b'\\' => out.push(b'\\'),
-                                b'/' => out.push(b'/'),
-                                b'n' => out.push(b'\n'),
-                                b't' => out.push(b'\t'),
-                                b'r' => out.push(b'\r'),
-                                b'b' => out.push(0x08),
-                                b'f' => out.push(0x0c),
+                                b'"' => scratch.push(b'"'),
+                                b'\\' => scratch.push(b'\\'),
+                                b'/' => scratch.push(b'/'),
+                                b'n' => scratch.push(b'\n'),
+                                b't' => scratch.push(b'\t'),
+                                b'r' => scratch.push(b'\r'),
+                                b'b' => scratch.push(0x08),
+                                b'f' => scratch.push(0x0c),
                                 b'u' => {
                                     if k + 4 >= raw_body.len() {
                                         return Err(());
@@ -772,7 +868,7 @@ fn body_field(raw_body: &[u8]) -> Result<BodyExtract, ()> {
                                     let cp = u32::from_str_radix(hex, 16).map_err(|_| ())?;
                                     let ch = char::from_u32(cp).ok_or(())?;
                                     let mut enc = [0u8; 4];
-                                    out.extend_from_slice(ch.encode_utf8(&mut enc).as_bytes());
+                                    scratch.extend_from_slice(ch.encode_utf8(&mut enc).as_bytes());
                                     k += 4;
                                 }
                                 _ => return Err(()),
@@ -780,7 +876,7 @@ fn body_field(raw_body: &[u8]) -> Result<BodyExtract, ()> {
                             k += 1;
                         }
                         other => {
-                            out.push(other);
+                            scratch.push(other);
                             k += 1;
                         }
                     }
@@ -811,4 +907,45 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::*;
+
+    /// Regression (official-gate catch, 2026-11-23): the trim-range
+    /// arithmetic double-counted `wstart`, so any body_field_into call on a
+    /// NON-EMPTY scratch produced a range past the end (panic "range start
+    /// index 1206 out of range for slice of length 645"). The first request
+    /// on an empty scratch masked it.
+    #[test]
+    fn body_field_range_valid_on_nonempty_scratch() {
+        let mut scratch = Vec::new();
+        // simulate a prior request's arena bytes
+        scratch.extend_from_slice(b"prior-bytes-from-request-one....");
+        let raw = br#"{"body":"   hello world   "}"#;
+        match body_field_into(raw, &mut scratch) {
+            Ok(BodyExtract::Body((s, e))) => {
+                let (s, e) = (s as usize, e as usize);
+                assert!(e <= scratch.len(), "range {s}..{e} past scratch len {}", scratch.len());
+                assert_eq!(&scratch[s..e], b"hello world");
+                // prior arena bytes untouched
+                assert_eq!(&scratch[..32], b"prior-bytes-from-request-one....");
+            }
+            other => panic!("expected ranged body, got {other:?}"),
+        }
+    }
+
+    /// Two sequential requests: ranges from both stay valid until clear.
+    #[test]
+    fn two_requests_share_arena() {
+        let mut scratch = Vec::new();
+        let r1 = body_field_into(br#"{"body":"first"}"#, &mut scratch).unwrap();
+        let r2 = body_field_into(br#"{"body":"second"}"#, &mut scratch).unwrap();
+        let (BodyExtract::Body((s1, e1)), BodyExtract::Body((s2, e2))) = (r1, r2) else {
+            panic!()
+        };
+        assert_eq!(&scratch[s1 as usize..e1 as usize], b"first");
+        assert_eq!(&scratch[s2 as usize..e2 as usize], b"second");
+    }
 }

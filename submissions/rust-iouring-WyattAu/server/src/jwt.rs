@@ -96,6 +96,22 @@ impl KeyedMac {
     }
 }
 
+/// verify() with the username appended to `scratch` instead of a fresh Vec:
+/// per-pass arena (range returned), zero per-request allocations on the
+/// authed hot path. Returns (user_id, (start, end)) into `scratch`.
+pub fn verify_scratch(
+    authorization_value: Option<&[u8]>,
+    mac: &KeyedMac,
+    now: i64,
+    scratch: &mut Vec<u8>,
+) -> Result<(i64, (u32, u32)), JwtError> {
+    let claims = verify(authorization_value, mac, now)?;
+    let start = scratch.len() as u32;
+    scratch.extend_from_slice(&claims.username);
+    let end = scratch.len() as u32;
+    Ok((claims.user_id, (start, end)))
+}
+
 /// Extract a string value for `key` from a small JSON object (flat, SPEC
 /// payload shape). Returns the byte view of the value (inside quotes for
 /// strings; raw token bytes for numbers ;  caller disambiguates).

@@ -79,8 +79,9 @@ pub struct Server {
     listener: std::net::TcpListener,
     accept_fd: RawFd,
     conns: HashMap<RawFd, Conn>,
-    /// generation -> fd (one live conn per generation)
+    /// generation -> fd; generations are monotonic per admitted conn
     gen_conn: HashMap<u16, RawFd>,
+    next_generation: u16,
     /// closed conns awaiting their close(2) CQE; buffers stay alive so an
     /// in-flight kernel write/read can never touch freed memory
     graveyard: Vec<(Token, Conn)>,
@@ -108,6 +109,7 @@ impl Server {
             accept_fd,
             conns: HashMap::new(),
             gen_conn: HashMap::new(),
+            next_generation: 1,
             graveyard: Vec::new(),
             queue: Vec::new(),
             now_ms: 0,
@@ -400,7 +402,8 @@ impl Server {
         }
         self.engine
             .add_stream(fd, Token::new(Op::Read, 0, 0, 0));
-        let generation = 0;
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1);
         self.conns.insert(
             fd,
             Conn {

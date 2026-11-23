@@ -99,17 +99,38 @@ nonisolated extension HTTP {
         return value
     }
 
+    /// Whether `s` is a token (RFC 9110): each byte looked up in the token characters as a 128-bit set, with no branch.
     @inline(__always) private static func isTokenName(_ s: Span<UInt8>) -> Bool {
         guard s.count > 0 else { return false }
+        let low: UInt64 = 0x03FF_6CFA_0000_0000, high: UInt64 = 0x57FF_FFFF_C7FF_FFFE
+        var bad: UInt64 = 0
         for i in 0..<s.count {
-            let b = s[i]
-            if b <= 0x20 || b >= 0x7F { return false }
-            switch b {
-            case 0x28, 0x29, 0x3C, 0x3E, 0x40, 0x2C, 0x3B, 0x3A, 0x5C, 0x22, 0x2F, 0x5B, 0x5D, 0x3F, 0x3D, 0x7B, 0x7D: return false
-            default: continue
-            }
+            let c = UInt64(s[i])
+            bad |= (((c < 64 ? low : high) >> (c & 63)) & 1) ^ 1 | c >> 7
         }
-        return true
+        return bad == 0
+    }
+
+    /// Whether `s` has a byte at or below 0x20 (a space or a control character) or 0x7F, 8 bytes a step.
+    @inline(__always) private static func hasControlOrSpace(_ s: Span<UInt8>) -> Bool {
+        let n = s.count
+        let raw = s.bytes
+        let lo: UInt64 = 0x0101_0101_0101_0101
+        @inline(__always) func flags(_ x: UInt64) -> UInt64 {
+            let delete = x ^ (lo &* 0x7F)
+            return ((x &- lo &* 0x21) & ~x | (delete &- lo) & ~delete) & (lo &* 0x80)
+        }
+        var i = 0
+        while i + 8 <= n {
+            if flags(raw.unsafeLoadUnaligned(fromByteOffset: i, as: UInt64.self)) != 0 { return true }
+            i += 8
+        }
+        if n >= 8 { return flags(raw.unsafeLoadUnaligned(fromByteOffset: n - 8, as: UInt64.self)) != 0 }
+        while i < n {
+            if s[i] <= 0x20 || s[i] == 0x7F { return true }
+            i += 1
+        }
+        return false
     }
 
     @inline(__always) private static func equalsIgnoringCase(_ s: Span<UInt8>, _ lower: StaticString) -> Bool {
@@ -134,7 +155,7 @@ nonisolated extension HTTP {
         guard let sp2 = Bytes.find(reqLine, 0x20, from: sp1 + 1) else { return .reject(400) }
         let rawTarget = reqLine.extracting((sp1 + 1)..<sp2)
         guard rawTarget.count > 0 else { return .reject(400) }
-        for i in 0..<rawTarget.count where rawTarget[i] <= 0x20 || rawTarget[i] == 0x7F { return .reject(400) }
+        if hasControlOrSpace(rawTarget) { return .reject(400) }
         let version = reqLine.extracting((sp2 + 1)..<reqLine.count)
         let isHTTP10: Bool
         if Bytes.equal(version, "HTTP/1.1") {

@@ -25,32 +25,46 @@ nonisolated enum SHA256 {
 
     @inline(__always) private static func rotr(_ x: UInt32, _ n: UInt32) -> UInt32 { x >> n | x << (32 - n) }
 
+    @inline(__always) private static func bigSigma0(_ a: UInt32) -> UInt32 { rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22) }
+    @inline(__always) private static func bigSigma1(_ e: UInt32) -> UInt32 { rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25) }
+    @inline(__always) private static func smallSigma0(_ x: UInt32) -> UInt32 { rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3) }
+    @inline(__always) private static func smallSigma1(_ x: UInt32) -> UInt32 { rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10) }
+
+    /// The 64 rounds written out 16 at a time, so the schedule's indices are constants (its words can stay in
+    /// registers; as a loop they were read through memory); Ch as `g ^ (e & (f ^ g))`, and Maj as `(a ^ b) & (b ^ c) ^ b`
+    /// with `b ^ c` the previous round's `a ^ b`.
     @inline(__always) static func compressWords(_ state: inout State, _ words: InlineArray<16, UInt32>) {
         var w = words
         var a = state[0], b = state[1], c = state[2], d = state[3]
         var e = state[4], f = state[5], g = state[6], h = state[7]
-        for i in 0..<64 {
-            if i >= 16 {
-                let w15 = w[(i + 1) & 15]
-                let w2 = w[(i + 14) & 15]
-                let s0 = rotr(w15, 7) ^ rotr(w15, 18) ^ (w15 >> 3)
-                let s1 = rotr(w2, 17) ^ rotr(w2, 19) ^ (w2 >> 10)
-                w[i & 15] = w[i & 15] &+ s0 &+ w[(i + 9) & 15] &+ s1
-            }
-            let s1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)
-            let ch = (e & f) ^ (~e & g)
-            let temp1 = h &+ s1 &+ ch &+ roundConstants[i] &+ w[i & 15]
-            let s0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)
-            let maj = (a & b) ^ (a & c) ^ (b & c)
-            let temp2 = s0 &+ maj
+        var bc = b ^ c
+        @inline(__always) func round(_ i: Int, _ wi: UInt32) {
+            let t1 = h &+ bigSigma1(e) &+ (g ^ (e & (f ^ g))) &+ roundConstants[i] &+ wi
+            let ab = a ^ b
+            let t2 = bigSigma0(a) &+ ((ab & bc) ^ b)
+            bc = ab
             h = g
             g = f
             f = e
-            e = d &+ temp1
+            e = d &+ t1
             d = c
             c = b
             b = a
-            a = temp1 &+ temp2
+            a = t1 &+ t2
+        }
+        @inline(__always) func scheduled(_ base: Int, _ j: Int) {
+            w[j] = w[j] &+ smallSigma0(w[(j + 1) & 15]) &+ w[(j + 9) & 15] &+ smallSigma1(w[(j + 14) & 15])
+            round(base + j, w[j])
+        }
+        round(0, w[0]); round(1, w[1]); round(2, w[2]); round(3, w[3])
+        round(4, w[4]); round(5, w[5]); round(6, w[6]); round(7, w[7])
+        round(8, w[8]); round(9, w[9]); round(10, w[10]); round(11, w[11])
+        round(12, w[12]); round(13, w[13]); round(14, w[14]); round(15, w[15])
+        for base in stride(from: 16, to: 64, by: 16) {
+            scheduled(base, 0); scheduled(base, 1); scheduled(base, 2); scheduled(base, 3)
+            scheduled(base, 4); scheduled(base, 5); scheduled(base, 6); scheduled(base, 7)
+            scheduled(base, 8); scheduled(base, 9); scheduled(base, 10); scheduled(base, 11)
+            scheduled(base, 12); scheduled(base, 13); scheduled(base, 14); scheduled(base, 15)
         }
         state[0] &+= a
         state[1] &+= b
@@ -193,6 +207,7 @@ nonisolated extension TokenSigner {
     /// The claims, read in place: `exp` (required) and `nbf` against the clock, `iat` a number if present, then
     /// `sub` and `username`.
     private static func claims<R>(_ payload: Span<UInt8>, now: Double, _ body: (Int64, Span<UInt8>) -> R) -> Verdict<R> {
+        if let verdict = seedLayoutClaims(payload, now: now, body) { return verdict }
         guard let fields = JSON.scan(payload, keys: ["exp", "nbf", "iat", "sub", "username"]), fields.isObject,
               let exp = fields[0], exp.kind == .number,
               let expires = JSON.number(payload, exp), now < expires else { return .invalid }
@@ -203,6 +218,65 @@ nonisolated extension TokenSigner {
         guard let sub = fields[3], sub.kind == .string, let userID = JSON.withString(payload, sub, positiveInteger),
               let name = fields[4], name.kind == .string else { return .badPayload }
         return .valid(JSON.withString(payload, name) { body(userID, $0) })
+    }
+
+    /// The claims in the layout the seed's tokens have, `{"sub":"<digits>","username":"<ASCII>","iat":<digits>,
+    /// "exp":<digits>}`, read without the JSON scanner: its fixed parts compared as 8-byte words, its numbers as digits,
+    /// and the username up to its closing quote 8 bytes a step. Nil for anything else (another order, whitespace, an
+    /// escape, a byte below 0x20 or above 0x7F, `nbf`, a number that isn't plain digits), which `claims` scans as JSON.
+    /// The verdict is the scanner's: `exp` against the clock first, then `sub`.
+    private static func seedLayoutClaims<R>(_ p: Span<UInt8>, now: Double, _ body: (Int64, Span<UInt8>) -> R) -> Verdict<R>? {
+        let n = p.count
+        let raw = p.bytes
+        @inline(__always) func word(_ at: Int) -> UInt64 { raw.unsafeLoadUnaligned(fromByteOffset: at, as: UInt64.self) }
+        @inline(__always) func isDigit(_ c: UInt8) -> Bool { c &- 0x30 < 10 }
+        // A JSON number that is plain digits (no leading zero), at most 15 of them so that it is exact as a Double.
+        @inline(__always) func number(_ from: Int) -> (value: Int64, end: Int)? {
+            var at = from
+            var value: Int64 = 0
+            while at < n && isDigit(p[at]) && at - from < 15 {
+                value = value &* 10 &+ Int64(p[at] &- 0x30)
+                at += 1
+            }
+            let count = at - from
+            guard count > 0, at < n, !isDigit(p[at]), count == 1 || p[from] != 0x30 else { return nil }
+            return (value, at)
+        }
+        // {"sub":"
+        guard n >= 8, word(0) == 0x223A_2262_7573_227B else { return nil }
+        var at = 8
+        let subStart = at
+        while at < n && isDigit(p[at]) && at - subStart < 19 { at += 1 }
+        let subEnd = at
+        // ","username":"
+        guard subEnd > subStart, at + 14 <= n, word(at) == 0x6E72_6573_7522_2C22, word(at + 6) == 0x223A_2265_6D61_6E72 else { return nil }
+        at += 14
+        let nameStart = at
+        // The username's closing quote: the first byte that is a quote, a backslash, below 0x20 or above 0x7F, found 8
+        // bytes a step (the lowest flag is exact), and it must be the quote.
+        let lo: UInt64 = 0x0101_0101_0101_0101, hi: UInt64 = 0x8080_8080_8080_8080
+        while at + 8 <= n {
+            let x = word(at)
+            let quote = x ^ (lo &* 0x22), backslash = x ^ (lo &* 0x5C)
+            let stop = ((x &- lo &* 0x20) & ~x | (quote &- lo) & ~quote | (backslash &- lo) & ~backslash) & hi | x & hi
+            if stop != 0 {
+                at += stop.trailingZeroBitCount >> 3
+                break
+            }
+            at += 8
+        }
+        while at < n && p[at] >= 0x20 && p[at] < 0x80 && p[at] != 0x22 && p[at] != 0x5C { at += 1 }
+        guard at < n, p[at] == 0x22 else { return nil }
+        let nameEnd = at
+        // ","iat":
+        guard at + 8 <= n, word(at) == 0x3A22_7461_6922_2C22, let iat = number(at + 8) else { return nil }
+        at = iat.end
+        // ,"exp":
+        guard at + 8 <= n, word(at) & 0x00FF_FFFF_FFFF_FFFF == 0x003A_2270_7865_222C, let exp = number(at + 7),
+              exp.end == n - 1, p[n - 1] == 0x7D else { return nil }
+        guard now < Double(exp.value) else { return .invalid }
+        guard let userID = positiveInteger(p.extracting(subStart..<subEnd)) else { return .badPayload }
+        return .valid(body(userID, p.extracting(nameStart..<nameEnd)))
     }
 
     /// A positive decimal integer that fits an Int64, nil otherwise.

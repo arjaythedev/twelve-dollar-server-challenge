@@ -770,11 +770,22 @@ That is 0.6 µs a request, 11 % of this server's user time. At 320,000 users (34
 second) it is about 2 % of the box's CPU: small, but the 2-minute runs at 320k are decided in
 the seconds at the end of the ramp where the box has none to spare (the section above).
 
-Three 2-minute runs at 320k with this commit, as in the table of the section above: p99 4.1 s,
-40 ms and 628 ms (p95 24, 14 and 23 ms; nothing failed; least free memory 83-94 MB), so two of
-the three pass, where the commit before passed two of five (818 ms, 6.3 s, 540 ms, 3.8 s,
-4.5 s). Eight runs are too few to say the difference is this commit: every one of them still
-has its stall at the end of the ramp, and how deep it goes varies from run to run.
+**At 320k**, eight 2-minute runs of each commit on the test box (60 s ramp + 2 min + 30 s
+down, as in the table of the section above). The first five runs of the commit before are from
+the day before; its last three and all eight of this commit are from one evening, the last five
+of this commit alternating with them. Nothing failed in any of them and the least free memory
+was 66-99 MB. A run passes with fewer than about 57,000 requests over 1 s:
+
+| | p99 of each run | pass | requests over 1 s, per run | mean |
+|---|---|---|---|---|
+| commit before | 818 ms, 6.3 s, 540 ms, 3.8 s, 4.5 s, 114 ms, 9.1 s, 371 ms | 4 of 8 | 54k, 181k, 39k, 76k, 108k, 2k, 141k, 42k | 80k |
+| this commit | 4.1 s, 40 ms, 628 ms, 2.2 s, 223 ms, 621 ms, 1.7 s, 108 ms | 5 of 8 | 77k, 11k, 46k, 61k, 45k, 49k, 88k, 31k | 51k |
+
+p95 is 14-27 ms with this commit and 18-53 ms before. Every run of both still has its stall at
+the end of the ramp, and how deep it goes varies more from run to run than between the two
+commits, so this is one pass more in eight and fewer late requests on average, not a different
+picture. The server's user CPU in these runs is 4.6-4.9 µs a request with this commit and
+5.2-5.4 µs in the three runs of the commit before that evening.
 
 Three more things were tried on top and left out because they did not measure faster: the
 feed's 20 rows through the same descent instead of cursor steps (5.00, 4.94 µs); prefetch hints

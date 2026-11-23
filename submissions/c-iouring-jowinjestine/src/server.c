@@ -721,6 +721,8 @@ static struct {
   unsigned high_streak, low_streak;
   double psi_some10, psi_full10;
   unsigned long tcp_mem_pages;
+  uint64_t last_cg_sock, last_cg_sample_ns;
+  unsigned predicted_high_streak;
 } MG;
 
 /* ---------- housekeeping ---------- */
@@ -853,8 +855,35 @@ static void memgov_tick(uint64_t now) {
       if (mem && (!line_end || mem < line_end)) MG.tcp_mem_pages = strtoul(mem + 5, NULL, 10);
     }
   }
+  /* Feed-forward TCP socket-memory velocity predictor: use the change in
+   * cgroup sock bytes to anticipate pressure on *future* accepted sockets.
+   * No request caching, rejection, or changes to existing connections.
+   * Only act after two consecutive predicted-high samples; require current
+   * memory above 60% of the cgroup limit to avoid early overreaction. */
+  int predicted_high = 0;
+  if (MG.cg_limit && MG.last_cg_sample_ns && now > MG.last_cg_sample_ns &&
+      MG.cg_sock > MG.last_cg_sock && MG.cg_current > MG.cg_limit * 60 / 100) {
+    uint64_t dt = now - MG.last_cg_sample_ns;
+    uint64_t delta = MG.cg_sock - MG.last_cg_sock;
+    /* Predict four seconds ahead without overflow: clamp the projection
+     * at the remaining memory headroom before multiplying. */
+    uint64_t threshold = MG.cg_limit * 85 / 100;
+    if (MG.cg_current >= threshold) predicted_high = 1;
+    else {
+      uint64_t headroom = threshold - MG.cg_current;
+      /* Compare delta/dt to headroom/4s with long double arithmetic;
+       * only on the existing two-second housekeeping path. */
+      predicted_high = (long double)delta * 4000000000.0L >=
+                       (long double)headroom * (long double)dt;
+    }
+  }
+  MG.last_cg_sock = MG.cg_sock;
+  MG.last_cg_sample_ns = now;
+  if (predicted_high) MG.predicted_high_streak++;
+  else MG.predicted_high_streak = 0;
   int high = (psi_available && (MG.psi_full10 >= 2.0 || MG.psi_some10 >= 10.0)) ||
-             (MG.cg_limit && MG.cg_current > MG.cg_limit * 85 / 100);
+             (MG.cg_limit && MG.cg_current > MG.cg_limit * 85 / 100) ||
+             MG.predicted_high_streak >= 2;
   if (high) { MG.high_streak++; MG.low_streak = 0; }
   else { MG.low_streak++; MG.high_streak = 0; }
   /* Changes affect only new accepts. Never throttle, reject or close a connection. */

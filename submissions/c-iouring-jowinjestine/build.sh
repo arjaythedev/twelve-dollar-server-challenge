@@ -5,6 +5,7 @@
 #   PGO=0 bash build.sh     plain build (default: instrumented build, training run, final build)
 #   SHA256_ROLLING16=0 bash build.sh    previous SHA-256 compression function
 #   LTO=1 bash build.sh    experimental LTO on top of the existing PGO build
+#   SELFCHECK=1 bash build.sh    test build: every B-tree answer is compared with the reference SQL's
 set -euo pipefail
 cd "$(dirname "$0")"
 SQLITE=sqlite-amalgamation-3540100
@@ -34,6 +35,7 @@ CFLAGS="-std=gnu11 -O3 $ARCH -fno-plt -fno-semantic-interposition -fno-stack-pro
   -Wall -Wno-unused-function -Wno-unused-variable -Wno-unused-but-set-variable -Wno-unused-result
   -I vendor/$SQLITE -I src $SQLOPTS"
 case "$(uname -m)" in aarch64|arm64) CFLAGS=${CFLAGS//-mprefer-vector-width=256/}; CFLAGS=${CFLAGS//-fcf-protection=none/} ;; esac
+[ "${SELFCHECK:-0}" = 1 ] && CFLAGS="$CFLAGS -DBT_SELFCHECK"
 [ "${PROFILE:-0}" = 1 ] && CFLAGS="${CFLAGS//-fomit-frame-pointer/} -g -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer"
 LDFLAGS="-static -lpthread -lm"
 # Keep potentially toolchain-sensitive LTO opt-in until a controlled A/B result.

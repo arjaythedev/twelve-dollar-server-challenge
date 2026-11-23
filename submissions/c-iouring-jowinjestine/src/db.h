@@ -720,11 +720,60 @@ static inline void ob_post_row(struct ob *o, sqlite3_stmt *st) {
               (u32)sqlite3_column_bytes(st, 2), sqlite3_column_text(st, 3), (u32)sqlite3_column_bytes(st, 3), sqlite3_column_int64(st, 4));
 }
 
+#ifdef BT_SELFCHECK
+/* Test builds only (-DBT_SELFCHECK): the reference SQL's answer beside the B-tree one, on the same
+ * snapshot; a difference is printed. */
+static uint64_t selfcheck_n, selfcheck_bad;
+static void db_selfcheck(struct db *d, const struct ob *o, size_t mark, int feed, i64 id, int rc_bt) {
+  static uint8_t buf[1 << 17];
+  struct ob r;
+  ob_init(&r, buf, sizeof buf);
+  int ret, rc;
+  if (feed) {
+    int n = 0;
+    ob_lit(&r, "{\"posts\":[");
+    while ((rc = sqlite3_step(d->st_feed_ref)) == SQLITE_ROW) {
+      if (n++) ob_char(&r, ',');
+      ob_post_row(&r, d->st_feed_ref);
+    }
+    sqlite3_reset(d->st_feed_ref);
+    ob_lit(&r, "]}");
+    ret = rc == SQLITE_DONE ? 0 : -1;
+  } else {
+    sqlite3_bind_int64(d->st_post_ref, 1, id);
+    rc = sqlite3_step(d->st_post_ref);
+    if (rc == SQLITE_ROW) {
+      ob_lit(&r, "{\"post\":");
+      ob_post_row(&r, d->st_post_ref);
+      ob_char(&r, '}');
+      ret = 1;
+    } else {
+      ret = rc == SQLITE_DONE ? 0 : -1;
+    }
+    sqlite3_reset(d->st_post_ref);
+  }
+  size_t n_bt = o->n - mark;
+  selfcheck_n++;
+  if (ret != rc_bt || r.err || n_bt != r.n || memcmp(o->p + mark, r.p, r.n)) {
+    if (selfcheck_bad++ < 20)
+      fprintf(stderr, "SELFCHECK DIFFERS %s id=%lld: btree rc=%d %zu bytes, sql rc=%d %zu bytes\n btree: %.*s\n sql:   %.*s\n", feed ? "feed" : "post",
+              (long long)id, rc_bt, n_bt, ret, r.n, (int)(n_bt < 600 ? n_bt : 600), (const char *)o->p + mark, (int)(r.n < 600 ? r.n : 600), (const char *)r.p);
+  }
+  if (selfcheck_n == 1000 || (selfcheck_n & 0x3ffff) == 0)
+    fprintf(stderr, "selfcheck: %llu answers compared with the reference SQL, %llu differ\n", (unsigned long long)selfcheck_n, (unsigned long long)selfcheck_bad);
+}
+#endif
+
 static int db_feed(struct db *d, struct ob *o) {
   if (db_begin(d) < 0) return -1;
   if (d->bt.open) {
     size_t mark = o->n;
-    if (bt_feed(&d->bt, o) == 0 && !o->err) return 0;
+    if (bt_feed(&d->bt, o) == 0 && !o->err) {
+#ifdef BT_SELFCHECK
+      db_selfcheck(d, o, mark, 1, 0, 0);
+#endif
+      return 0;
+    }
     o->n = mark;
     o->err = 0;
     d->n_fallback++;
@@ -751,7 +800,12 @@ static int db_post(struct db *d, struct ob *o, i64 id) {
   if (d->bt.open) {
     size_t mark = o->n;
     int rc = bt_post(&d->bt, o, id);
-    if (rc >= 0 && !o->err) return rc;
+    if (rc >= 0 && !o->err) {
+#ifdef BT_SELFCHECK
+      db_selfcheck(d, o, mark, 0, id, rc);
+#endif
+      return rc;
+    }
     o->n = mark;
     o->err = 0;
     d->n_fallback++;

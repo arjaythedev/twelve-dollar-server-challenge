@@ -113,12 +113,14 @@ mostly idle sockets under `LimitNOFILE=65535`.
     cursor step back; their pages get an extra reference while the other cursors move), the 20
     authors are looked up in one descent of `users` through the same pager calls as
     `sqlite3BtreeTableMoveto` (every key's child page chosen before the next level is fetched, a
-    page shared by several keys fetched once, and inside a page the search starting where a
-    straight line through its first and last rowids puts the key, since rowids are dense: 2-3
-    probes instead of 7-9; the idea is from c-iouring-pavlyhalim #245), and every post object is
-    written from the pages: no row is copied anywhere else.
-  - **Post:** the row by rowid, its author, its likes, the same way. Likes check that the post
-    exists with a seek too.
+    page shared by several keys fetched once; in a leaf the row is first looked for in the one
+    cell it is in when the leaf's rowids run on without a gap from the parent's key before the
+    leaf, and otherwise the page is searched from where a straight line through its first and
+    last rowids puts the key: 2-3 probes instead of 7-9; the batched descent and the straight
+    line are from c-iouring-pavlyhalim #245, the first cell is described in the last section),
+    and every post object is written from the pages: no row is copied anywhere else.
+  - **Post:** the row and then its author with that descent (one key each), its likes with a
+    seek of `likes_post_id_idx`. Likes check that the post exists with a seek too.
   - **Nothing is assumed and nothing is kept.** The stored layout is checked against the schema
     the decoders were written for at startup, and anything unexpected during a read (a record on
     overflow pages, a cell not in the expected form, an index entry without its row, a post whose
@@ -234,7 +236,10 @@ test suite's error paths through it with `src/train.c` over 48 keep-alive connec
 the final binary with the profile. The instrumented build counts with `-fprofile-update=prefer-atomic`:
 the checkpoint thread runs SQLite during training too, and racing counters once left a profile the
 optimized build rejected. `PGO=0 bash build.sh` skips that. No 512-bit vectors: on Cascade
-Lake one would lower the core's clock for a while after each use.
+Lake one would lower the core's clock for a while after each use. `SELFCHECK=1 bash build.sh`
+makes a test build in which every answer of the B-tree read path is followed by the reference
+SQL on the same snapshot and the two are compared byte for byte (differences and a running count
+go to stderr); the submission's build does not have it.
 
 ## Rules
 
@@ -717,3 +722,71 @@ numbers are a comparison, not a prediction. `FRESH_FIRST=0` restores the old ord
 BACKLOG_QUIET_MS=0` is the first version of this PR; `DELACK_RESTORE=0`, `QUICKACK_OFF=0`,
 `KEEP_LIMIT=0` (every connection is kept, up to `CONN_LIMIT`) and `CONN_LIMIT=0` turn off the
 others.
+
+## Rows by rowid: one cell first (follow-up to #486)
+
+A profile on the test box (kernel 6.8, six seconds of the hold of a 320,000-user run) put a
+fifth of the CPU time in use in this server's own code and four fifths in the kernel. (Profiling
+at that load is not repeatable: the profiler's start cost three seconds of CPU, the box fell
+behind and the run did not survive it. The other profiles here are from 200,000 users.) Of the
+server's fifth, the largest single piece was the look-up of a feed's 20 authors: each is a row
+of `users` on a different leaf, and in each leaf the search read the first and the last rowid,
+divided, and probed two or three cells, every one a first touch of that page. This commit
+changes how the row is found, not what is read:
+
+- While the descent chooses a key's child page it reads the parent's key before that child, and
+  every rowid in the child is larger. In a leaf whose rowids run on without a gap from that key,
+  the row with rowid `k` is in cell `k - that key - 1`. That cell is read first, and if it holds
+  `k` it is the row: keys are unique and ordered, so the cell that holds the key is the answer
+  whatever the other cells hold. One cell read instead of five or six. If it holds something else
+  (a gap in the rowids, the tree's first leaf, a root that is a leaf), the page is searched as
+  before.
+- A page's first and last rowid are read only when a search needs them, and the straight line
+  through them costs one division per page (in `double`) instead of a 64-bit division per key and
+  level.
+- `GET /posts/:id` finds the post and then its author with this descent, one key each, instead
+  of two `sqlite3BtreeTableMoveto` calls. A record that spills to overflow pages, or anything
+  else not in the expected form, is read with the cursor as before.
+
+Every page still comes from SQLite's pager (`getAndInitPage`, `releasePage`) inside the batch's
+transaction, and nothing is kept between requests.
+
+**Checked** with a test build (`SELFCHECK=1 bash build.sh`) in which every answer of the B-tree
+path is followed by the reference SQL on the same snapshot and the two are compared byte for
+byte: 786,000 answers under 100,000 users, with their posts and likes going in (so with leaves
+filling and splitting), none different, no fallbacks. And the 42 tests.
+
+**Measured** on the test box at 200,000 users, where it is half busy and has no stalls, so the
+number is steady from run to run: 40 s ramp + 90 s + 30 s down, runs alternating between the
+previous commit and this one; the server process's user CPU (from its cgroup) divided by the
+requests.
+
+| | user CPU per request |
+|---|---|
+| previous commit | 5.54, 5.44, 5.67 µs |
+| this commit | 4.91, 4.85, 4.92, 4.83, 4.83, 4.74, 4.93, 4.80, 5.03 µs |
+
+That is 0.6 µs a request, 11 % of this server's user time. At 320,000 users (34,000 requests a
+second) it is about 2 % of the box's CPU: small, but the 2-minute runs at 320k are decided in
+the seconds at the end of the ramp where the box has none to spare (the section above).
+
+Three 2-minute runs at 320k with this commit, as in the table of the section above: p99 4.1 s,
+40 ms and 628 ms (p95 24, 14 and 23 ms; nothing failed; least free memory 83-94 MB), so two of
+the three pass, where the commit before passed two of five (818 ms, 6.3 s, 540 ms, 3.8 s,
+4.5 s). Eight runs are too few to say the difference is this commit: every one of them still
+has its stall at the end of the ramp, and how deep it goes varies from run to run.
+
+Three more things were tried on top and left out because they did not measure faster: the
+feed's 20 rows through the same descent instead of cursor steps (5.00, 4.94 µs); prefetch hints
+for each author's chain of loads (the page cache's hash slot, the page's headers, the cell)
+before the pager is called for any of them (4.90, 4.93 µs: `users` has 20,000 rows on about 300
+leaves, which the processor's caches hold, so there was little waiting to overlap); and
+SQLite's `biasRight` argument for the feed's first row (4.79, 4.86 µs, no difference).
+
+The same profile says where the rest goes at 320k, for anyone working on this box: finding the
+connection of each arriving packet (`__inet_lookup_established`) 14-17 % of the CPU in use, zeroing
+the pages that packets are received into and sent from (`clear_page_erms`, the kernel's
+`init_on_alloc`) 4.5 %, the AppArmor hooks on every send and receive about 3 %. The server
+receives 2.4 packets per request: the request, and 1.4 bare ACKs, because a feed response is
+three segments and the load generator's kernel acknowledges it twice. None of that is the
+server's to change.

@@ -180,11 +180,25 @@ All 42 checks of `test/test.sh` pass.
 ## Credits
 
 Ideas taken from other submissions, each written here from the idea, not the
-code: a transaction per loop pass and a checkpoint helper process, and
-starting more processes on the same port past the descriptor limit, from
-[c-epoll-unorig-username](../c-epoll-unorig-username); holding writes while a
-checkpoint catches up so the WAL can start again, reading the feed's posts
-in ascending id order with its like counts in one index walk, and letting a
-pass gather for about a millisecond, from
-[rust-iouring-kensac](../rust-iouring-kensac). SPEC.md's reference SQL is the
-fallback for the feed and the query for a single post.
+code:
+
+- [c-epoll-unorig-username](../c-epoll-unorig-username): one SQLite
+  transaction per loop pass; a checkpoint helper process that keeps
+  checkpoints off the request path; starting more processes on the same port
+  past the descriptor limit (the five-process design `RING=0` keeps); and a
+  like as one `INSERT … SELECT … WHERE EXISTS (post) ON CONFLICT DO NOTHING`,
+  with a post lookup only when nothing was inserted.
+- [rust-iouring-kensac](../rust-iouring-kensac): reading posts through
+  SQLite's own B-tree cursors rather than its bytecode engine; holding every
+  connection in one io_uring process; holding writes while a checkpoint
+  catches up so the WAL can start again; reading the feed's posts in ascending
+  id order, and its like counts (and, through SQL, its rows) as one range walk
+  of the index when the ids lie close together; one send per response; and
+  letting a loop pass gather for about a millisecond. The last four came from
+  profiling this entry against it under the same load.
+
+[c-iouring-pavlyhalim](../c-iouring-pavlyhalim) and
+[c-epoll-unorig-username](../c-epoll-unorig-username) were also built and run
+under this entry's load harness, as reference points for its local figures;
+no code of theirs is used. SPEC.md's reference SQL is the fallback for the
+feed and the SQL path's query for a single post.

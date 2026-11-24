@@ -71,6 +71,10 @@ export class ServerConfig {
   idleTimeoutMs: i32 = 600000
   cacheKib: i32 = 65536
   mmapBytes: i64 = 0
+  /** A pass with fewer events than this is followed by a wait of `batchMs` (`BATCH_MIN`). */
+  batchMin: i32 = 64
+  /** How long requests gather after a small pass, in ms; 0 never waits (`BATCH_MS`). */
+  batchMs: i32 = 1
   /** Read posts through B-tree cursors (`CURSORS`, on by default) rather than SQL. */
   cursors: boolean = true
 }
@@ -177,6 +181,8 @@ export class FeedServer {
   likeRange: Statement
   /** The feed's ids in order, each one's place by `id - lo`, and its object's span in `rows` and its like count. */
   feedIds: i64[]
+  /** The feed's places in ascending id order. */
+  feedOrder: i32[]
   rangeAt: i32[]
   rowStart: i32[]
   rowEnd: i32[]
@@ -184,6 +190,10 @@ export class FeedServer {
   rows: Out
   /** Whether the pass's read transaction is open. */
   reading: boolean = false
+  batchMin: i32
+  batchMs: i32
+  /** The slot `drive` is running, whose flush follows its events; -1 outside it. */
+  driving: i32 = -1
   /** Read through cursors at all (`ServerConfig.cursors`). */
   useCursors: boolean
   /**
@@ -244,6 +254,8 @@ export class FeedServer {
     pollAdd(this.loop, listener, H1_WANT_READ, TOKEN_LISTENER)
     this.db = db
     this.useCursors = cfg.cursors
+    this.batchMin = cfg.batchMin
+    this.batchMs = cfg.batchMs
     this.feed = db.prepare(`${POST_SQL} ORDER BY p.created_at DESC, p.id DESC LIMIT 20`).expect("feed")
     this.post = db.prepare(`${POST_SQL} WHERE p.id = ?1`).expect("post")
     this.insertPost = db
@@ -269,6 +281,7 @@ export class FeedServer {
       .prepare("SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id")
       .expect("like range")
     this.feedIds = new Array<i64>(20)
+    this.feedOrder = new Array<i32>(20)
     this.rangeAt = new Array<i32>(RANGE_MAX)
     for (let k: i32 = 0; k < RANGE_MAX; k++) {
       this.rangeAt[k] = -1
@@ -329,6 +342,9 @@ export class FeedServer {
   /** Serves until the process is stopped; answers 1 when the loop fails. */
   run(): i32 {
     const ready: i32[] = new Array<i32>(2 * 1024)
+    // An empty loop: waiting on it sleeps for its whole timeout.
+    const nap: i32 = pollCreate()
+    const napReady: i32[] = new Array<i32>(2)
     while (true) {
       const n: i32 = pollWait(this.loop, ready, this.held ? 1 : 1000)
       if (n < 0 && n !== -4) {
@@ -347,6 +363,13 @@ export class FeedServer {
       if (now >= this.nextExpire) {
         this.server.expire(now)
         this.nextExpire = now + 1000000000
+      }
+      // After a small pass, with no write left waiting for the lock, let
+      // requests gather for `batchMs` (the pass's responses are sent first),
+      // so the next pass serves them together: fewer waits, wakes and
+      // system calls a request, and one COMMIT for more writes.
+      if (this.batchMs > 0 && n < this.batchMin && this.writes.length === 0) {
+        pollWait(nap, napReady, this.batchMs)
       }
     }
   }
@@ -387,6 +410,7 @@ export class FeedServer {
 
   /** Runs `slot`'s events, then re-arms or closes it. */
   drive(slot: i32): void {
+    this.driving = slot
     let event: i32 = this.server.next(slot)
     while (event !== H1_NEED_MORE && event !== H1_ERROR) {
       if (event === H1_REQUEST) {
@@ -405,6 +429,12 @@ export class FeedServer {
       }
       event = this.server.next(slot)
     }
+    this.driving = -1
+    this.finish(slot)
+  }
+
+  /** Sends what `slot`'s connection has queued, then re-arms or closes it. */
+  finish(slot: i32): void {
     const wants: i32 = this.server.flush(slot)
     if ((wants & H1_DONE) !== 0) {
       this.closeSlot(slot)
@@ -465,8 +495,16 @@ export class FeedServer {
     }
     const conn: Http1Connection = this.server.connection(slot)
     conn.respond(status, this.jsonNames, this.jsonValues, len)
-    conn.sendBody(buf, 0, len)
+    // `write` copies the body into the connection's output behind its head,
+    // and `flush` sends the two as one buffer: on a ring slot that is one
+    // SEND and one segment, where `sendBody`'s head-and-body `netWrite2` is
+    // two of each.
+    conn.write(buf, 0, len)
     conn.end()
+    if (slot !== this.driving) {
+      // A write answered after its group's COMMIT, outside `drive`.
+      this.finish(slot)
+    }
   }
 
   fail(r: Req, error: i32): void {
@@ -671,6 +709,32 @@ export class FeedServer {
    * bytecode. 1 when written, 0 when the post or its author is not there (the
    * reference JOIN drops a post without its user), -1 when SQLite failed.
    */
+  /** Post `id`'s entries in `likes_post_id_idx`, by one seek; -1 when SQLite failed. */
+  countLikes(id: i64): i64 {
+    const likes = this.likeCur
+    if (likes === null) {
+      return -1
+    }
+    if (likes.keyReset().isErr() || likes.keyI64(id).isErr()) {
+      return -1
+    }
+    const first = likes.seek(SEEK_GE)
+    if (first.isErr()) {
+      return -1
+    }
+    let count: i64 = 0
+    let on: boolean = first.value
+    while (on && likes.columnI64(0) === id) {
+      count++
+      const n = likes.next()
+      if (n.isErr()) {
+        return -1
+      }
+      on = n.value
+    }
+    return count
+  }
+
   cursorPost(id: i64, out: Out): i32 {
     const posts = this.postCur
     const users = this.userCur
@@ -692,22 +756,9 @@ export class FeedServer {
     if (!u.value) {
       return 0
     }
-    let count: i64 = 0
-    if (likes.keyReset().isErr() || likes.keyI64(id).isErr()) {
+    const count: i64 = this.countLikes(id)
+    if (count < 0) {
       return -1
-    }
-    const first = likes.seek(SEEK_GE)
-    if (first.isErr()) {
-      return -1
-    }
-    let on: boolean = first.value
-    while (on && likes.columnI64(0) === id) {
-      count++
-      const n = likes.next()
-      if (n.isErr()) {
-        return -1
-      }
-      on = n.value
     }
     out.bytes(this.frag[0], 0, 6)
     out.int(id)
@@ -730,23 +781,65 @@ export class FeedServer {
   }
 
   /**
-   * `GET /feed` through cursors: `posts_created_at_id_idx` from its first
-   * entry, newest first in `(created_at DESC, id DESC)` order, and each entry's
-   * post object until 20 are written; an entry whose post or author is
-   * missing is skipped, as the reference query's JOIN skips it. False, having
-   * written nothing, when the cursors cannot be opened.
+   * The like counts of the feed's posts `ids[0, n)`, whose ids span `lo` to
+   * `hi` (less than `RANGE_MAX` apart), into `likes`, by one walk of
+   * `likes_post_id_idx` from `lo` to `hi` rather than a seek per post.
+   * `at[id - lo]` is each post's place. False when SQLite failed.
+   */
+  countLikesRange(lo: i64, hi: i64): boolean {
+    const likes = this.likeCur
+    if (likes === null) {
+      return false
+    }
+    if (likes.keyReset().isErr() || likes.keyI64(lo).isErr()) {
+      return false
+    }
+    const first = likes.seek(SEEK_GE)
+    if (first.isErr()) {
+      return false
+    }
+    let on: boolean = first.value
+    while (on) {
+      const id: i64 = likes.columnI64(0)
+      if (id > hi || id < lo) {
+        break
+      }
+      const k: i32 = this.rangeAt[toI32(id - lo)]
+      if (k >= 0) {
+        this.likes[k] = this.likes[k] + 1
+      }
+      const n = likes.next()
+      if (n.isErr()) {
+        return false
+      }
+      on = n.value
+    }
+    return true
+  }
+
+  /**
+   * `GET /feed` through cursors. The 20 newest ids come from
+   * `posts_created_at_id_idx`, from its first entry: its order is exactly
+   * `(created_at DESC, id DESC)`. Their posts and authors are then read in
+   * ascending id order, so consecutive ids land on the next cell of the leaf
+   * the last seek left (SQLite's own fast path in `TableMoveto`) instead of a
+   * descent each. Their like counts are one walk of `likes_post_id_idx` when
+   * the ids span less than `RANGE_MAX`, else a seek each. A post or author
+   * that is missing, which the reference query's JOIN would drop, hands the
+   * request to the reference SQL. False, having written nothing, when the
+   * cursors cannot be opened.
    */
   readFeedCursors(r: Req): boolean {
     if (!this.openCursors()) {
       return false
     }
     const ix = this.newestCur
-    if (ix === null) {
+    const posts = this.postCur
+    const users = this.userCur
+    if (ix === null || posts === null || users === null) {
       return false
     }
-    const out: Out = this.out
-    out.reset()
-    out.bytes(this.feedOpen, 0, 10)
+    const ids: i64[] = this.feedIds
     let n: i32 = 0
     const first = ix.first()
     let ok: boolean = true
@@ -757,35 +850,111 @@ export class FeedServer {
       ok = false
     }
     while (ok && on && n < 20) {
-      const mark: i32 = out.end
-      if (n > 0) {
-        out.byte(44)
-      }
-      const w: i32 = this.cursorPost(ix.rowid(), out)
-      if (w < 0) {
-        ok = false
-      } else {
-        if (w === 0) {
-          out.end = mark
+      ids[n] = ix.rowid()
+      n++
+      if (n < 20) {
+        const s = ix.next()
+        if (s.isOk()) {
+          on = s.value
         } else {
-          n++
+          ok = false
         }
-        if (n < 20) {
-          const s = ix.next()
-          if (s.isOk()) {
-            on = s.value
-          } else {
+      }
+    }
+    if (!ok) {
+      this.fail(r, E_INTERNAL)
+      return true
+    }
+    // The places 0..n in ascending id order, by insertion: n is at most 20.
+    const order: i32[] = this.feedOrder
+    for (let k: i32 = 0; k < n; k++) {
+      let j: i32 = k
+      while (j > 0 && ids[order[j - 1]] > ids[k]) {
+        order[j] = order[j - 1]
+        j--
+      }
+      order[j] = k
+    }
+    const rows: Out = this.rows
+    rows.reset()
+    let missing: boolean = false
+    for (let j: i32 = 0; j < n && ok && !missing; j++) {
+      const k: i32 = order[j]
+      const p = posts.seekRowid(ids[k])
+      if (p.isErr()) {
+        ok = false
+      } else if (!p.value) {
+        missing = true
+      } else {
+        const u = users.seekRowid(posts.columnI64(1))
+        if (u.isErr()) {
+          ok = false
+        } else if (!u.value) {
+          missing = true
+        } else {
+          this.rowStart[k] = rows.end
+          rows.bytes(this.frag[0], 0, 6)
+          rows.int(ids[k])
+          rows.bytes(this.frag[1], 0, 8)
+          ok = this.textCursor(posts, 2, rows)
+          rows.bytes(this.frag[2], 0, 14)
+          ok = ok && this.textCursor(posts, 3, rows)
+          rows.bytes(this.frag[3], 0, 10)
+          ok = ok && this.textCursor(users, 1, rows)
+          rows.bytes(this.frag[4], 0, 14)
+          this.rowEnd[k] = rows.end
+          this.likes[k] = 0
+        }
+      }
+    }
+    if (ok && missing) {
+      this.readFeedReference(r)
+      return true
+    }
+    if (ok && n > 0) {
+      const lo: i64 = ids[order[0]]
+      const hi: i64 = ids[order[n - 1]]
+      if (hi - lo < toI64(RANGE_MAX)) {
+        const at: i32[] = this.rangeAt
+        for (let k: i32 = 0; k < n; k++) {
+          at[toI32(ids[k] - lo)] = k
+        }
+        ok = this.countLikesRange(lo, hi)
+        for (let k: i32 = 0; k < n; k++) {
+          at[toI32(ids[k] - lo)] = -1
+        }
+      } else {
+        for (let k: i32 = 0; k < n && ok; k++) {
+          const c: i64 = this.countLikes(ids[k])
+          if (c < 0) {
             ok = false
+          } else {
+            this.likes[k] = c
           }
         }
       }
     }
-    if (!ok || out.failed) {
+    if (!ok || rows.failed) {
       this.fail(r, E_INTERNAL)
       return true
     }
+    const out: Out = this.out
+    out.reset()
+    out.bytes(this.feedOpen, 0, 10)
+    for (let k: i32 = 0; k < n; k++) {
+      if (k > 0) {
+        out.byte(44)
+      }
+      out.bytes(rows.buf, this.rowStart[k], this.rowEnd[k] - this.rowStart[k])
+      out.int(this.likes[k])
+      out.byte(125)
+    }
     out.byte(93)
     out.byte(125)
+    if (out.failed) {
+      this.fail(r, E_INTERNAL)
+      return true
+    }
     this.answer(r, 200, out.buf, out.end)
     return true
   }

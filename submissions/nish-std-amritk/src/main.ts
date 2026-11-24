@@ -133,6 +133,8 @@ export const main = (): i32 => {
   cfg.idleTimeoutMs = envInt("IDLE_TIMEOUT_MS", 600000)
   cfg.cacheKib = envInt("CACHE_KIB", 16384)
   cfg.cursors = (getenv("CURSORS") ?? "1") !== "0"
+  cfg.batchMin = envInt("BATCH_MIN", 64)
+  cfg.batchMs = (getenv("BATCH_MS") ?? "1") === "0" ? 0 : envInt("BATCH_MS", 1)
   const mmapMib: i32 = envInt("MMAP_MIB", 0)
   // RING=0 keeps the descriptors. Otherwise a child probes for rings; the
   // workers fork after it, so every one listens the same way.

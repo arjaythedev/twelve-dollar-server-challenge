@@ -11,7 +11,7 @@ B-trees directly through mmap, writes through the bundled SQLite.
 | SQLite reads | mmap B-tree walk: table seeks, right-spine backward walk for the feed, in-order index scan for like counts — NO SQL engine on the read path |
 | SQLite writes | rusqlite, group commit per pass (BEGIN; INSERTs; COMMIT; responses flush after COMMIT) |
 | Nginx or direct | **Direct** (serves HOST:PORT itself) |
-| Needs | Linux 6.1+ (io_uring DEFER_TASKRUN-era features; registered-buffer reads). SHA-NI optional — HMAC auto-detects hardware support at runtime |
+| Needs | Linux 6.1+ (io_uring DEFER_TASKRUN-era features). Reads go into per-connection unregistered buffers — no RLIMIT_MEMLOCK requirement, runs under a stock systemd unit. SHA-NI optional — HMAC auto-detects hardware support at runtime |
 
 ## The read path (the interesting part)
 

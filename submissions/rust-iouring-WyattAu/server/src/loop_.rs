@@ -6,8 +6,11 @@
 //! Transport (exact uring-kit semantics):
 //! - `add_listener` arms a single-shot Accept SQE; the engine re-arms it on
 //!   every completion (drain path). The Accept CQE's result IS the new fd.
-//! - reads: registered-buffer `read(token, fd, slot)`; CQE result = bytes;
-//!   0 = peer close.
+//! - reads: UNREGISTERED vectored reads into each connection's own
+//!   stable heap buffer (no RLIMIT_MEMLOCK dependency); CQE result =
+//!   bytes, 0 = peer close. Partial reads cannot occur on a stream
+//!   socket read; short reads cannot occur either (read returns what
+//!   the kernel has, up to the buffer size).
 //! - sends: `write_vectored` from per-connection outbox buffers (stable
 //!   until the write CQE; popped after). One write in flight per connection;
 //!   on its completion: pop outbox front, send next, else re-arm read.

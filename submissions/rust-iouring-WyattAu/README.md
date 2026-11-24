@@ -11,7 +11,7 @@ B-trees directly through mmap, writes through the bundled SQLite.
 | SQLite reads | mmap B-tree walk: table seeks, right-spine backward walk for the feed, in-order index scan for like counts — NO SQL engine on the read path |
 | SQLite writes | rusqlite, group commit per pass (BEGIN; INSERTs; COMMIT; responses flush after COMMIT) |
 | Nginx or direct | **Direct** (serves HOST:PORT itself) |
-| Needs | Linux 6.1+ (io_uring DEFER_TASKRUN-era features; registered-buffer reads) |
+| Needs | Linux 6.1+ (io_uring DEFER_TASKRUN-era features; registered-buffer reads). SHA-NI optional — HMAC auto-detects hardware support at runtime |
 
 ## The read path (the interesting part)
 
@@ -29,6 +29,17 @@ batches, checkpoint-restarts, TRUNCATE checkpoints, and SIGKILL-recovery,
 every read (seeks, counts, feed order) must equal SQLite's own answers on
 the same bytes (12-round synthetic corpus + the real 238 MB seed).
 
+## The hot path
+
+Requests parse against the connection buffer in place (no per-request
+buffer copies); authed writes and JWT usernames land in a per-pass arena
+that retires after each commit. `GET /posts/:id` emits the SPEC JSON
+straight from mmap views in one reader pass (post row, author rowid seek,
+like-count index walk). Responses flush as two iovecs — header block and
+body — with partial-write progress tracked across write completions.
+HMAC-SHA256 verification uses the SHA-NI instructions when the CPU has
+them (runtime detection); the fallback is the portable kernel.
+
 ## Durability and correctness
 
 - WAL with `synchronous=NORMAL`, autocheckpoint disabled; checkpoints are
@@ -44,12 +55,12 @@ the same bytes (12-round synthetic corpus + the real 238 MB seed).
 
 ## Proofs
 
-`proof/` carries Lean 4 theorems over the varint decoder model: totality
-(structural recursion), the 9-byte consumption bound, and the
-consumed-within-buffer bound. The value-bound (< 2^64) and the B-tree
-walker's bounds are open Lean targets tracked in the repo ledger;
-empirically they are enforced by the proptest round-trip over all u64 and
-the differential oracle.
+`proof/` carries Lean 4 theorems over the varint decoder model, all
+machine-checked: totality (structural recursion), the 9-byte consumption
+bound, consumed-within-buffer (no phantom progress), and the decoded
+value bound < 2^64 (the `u64` fit the Rust decoder relies on). The
+B-tree walker's bounds remain enforced empirically by the proptest
+round-trip over all u64 and the differential oracle.
 
 ## Layout
 

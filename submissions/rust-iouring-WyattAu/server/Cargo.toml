@@ -10,7 +10,9 @@ uring-http = { path = "../crates/uring-http" }
 sqlite-btree = { path = "../crates/sqlite-btree" }
 io-uring.workspace = true
 libc.workspace = true
-sha2 = "0.10"
+# F26 lever: hand-written SHA-NI kernels (runtime-detected via cpufeatures)
+# — the HMAC-SHA256 verify runs once per authed request
+sha2 = { version = "0.10", features = ["asm"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 uring-kit.workspace = true
 hmac = "0.12"

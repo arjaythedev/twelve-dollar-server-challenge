@@ -41,6 +41,22 @@ const MAX_REQUEST: usize = 64 * 1024;
 /// pipelined requests drained per read burst
 const MAX_PIPELINED: usize = 8;
 
+/// One queued response: header block + body as two owned pieces, plus
+/// partial-write progress (a writev may flush less than the frame; the
+/// rest resends on the next Op::Write — truncation bug fixed in passing).
+struct OutFrame {
+    head: Vec<u8>,
+    body: Vec<u8>,
+    head_off: usize,
+    body_off: usize,
+}
+
+impl OutFrame {
+    fn remaining(&self) -> usize {
+        self.head.len() - self.head_off + (self.body.len() - self.body_off)
+    }
+}
+
 struct Conn {
     fd: RawFd,
     generation: u16,
@@ -50,8 +66,9 @@ struct Conn {
     buf: Vec<u8>,
     /// consumed prefix of `buf`
     consumed: usize,
-    /// responses awaiting send (front is in flight)
-    outbox: VecDeque<Vec<u8>>,
+    /// responses awaiting send (front is in flight). E06: head and body
+    /// sent as separate iovecs — no body memcpy into the frame buffer.
+    outbox: VecDeque<OutFrame>,
     last_active: u64,
 }
 
@@ -188,14 +205,30 @@ impl Server {
             }
             Op::Write => {
                 let generation = cqe.token.generation();
-                if cqe.result.is_err() {
+                let Ok(n) = cqe.result else {
                     self.close_conn(generation);
                     return;
-                }
-                // response sent: pop the outbox front; send next or re-arm read
+                };
                 let Some(&fd) = self.gen_conn.get(&generation) else { return };
                 let Some(conn) = self.conns.get_mut(&fd) else { return };
                 if conn.generation != generation {
+                    return;
+                }
+                // advance past the flushed bytes; a partial write keeps its
+                // frame in front and resends the remainder (the old path
+                // popped unconditionally — silent truncation on backpressure)
+                let mut n = n as usize;
+                let Some(front) = conn.outbox.front_mut() else { return };
+                let head_left = front.head.len() - front.head_off;
+                if n < head_left {
+                    front.head_off += n;
+                } else {
+                    n -= head_left;
+                    front.head_off = front.head.len();
+                    front.body_off = (front.body_off + n).min(front.body.len());
+                }
+                if front.remaining() > 0 {
+                    self.submit_write_front(fd, generation);
                     return;
                 }
                 conn.outbox.pop_front();
@@ -369,10 +402,18 @@ impl Server {
     fn submit_write_front(&mut self, fd: RawFd, generation: u16) {
         let Some(conn) = self.conns.get(&fd) else { return };
         let Some(front) = conn.outbox.front() else { return };
-        let iov = Box::new([libc::iovec {
-            iov_base: front.as_ptr() as *mut libc::c_void,
-            iov_len: front.len(),
-        }]);
+        let iov = Box::new([
+            libc::iovec {
+                iov_base: unsafe { front.head.as_ptr().add(front.head_off) }
+                    as *mut libc::c_void,
+                iov_len: front.head.len() - front.head_off,
+            },
+            libc::iovec {
+                iov_base: unsafe { front.body.as_ptr().add(front.body_off) }
+                    as *mut libc::c_void,
+                iov_len: front.body.len() - front.body_off,
+            },
+        ]);
         let _ = conn; // borrow ends here; iov points at outbox-owned memory
         let token = Token::new(Op::Write, 0, generation, 0);
         if self.engine.write_vectored(token, fd, iov).is_err() {
@@ -638,12 +679,19 @@ impl Server {
         if std::env::var_os("LOOP_DEBUG").is_some() {
             eprintln!("send_response fd {fd} status {status} len {}", body.len());
         }
-        let mut frame = Vec::with_capacity(112 + body.len());
-        frame.extend_from_slice(status_line(status));
-        frame.extend_from_slice(b"Content-Type: application/json\r\nContent-Length: ");
-        push_decimal(&mut frame, body.len());
-        frame.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
-        frame.extend_from_slice(body);
+        // E06: head and body stay separate pieces (writev sends both; the
+        // body memcpy into a single frame buffer is gone)
+        let mut head = Vec::with_capacity(112);
+        head.extend_from_slice(status_line(status));
+        head.extend_from_slice(b"Content-Type: application/json\r\nContent-Length: ");
+        push_decimal(&mut head, body.len());
+        head.extend_from_slice(b"\r\nConnection: keep-alive\r\n\r\n");
+        let frame = OutFrame {
+            head,
+            body: body.to_vec(),
+            head_off: 0,
+            body_off: 0,
+        };
         let was_idle = match self.conns.get_mut(&fd) {
             Some(conn) => {
                 let was_idle = conn.outbox.is_empty();

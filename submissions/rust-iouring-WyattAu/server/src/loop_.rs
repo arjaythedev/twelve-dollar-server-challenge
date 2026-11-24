@@ -585,8 +585,23 @@ impl Server {
         for (i, q) in queue.iter().enumerate() {
             match &q.kind {
                 QueuedKind::PostCreate { user, username: (us, ue), body: (bs, be) } => {
-                    let username = &self.scratch[*us as usize..*ue as usize];
-                    let body = &self.scratch[*bs as usize..*be as usize];
+                    let (us, ue) = (*us as usize, *ue as usize);
+                    let (bs, be) = (*bs as usize, *be as usize);
+                    // RANGE-INVALIDATION GUARD: if a queued range exceeds the
+                    // arena, the arena was cleared with this item still
+                    // queued — the response is unrecoverable; log the exact
+                    // state (the sequence that clears live ranges is the
+                    // actual bug) and answer 500 instead of dying.
+                    if ue > self.scratch.len() || be > self.scratch.len() {
+                        eprintln!(
+                            "SCRATCH RACE: queued range {us}..{ue}/{bs}..{be} vs arena len {} — item survived a clear; dropping response",
+                            self.scratch.len()
+                        );
+                        results[i] = (500, b"{\"error\":\"internal\"}".to_vec());
+                        continue;
+                    }
+                    let username = &self.scratch[us..ue];
+                    let body = &self.scratch[bs..be];
                     match handlers::insert_post(&self.store.writer, *user, body) {
                         Ok((pid, created)) => {
                             let pref = json::PostRef {

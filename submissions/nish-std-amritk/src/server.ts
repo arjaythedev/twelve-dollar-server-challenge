@@ -26,7 +26,7 @@ import {
   Http1Server,
 } from "nish/net/http1-server"
 import { Http1Parser } from "nish/net/http1-codec"
-import { Cursor, Database, SEEK_GE, SQLITE_BUSY, Statement } from "nish/sqlite"
+import { Cursor, Database, SQLITE_BUSY, SQLITE_TEXT, Statement } from "nish/sqlite"
 import { BODY_MALFORMED, BODY_OK, BODY_REQUIRED, BodyReader } from "./body"
 import { JWT_BAD_PAYLOAD, JWT_OK, Jwt } from "./jwt"
 import { Out, bytesOf } from "./out"
@@ -183,6 +183,14 @@ export class FeedServer {
   feedIds: i64[]
   /** The feed's places in ascending id order. */
   feedOrder: i32[]
+  /** `readRow`'s columns: a post's user_id, body and created_at; an author's username. */
+  postCols: i32[]
+  userCols: i32[]
+  /** What `readRow` decodes a row into; the text goes to `col`. */
+  rowInts: i64[]
+  rowSpans: i32[]
+  /** Like counts by post id from a range's first, from `countRange`. */
+  likeSpan: i64[]
   rangeAt: i32[]
   rowStart: i32[]
   rowEnd: i32[]
@@ -282,6 +290,11 @@ export class FeedServer {
       .expect("like range")
     this.feedIds = new Array<i64>(20)
     this.feedOrder = new Array<i32>(20)
+    this.postCols = [1, 2, 3]
+    this.userCols = [1]
+    this.rowInts = new Array<i64>(3)
+    this.rowSpans = new Array<i32>(9)
+    this.likeSpan = new Array<i64>(RANGE_MAX)
     this.rangeAt = new Array<i32>(RANGE_MAX)
     for (let k: i32 = 0; k < RANGE_MAX; k++) {
       this.rangeAt[k] = -1
@@ -346,6 +359,7 @@ export class FeedServer {
     const nap: i32 = pollCreate()
     const napReady: i32[] = new Array<i32>(2)
     while (true) {
+      // A held write group retries within 1 ms.
       const n: i32 = pollWait(this.loop, ready, this.held ? 1 : 1000)
       if (n < 0 && n !== -4) {
         return 1
@@ -366,8 +380,10 @@ export class FeedServer {
       }
       // After a small pass, with no write left waiting for the lock, let
       // requests gather for `batchMs` (the pass's responses are sent first),
-      // so the next pass serves them together: fewer waits, wakes and
-      // system calls a request, and one COMMIT for more writes.
+      // so the next pass serves them together: fewer waits, wakes and system
+      // calls a request, and one COMMIT for more writes. A wait on an empty
+      // poll set sleeps; Nish 0.46.0's `pollWaitBatch` serves completions as
+      // they trickle in during its window instead, and measured 13% dearer.
       if (this.batchMs > 0 && n < this.batchMin && this.writes.length === 0) {
         pollWait(nap, napReady, this.batchMs)
       }
@@ -676,6 +692,10 @@ export class FeedServer {
     if (a.isErr() || b.isErr() || c.isErr() || d.isErr()) {
       return false
     }
+    // readRow's columns: a post's user_id, body and created_at; an author's username.
+    if (b.value.selectRow(this.postCols).isErr() || c.value.selectRow(this.userCols).isErr()) {
+      return false
+    }
     this.newestCur = a.value
     this.postCur = b.value
     this.userCur = c.value
@@ -683,63 +703,42 @@ export class FeedServer {
     return true
   }
 
-  /** Appends text column `c` of `cur`'s row to `out` as a JSON string; false when SQLite failed. */
-  textCursor(cur: Cursor, c: i32, out: Out): boolean {
-    const r = cur.columnInto(c, this.col, 0)
+  /**
+   * Reads the current row of `cur` (its `selectRow` columns) into `ints`,
+   * `spans` and `this.col`, growing `this.col` when the row's text does not
+   * fit; false when SQLite failed.
+   */
+  readRow(cur: Cursor, ints: i64[], spans: i32[]): boolean {
+    const r = cur.readRow(ints, spans, this.col)
     if (r.isErr()) {
       return false
     }
     if (r.value <= toI32(this.col.length)) {
-      out.string(this.col, 0, r.value)
       return true
     }
     this.col = new Array<u8>(r.value)
-    const again = cur.columnInto(c, this.col, 0)
-    if (again.isErr()) {
+    return cur.readRow(ints, spans, this.col).isOk()
+  }
+
+  /** Appends the `k`th text column `readRow` left in `this.col` to `out` as a JSON string; false when it is not text. */
+  textSpan(spans: i32[], k: i32, out: Out): boolean {
+    if (spans[3 * k] !== SQLITE_TEXT) {
       return false
     }
-    out.string(this.col, 0, again.value)
+    out.string(this.col, spans[3 * k + 1], spans[3 * k + 2])
     return true
   }
 
   /**
-   * Post `id`'s whole object into `out`, read through the open cursors: its
-   * row by rowid, its author's by rowid, and its likes counted in
-   * `likes_post_id_idx`, the reference query's three reads without its
-   * bytecode. 1 when written, 0 when the post or its author is not there (the
-   * reference JOIN drops a post without its user), -1 when SQLite failed.
+   * Post `id`'s object up to and including `"like_count":`, into `out`, read
+   * through the open cursors: its row by rowid, decoded in one `readRow`, then
+   * its author's. 1 when written, 0 when the post or its author is not there
+   * (the reference JOIN drops a post without its user), -1 when SQLite failed.
    */
-  /** Post `id`'s entries in `likes_post_id_idx`, by one seek; -1 when SQLite failed. */
-  countLikes(id: i64): i64 {
-    const likes = this.likeCur
-    if (likes === null) {
-      return -1
-    }
-    if (likes.keyReset().isErr() || likes.keyI64(id).isErr()) {
-      return -1
-    }
-    const first = likes.seek(SEEK_GE)
-    if (first.isErr()) {
-      return -1
-    }
-    let count: i64 = 0
-    let on: boolean = first.value
-    while (on && likes.columnI64(0) === id) {
-      count++
-      const n = likes.next()
-      if (n.isErr()) {
-        return -1
-      }
-      on = n.value
-    }
-    return count
-  }
-
-  cursorPost(id: i64, out: Out): i32 {
+  postHeadCursor(id: i64, out: Out): i32 {
     const posts = this.postCur
     const users = this.userCur
-    const likes = this.likeCur
-    if (posts === null || users === null || likes === null) {
+    if (posts === null || users === null) {
       return -1
     }
     const p = posts.seekRowid(id)
@@ -749,73 +748,68 @@ export class FeedServer {
     if (!p.value) {
       return 0
     }
-    const u = users.seekRowid(posts.columnI64(1))
+    const ints: i64[] = this.rowInts
+    const spans: i32[] = this.rowSpans
+    if (!this.readRow(posts, ints, spans)) {
+      return -1
+    }
+    const u = users.seekRowid(ints[0])
     if (u.isErr()) {
       return -1
     }
     if (!u.value) {
       return 0
     }
+    out.bytes(this.frag[0], 0, 6)
+    out.int(id)
+    out.bytes(this.frag[1], 0, 8)
+    if (!this.textSpan(spans, 1, out)) {
+      return -1
+    }
+    out.bytes(this.frag[2], 0, 14)
+    if (!this.textSpan(spans, 2, out)) {
+      return -1
+    }
+    // The author's row replaces the post's text in `this.col`, which is written.
+    if (!this.readRow(users, ints, spans)) {
+      return -1
+    }
+    out.bytes(this.frag[3], 0, 10)
+    if (!this.textSpan(spans, 0, out)) {
+      return -1
+    }
+    out.bytes(this.frag[4], 0, 14)
+    return 1
+  }
+
+  /** Post `id`'s entries in `likes_post_id_idx`, by one `countRange`; -1 when SQLite failed. */
+  countLikes(id: i64): i64 {
+    const likes = this.likeCur
+    if (likes === null) {
+      return -1
+    }
+    const n = likes.countRange(id, id, this.likeSpan)
+    return n.isErr() ? -1 : toI64(n.value)
+  }
+
+  /**
+   * Post `id`'s whole object into `out`, read through the open cursors. 1 when
+   * written, 0 when the post or its author is not there, -1 when SQLite failed.
+   */
+  cursorPost(id: i64, out: Out): i32 {
+    const w: i32 = this.postHeadCursor(id, out)
+    if (w <= 0) {
+      return w
+    }
     const count: i64 = this.countLikes(id)
     if (count < 0) {
       return -1
     }
-    out.bytes(this.frag[0], 0, 6)
-    out.int(id)
-    out.bytes(this.frag[1], 0, 8)
-    if (!this.textCursor(posts, 2, out)) {
-      return -1
-    }
-    out.bytes(this.frag[2], 0, 14)
-    if (!this.textCursor(posts, 3, out)) {
-      return -1
-    }
-    out.bytes(this.frag[3], 0, 10)
-    if (!this.textCursor(users, 1, out)) {
-      return -1
-    }
-    out.bytes(this.frag[4], 0, 14)
     out.int(count)
     out.byte(125)
     return 1
   }
 
-  /**
-   * The like counts of the feed's posts `ids[0, n)`, whose ids span `lo` to
-   * `hi` (less than `RANGE_MAX` apart), into `likes`, by one walk of
-   * `likes_post_id_idx` from `lo` to `hi` rather than a seek per post.
-   * `at[id - lo]` is each post's place. False when SQLite failed.
-   */
-  countLikesRange(lo: i64, hi: i64): boolean {
-    const likes = this.likeCur
-    if (likes === null) {
-      return false
-    }
-    if (likes.keyReset().isErr() || likes.keyI64(lo).isErr()) {
-      return false
-    }
-    const first = likes.seek(SEEK_GE)
-    if (first.isErr()) {
-      return false
-    }
-    let on: boolean = first.value
-    while (on) {
-      const id: i64 = likes.columnI64(0)
-      if (id > hi || id < lo) {
-        break
-      }
-      const k: i32 = this.rangeAt[toI32(id - lo)]
-      if (k >= 0) {
-        this.likes[k] = this.likes[k] + 1
-      }
-      const n = likes.next()
-      if (n.isErr()) {
-        return false
-      }
-      on = n.value
-    }
-    return true
-  }
 
   /**
    * `GET /feed` through cursors. The 20 newest ids come from
@@ -834,9 +828,7 @@ export class FeedServer {
       return false
     }
     const ix = this.newestCur
-    const posts = this.postCur
-    const users = this.userCur
-    if (ix === null || posts === null || users === null) {
+    if (ix === null) {
       return false
     }
     const ids: i64[] = this.feedIds
@@ -880,31 +872,13 @@ export class FeedServer {
     let missing: boolean = false
     for (let j: i32 = 0; j < n && ok && !missing; j++) {
       const k: i32 = order[j]
-      const p = posts.seekRowid(ids[k])
-      if (p.isErr()) {
+      this.rowStart[k] = rows.end
+      const w: i32 = this.postHeadCursor(ids[k], rows)
+      this.rowEnd[k] = rows.end
+      if (w < 0) {
         ok = false
-      } else if (!p.value) {
+      } else if (w === 0) {
         missing = true
-      } else {
-        const u = users.seekRowid(posts.columnI64(1))
-        if (u.isErr()) {
-          ok = false
-        } else if (!u.value) {
-          missing = true
-        } else {
-          this.rowStart[k] = rows.end
-          rows.bytes(this.frag[0], 0, 6)
-          rows.int(ids[k])
-          rows.bytes(this.frag[1], 0, 8)
-          ok = this.textCursor(posts, 2, rows)
-          rows.bytes(this.frag[2], 0, 14)
-          ok = ok && this.textCursor(posts, 3, rows)
-          rows.bytes(this.frag[3], 0, 10)
-          ok = ok && this.textCursor(users, 1, rows)
-          rows.bytes(this.frag[4], 0, 14)
-          this.rowEnd[k] = rows.end
-          this.likes[k] = 0
-        }
       }
     }
     if (ok && missing) {
@@ -914,14 +888,13 @@ export class FeedServer {
     if (ok && n > 0) {
       const lo: i64 = ids[order[0]]
       const hi: i64 = ids[order[n - 1]]
-      if (hi - lo < toI64(RANGE_MAX)) {
-        const at: i32[] = this.rangeAt
-        for (let k: i32 = 0; k < n; k++) {
-          at[toI32(ids[k] - lo)] = k
-        }
-        ok = this.countLikesRange(lo, hi)
-        for (let k: i32 = 0; k < n; k++) {
-          at[toI32(ids[k] - lo)] = -1
+      const likes = this.likeCur
+      if (likes !== null && hi - lo < toI64(RANGE_MAX)) {
+        // One seek and one walk of likes_post_id_idx for all of them.
+        const span: i64[] = this.likeSpan
+        ok = likes.countRange(lo, hi, span).isOk()
+        for (let k: i32 = 0; k < n && ok; k++) {
+          this.likes[k] = span[toI32(ids[k] - lo)]
         }
       } else {
         for (let k: i32 = 0; k < n && ok; k++) {

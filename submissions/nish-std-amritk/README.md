@@ -2,7 +2,7 @@
 
 Front: **direct** (serves `HOST:PORT` itself, `0.0.0.0:80` on the benchmark box)
 
-Nish 0.44.0 (a statically typed TypeScript subset compiled to native code
+Nish 0.45.1 (a statically typed TypeScript subset compiled to native code
 through LLVM), built with clang-18 and lld-18 from LLVM 18. The compiler runs
 on Node.js 22.18.0 at build time only; the server is one native binary. Every
 import is Nish's own standard library: `nish/net/http1-server` for HTTP/1.1,
@@ -97,7 +97,7 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
   request allocates nothing: the server's RSS stays flat over millions of
   requests.
 
-Built with `--allow-panics`: Nish 0.44.0 refuses by default any index or
+Built with `--allow-panics`: since 0.44.0 Nish refuses by default any index or
 arithmetic it cannot prove in range, and with the flag those sites keep the
 run-time check every earlier release compiled.
 
@@ -156,6 +156,20 @@ a post with many likes costs a cursor step per like, so a run that piles likes
 on a few posts lengthens the tail. If the box shows p95 or p99 trouble before
 it shows full CPU, `RING=0` is the five-process design and `CURSORS=0` the SQL
 reads.
+
+With Nish 0.45.1, on another container of the same kind, five interleaved
+saturated rounds measured 15.9 µs a request (14.0–16.3) against 15.5 µs
+(14.5–16.2) for the same code built with 0.44.0: no measurable change. On
+that container, under the same harness:
+
+| Server | 90,000 connections, 4 s think | 180,000 connections, 8 s think | Leaderboard |
+| --- | ---: | ---: | ---: |
+| [c-iouring-pavlyhalim](../c-iouring-pavlyhalim) | 18.0 µs | 24.3 µs | 295,000 |
+| this entry, Nish 0.45.1 | 25.3 µs | 29.1–31.5 µs (2 runs) | |
+| [c-epoll-unorig-username](../c-epoll-unorig-username) | 30.2 µs | 43.4 µs | 210,000 |
+
+This entry held every connection with no errors, at a p99 of 16 ms at 90,000
+and 32–43 ms at 180,000, in 97 to 120 MB of server memory.
 
 All 42 checks of `test/test.sh` pass.
 

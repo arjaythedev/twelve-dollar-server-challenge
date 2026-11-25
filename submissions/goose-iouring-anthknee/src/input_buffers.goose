@@ -1,11 +1,9 @@
-// Bounded native input buffers, with exact-length Goose spans for overflow.
 import slice_pool;
 import slot_pool;
 import src.model;
 import src.native;
 namespace input_buffers;
 
-// Both handle tables fit below this bit. Keep the connection's existing i32 handle.
 let POOLED: i32 = 1 << 30;
 struct Span { offset: u32, length: u32 }
 var storage = slice_pool<u8> {};
@@ -20,8 +18,7 @@ fn span(handle: i32) -> Span {
 
 fn save_pooled(bytes: const u8[:]) -> i32 {
     if handles.free_slots.len == 0 && handles.items.len >= model::MAX_RINGS * 65535 { return -1; }
-    // Reserve worst-case growth before allocation, then account the actual high-water length.
-    // This can reject near the shared limit even when a free span would have fitted.
+
     if !native::input_reserve(storage.items.len + bytes.len) { return -1; }
     let saved = storage.alloc_copy(bytes);
     let accounted = native::input_reserve(storage.items.len);
@@ -38,7 +35,7 @@ fn save(bytes: const u8[:]) -> i32 {
     if handle < 0 { return save_pooled(bytes); }
     assert(handle < POOLED);
     let copied = native::input_append(handle, bytes);
-    assert(copied); // The new buffer already has capacity for this payload.
+    assert(copied);
     return handle;
 }
 
@@ -48,7 +45,6 @@ fn append(handle: i32&, bytes: const u8[:]) -> bool {
         if native::box_len(handle) + bytes.len > model::MAX_HEAD + model::MAX_BODY { return false; }
         if bytes.len == 0 { return true; }
         if native::input_append(handle, bytes) { return true; }
-        // Keep the original buffer alive until the entire replacement is owned.
         var moved: u8[>..] = [];
         native::box_read(handle, moved);
         moved.append(bytes);

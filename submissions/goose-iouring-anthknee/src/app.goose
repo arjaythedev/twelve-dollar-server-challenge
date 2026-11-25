@@ -1,4 +1,3 @@
-// Effectful handlers. Pure parsing/authentication receive all dependencies as values.
 import src.db;
 import src.http;
 import src.jwt;
@@ -43,7 +42,6 @@ fn auth_error(result: model::Auth&, out: u8[>..]&) -> i32 {
     };
 }
 
-// Last duplicate key wins; malformed JSON and a non-string/missing body stay distinct.
 fn create(bytes: const u8[:], req: model::Request&, now: f64, out: u8[>..]&) -> i32 {
     var auth = authenticate(bytes, req, now, true);
     var uid: i64 = 0;
@@ -109,7 +107,6 @@ fn like(bytes: const u8[:], req: model::Request&, raw_id: model::ByteRange,
     return status;
 }
 
-// JSON only. The transport constructs headers and defers these bytes until COMMIT.
 fn respond(bytes: const u8[:], req: model::Request&, started_us: i64, out: u8[>..]&) -> i32 {
     out.clear();
     let route = http::route(bytes, req);

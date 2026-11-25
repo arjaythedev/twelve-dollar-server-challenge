@@ -1,4 +1,4 @@
-// Effect boundary. Borrowed slices are consumed synchronously; C never retains them.
+// Native calls borrow these slices only for the duration of the call.
 namespace native;
 
 struct Cqe { ud: u64, result: i32, flags: u32 }
@@ -47,12 +47,14 @@ extern fn seek_ge(tree: i32, key: i64) -> i32 = "sd_seek_ge";
 extern fn first(tree: i32) -> i32 = "sd_first";
 extern fn next(tree: i32) -> i32 = "sd_next";
 extern fn row(tree: i32, out: u8[>..]&) -> i64 = "sd_row";
+extern fn feed_author_names(ids: const i64[:], offsets: i64[:], out: u8[>..]&) -> bool = "sd_feed_author_names";
 extern fn like_counts(lo: i64, hi: i64, counts: u32[:]) -> i32 = "sd_like_counts";
 extern fn add_post(uid: i64, text: const u8[:], id: i64&, created: u8[>..]&) -> i32 = "sd_add_post";
 extern fn add_like(uid: i64, id: i64) -> i32 = "sd_add_like";
 extern fn ping(err: u8[>..]&) -> i32 = "sd_ping";
 extern fn feed_step(row: FeedRow&, text: u8[>..]&) -> i32 = "sd_feed_step";
 extern fn checkpoint_request() = "sd_checkpoint_request";
+extern fn checkpoint_interrupt() = "sd_checkpoint_interrupt";
 extern fn checkpoint_poll() -> i32 = "sd_checkpoint_poll";
 extern fn wal_frames() -> i64 = "sd_wal_frames";
 extern fn wal_reset() = "sd_wal_reset";

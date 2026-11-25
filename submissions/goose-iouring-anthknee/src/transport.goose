@@ -1,4 +1,3 @@
-// Imperative shell. Rust's receive strategy, Goose-owned state and fair bounded queues.
 import std;
 import os;
 import src.model;
@@ -20,6 +19,7 @@ let NOT_FOUND: i32 = -2;
 let AGAIN: i32 = -11;
 let ALREADY: i32 = -114;
 let NO_BUFFERS: i32 = -105;
+let WRITE_WINDOW_US: i64 = 16000;
 
 struct Ring { open: i64, reads: i64, accepting: bool[8], cancelling: bool[8] }
 var connections: model::Connection[>..];
@@ -39,6 +39,7 @@ var touched: model::Handle[>..<];
 var ready_head: i64 = 0;
 var read_head: i64 = 0;
 var held_head: i64 = 0;
+var write_deadline: i64 = 0;
 var incoming: u8[>..];
 var assembled: u8[>..];
 var response: u8[>..];
@@ -72,7 +73,6 @@ fn live(value: model::Handle) -> bool {
     return current(value) && connections[value.index].life == model::Life.Open;
 }
 
-// 8 operation bits, 8 ring bits, 32 generation bits and 16 slot bits.
 fn tag(operation: u64, index: i64) -> u64 {
     let h = handle(index);
     return (operation << 56) | (((index / slots) as u64) << 48) |
@@ -141,7 +141,6 @@ fn stash(index: i64, bytes: const u8[:], kind: i32) {
         input_buffers::release(box); c.input = model::Input.Empty;
         close_after(index); return;
     }
-    // Each transition into a queued state contributes exactly one generation-tagged handle.
     if kind == 0 { c.input = model::Input.Partial { box: box }; }
     else if kind == 1 {
         c.input = model::Input.Ready { box: box };
@@ -155,11 +154,11 @@ fn stash(index: i64, bytes: const u8[:], kind: i32) {
             input_buffers::release(box); c.input = model::Input.Empty; close_after(index); return;
         }
         held.push(handle(index));
+        if write_deadline == 0 { write_deadline = native::micros() + WRITE_WINDOW_US; }
     }
 }
 
-// A pass processes at most ANSWERS attempts. A request and later bytes stay together.
-fn serve(index: i64, bytes: const u8[:], floor: i64) {
+fn serve(index: i64, bytes: const u8[:], floor: i64, allow_writes: bool) {
     assert(floor >= 0);
     if (connections[index].flags & model::CLOSE_AFTER) != 0 { return; }
     var offset = 0;
@@ -173,7 +172,6 @@ fn serve(index: i64, bytes: const u8[:], floor: i64) {
                 answers_left--;
                 response.clear();
                 let status = app::error(response, 400, "bad request");
-                // If output allocation fails, append_response marks the connection to close.
                 append_response(index, status, response);
                 close_after(index); return;
             },
@@ -181,7 +179,7 @@ fn serve(index: i64, bytes: const u8[:], floor: i64) {
                 var req = parsed.request;
                 assert(req.used > 0); assert(req.used <= remaining.len);
                 answers_left--;
-                if req.method == model::Method.Post && db::writes_held() {
+                if req.method == model::Method.Post && !allow_writes {
                     stash(index, remaining, 2); return;
                 }
                 let status = app::respond(remaining, req, started, response);
@@ -197,7 +195,6 @@ fn append_waiting(index: i64, box: i32, bytes: const u8[:]) {
     var next = box;
     if !input_buffers::append(next, bytes) { close_after(index); return; }
     if next != box {
-        // Growing input can move from the bounded native path into the Goose pool.
         match connections[index].input {
             Ready => { connections[index].input = model::Input.Ready { box: next }; },
             Held => { connections[index].input = model::Input.Held { box: next }; },
@@ -215,9 +212,9 @@ fn received(index: i64, bytes: const u8[:]) {
         Partial v => {
             assembled.clear(); input_buffers::read(v.box, assembled); assembled.append(bytes);
             input_buffers::release(v.box); c.input = model::Input.Empty;
-            serve(index, assembled, 0);
+            serve(index, assembled, 0, false);
         },
-        Empty => { serve(index, bytes, 0); },
+        Empty => { serve(index, bytes, 0, false); },
     }
 }
 
@@ -236,7 +233,7 @@ fn eof(index: i64) {
     c.flags |= model::PEER_EOF;
     match c.input {
         Empty, Partial => { close_after(index); },
-        Ready, Held => {}, // Already read requests still receive their responses.
+        Ready, Held => {},
     }
 }
 
@@ -278,7 +275,7 @@ fn on_send(index: i64, generation: u32, result: i32) {
     if !current(h) { return; }
     let c .= connections[index];
     match c.tx {
-        Idle => {}, // A stale completion cannot release a buffer a later send owns.
+        Idle => {},
         Flight flight => {
             if result <= 0 {
                 native::box_drop(flight.box); c.tx = model::Tx.Idle;
@@ -334,7 +331,6 @@ fn drain(ring: i64) {
         if operation == ACCEPT {
             assert(slot < 8); assert(rings[ring].accepting[slot]);
             if (event.flags & MORE) == 0 { rings[ring].accepting[slot] = false; }
-            // A final success still owns a slot, even if this ring is retiring.
             if event.result >= 0 {
                 let ci = ring * slots + event.result;
                 assert(event.result < slots); assert(connections[ci].life == model::Life.Free);
@@ -347,7 +343,7 @@ fn drain(ring: i64) {
         } else if operation == CANCEL_ACCEPT {
             assert(slot < 8); assert(rings[ring].cancelling[slot]);
             rings[ring].cancelling[slot] = false;
-            // An executing accept can race cancellation. Its own final CQE clears accepting.
+            // An accept can race cancellation. Its final completion clears the accepting flag.
             if event.result == ALREADY {
                 if ring != accept_ring { cancel_accept(ring, slot); }
             } else if event.result < 0 && event.result != NOT_FOUND {
@@ -357,7 +353,7 @@ fn drain(ring: i64) {
             on_receive(ring, index, generation, event.result, event.flags, operation == READ);
         } else if operation == SEND { on_send(index, generation, event.result); }
         else if operation == CLOSE { on_close(index, generation); }
-        else { assert(operation == SHUTDOWN); } // Its linked close completion owns cleanup.
+        else { assert(operation == SHUTDOWN); }
     }
 }
 
@@ -372,7 +368,7 @@ fn run_ready() {
             Ready v => {
                 assembled.clear(); input_buffers::read(v.box, assembled);
                 input_buffers::release(v.box); c.input = model::Input.Empty;
-                serve(h.index, assembled, 0);
+                serve(h.index, assembled, 0, false);
                 if (c.flags & model::PEER_EOF) != 0 {
                     match c.input { Empty, Partial => { close_after(h.index); }, Ready, Held => {} }
                 }
@@ -382,10 +378,13 @@ fn run_ready() {
     compact(ready, ready_head);
 }
 
+fn held_writes_due() -> bool {
+    return write_deadline != 0 && !db::writes_held() && native::micros() >= write_deadline;
+}
+
 fn release_held() {
-    if db::writes_held() { return; }
+    if !held_writes_due() { return; }
     let end = held.len;
-    // Reserve part of the old-work budget for reads when both queues have work.
     let floor = if ready_head < ready.len { answers_left / 2 } else { 0 };
     while held_head < end && answers_left > floor {
         let h = held[held_head]; held_head++;
@@ -396,7 +395,7 @@ fn release_held() {
             Held v => {
                 assembled.clear(); input_buffers::read(v.box, assembled);
                 input_buffers::release(v.box); c.input = model::Input.Empty;
-                serve(h.index, assembled, floor);
+                serve(h.index, assembled, floor, true);
                 if (c.flags & model::PEER_EOF) != 0 {
                     match c.input { Empty, Partial => { close_after(h.index); }, Ready, Held => {} }
                 }
@@ -404,10 +403,10 @@ fn release_held() {
         }
     }
     compact(held, held_head);
+    if held.len == 0 { write_deadline = 0; }
 }
 
 fn read_rounds(first_ring: i64, reads_left: i64&, pause_for_replies: bool) -> bool {
-    // Each productive round issues at least one read, bounded by READS per pass.
     while read_head < reads.len && reads_left > 0 {
         if pause_for_replies && answers_left == 0 && touched.len > 0 { return true; }
         let end = reads.len;
@@ -491,7 +490,6 @@ fn accept_more(now: i64) {
     }
     let ring = accept_ring;
     for listener in 8 {
-        // Reuse the tag only after both the stream and any cancellation have completed.
         if rings[ring].accepting[listener] || rings[ring].cancelling[listener] { continue; }
         queued(native::accept(ring as! i32, listener as! i32, listener_tag(ACCEPT, ring, listener)));
         rings[ring].accepting[listener] = true;
@@ -528,9 +526,8 @@ fn initialize() {
 fn run() {
     initialize();
     var first_ring: i64 = 0;
-    // Intentional process-lifetime event loop. All per-pass work and queues are bounded.
     loop {
-        let old_work = ready.len - ready_head + (if db::writes_held() { 0 } else { held.len - held_head });
+        let old_work = ready.len - ready_head + (if held_writes_due() { held.len - held_head } else { 0 });
         let busy = old_work > 0 || read_head < reads.len;
         var ring = ring_count;
         while ring > 0 { ring--; queued(native::enter(ring as! i32, ring == 0 && !busy)); }
@@ -540,7 +537,6 @@ fn run() {
             answers_left = reserved;
             release_held();
             run_ready();
-            // Carry unused reserved attempts into the rest of this pass.
             answers_left += model::ANSWERS - reserved;
         }
         for offset in ring_count {
@@ -557,7 +553,7 @@ fn run() {
             queued(native::submit_pending());
             read_rounds(first_ring, reads_left, false);
             native::publish();
-            // With no answer budget left, completions can expose committed output or a close.
+            // The request budget is exhausted, so any remaining output is already committed.
             flush(true);
         }
         first_ring = (first_ring + 1) % ring_count;
@@ -566,9 +562,9 @@ fn run() {
         accept_more(now);
         if native::trim_due(now) {
             native::heap_trim();
-            // Call through Goose so the compiler publishes live stack tops.
+            // Goose publishes live stack tops before trimming.
             trim_memory();
         }
-        if native::stop() { native::shutdown(); return; } // Join the checkpoint worker before leaving the loop.
+        if native::stop() { native::shutdown(); return; }
     }
 }

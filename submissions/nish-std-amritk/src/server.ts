@@ -1,6 +1,7 @@
 // One serving process: a single-threaded `pollWait` loop over its listener
-// and its keep-alive connections (`nish/net/http1-server`), and one SQLite
-// connection (`nish/sqlite`) that every request reads and writes inline.
+// and its keep-alive connections, whose HTTP/1.1 is `./http` over `nish:net`,
+// and one SQLite connection (`nish/sqlite`) that every request reads and
+// writes inline.
 //
 // A pass of the loop is everything one `pollWait` hands back. Reads are
 // answered as their request ends, each statement reading SQLite while that
@@ -9,27 +10,34 @@
 // synchronous=NORMAL). Each write's response is sent only after that
 // `COMMIT` returns (rule 6); if it fails, every write in the group answers
 // 500 and none is retried, since none committed.
-import { pollAdd, pollCreate, pollModify, pollWait } from "nish:net"
+import { netClose, netRead, netWrite, pollAdd, pollCreate, pollModify, pollWait, tcpAccept } from "nish:net"
 import { monotonicNanos } from "nish:process"
-import {
-  H1_BODY,
-  H1_DONE,
-  H1_END,
-  H1_ERROR,
-  H1_NEED_MORE,
-  H1_POOL_FULL,
-  H1_REQUEST,
-  H1_WANT_READ,
-  H1_WANT_WRITE,
-  Http1Config,
-  Http1Connection,
-  Http1Server,
-} from "nish/net/http1-server"
-import { Http1Parser } from "nish/net/http1-codec"
-import { Cursor, Database, SQLITE_BUSY, SQLITE_TEXT, Statement } from "nish/sqlite"
+import { copyBytes } from "nish/bytes"
+import { HttpDate } from "nish/net/http1-server"
+import { Cursor, Database, RowRecord, SQLITE_BUSY, SQLITE_INTEGER, SQLITE_TEXT, Statement } from "nish/sqlite"
 import { BODY_MALFORMED, BODY_OK, BODY_REQUIRED, BodyReader } from "./body"
 import { JWT_BAD_PAYLOAD, JWT_OK, Jwt } from "./jwt"
 import { Out, bytesOf } from "./out"
+import {
+  C_FD,
+  C_FLAGS,
+  C_GEN,
+  C_OUT_LEN,
+  C_OUT_OFF,
+  C_PEND,
+  C_REQ,
+  BufPool,
+  Conns,
+  F_CLOSE,
+  F_WRITE,
+  HEAD_BAD,
+  HEAD_MORE,
+  Head,
+  Heads,
+  M_GET,
+  M_POST,
+  parseHead,
+} from "./http"
 
 const R_NONE: i32 = 0
 const R_HEALTH: i32 = 1
@@ -38,9 +46,14 @@ const R_POST: i32 = 3
 const R_CREATE: i32 = 4
 const R_LIKE: i32 = 5
 
-/** `pollWait`'s token for the listener; a connection's is its slot. */
+/** `pollWait`'s token for the listener; a connection's is its index in `conns`. */
 const TOKEN_LISTENER: i32 = -1
+/** Readable, or hung up: `pollWait`'s bits 1 and 4. */
 const READABLE: i32 = 5
+const WRITABLE: i32 = 2
+/** The interest `pollAdd` and `pollModify` take: read, and write. */
+const WANT_READ: i32 = 1
+const WANT_WRITE: i32 = 2
 
 /** Status codes and SPEC.md's error messages, by index in `errors`. */
 const E_NOT_FOUND: i32 = 0
@@ -68,7 +81,6 @@ export class ServerConfig {
   port: i32 = 3000
   /** Connections this process holds at most. */
   slots: i32 = 60000
-  idleTimeoutMs: i32 = 600000
   cacheKib: i32 = 65536
   mmapBytes: i64 = 0
   /** A pass with fewer events than this is followed by a wait of `batchMs` (`BATCH_MIN`). */
@@ -164,7 +176,19 @@ const idOf = (b: u8[], start: i32, end: i32): i64 => {
 }
 
 export class FeedServer {
-  server: Http1Server
+  listener: i32
+  conns: Conns
+  /** Every buffer a connection keeps comes from here and goes back. */
+  pool: BufPool
+  head: Head
+  heads: Heads
+  date: HttpDate
+  /** Where a read lands, and the request heads in it are parsed. */
+  scratch: u8[]
+  peer: u8[]
+  /** An error's answer, with room for its head. */
+  errOut: Out
+  badRequest: u8[]
   loop: i32
   db: Database
   feed: Statement
@@ -181,14 +205,6 @@ export class FeedServer {
   likeRange: Statement
   /** The feed's ids in order, each one's place by `id - lo`, and its object's span in `rows` and its like count. */
   feedIds: i64[]
-  /** The feed's places in ascending id order. */
-  feedOrder: i32[]
-  /** `readRow`'s columns: a post's user_id, body and created_at; an author's username. */
-  postCols: i32[]
-  userCols: i32[]
-  /** What `readRow` decodes a row into; the text goes to `col`. */
-  rowInts: i64[]
-  rowSpans: i32[]
   /** Like counts by post id from a range's first, from `countRange`. */
   likeSpan: i64[]
   rangeAt: i32[]
@@ -200,8 +216,6 @@ export class FeedServer {
   reading: boolean = false
   batchMin: i32
   batchMs: i32
-  /** The slot `drive` is running, whose flush follows its events; -1 outside it. */
-  driving: i32 = -1
   /** Read through cursors at all (`ServerConfig.cursors`). */
   useCursors: boolean
   /**
@@ -213,14 +227,13 @@ export class FeedServer {
   postCur: Cursor | null = null
   userCur: Cursor | null = null
   likeCur: Cursor | null = null
+  /** Whether the four cursors are open in the pass's read transaction. */
+  cursorsOpen: boolean = false
   rollback: Statement
   jwt: Jwt
   bodies: BodyReader
   reqs: Req[]
   free: i32[]
-  /** The request each slot is in, or -1; and the slot's generation, bumped when it closes. */
-  slotReq: i32[]
-  slotGen: i32[]
   /** The writes waiting for the end of the pass, by request index. */
   writes: i32[]
   /** The other half of `writes`, swapped in while a group is answered. */
@@ -231,8 +244,6 @@ export class FeedServer {
   out: Out
   /** A text column's bytes, between SQLite and `out`. */
   col: u8[]
-  jsonNames: u8[][]
-  jsonValues: u8[][]
   errorStatus: i32[]
   errorBodies: u8[][]
   startedNs: i64
@@ -248,18 +259,25 @@ export class FeedServer {
   postIdKey: u8[]
   /** The post object's keys, in SPEC.md's order. */
   frag: u8[][]
-  nextExpire: i64 = 0
+  /** The pass's wall clock, in ms: the Date header and every token's `exp` check read it. */
+  passMs: i64 = 0
+  /** A post's record (id, user_id, body, created_at), then an author's (id, username). */
+  postRec: RowRecord
+  userRec: RowRecord
 
   constructor(cfg: ServerConfig, listener: i32, db: Database) {
-    const http = new Http1Config()
-    http.idleTimeout = cfg.idleTimeoutMs
-    http.maxBody = 1048576
-    http.outputSize = 65536
-    // Nearly every connection sits between requests: it holds no input buffer while it does.
-    http.idleInput = true
-    this.server = new Http1Server(http, listener, cfg.slots)
+    this.listener = listener
+    this.conns = new Conns(cfg.slots)
+    this.pool = new BufPool()
+    this.head = new Head()
+    this.heads = new Heads()
+    this.date = new HttpDate()
+    this.scratch = new Array<u8>(65536)
+    this.peer = new Array<u8>(32)
+    this.errOut = new Out(1024)
+    this.badRequest = bytesOf('{"error":"bad request"}')
     this.loop = pollCreate()
-    pollAdd(this.loop, listener, H1_WANT_READ, TOKEN_LISTENER)
+    pollAdd(this.loop, listener, WANT_READ, TOKEN_LISTENER)
     this.db = db
     this.useCursors = cfg.cursors
     this.batchMin = cfg.batchMin
@@ -271,7 +289,7 @@ export class FeedServer {
       .expect("insert post")
     this.insertLike = db
       .prepare(
-        "INSERT INTO likes (user_id, post_id) SELECT ?1, ?2 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?2) ON CONFLICT (user_id, post_id) DO NOTHING",
+        "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING",
       )
       .expect("insert like")
     this.postExists = db.prepare("SELECT 1 FROM posts WHERE id = ?1").expect("post exists")
@@ -289,11 +307,6 @@ export class FeedServer {
       .prepare("SELECT post_id, count(*) FROM likes WHERE post_id BETWEEN ?1 AND ?2 GROUP BY post_id")
       .expect("like range")
     this.feedIds = new Array<i64>(20)
-    this.feedOrder = new Array<i32>(20)
-    this.postCols = [1, 2, 3]
-    this.userCols = [1]
-    this.rowInts = new Array<i64>(3)
-    this.rowSpans = new Array<i32>(9)
     this.likeSpan = new Array<i64>(RANGE_MAX)
     this.rangeAt = new Array<i32>(RANGE_MAX)
     for (let k: i32 = 0; k < RANGE_MAX; k++) {
@@ -308,17 +321,10 @@ export class FeedServer {
     this.bodies = new BodyReader()
     this.reqs = []
     this.free = []
-    this.slotReq = new Array<i32>(cfg.slots)
-    this.slotGen = new Array<i32>(cfg.slots)
-    for (let k: i32 = 0; k < cfg.slots; k++) {
-      this.slotReq[k] = -1
-    }
     this.writes = []
     this.spare = []
     this.out = new Out(65536)
     this.col = new Array<u8>(4096)
-    this.jsonNames = [bytesOf("Content-Type")]
-    this.jsonValues = [bytesOf("application/json")]
     this.errorStatus = [404, 400, 404, 401, 401, 401, 400, 400, 400, 500]
     const messages: string[] = [
       "not found",
@@ -348,6 +354,8 @@ export class FeedServer {
     this.postIdKey = bytesOf(',"post_id":')
     this.frag = [bytesOf('{"id":'), bytesOf(',"body":'), bytesOf(',"created_at":'), bytesOf(',"author":'), bytesOf(',"like_count":')]
     this.startedNs = monotonicNanos()
+    this.postRec = new RowRecord(4096, 4)
+    this.userRec = new RowRecord(256, 2)
   }
 
   // ---- The loop -------------------------------------------------------------------
@@ -364,26 +372,35 @@ export class FeedServer {
       if (n < 0 && n !== -4) {
         return 1
       }
+      // The pass's two clock reads: every activity stamp and the Date header
+      // of the pass take them, rather than each request reading both clocks.
+      this.passMs = toI64(Date.now())
+      this.date.pin(this.passMs)
       for (let k: i32 = 0; k < n; k++) {
         this.ready(ready[2 * k], ready[2 * k + 1])
       }
       if (this.reading) {
         this.endRead()
       }
-      if (this.writes.length > 0) {
+      // Every pass tries the waiting writes, a group held by the write lock
+      // included (`commitWrites` clears `held` once BEGIN IMMEDIATE takes
+      // it). A group's answers can serve writes pipelined behind them, which
+      // join the next group: it commits now rather than after the next
+      // wait, unless the lock is taken.
+      let groups: i32 = 0
+      while (this.writes.length > 0 && groups < 8 && (groups === 0 || !this.held)) {
         this.commitWrites()
-      }
-      const now: i64 = monotonicNanos()
-      if (now >= this.nextExpire) {
-        this.server.expire(now)
-        this.nextExpire = now + 1000000000
+        if (this.reading) {
+          this.endRead()
+        }
+        groups++
       }
       // After a small pass, with no write left waiting for the lock, let
       // requests gather for `batchMs` (the pass's responses are sent first),
       // so the next pass serves them together: fewer waits, wakes and system
       // calls a request, and one COMMIT for more writes. A wait on an empty
-      // poll set sleeps; Nish 0.46.0's `pollWaitBatch` serves completions as
-      // they trickle in during its window instead, and measured 13% dearer.
+      // poll set sleeps; `pollWaitBatch`, which serves completions as they
+      // come in during its window, measured dearer each way it was tried.
       if (this.batchMs > 0 && n < this.batchMin && this.writes.length === 0) {
         pollWait(nap, napReady, this.batchMs)
       }
@@ -392,13 +409,13 @@ export class FeedServer {
 
   ready(token: i32, events: i32): void {
     if (token >= 0) {
-      if (this.server.holds(token)) {
-        if ((events & READABLE) !== 0) {
-          this.server.readable(token)
-        } else {
-          this.server.writable(token)
+      if (this.conns.get(token, C_FD) >= 0) {
+        if ((events & WRITABLE) !== 0) {
+          this.writable(token)
         }
-        this.drive(token)
+        if ((events & READABLE) !== 0 && this.conns.get(token, C_FD) >= 0) {
+          this.readable(token)
+        }
       }
     } else if (token === TOKEN_LISTENER) {
       this.acceptAll()
@@ -406,79 +423,266 @@ export class FeedServer {
   }
 
   acceptAll(): void {
+    const conns: Conns = this.conns
     while (true) {
-      const slot: i32 = this.server.accept()
-      if (slot >= 0) {
-        const old: i32 = this.slotReq[slot]
-        // `expire` closes a slot without telling the loop: a request it left
-        // that is not waiting to commit is freed here.
-        if (old >= 0 && this.reqs[old].status === 0) {
-          this.release(this.reqs[old])
+      const fd: i32 = tcpAccept(this.listener, this.peer)
+      if (fd < 0) {
+        // -4 and -103/-71 (a connection gone before it was taken) try again.
+        if (fd === -4 || fd === -103 || fd === -71) {
+          continue
         }
-        this.slotGen[slot] = this.slotGen[slot] + 1
-        this.slotReq[slot] = -1
-        pollAdd(this.loop, this.server.fd(slot), H1_WANT_READ, slot)
-      } else if (slot !== H1_POOL_FULL) {
+        return
+      }
+      if (conns.free.length === 0) {
+        netClose(fd)
+        continue
+      }
+      const c: i32 = conns.free[conns.free.length - 1]
+      conns.free.pop()
+      conns.set(c, C_FD, fd)
+      conns.set(c, C_REQ, -1)
+      conns.set(c, C_FLAGS, 0)
+      conns.set(c, C_PEND, 0)
+      conns.set(c, C_OUT_OFF, 0)
+      conns.set(c, C_OUT_LEN, 0)
+      if (pollAdd(this.loop, fd, WANT_READ, c) < 0) {
+        this.closeConn(c)
+      }
+    }
+  }
+
+  /**
+   * Reads what `c`'s socket holds and serves every whole request in it, in
+   * order. A head or body not yet whole, and requests behind a write that
+   * waits for its group's commit, are kept in `conns.pend[c]`; anything else
+   * is read and served where it lies, in `scratch`.
+   */
+  readable(c: i32): void {
+    const conns: Conns = this.conns
+    while (conns.get(c, C_FD) >= 0) {
+      const kept: i32 = conns.get(c, C_PEND)
+      let buf: u8[] = this.scratch
+      let at: i32 = 0
+      if (kept > 0) {
+        buf = conns.pend[c]
+        at = kept
+        if (at + 4096 > toI32(buf.length)) {
+          buf = this.grow(buf, at, at + 4096)
+          conns.pend[c] = buf
+        }
+      }
+      const want: i32 = toI32(buf.length) - at
+      const n: i32 = netRead(conns.get(c, C_FD), buf, at, want)
+      if (n <= 0) {
+        if (n !== -11) {
+          this.closeConn(c)
+        }
+        return
+      }
+      this.serve(c, buf, at + n)
+      // A short read emptied the socket; readiness is level-triggered, so
+      // more input wakes the loop again.
+      if (n < want) {
         return
       }
     }
   }
 
-  /** Runs `slot`'s events, then re-arms or closes it. */
-  drive(slot: i32): void {
-    this.driving = slot
-    let event: i32 = this.server.next(slot)
-    while (event !== H1_NEED_MORE && event !== H1_ERROR) {
-      if (event === H1_REQUEST) {
-        this.onHead(slot)
-      } else if (event === H1_BODY) {
-        const r: i32 = this.slotReq[slot]
-        if (r >= 0) {
-          const conn: Http1Connection = this.server.connection(slot)
-          this.reqs[r].addBody(conn.data, conn.dataStart, conn.dataLength)
-        }
-      } else if (event === H1_END) {
-        const r: i32 = this.slotReq[slot]
-        if (r >= 0) {
-          this.onEnd(this.reqs[r])
-        }
+  /** `buf[0, len)` copied into a pooled buffer of at least `size` bytes; `buf` goes back to the pool. */
+  grow(buf: u8[], len: i32, size: i32): u8[] {
+    const next: u8[] = this.pool.take(size)
+    copyBytes(next, 0, buf, 0, len)
+    this.pool.give(buf)
+    return next
+  }
+
+  /**
+   * Serves the whole requests in `buf[0, end)`, the input `c` has (its kept
+   * bytes and what was just read), and keeps the rest in `conns.pend[c]`.
+   */
+  serve(c: i32, buf: u8[], end: i32): void {
+    const conns: Conns = this.conns
+    const h: Head = this.head
+    let at: i32 = 0
+    while (at < end && conns.get(c, C_REQ) < 0 && conns.get(c, C_FD) >= 0 && (conns.get(c, C_FLAGS) & F_CLOSE) === 0) {
+      const he: i32 = parseHead(buf, at, end, h)
+      if (he === HEAD_BAD) {
+        this.refuse(c)
+        return
       }
-      event = this.server.next(slot)
+      if (he === HEAD_MORE) {
+        break
+      }
+      const stop: i32 = he + h.contentLength
+      if (stop > end) {
+        break
+      }
+      if (!h.keepAlive) {
+        conns.set(c, C_FLAGS, conns.get(c, C_FLAGS) | F_CLOSE)
+      }
+      this.request(c, buf, h, he, stop)
+      at = stop
     }
-    this.driving = -1
-    this.finish(slot)
+    if (conns.get(c, C_FD) < 0) {
+      return
+    }
+    const left: i32 = end - at
+    const kept: i32 = conns.get(c, C_PEND)
+    if (left === 0) {
+      // `pend[c]` is touched only by a connection that kept bytes, so a
+      // request served from `scratch` reads one cache line of `conns`.
+      if (kept > 0) {
+        conns.set(c, C_PEND, 0)
+        this.pool.give(conns.pend[c])
+        conns.pend[c] = conns.empty
+      }
+      return
+    }
+    let keep: u8[] = kept > 0 || buf !== this.scratch ? conns.pend[c] : conns.empty
+    if (buf === keep) {
+      if (at > 0) {
+        copyBytes(keep, 0, keep, at, left)
+      }
+    } else {
+      if (toI32(keep.length) < left) {
+        this.pool.give(keep)
+        keep = this.pool.take(left)
+      }
+      copyBytes(keep, 0, buf, at, left)
+      conns.pend[c] = keep
+    }
+    conns.set(c, C_PEND, left)
   }
 
-  /** Sends what `slot`'s connection has queued, then re-arms or closes it. */
-  finish(slot: i32): void {
-    const wants: i32 = this.server.flush(slot)
-    if ((wants & H1_DONE) !== 0) {
-      this.closeSlot(slot)
-    } else if (this.server.rearm(slot, wants)) {
-      pollModify(this.loop, this.server.fd(slot), wants & (H1_WANT_READ | H1_WANT_WRITE), slot)
+  /** The socket of `c` has room again: sends what it kept. */
+  writable(c: i32): void {
+    const conns: Conns = this.conns
+    const off: i32 = conns.get(c, C_OUT_OFF)
+    const len: i32 = conns.get(c, C_OUT_LEN)
+    if (len > off) {
+      const n: i32 = netWrite(conns.get(c, C_FD), conns.out[c], off, len - off)
+      if (n < 0 && n !== -11) {
+        this.closeConn(c)
+        return
+      }
+      if (n > 0 && off + n < len) {
+        conns.set(c, C_OUT_OFF, off + n)
+        return
+      }
+      if (n <= 0) {
+        return
+      }
+    }
+    conns.set(c, C_OUT_OFF, 0)
+    conns.set(c, C_OUT_LEN, 0)
+    this.pool.give(conns.out[c])
+    conns.out[c] = conns.empty
+    const flags: i32 = conns.get(c, C_FLAGS)
+    conns.set(c, C_FLAGS, flags & ~F_WRITE)
+    if ((flags & F_CLOSE) !== 0 && conns.get(c, C_REQ) < 0) {
+      this.closeConn(c)
+      return
+    }
+    pollModify(this.loop, conns.get(c, C_FD), WANT_READ, c)
+  }
+
+  /** Sends `buf[from, from + len)` on `c`, keeping what the socket does not take; false when `c` failed and was closed. */
+  send(c: i32, buf: u8[], from: i32, len: i32): boolean {
+    const conns: Conns = this.conns
+    const queued: i32 = conns.get(c, C_OUT_LEN)
+    let sent: i32 = 0
+    if (queued === 0) {
+      const n: i32 = netWrite(conns.get(c, C_FD), buf, from, len)
+      if (n < 0 && n !== -11) {
+        this.closeConn(c)
+        return false
+      }
+      sent = n > 0 ? n : 0
+      if (sent === len) {
+        return true
+      }
+    }
+    // The rest waits for room, behind anything already waiting.
+    const rest: i32 = len - sent
+    let q: u8[] = conns.out[c]
+    const off: i32 = conns.get(c, C_OUT_OFF)
+    const have: i32 = queued - off
+    if (toI32(q.length) < have + rest || off > 0) {
+      const next: u8[] = this.pool.take(have + rest)
+      if (have > 0) {
+        copyBytes(next, 0, q, off, have)
+      }
+      this.pool.give(q)
+      q = next
+      conns.out[c] = q
+    }
+    copyBytes(q, have, buf, from + sent, rest)
+    conns.set(c, C_OUT_OFF, 0)
+    conns.set(c, C_OUT_LEN, have + rest)
+    const flags: i32 = conns.get(c, C_FLAGS)
+    if ((flags & F_WRITE) === 0) {
+      conns.set(c, C_FLAGS, flags | F_WRITE)
+      pollModify(this.loop, conns.get(c, C_FD), WANT_READ | WANT_WRITE, c)
+    }
+    return true
+  }
+
+  /** A head this server refuses: 400, and the connection closes. */
+  refuse(c: i32): void {
+    const conns: Conns = this.conns
+    conns.set(c, C_FLAGS, conns.get(c, C_FLAGS) | F_CLOSE)
+    const out: Out = this.errOut
+    out.open()
+    out.bytes(this.badRequest, 0, toI32(this.badRequest.length))
+    const at: i32 = this.heads.write(out.buf, out.start, 400, out.end - out.start, this.date.current(), true)
+    if (this.send(c, out.buf, at, out.end - at)) {
+      this.closeIfDone(c)
     }
   }
 
-  closeSlot(slot: i32): void {
-    this.server.close(slot)
-    this.slotGen[slot] = this.slotGen[slot] + 1
-    const r: i32 = this.slotReq[slot]
-    this.slotReq[slot] = -1
+  /** Closes `c` if it asked to close and has nothing left to send. */
+  closeIfDone(c: i32): void {
+    const conns: Conns = this.conns
+    if (conns.get(c, C_FD) >= 0 && (conns.get(c, C_FLAGS) & F_CLOSE) !== 0 && conns.get(c, C_OUT_LEN) === 0 && conns.get(c, C_REQ) < 0) {
+      this.closeConn(c)
+    }
+  }
+
+  closeConn(c: i32): void {
+    const conns: Conns = this.conns
+    const fd: i32 = conns.get(c, C_FD)
+    if (fd < 0) {
+      return
+    }
+    netClose(fd)
+    conns.set(c, C_FD, -1)
+    conns.set(c, C_GEN, conns.get(c, C_GEN) + 1)
+    conns.set(c, C_PEND, 0)
+    conns.set(c, C_OUT_OFF, 0)
+    conns.set(c, C_OUT_LEN, 0)
+    conns.set(c, C_FLAGS, 0)
+    this.pool.give(conns.pend[c])
+    this.pool.give(conns.out[c])
+    conns.pend[c] = conns.empty
+    conns.out[c] = conns.empty
+    const r: i32 = conns.get(c, C_REQ)
+    conns.set(c, C_REQ, -1)
     // A write waiting to commit is freed when its group has.
     if (r >= 0 && this.reqs[r].status === 0) {
       this.release(this.reqs[r])
     }
+    conns.free.push(c)
   }
 
-  take(slot: i32): Req {
+  take(c: i32): Req {
     if (this.free.length === 0) {
       this.reqs.push(new Req(toI32(this.reqs.length)))
       this.free.push(toI32(this.reqs.length) - 1)
     }
     const r: Req = this.reqs[this.free[this.free.length - 1]]
     this.free.pop()
-    r.slot = slot
-    r.gen = this.slotGen[slot]
+    r.slot = c
+    r.gen = this.conns.get(c, C_GEN)
     r.route = R_NONE
     r.error = -1
     r.postId = 0
@@ -486,13 +690,13 @@ export class FeedServer {
     r.nameLength = 0
     r.bodyLength = 0
     r.status = 0
-    this.slotReq[slot] = r.index
+    this.conns.set(c, C_REQ, r.index)
     return r
   }
 
   release(r: Req): void {
-    if (r.slot >= 0 && this.slotReq[r.slot] === r.index) {
-      this.slotReq[r.slot] = -1
+    if (r.slot >= 0 && this.conns.get(r.slot, C_REQ) === r.index) {
+      this.conns.set(r.slot, C_REQ, -1)
     }
     r.slot = -1
     r.status = 0
@@ -501,49 +705,50 @@ export class FeedServer {
 
   // ---- Answers ----------------------------------------------------------------------
 
-  /** Sends `buf[0, len)` with `status` on `r`'s slot, if it is still the connection `r` came on, and frees `r`. */
-  answer(r: Req, status: i32, buf: u8[], len: i32): void {
-    const slot: i32 = r.slot
-    const live: boolean = slot >= 0 && this.server.holds(slot) && this.slotGen[slot] === r.gen
+  /**
+   * Answers `r` with `status` and the body `buf[start, start + len)`, if its
+   * connection is still the one it came on, and frees `r`. The head is
+   * written into the `HEAD_ROOM` bytes before `start`, so head and body
+   * leave in one write.
+   */
+  answer(r: Req, status: i32, buf: u8[], start: i32, len: i32): void {
+    const c: i32 = r.slot
+    const conns: Conns = this.conns
+    const live: boolean = c >= 0 && conns.get(c, C_FD) >= 0 && conns.get(c, C_GEN) === r.gen
     this.release(r)
     if (!live) {
       return
     }
-    const conn: Http1Connection = this.server.connection(slot)
-    conn.respond(status, this.jsonNames, this.jsonValues, len)
-    // `write` copies the body into the connection's output behind its head,
-    // and `flush` sends the two as one buffer: on a ring slot that is one
-    // SEND and one segment, where `sendBody`'s head-and-body `netWrite2` is
-    // two of each.
-    conn.write(buf, 0, len)
-    conn.end()
-    if (slot !== this.driving) {
-      // A write answered after its group's COMMIT, outside `drive`.
-      this.finish(slot)
+    const close: boolean = (conns.get(c, C_FLAGS) & F_CLOSE) !== 0
+    const at: i32 = this.heads.write(buf, start, status, len, this.date.current(), close)
+    if (this.send(c, buf, at, start + len - at)) {
+      this.closeIfDone(c)
     }
   }
 
   fail(r: Req, error: i32): void {
     const body: u8[] = this.errorBodies[error]
-    this.answer(r, this.errorStatus[error], body, toI32(body.length))
+    const out: Out = this.errOut
+    out.open()
+    out.bytes(body, 0, toI32(body.length))
+    this.answer(r, this.errorStatus[error], out.buf, out.start, out.end - out.start)
   }
 
   // ---- A request ------------------------------------------------------------------
 
-  onHead(slot: i32): void {
-    const r: Req = this.take(slot)
-    const p: Http1Parser = this.server.connection(slot).parser
-    const b: u8[] = p.head
-    const get: boolean = bytesAre(b, p.methodStart, p.methodEnd, "GET")
-    const post: boolean = !get && bytesAre(b, p.methodStart, p.methodEnd, "POST")
-    let end: i32 = p.targetEnd
-    for (let k: i32 = p.targetStart; k < p.targetEnd; k++) {
+  /** Serves the request whose head `h` parsed from `b`, its body `b[bodyAt, stop)`. */
+  request(c: i32, b: u8[], h: Head, bodyAt: i32, stop: i32): void {
+    const r: Req = this.take(c)
+    const get: boolean = h.method === M_GET
+    const post: boolean = h.method === M_POST
+    let end: i32 = h.targetEnd
+    for (let k: i32 = h.targetStart; k < h.targetEnd; k++) {
       if (toI32(b[k]) === 63) {
         end = k
         break
       }
     }
-    const start: i32 = p.targetStart
+    const start: i32 = h.targetStart
     if (bytesAre(b, start, end, "/feed")) {
       r.route = get ? R_FEED : R_NONE
     } else if (bytesAre(b, start, end, "/posts")) {
@@ -570,32 +775,29 @@ export class FeedServer {
     }
     if (r.route === R_NONE) {
       r.error = E_NOT_FOUND
-      return
-    }
-    if (r.route === R_CREATE || r.route === R_LIKE) {
-      r.error = this.auth(r, p)
-      if (r.error >= 0) {
-        return
+    } else {
+      if (r.route === R_CREATE || r.route === R_LIKE) {
+        r.error = this.auth(r, b, h)
+      }
+      if (r.error < 0 && (r.route === R_POST || r.route === R_LIKE) && r.postId < 0) {
+        r.error = E_BAD_ID
       }
     }
-    if ((r.route === R_POST || r.route === R_LIKE) && r.postId < 0) {
-      r.error = E_BAD_ID
+    if (r.error < 0 && r.route === R_CREATE && stop > bodyAt) {
+      r.addBody(b, bodyAt, stop - bodyAt)
     }
+    this.onEnd(r)
   }
 
   /** Reads `r`'s bearer token; answers -1 when it is good, else the error. */
-  auth(r: Req, p: Http1Parser): i32 {
-    const h: i32 = p.headerIndex("authorization")
-    if (h < 0) {
+  auth(r: Req, b: u8[], h: Head): i32 {
+    const start: i32 = h.authStart
+    const end: i32 = h.authEnd
+    if (start < 0 || end - start < 7 || !bytesAre(b, start, start + 7, "Bearer ")) {
       return E_NO_TOKEN
     }
-    const start: i32 = p.spans[4 * h + 2]
-    const end: i32 = p.spans[4 * h + 3]
-    if (end - start < 7 || !bytesAre(p.head, start, start + 7, "Bearer ")) {
-      return E_NO_TOKEN
-    }
-    const now: i64 = toI64(Date.now()) / 1000
-    const v: i32 = this.jwt.verify(p.head, start + 7, end - start - 7, now)
+    const now: i64 = this.passMs / 1000
+    const v: i32 = this.jwt.verify(b, start + 7, end - start - 7, now)
     if (v !== JWT_OK) {
       return v === JWT_BAD_PAYLOAD ? E_BAD_PAYLOAD : E_BAD_TOKEN
     }
@@ -662,10 +864,7 @@ export class FeedServer {
   endRead(): void {
     const r = this.db.endRead()
     this.reading = false
-    this.newestCur = null
-    this.postCur = null
-    this.userCur = null
-    this.likeCur = null
+    this.cursorsOpen = false
     if (r.isErr()) {
       return
     }
@@ -679,105 +878,103 @@ export class FeedServer {
    * `sqlite_schema`, so a different schema is refused, never misread.
    */
   openCursors(): boolean {
-    if (this.likeCur !== null) {
+    if (this.cursorsOpen) {
       return true
     }
     if (!this.useCursors || !this.reading) {
       return false
     }
-    const a = this.db.openCursor("posts_created_at_id_idx", "created_at DESC,id DESC,rowid")
-    const b = this.db.openCursor("posts", "id,user_id,body,created_at")
-    const c = this.db.openCursor("users", "id,username,created_at")
-    const d = this.db.openCursor("likes_post_id_idx", "post_id,rowid")
-    if (a.isErr() || b.isErr() || c.isErr() || d.isErr()) {
+    // `openCursor` checks the columns against `sqlite_schema`, so the
+    // records `postHeadCursor` decodes hold them in this order. The four
+    // `Cursor` objects are made once and reopened by every later read:
+    // there is no garbage collector, and four new ones a pass stayed
+    // allocated for good.
+    const a = this.newestCur
+    const b = this.postCur
+    const c = this.userCur
+    const d = this.likeCur
+    if (a !== null && b !== null && c !== null && d !== null) {
+      this.cursorsOpen =
+        this.db.reopenCursor(a, "posts_created_at_id_idx", "created_at DESC,id DESC,rowid").isOk() &&
+        this.db.reopenCursor(b, "posts", "id,user_id,body,created_at").isOk() &&
+        this.db.reopenCursor(c, "users", "id,username,created_at").isOk() &&
+        this.db.reopenCursor(d, "likes_post_id_idx", "post_id,rowid").isOk()
+      return this.cursorsOpen
+    }
+    const na = this.db.openCursor("posts_created_at_id_idx", "created_at DESC,id DESC,rowid")
+    const nb = this.db.openCursor("posts", "id,user_id,body,created_at")
+    const nc = this.db.openCursor("users", "id,username,created_at")
+    const nd = this.db.openCursor("likes_post_id_idx", "post_id,rowid")
+    if (na.isErr() || nb.isErr() || nc.isErr() || nd.isErr()) {
       return false
     }
-    // readRow's columns: a post's user_id, body and created_at; an author's username.
-    if (b.value.selectRow(this.postCols).isErr() || c.value.selectRow(this.userCols).isErr()) {
-      return false
-    }
-    this.newestCur = a.value
-    this.postCur = b.value
-    this.userCur = c.value
-    this.likeCur = d.value
-    return true
-  }
-
-  /**
-   * Reads the current row of `cur` (its `selectRow` columns) into `ints`,
-   * `spans` and `this.col`, growing `this.col` when the row's text does not
-   * fit; false when SQLite failed.
-   */
-  readRow(cur: Cursor, ints: i64[], spans: i32[]): boolean {
-    const r = cur.readRow(ints, spans, this.col)
-    if (r.isErr()) {
-      return false
-    }
-    if (r.value <= toI32(this.col.length)) {
-      return true
-    }
-    this.col = new Array<u8>(r.value)
-    return cur.readRow(ints, spans, this.col).isOk()
-  }
-
-  /** Appends the `k`th text column `readRow` left in `this.col` to `out` as a JSON string; false when it is not text. */
-  textSpan(spans: i32[], k: i32, out: Out): boolean {
-    if (spans[3 * k] !== SQLITE_TEXT) {
-      return false
-    }
-    out.string(this.col, spans[3 * k + 1], spans[3 * k + 2])
+    this.newestCur = na.value
+    this.postCur = nb.value
+    this.userCur = nc.value
+    this.likeCur = nd.value
+    this.cursorsOpen = true
     return true
   }
 
   /**
    * Post `id`'s object up to and including `"like_count":`, into `out`, read
-   * through the open cursors: its row by rowid, decoded in one `readRow`, then
-   * its author's. 1 when written, 0 when the post or its author is not there
+   * through the open cursors: its row by rowid, read as one record
+   * (`Cursor.record`), then its author's. 1 when written, 0 when the post or its author is not there
    * (the reference JOIN drops a post without its user), -1 when SQLite failed.
    */
-  postHeadCursor(id: i64, out: Out): i32 {
+  postHeadCursor(id: i64, step: boolean, out: Out): i32 {
     const posts = this.postCur
     const users = this.userCur
     if (posts === null || users === null) {
       return -1
     }
-    const p = posts.seekRowid(id)
-    if (p.isErr()) {
+    // `step`: the post is likely the row before the one just read.
+    let found: boolean = false
+    if (step) {
+      const q = posts.previous()
+      if (q.isErr()) {
+        return -1
+      }
+      found = q.value && posts.rowid() === id
+    }
+    if (!found) {
+      const p = posts.seekRowid(id)
+      if (p.isErr()) {
+        return -1
+      }
+      if (!p.value) {
+        return 0
+      }
+    }
+    // The post's record: its id (NULL, the rowid), user_id, body, created_at.
+    const pr: RowRecord = this.postRec
+    if (pr.read(posts).isErr()) {
       return -1
     }
-    if (!p.value) {
+    // A user_id that is not an integer finds no author here: the reference
+    // query, which compares it as SQL does, answers instead.
+    if (pr.type(1) !== SQLITE_INTEGER) {
       return 0
     }
-    const ints: i64[] = this.rowInts
-    const spans: i32[] = this.rowSpans
-    if (!this.readRow(posts, ints, spans)) {
-      return -1
-    }
-    const u = users.seekRowid(ints[0])
+    const u = users.seekRowid(pr.int(1))
     if (u.isErr()) {
       return -1
     }
     if (!u.value) {
       return 0
     }
+    const ur: RowRecord = this.userRec
+    if (ur.read(users).isErr() || pr.type(2) !== SQLITE_TEXT || pr.type(3) !== SQLITE_TEXT || ur.type(1) !== SQLITE_TEXT) {
+      return -1
+    }
     out.bytes(this.frag[0], 0, 6)
     out.int(id)
     out.bytes(this.frag[1], 0, 8)
-    if (!this.textSpan(spans, 1, out)) {
-      return -1
-    }
+    out.string(pr.buf, pr.start(2), pr.size(2))
     out.bytes(this.frag[2], 0, 14)
-    if (!this.textSpan(spans, 2, out)) {
-      return -1
-    }
-    // The author's row replaces the post's text in `this.col`, which is written.
-    if (!this.readRow(users, ints, spans)) {
-      return -1
-    }
+    out.string(pr.buf, pr.start(3), pr.size(3))
     out.bytes(this.frag[3], 0, 10)
-    if (!this.textSpan(spans, 0, out)) {
-      return -1
-    }
+    out.string(ur.buf, ur.start(1), ur.size(1))
     out.bytes(this.frag[4], 0, 14)
     return 1
   }
@@ -797,7 +994,7 @@ export class FeedServer {
    * written, 0 when the post or its author is not there, -1 when SQLite failed.
    */
   cursorPost(id: i64, out: Out): i32 {
-    const w: i32 = this.postHeadCursor(id, out)
+    const w: i32 = this.postHeadCursor(id, false, out)
     if (w <= 0) {
       return w
     }
@@ -814,14 +1011,15 @@ export class FeedServer {
   /**
    * `GET /feed` through cursors. The 20 newest ids come from
    * `posts_created_at_id_idx`, from its first entry: its order is exactly
-   * `(created_at DESC, id DESC)`. Their posts and authors are then read in
-   * ascending id order, so consecutive ids land on the next cell of the leaf
-   * the last seek left (SQLite's own fast path in `TableMoveto`) instead of a
-   * descent each. Their like counts are one walk of `likes_post_id_idx` when
-   * the ids span less than `RANGE_MAX`, else a seek each. A post or author
-   * that is missing, which the reference query's JOIN would drop, hands the
-   * request to the reference SQL. False, having written nothing, when the
-   * cursors cannot be opened.
+   * `(created_at DESC, id DESC)`. Their like counts come first, from one walk
+   * of `likes_post_id_idx` when the ids span less than `RANGE_MAX`, else a
+   * seek each. Then each post is read in the feed's order and written
+   * straight into the answer: a post whose id is one below the last one's is
+   * the cursor's previous row, on the leaf the last read left (the newest
+   * posts nearly always are), any other a seek. A post or author that is
+   * missing, which the reference query's JOIN would drop, hands the request
+   * to the reference SQL. False, having written nothing, when the cursors
+   * cannot be opened.
    */
   readFeedCursors(r: Req): boolean {
     if (!this.openCursors()) {
@@ -853,41 +1051,17 @@ export class FeedServer {
         }
       }
     }
-    if (!ok) {
-      this.fail(r, E_INTERNAL)
-      return true
-    }
-    // The places 0..n in ascending id order, by insertion: n is at most 20.
-    const order: i32[] = this.feedOrder
-    for (let k: i32 = 0; k < n; k++) {
-      let j: i32 = k
-      while (j > 0 && ids[order[j - 1]] > ids[k]) {
-        order[j] = order[j - 1]
-        j--
-      }
-      order[j] = k
-    }
-    const rows: Out = this.rows
-    rows.reset()
-    let missing: boolean = false
-    for (let j: i32 = 0; j < n && ok && !missing; j++) {
-      const k: i32 = order[j]
-      this.rowStart[k] = rows.end
-      const w: i32 = this.postHeadCursor(ids[k], rows)
-      this.rowEnd[k] = rows.end
-      if (w < 0) {
-        ok = false
-      } else if (w === 0) {
-        missing = true
-      }
-    }
-    if (ok && missing) {
-      this.readFeedReference(r)
-      return true
-    }
     if (ok && n > 0) {
-      const lo: i64 = ids[order[0]]
-      const hi: i64 = ids[order[n - 1]]
+      let lo: i64 = ids[0]
+      let hi: i64 = ids[0]
+      for (let k: i32 = 1; k < n; k++) {
+        if (ids[k] < lo) {
+          lo = ids[k]
+        }
+        if (ids[k] > hi) {
+          hi = ids[k]
+        }
+      }
       const likes = this.likeCur
       if (likes !== null && hi - lo < toI64(RANGE_MAX)) {
         // One seek and one walk of likes_post_id_idx for all of them.
@@ -907,18 +1081,26 @@ export class FeedServer {
         }
       }
     }
-    if (!ok || rows.failed) {
+    if (!ok) {
       this.fail(r, E_INTERNAL)
       return true
     }
     const out: Out = this.out
-    out.reset()
+    out.open()
     out.bytes(this.feedOpen, 0, 10)
     for (let k: i32 = 0; k < n; k++) {
       if (k > 0) {
         out.byte(44)
       }
-      out.bytes(rows.buf, this.rowStart[k], this.rowEnd[k] - this.rowStart[k])
+      const w: i32 = this.postHeadCursor(ids[k], k > 0 && ids[k] === ids[k - 1] - 1, out)
+      if (w < 0) {
+        this.fail(r, E_INTERNAL)
+        return true
+      }
+      if (w === 0) {
+        this.readFeedReference(r)
+        return true
+      }
       out.int(this.likes[k])
       out.byte(125)
     }
@@ -928,9 +1110,10 @@ export class FeedServer {
       this.fail(r, E_INTERNAL)
       return true
     }
-    this.answer(r, 200, out.buf, out.end)
+    this.answer(r, 200, out.buf, out.start, out.end - out.start)
     return true
   }
+
 
   /** Appends the text column `c` of `st`'s row to `out` as a JSON string; false when SQLite failed. */
   textColumn(st: Statement, c: i32, out: Out): boolean {
@@ -1094,7 +1277,7 @@ export class FeedServer {
       return
     }
     const out: Out = this.out
-    out.reset()
+    out.open()
     out.bytes(this.feedOpen, 0, 10)
     for (let k: i32 = 0; k < n; k++) {
       if (k > 0) {
@@ -1110,14 +1293,14 @@ export class FeedServer {
       this.fail(r, E_INTERNAL)
       return
     }
-    this.answer(r, 200, out.buf, out.end)
+    this.answer(r, 200, out.buf, out.start, out.end - out.start)
   }
 
   /** The feed by SPEC.md's reference query, one statement: what `readFeed` falls back to. */
   readFeedReference(r: Req): void {
     const st: Statement = this.feed
     const out: Out = this.out
-    out.reset()
+    out.open()
     out.bytes(this.feedOpen, 0, 10)
     let rows: i32 = 0
     let ok: boolean = true
@@ -1142,12 +1325,12 @@ export class FeedServer {
     }
     out.byte(93)
     out.byte(125)
-    this.answer(r, 200, out.buf, out.end)
+    this.answer(r, 200, out.buf, out.start, out.end - out.start)
   }
 
   readPost(r: Req): void {
     const out: Out = this.out
-    out.reset()
+    out.open()
     if (this.openCursors()) {
       out.bytes(this.postOpen, 0, 8)
       const w: i32 = this.cursorPost(r.postId, out)
@@ -1157,7 +1340,7 @@ export class FeedServer {
         this.fail(r, E_NO_POST)
       } else {
         out.byte(125)
-        this.answer(r, 200, out.buf, out.end)
+        this.answer(r, 200, out.buf, out.start, out.end - out.start)
       }
       return
     }
@@ -1185,7 +1368,7 @@ export class FeedServer {
       return
     }
     out.byte(125)
-    this.answer(r, 200, out.buf, out.end)
+    this.answer(r, 200, out.buf, out.start, out.end - out.start)
   }
 
   health(r: Req): void {
@@ -1193,19 +1376,19 @@ export class FeedServer {
     settle(this.ping)
     const code: i32 = s.isErr() ? s.error : 0
     const out: Out = this.out
-    out.reset()
+    out.open()
     if (s.isErr() || !s.value) {
       out.bytes(this.degraded, 0, 48)
       const msg: u8[] = bytesOf(this.db.error(code).message)
       out.string(msg, 0, toI32(msg.length))
       out.byte(125)
-      this.answer(r, 503, out.buf, out.end)
+      this.answer(r, 503, out.buf, out.start, out.end - out.start)
       return
     }
     out.bytes(this.healthy, 0, 36)
     out.int((monotonicNanos() - this.startedNs) / 1000000000)
     out.byte(125)
-    this.answer(r, 200, out.buf, out.end)
+    this.answer(r, 200, out.buf, out.start, out.end - out.start)
   }
 
   // ---- Writes -----------------------------------------------------------------------
@@ -1250,15 +1433,15 @@ export class FeedServer {
     for (let k: i32 = 0; k < toI32(batch.length); k++) {
       const r: Req = this.reqs[batch[k]]
       const slot: i32 = r.slot
-      const live: boolean = slot >= 0 && this.server.holds(slot) && this.slotGen[slot] === r.gen
+      const live: boolean = slot >= 0 && this.conns.get(slot, C_FD) >= 0 && this.conns.get(slot, C_GEN) === r.gen
       if (ok && (r.status === 200 || r.status === 201)) {
-        this.answer(r, r.status, r.out.buf, r.out.end)
+        this.answer(r, r.status, r.out.buf, r.out.start, r.out.end - r.out.start)
       } else {
         this.fail(r, ok && r.status === 404 ? E_NO_POST : E_INTERNAL)
       }
-      if (live) {
-        // The slot may hold the next pipelined request; it is read now.
-        this.drive(slot)
+      if (live && this.conns.get(slot, C_FD) >= 0 && this.conns.get(slot, C_PEND) > 0) {
+        // The connection kept the requests behind this one; they are served now.
+        this.serve(slot, this.conns.pend[slot], this.conns.get(slot, C_PEND))
       }
     }
     while (batch.length > 0) {
@@ -1279,7 +1462,7 @@ export class FeedServer {
       return false
     }
     const out: Out = r.out
-    out.reset()
+    out.open()
     out.bytes(this.createdOpen, 0, 14)
     out.int(st.columnI64(0))
     out.bytes(this.frag[1], 0, 8)
@@ -1299,8 +1482,30 @@ export class FeedServer {
     return !out.failed
   }
 
-  /** Likes `r`'s post as its user and writes the answer into `r.out`; false when SQLite failed. */
+  /**
+   * Likes `r`'s post as its user and writes the answer into `r.out`; false
+   * when SQLite failed. The post is looked up first, inside the group's
+   * write transaction, and the like is then a one-row `INSERT … VALUES`: an
+   * `INSERT … SELECT` is a statement that may write many rows, and SQLite
+   * gives every such statement a statement journal, which inside a group's
+   * transaction copied each page the group had already changed, about
+   * sixteen 4 KiB pages a like.
+   */
   like(r: Req): boolean {
+    const e: Statement = this.postExists
+    if (e.bindI64(1, r.postId).isErr()) {
+      settle(e)
+      return false
+    }
+    const found = e.step()
+    settle(e)
+    if (found.isErr()) {
+      return false
+    }
+    if (!found.value) {
+      r.status = 404
+      return true
+    }
     const st: Statement = this.insertLike
     if (st.bindI64(1, r.userId).isErr() || st.bindI64(2, r.postId).isErr()) {
       settle(st)
@@ -1311,27 +1516,10 @@ export class FeedServer {
     if (s.isErr()) {
       return false
     }
-    let status: i32 = 201
-    if (this.db.changes() === 0) {
-      // Nothing inserted: a like there already, or no such post.
-      const e: Statement = this.postExists
-      if (e.bindI64(1, r.postId).isErr()) {
-        settle(e)
-        return false
-      }
-      const found = e.step()
-      settle(e)
-      if (found.isErr()) {
-        return false
-      }
-      if (!found.value) {
-        r.status = 404
-        return true
-      }
-      status = 200
-    }
+    // Nothing inserted: the user has liked the post already.
+    const status: i32 = this.db.changes() === 0 ? 200 : 201
     const out: Out = r.out
-    out.reset()
+    out.open()
     out.bytes(this.likedOpen, 0, 30)
     if (status === 200) {
       out.bytes(this.trueBytes, 0, 4)

@@ -30,30 +30,31 @@ export const JWT_MAX_NAME: i32 = 1024
 /** base64url of `{"alg":"HS256","typ":"JWT"}`, the header nearly every token has. */
 const JWT_HEADER: string = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
 
-/** The sextet base64url gives the byte `c`, or -1 when `c` is not in its alphabet. */
-const jwtSextet = (c: i32): i32 => {
-  if (c >= 65 && c <= 90) {
-    return c - 65
-  }
-  if (c >= 97 && c <= 122) {
-    return c - 71
-  }
-  if (c >= 48 && c <= 57) {
-    return c + 4
-  }
-  if (c === 45) {
-    return 62
-  }
-  if (c === 95) {
-    return 63
-  }
-  return -1
-}
+/** The sextet base64url gives each byte, or -1 for a byte outside its alphabet. */
+const SEXTETS: readonly i32[] = [
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1,
+  52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
+  -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+  15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, 63,
+  -1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+  41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+  -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+]
 
 /**
  * Decodes unpadded base64url `src[off, off + len)` into `out` from 0, and
  * answers the bytes written; -1 for a byte outside the alphabet, a length no
- * encoding has (1 mod 4), stray bits in the last sextet, or no room.
+ * encoding has (1 mod 4), stray bits in the last sextet, or no room. Four
+ * characters make three bytes, by table, with one test of all four.
  */
 const jwtDecode = (src: u8[], off: i32, len: i32, out: u8[]): i32 => {
   if (off < 0 || len < 0 || off + len > toI32(src.length) || len % 4 === 1) {
@@ -62,25 +63,44 @@ const jwtDecode = (src: u8[], off: i32, len: i32, out: u8[]): i32 => {
   if ((len * 3) >> 2 > toI32(out.length)) {
     return -1
   }
-  let acc: i32 = 0
-  let bits: i32 = 0
   let o: i32 = 0
-  for (let k: i32 = off; k < off + len; k++) {
-    const v: i32 = jwtSextet(toI32(src[k]))
-    if (v < 0) {
+  let k: i32 = off
+  const whole: i32 = off + (len & ~3)
+  while (k < whole) {
+    const a: i32 = SEXTETS[toI32(src[k])]
+    const b: i32 = SEXTETS[toI32(src[k + 1])]
+    const c: i32 = SEXTETS[toI32(src[k + 2])]
+    const d: i32 = SEXTETS[toI32(src[k + 3])]
+    if ((a | b | c | d) < 0) {
       return -1
     }
-    acc = ((acc << 6) | v) & 0xffffff
-    bits += 6
-    if (bits >= 8) {
-      bits -= 8
-      out[o] = toU8((acc >> bits) & 255)
-      o++
-    }
+    const v: i32 = (a << 18) | (b << 12) | (c << 6) | d
+    out[o] = toU8(v >> 16)
+    out[o + 1] = toU8((v >> 8) & 255)
+    out[o + 2] = toU8(v & 255)
+    o += 3
+    k += 4
   }
-  // RFC 4648 §3.5: the bits past the last whole byte are zero in a canonical encoding.
-  if ((acc & ((1 << bits) - 1)) !== 0) {
-    return -1
+  const rest: i32 = off + len - k
+  if (rest >= 2) {
+    const a: i32 = SEXTETS[toI32(src[k])]
+    const b: i32 = SEXTETS[toI32(src[k + 1])]
+    const c: i32 = rest === 3 ? SEXTETS[toI32(src[k + 2])] : 0
+    if ((a | b | c) < 0) {
+      return -1
+    }
+    out[o] = toU8((a << 2) | (b >> 4))
+    o++
+    if (rest === 3) {
+      out[o] = toU8(((b & 15) << 4) | (c >> 2))
+      o++
+      // RFC 4648 §3.5: the bits past the last whole byte are zero in a canonical encoding.
+      if ((c & 3) !== 0) {
+        return -1
+      }
+    } else if ((b & 15) !== 0) {
+      return -1
+    }
   }
   return o
 }

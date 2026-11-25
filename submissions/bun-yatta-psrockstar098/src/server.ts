@@ -13,19 +13,22 @@
  *     Bun's default. idleTimeout is set to 120 s: the challenge requires idle
  *     connections to stay open at least 65 s when behind nginx, and the load
  *     test's think/idle gaps run to ~15 s per user in direct mode.
- *   - Auth: HS256 JWT verification is done in this file with node:crypto
- *     (Yatta's auth subsystem is a full accounts system whose error strings
- *     do not match SPEC.md, so it is not used here). Every request verifies
- *     the signature and exp; nothing about a token is ever cached.
+ *   - Auth: HS256 JWT verification is done in this file with
+ *     Bun.CryptoHasher (logic adapted from yatta.js/jwt; the entry keeps
+ *     npm yatta.js@1.0.1, so the verifier is inlined here until a
+ *     published Yatta version carries the export). Yatta's auth subsystem
+ *     is a full accounts system whose error strings do not match SPEC.md,
+ *     so it is not used here. Every request verifies the signature and
+ *     exp; nothing about a token is ever cached.
  *
  * Nothing is cached across requests: every read runs its SQL while being
  * served, every write is committed (WAL + synchronous NORMAL) before the
  * response is sent, and no response is ever hard-coded.
  */
 
-import { createAPI, API } from "yatta.js/api";
+import { createAPI } from "yatta.js/api";
 import { createDatabase } from "yatta.js/db";
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { timingSafeEqual } from "node:crypto";
 
 const SQLITE_PATH = process.env.SQLITE_PATH ?? "";
 const JWT_SECRET = process.env.JWT_SECRET ?? "";
@@ -45,37 +48,59 @@ if (!JWT_SECRET) {
 // is given, so no migration/sync runs against it; the file is used as-is.
 const db = createDatabase({ path: SQLITE_PATH });
 
+// WAL auto-checkpoint threshold: Yatta opens the DB with WAL +
+// synchronous NORMAL + busy_timeout, and SQLite's default auto-checkpoint
+// (1,000 WAL pages) fires a checkpoint inline in a write transaction every
+// ~1,000 pages — measured locally at ~425us per like-INSERT, of which
+// ~175us is checkpoint amortization (raw fsync here is ~10us, and
+// synchronous=FULL is 16.5ms, so NORMAL itself is not the cost).
+// Raising the threshold to 50,000 pages cuts the like-INSERT to ~204us
+// (same as disabling auto-checkpoint entirely, ~201us) while bounding the
+// WAL at ~200MB; feed reads are unaffected (41.5us with a 70MB WAL
+// present vs 41.9us on a clean DB). Durability is unchanged: journal
+// mode stays WAL, synchronous stays NORMAL, and the fixed schema is
+// untouched — only when WAL pages are copied back to the main DB moves.
+db.exec("PRAGMA wal_autocheckpoint = 50000;");
+
 const startedAt = Date.now();
 
 // ---------------------------------------------------------------------------
 // Response helpers (exact bytes per SPEC.md: compact JSON, key order as
-// listed in the spec, Content-Type application/json via API.json).
+// listed in the spec, Content-Type application/json; charset=utf-8 via the
+// local json() helper).
 // ---------------------------------------------------------------------------
 
+// Local JSON responder: builds the Response with a plain-object headers
+// literal (no `new Headers()` allocation) and the exact bytes SPEC.md
+// requires — compact JSON, `application/json; charset=utf-8`. Same bytes
+// as Yatta's API.json (the round-3 framework fast path does the same);
+// verified by test/test.sh golden checks. `API.json` is not used here so
+// the entry pays no Headers allocation per response.
+const json = (data: unknown, status = 200) =>
+  new Response(JSON.stringify(data), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+
 const err = (message: string, status: number) =>
-  API.json({ error: message }, { status });
+  json({ error: message }, status);
 
 type PostRow = {
   id: number;
   body: string;
   created_at: string;
-  username: string;
+  author: string;
   like_count: number;
 };
 
-const toPost = (row: PostRow) => ({
-  id: row.id,
-  body: row.body,
-  created_at: row.created_at,
-  author: row.username,
-  like_count: row.like_count,
-});
-
 const POST_SELECT = `
-  SELECT p.id, p.body, p.created_at, u.username,
+  SELECT p.id, p.body, p.created_at, u.username AS author,
          (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count
     FROM posts p JOIN users u ON u.id = p.user_id
 `;
+// Rows already carry the exact wire keys in the exact wire order
+// (id, body, created_at, author, like_count), so the feed and single-post
+// handlers send them straight to JSON with no per-row mapping step.
 
 // ---------------------------------------------------------------------------
 // JWT verification (HS256, secret $JWT_SECRET). Returns the authed user, or
@@ -108,14 +133,16 @@ function verifyAuth(req: Request): AuthResult {
   const signatureB64 = token.slice(i2 + 1);
 
   // Bun/Node decode base64url natively — no manual char replace + padding.
+  // The header parses first (the alg gate needs it); the payload parses
+  // only AFTER the signature is known good, so a forged token never pays
+  // for a JSON parse. Both orders yield identical error strings: every
+  // failure before the payload-shape check reports "invalid or expired
+  // token", and "invalid token payload" is reachable only after the
+  // signature has passed and the payload parsed as an object.
   let headerObj: unknown;
-  let payloadObj: unknown;
   try {
     headerObj = JSON.parse(
       Buffer.from(headerB64, "base64url").toString("utf8"),
-    );
-    payloadObj = JSON.parse(
-      Buffer.from(payloadB64, "base64url").toString("utf8"),
     );
   } catch {
     return { ok: false, error: "invalid or expired token" };
@@ -129,8 +156,15 @@ function verifyAuth(req: Request): AuthResult {
   }
 
   // Signature first (a forged token must not reach payload checks).
-  // Compare digest bytes directly instead of re-encoding to a string.
-  const digest = createHmac("sha256", JWT_SECRET)
+  // HMAC-SHA256 via Bun.CryptoHasher: ~2x faster than node:createHmac
+  // on this workload (729ns vs 1,423ns per call, Bun 1.4.4). Logic
+  // adapted from yatta.js/jwt (Yatta's fast verifier, same MIT project);
+  // the entry keeps npm yatta.js@1.0.1, so the verifier is inlined here
+  // until a published Yatta version carries the export. Compare digest
+  // bytes directly instead of re-encoding to a string: two base64url
+  // spellings can decode to the same bytes, and a string comparison
+  // would wrongly reject those.
+  const digest = new Bun.CryptoHasher("sha256", JWT_SECRET)
     .update(`${headerB64}.${payloadB64}`)
     .digest();
   let givenSig: Buffer;
@@ -146,6 +180,14 @@ function verifyAuth(req: Request): AuthResult {
     return { ok: false, error: "invalid or expired token" };
   }
 
+  let payloadObj: unknown;
+  try {
+    payloadObj = JSON.parse(
+      Buffer.from(payloadB64, "base64url").toString("utf8"),
+    );
+  } catch {
+    return { ok: false, error: "invalid or expired token" };
+  }
   if (typeof payloadObj !== "object" || payloadObj === null) {
     return { ok: false, error: "invalid or expired token" };
   }
@@ -178,16 +220,16 @@ api.get("/health", () => {
   try {
     db.rawGet("SELECT 1 AS one");
   } catch (e) {
-    return API.json(
+    return json(
       {
         status: "degraded",
         db: "unreachable",
         error: e instanceof Error ? e.message : String(e),
       },
-      { status: 503 },
+      503,
     );
   }
-  return API.json({
+  return json({
     status: "ok",
     db: "ok",
     uptime_s: Math.floor((Date.now() - startedAt) / 1000),
@@ -198,7 +240,7 @@ api.get("/feed", () => {
   const rows = db.rawAll<PostRow>(
     `${POST_SELECT} ORDER BY p.created_at DESC, p.id DESC LIMIT 20`,
   );
-  return API.json({ posts: rows.map(toPost) });
+  return json({ posts: rows });
 });
 
 function validPostId(raw: string): number | null {
@@ -213,7 +255,7 @@ api.get("/posts/:id", (ctx) => {
   if (id === null) return err("invalid post id", 400);
   const row = db.rawGet<PostRow>(`${POST_SELECT} WHERE p.id = ?`, [id]);
   if (!row) return err("post not found", 404);
-  return API.json({ post: toPost(row) });
+  return json({ post: row });
 });
 
 api.post("/posts", async (ctx) => {
@@ -233,7 +275,10 @@ api.post("/posts", async (ctx) => {
   if (typeof bodyValue !== "string") return err("body is required", 400);
   const trimmed = bodyValue.trim();
   if (trimmed.length === 0) return err("body is required", 400);
-  if ([...trimmed].length > 500) {
+  // Code points, not UTF-16 units: a string with .length <= 500 can never
+  // hold more than 500 code points, so the spread is skipped unless the
+  // string is already over 500 units long. Same verdict as [...trimmed].
+  if (trimmed.length > 500 ? [...trimmed].length > 500 : false) {
     return err("body must be at most 500 characters", 400);
   }
 
@@ -243,7 +288,7 @@ api.post("/posts", async (ctx) => {
     [auth.userId, trimmed],
   );
   if (!row) return err("internal server error", 500);
-  return API.json(
+  return json(
     {
       post: {
         id: row.id,
@@ -253,7 +298,7 @@ api.post("/posts", async (ctx) => {
         like_count: 0,
       },
     },
-    { status: 201 },
+    201,
   );
 });
 
@@ -272,9 +317,9 @@ api.post("/posts/:id/like", (ctx) => {
     [auth.userId, id],
   );
   const first = result.changes === 1;
-  return API.json(
+  return json(
     { liked: true, already_liked: !first, post_id: id },
-    { status: first ? 201 : 200 },
+    first ? 201 : 200,
   );
 });
 

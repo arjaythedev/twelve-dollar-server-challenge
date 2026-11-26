@@ -6,6 +6,7 @@ import borg.trikeshed.userspace.nio.channels.parseWhole
 import borg.trikeshed.userspace.nio.channels.spi.PosixChannelOperations
 import borg.trikeshed.userspace.nio.channels.spi.PosixReactorOperations
 import borg.trikeshed.userspace.nio.platform.spi.platformGetRandom
+import feedc.feed_lock_code
 import kotlinx.cinterop.ExperimentalForeignApi
 import kotlinx.cinterop.toKString
 import kotlinx.coroutines.runBlocking
@@ -18,6 +19,7 @@ import platform.posix.getenv
 @OptIn(ExperimentalForeignApi::class)
 fun main() {
     fun env(name: String): String? = getenv(name)?.toKString()
+    feed_lock_code()
     val store = SqliteStore(env("SQLITE_PATH") ?: error("SQLITE_PATH is not set"))
     val feed = Feed(store, Bearer((env("JWT_SECRET") ?: error("JWT_SECRET is not set")).encodeToByteArray()), epochSeconds())
     val host = env("HOST") ?: "127.0.0.1"

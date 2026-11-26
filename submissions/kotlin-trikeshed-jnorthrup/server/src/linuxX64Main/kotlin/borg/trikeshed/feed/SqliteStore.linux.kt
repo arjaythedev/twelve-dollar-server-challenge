@@ -63,8 +63,11 @@ class SqliteStore(path: String) : FeedStore {
         exec("PRAGMA journal_mode=WAL")
         exec("PRAGMA synchronous=NORMAL")
         exec("PRAGMA wal_autocheckpoint=0")
-        exec("PRAGMA mmap_size=1073741824")
-        exec("PRAGMA cache_size=-16384")
+        // No memory map, and a 48 MiB page cache: reads hit SQLite's own cache (process memory, which reclaim cannot take
+        // back without swap) instead of mapped page-cache pages, which the kernel drops first near the memory limit and
+        // the loop then reads back from disk. The hot set fits (the likes primary-key index is 29.5 MB in the seed).
+        exec("PRAGMA mmap_size=0")
+        exec("PRAGMA cache_size=-49152")
         exec("PRAGMA temp_store=MEMORY")
         feedStmt = prepare("$POST_SELECT ORDER BY p.created_at DESC, p.id DESC LIMIT 20")
         postStmt = prepare("$POST_SELECT WHERE p.id = ?1")

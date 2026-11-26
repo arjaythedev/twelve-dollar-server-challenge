@@ -16,6 +16,10 @@
 #include "feedbt.h"
 #include <pthread.h>
 #include <time.h>
+#ifdef __linux__
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#endif
 
 /* BEGIN feed_json_text */
 /*
@@ -184,7 +188,7 @@ void feedbt_release(void) {
  * much of the log its last checkpoint copied. Past FEEDBT_WAL_GATE frames the loop holds its next write batch (reads go
  * on) until the whole log is copied, so that batch's BEGIN starts the log over from its beginning (walRestartLog) and the
  * WAL stays small. While the loop waits, the thread checks every millisecond. */
-#define FEEDBT_WAL_GATE 1000
+#define FEEDBT_WAL_GATE 8192
 static sqlite3 *ck_db;
 static int ck_ms;
 static int ck_frames;          /* frames in the log after the loop's last commit: the loop writes, both read */
@@ -199,6 +203,11 @@ static int ck_hook(void *arg, sqlite3 *db, const char *name, int frames) {
 
 static void *ck_run(void *arg) {
   (void)arg;
+#ifdef __linux__
+  /* Nice 10 for this thread alone (Linux takes a thread id here): on one vCPU it gets about a tenth of the CPU while the
+   * loop is busy, and all of it while the loop waits. */
+  setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), 10);
+#endif
   struct timespec slow = { ck_ms / 1000, (long)(ck_ms % 1000) * 1000000L }, fast = { 0, 1000000L };
   for (;;) {
     nanosleep(__atomic_load_n(&ck_hurry, __ATOMIC_ACQUIRE) ? &fast : &slow, NULL);

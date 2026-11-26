@@ -89,6 +89,8 @@ export class ServerConfig {
   batchMs: i32 = 1
   /** Read posts through B-tree cursors (`CURSORS`, on by default) rather than SQL. */
   cursors: boolean = true
+  /** Print the loop's pass counters every 10 s (`STATS`, off by default). */
+  stats: boolean = false
 }
 
 /** One request, from its head to its answer. */
@@ -216,6 +218,7 @@ export class FeedServer {
   reading: boolean = false
   batchMin: i32
   batchMs: i32
+  stats: boolean
   /** Read through cursors at all (`ServerConfig.cursors`). */
   useCursors: boolean
   /**
@@ -282,6 +285,7 @@ export class FeedServer {
     this.useCursors = cfg.cursors
     this.batchMin = cfg.batchMin
     this.batchMs = cfg.batchMs
+    this.stats = cfg.stats
     this.feed = db.prepare(`${POST_SQL} ORDER BY p.created_at DESC, p.id DESC LIMIT 20`).expect("feed")
     this.post = db.prepare(`${POST_SQL} WHERE p.id = ?1`).expect("post")
     this.insertPost = db
@@ -366,6 +370,17 @@ export class FeedServer {
     // An empty loop: waiting on it sleeps for its whole timeout.
     const nap: i32 = pollCreate()
     const napReady: i32[] = new Array<i32>(2)
+    let sPasses: i64 = 0
+    let sEvents: i64 = 0
+    let sNaps: i64 = 0
+    let sBig: i64 = 0
+    let sWrites: i64 = 0
+    let sEmpty: i64 = 0
+    let sAt: i64 = toI64(Date.now())
+    let sCommitNs: i64 = 0
+    let sMaxCommitNs: i64 = 0
+    let sMaxPassNs: i64 = 0
+    let sBusyNs: i64 = 0
     while (true) {
       // A held write group retries within 1 ms.
       const n: i32 = pollWait(this.loop, ready, this.held ? 1 : 1000)
@@ -375,6 +390,7 @@ export class FeedServer {
       // The pass's two clock reads: every activity stamp and the Date header
       // of the pass take them, rather than each request reading both clocks.
       this.passMs = toI64(Date.now())
+      const t0: i64 = this.stats ? monotonicNanos() : toI64(0)
       this.date.pin(this.passMs)
       for (let k: i32 = 0; k < n; k++) {
         this.ready(ready[2 * k], ready[2 * k + 1])
@@ -388,6 +404,7 @@ export class FeedServer {
       // join the next group: it commits now rather than after the next
       // wait, unless the lock is taken.
       let groups: i32 = 0
+      const tc: i64 = this.stats ? monotonicNanos() : toI64(0)
       while (this.writes.length > 0 && groups < 8 && (groups === 0 || !this.held)) {
         this.commitWrites()
         if (this.reading) {
@@ -401,8 +418,38 @@ export class FeedServer {
       // calls a request, and one COMMIT for more writes. A wait on an empty
       // poll set sleeps; `pollWaitBatch`, which serves completions as they
       // come in during its window, measured dearer each way it was tried.
-      if (this.batchMs > 0 && n < this.batchMin && this.writes.length === 0) {
+      if (this.stats) {
+        const t1: i64 = monotonicNanos()
+        sCommitNs += t1 - tc
+        if (t1 - tc > sMaxCommitNs) sMaxCommitNs = t1 - tc
+        if (t1 - t0 > sMaxPassNs) sMaxPassNs = t1 - t0
+        sBusyNs += t1 - t0
+      }
+      const napping: boolean = this.batchMs > 0 && n < this.batchMin && this.writes.length === 0
+      if (napping) {
         pollWait(nap, napReady, this.batchMs)
+      }
+      if (this.stats) {
+        sPasses++
+        sEvents += toI64(n > 0 ? n : 0)
+        if (napping) sNaps++
+        if (n >= this.batchMin) sBig++
+        if (this.writes.length > 0) sWrites++
+        if (n <= 0) sEmpty++
+        if (this.passMs - sAt >= toI64(10000)) {
+          console.log(`stats passes=${sPasses} events=${sEvents} naps=${sNaps} big=${sBig} writesLeft=${sWrites} empty=${sEmpty} busyMs=${sBusyNs / toI64(1000000)} commitMs=${sCommitNs / toI64(1000000)} maxCommitMs=${sMaxCommitNs / toI64(1000000)} maxPassMs=${sMaxPassNs / toI64(1000000)}`)
+          sCommitNs = 0
+          sMaxCommitNs = 0
+          sMaxPassNs = 0
+          sBusyNs = 0
+          sPasses = 0
+          sEvents = 0
+          sNaps = 0
+          sBig = 0
+          sWrites = 0
+          sEmpty = 0
+          sAt = this.passMs
+        }
       }
     }
   }

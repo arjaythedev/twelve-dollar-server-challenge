@@ -11,8 +11,8 @@
 // one serving process holds them all, past the 65,535 descriptors a process
 // gets. Where it does not, five processes on descriptors hold SLOTS (60,000)
 // each. README.md lists the other optional variables.
-import { NET_LISTEN_RING, netRingState, pollCreate, pollWait, tcpListenFlags } from "nish:net"
-import { getenv } from "nish:process"
+import { NET_LISTEN_RING, NET_LISTEN_RING_WIDE, netRingState, pollCreate, pollWait, tcpListenFlags } from "nish:net"
+import { getenv, monotonicNanos } from "nish:process"
 import { PREFORK_STOPPED, PreforkConfig, preforkWith } from "nish/net/prefork"
 import { Database, OPEN_READWRITE, openDatabase } from "nish/sqlite"
 import { FeedServer, ServerConfig } from "./server"
@@ -22,6 +22,12 @@ const LISTEN_FLAGS: i32 = 3
 
 /** The argument that makes the program the ring probe instead of the server. */
 const PROBE_ARG: string = "--feed-ring-probe"
+
+/** libc's setpriority(2): `which` 0 is PRIO_PROCESS, `who` 0 this process. */
+declare function setpriority(which: i32, who: u32, prio: i32): i32
+/** libc's openat(2) and fsync(2), for the checkpointer's flush (-100 is AT_FDCWD). */
+declare function openat(dirfd: i32, path: string, flags: i32): i32
+declare function fsync(fd: i32): i32
 
 /**
  * The ring probe, run as a child of the supervisor before any worker starts:
@@ -86,19 +92,50 @@ const open = (path: string, pragmas: string[]): Database | null => {
  * so the log would never start again from its beginning; once it holds
  * `restartFrames`, a RESTART checkpoint holds new writers off (they find the
  * lock busy and retry on their next pass, server.ts `commitWrites`), copies
- * the rest and syncs, and the next write starts the log again.
+ * the rest and syncs, and the next write starts the log again. The database
+ * file is synced just before each RESTART, so the RESTART holds the lock only
+ * to copy and sync its last frames.
  */
-const checkpointer = (path: string, everyMs: i32, restartFrames: i64): i32 => {
-  const db = open(path, ["PRAGMA busy_timeout=250"])
+const checkpointer = (path: string, everyMs: i32, restartFrames: i64, nice: i32, stats: boolean): i32 => {
+  // On one CPU the checkpointer would take the server's core for its whole
+  // copy; at a low priority it copies in the time the server leaves idle.
+  if (nice > 0) {
+    setpriority(0, toU32(0), nice)
+  }
+  // busy_timeout=0: a RESTART the server's read transaction blocks gives up
+  // at once, letting go of the write lock, and is tried again a millisecond
+  // later; SQLite's busy handler would sleep 1, 2, 5, 10, ... ms holding it.
+  const db = open(path, ["PRAGMA busy_timeout=0"])
   if (db === null) {
     return 1
   }
   const tick: i32 = pollCreate()
   const ready: i32[] = new Array<i32>(2)
+  // The database file, read-only, only to flush it: SQLite syncs it only at a
+  // checkpoint that copied the whole log, which under steady writes is the
+  // RESTART, so every page the PASSIVE copies since would be written out
+  // while RESTART holds the write lock (measured: 70-125 ms a RESTART).
+  // Flushed here first, the RESTART has only its last frames to sync.
+  const dbFd: i32 = openat(-100, path, 0)
+  // A fresh copy of the database is dirty in the page cache; written out now,
+  // before load, rather than by the first RESTART's flush.
+  if (dbFd >= 0) {
+    fsync(dbFd)
+  }
   const passive = db.prepare("PRAGMA wal_checkpoint(PASSIVE)").expect("checkpoint")
   const restart = db.prepare("PRAGMA wal_checkpoint(RESTART)").expect("checkpoint")
+  let nP: i64 = 0
+  let pNs: i64 = 0
+  let pMax: i64 = 0
+  let nR: i64 = 0
+  let rNs: i64 = 0
+  let rMax: i64 = 0
+  let rFail: i64 = 0
+  let maxFrames: i64 = 0
+  let at: i64 = monotonicNanos()
   while (true) {
     pollWait(tick, ready, everyMs)
+    const t0: i64 = monotonicNanos()
     // One row: (busy, frames in the log, frames checkpointed).
     let frames: i64 = 0
     const r = passive.step()
@@ -106,12 +143,47 @@ const checkpointer = (path: string, everyMs: i32, restartFrames: i64): i32 => {
       frames = passive.columnI64(1)
     }
     const p = passive.reset()
+    const t1: i64 = monotonicNanos()
+    nP++
+    pNs += t1 - t0
+    if (t1 - t0 > pMax) pMax = t1 - t0
+    if (frames > maxFrames) maxFrames = frames
+    if (stats && t1 - at >= toI64(10000) * toI64(1000000)) {
+      const ms: i64 = toI64(1000000)
+      console.log(`ckpt passive=${nP} ${pNs / ms}ms max=${pMax / ms}ms restart=${nR} ${rNs / ms}ms max=${rMax / ms}ms fail=${rFail} maxFrames=${maxFrames}`)
+      nP = 0
+      pNs = 0
+      pMax = 0
+      nR = 0
+      rNs = 0
+      rMax = 0
+      rFail = 0
+      maxFrames = 0
+      at = t1
+    }
     if (p.isOk() && frames >= restartFrames) {
-      const q = restart.step()
-      const done = restart.reset()
-      if (q.isErr() || done.isErr()) {
-        // Busy past the timeout: the next tick tries again.
-        continue
+      if (dbFd >= 0) {
+        fsync(dbFd)
+      }
+      // One row: (1 when readers or a writer kept it from finishing, ...).
+      let tries: i32 = 0
+      let finished: boolean = false
+      while (!finished && tries < 200) {
+        const q = restart.step()
+        finished = q.isOk() && q.value && restart.columnI64(0) === toI64(0)
+        const rr = restart.reset()
+        finished = finished && rr.isOk()
+        tries++
+        if (!finished) {
+          pollWait(tick, ready, 1)
+        }
+      }
+      const t2: i64 = monotonicNanos()
+      nR++
+      rNs += t2 - t1
+      if (t2 - t1 > rMax) rMax = t2 - t1
+      if (!finished) {
+        rFail++
       }
     }
   }
@@ -131,6 +203,7 @@ export const main = (): i32 => {
   cfg.host = getenv("HOST") ?? "0.0.0.0"
   cfg.port = envInt("PORT", 3000)
   cfg.cursors = (getenv("CURSORS") ?? "1") !== "0"
+  cfg.stats = (getenv("STATS") ?? "0") === "1"
   cfg.batchMin = envInt("BATCH_MIN", 64)
   cfg.batchMs = (getenv("BATCH_MS") ?? "1") === "0" ? 0 : envInt("BATCH_MS", 1)
   const mmapMib: i32 = envInt("MMAP_MIB", 0)
@@ -150,7 +223,7 @@ export const main = (): i32 => {
     return index === PREFORK_STOPPED ? 0 : 1
   }
   if (index === workers) {
-    return checkpointer(cfg.sqlitePath, envInt("CHECKPOINT_MS", 50), toI64(envInt("RESTART_FRAMES", 2048)))
+    return checkpointer(cfg.sqlitePath, envInt("CHECKPOINT_MS", 50), toI64(envInt("RESTART_FRAMES", 2048)), envInt("CHECKPOINT_NICE", 0), (getenv("STATS") ?? "0") === "1")
   }
   // WAL with synchronous=NORMAL: a commit is in the log before it is
   // answered (rule 6). busy_timeout=0: a group that finds the write lock
@@ -167,7 +240,7 @@ export const main = (): i32 => {
   if (db === null) {
     return 1
   }
-  const listener: i32 = tcpListenFlags(cfg.host, cfg.port, 4096, rings ? LISTEN_FLAGS | NET_LISTEN_RING : LISTEN_FLAGS)
+  const listener: i32 = tcpListenFlags(cfg.host, cfg.port, 4096, rings ? LISTEN_FLAGS | NET_LISTEN_RING | NET_LISTEN_RING_WIDE : LISTEN_FLAGS)
   if (listener < 0) {
     console.log(`feed: cannot listen on ${cfg.host}:${cfg.port} (${listener})`)
     return 1

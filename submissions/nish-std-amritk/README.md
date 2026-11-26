@@ -12,9 +12,10 @@ written through prepared statements), `nish/json` and `nish/json-tokenizer`,
 `nish/bytes` and `nish/crypto/hmac`. No third-party package is used, and
 SQLite is unmodified.
 
-**Builds with Nish 0.47.0**: this version reads rows with `Cursor.record`,
+**Builds with Nish 0.48.0**: this version reads rows with `Cursor.record`,
 `RowRecord` and `Database.reopenCursor`, writes JSON strings with
-`jsonPutString`, and relies on that release's io_uring runtime (below).
+`jsonPutString`, and relies on that release's io_uring runtime (below),
+whose wide rings (`NET_LISTEN_RING_WIDE`) are new in 0.48.0.
 
 ```sh
 sudo bash install.sh
@@ -29,7 +30,10 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
   descriptors. So the listener accepts into io_uring ring slots
   (`NET_LISTEN_RING` in `nish:net`) rather than descriptors: a connection is a
   slot in a ring's file table, and one serving process holds up to `SLOTS`
-  (400,000) of them. A supervisor starts that process and one checkpointer,
+  (400,000) of them. `NET_LISTEN_RING_WIDE` makes each ring 65,536 slots
+  rather than 16,384, so 300,000 connections sit in five rings, not
+  nineteen: the loop pays one `io_uring_enter` a busy ring each pass, and
+  while busy it sleeps in its first ring rather than in epoll. A supervisor starts that process and one checkpointer,
   and restarts neither. Nish's runtime also registers the rings' provided
   buffers the way Ubuntu's 6.8.0-136 and later kernels accept (Launchpad
   #2162843), so a kernel update on the box would not drop it to the fallback.
@@ -90,8 +94,14 @@ SQLITE_PATH=/path/to/feed.db JWT_SECRET=twelve-dollar-challenge HOST=0.0.0.0 POR
 - **Checkpoints off the request path.** The checkpointer runs a PASSIVE
   checkpoint every `CHECKPOINT_MS` (50); once the log holds `RESTART_FRAMES`
   (2,048) frames a RESTART checkpoint holds writers off briefly, copies the
-  rest and syncs. The serving processes' `wal_autocheckpoint` (16,384 pages)
-  is only a backstop.
+  rest and syncs. SQLite syncs the database file only at a checkpoint that
+  copied the whole log, so under steady writes the RESTART would write out
+  every page the PASSIVE checkpoints dirtied, holding the write lock
+  throughout. The checkpointer syncs the file itself first, without the lock,
+  leaving the RESTART only its last frames. Its `busy_timeout` is 0: a
+  RESTART that a reader blocks gives up the lock at once and is tried again a
+  millisecond later, rather than held through SQLite's backoff. The serving
+  processes' `wal_autocheckpoint` (16,384 pages) is only a backstop.
 - **Rows straight into JSON.** Text goes from the record into the response
   through `nish/json`'s `jsonPutString`, whose runtime kernel finds the bytes
   to escape and copies the rest in blocks of 16, 8 or 4 bytes. The post
@@ -122,7 +132,9 @@ Optional settings, with their defaults: `RING` (1; 0 keeps descriptors),
 (1; 0 never waits), `WORKERS` (1 on rings, 5 on descriptors), `SLOTS`
 (400000 on rings, 60000 on descriptors) per process, `CACHE_KIB` (65536 on
 rings, 16384 on descriptors) SQLite page cache per process, `MMAP_MIB` (0),
-`CHECKPOINT_MS` (50), `RESTART_FRAMES` (2048), `AUTOCHECKPOINT` (16384).
+`CHECKPOINT_MS` (50), `RESTART_FRAMES` (2048), `AUTOCHECKPOINT` (16384),
+`CHECKPOINT_NICE` (0; the checkpointer's `nice`), `STATS` (0; 1 prints the
+loop's and the checkpointer's counters every 10 s).
 
 ## Measured
 

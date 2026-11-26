@@ -12,10 +12,13 @@ written through prepared statements), `nish/json` and `nish/json-tokenizer`,
 `nish/bytes` and `nish/crypto/hmac`. No third-party package is used, and
 SQLite is unmodified.
 
-**Builds with Nish 0.48.0**: this version reads rows with `Cursor.record`,
+**Builds with Nish 0.49.0**: this version reads rows with `Cursor.record`,
 `RowRecord` and `Database.reopenCursor`, writes JSON strings with
 `jsonPutString`, and relies on that release's io_uring runtime (below),
-whose wide rings (`NET_LISTEN_RING_WIDE`) are new in 0.48.0.
+whose wide rings (`NET_LISTEN_RING_WIDE`) are new in 0.48.0. In 0.49.0 a
+commit after a B-tree split no longer walks the whole page-cache hash table,
+which was 1.5% of the server's CPU at 250,000 users with this entry's 64 MiB
+cache.
 
 ```sh
 sudo bash install.sh

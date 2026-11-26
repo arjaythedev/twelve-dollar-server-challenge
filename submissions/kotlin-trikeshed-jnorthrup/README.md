@@ -58,8 +58,11 @@ with the io_uring rings in `feedc.def`.
   6,736 requests/s, p95 95 ms, p99 124 ms, max 190 ms, no errors. Current measurements: STUDIES.md S18.
 - **SQLite settings.** `journal_mode=WAL`, `synchronous=NORMAL`, `wal_autocheckpoint=0`, SQLite's own `unix-excl` VFS
   (this process alone opens the file: no fcntl locks, and the wal-index lives in process memory, with no `-shm` file),
-  `mmap_size` 1 GiB, `cache_size` 16 MiB, `temp_store=MEMORY`. A second connection on its own thread runs a PASSIVE
-  checkpoint every 100 ms (`feedbt_checkpointer`), so no checkpoint and no fsync runs on the loop thread. Statements are
+  `mmap_size=0`, `cache_size` 48 MiB (SQLite's own page cache: process memory, which reclaim cannot take back without swap,
+  instead of mapped file pages, which the kernel drops first near the memory limit), `temp_store=MEMORY`. A second
+  connection on its own thread, at nice 10, runs a PASSIVE checkpoint every 100 ms (`feedbt_checkpointer`), so no
+  checkpoint and no fsync runs on the loop thread. The WAL gate waits past 8,192 frames (STUDIES.md S19). At start the
+  process `mlock`s its own code pages within the `RLIMIT_MEMLOCK` it was given (`feed_lock_code`; it raises no limit). Statements are
   prepared once with `SQLITE_PREPARE_PERSISTENT` and reused. They cache plans, not data (rule 5).
 - **SQLite build.** `SQLITE_THREADSAFE=2` (multi-thread): the loop thread and the checkpoint thread each own one
   connection. From the list at

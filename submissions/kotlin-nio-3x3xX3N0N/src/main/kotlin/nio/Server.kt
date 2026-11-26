@@ -244,17 +244,24 @@ class Server(private val host: String, private val port: Int, private val db: Db
             var le = p
             while (le < e && b[le] != '\n'.code.toByte()) le++
             if (le >= e) return if (e - s > 16 * 1024) -1 else 0
-            val f = b[p].toInt() or 0x20
-            if (f == 'c'.code || f == 'a'.code || f == 't'.code) {
-                val end = if (b[le - 1] == '\r'.code.toByte()) le - 1 else le
-                var colon = p
-                while (colon < end && b[colon] != ':'.code.toByte()) colon++
-                var vs = colon + 1
+            // First character picks the candidate, the colon at that name's fixed offset confirms it (idea from
+            // kotlin-trikeshed-jnorthrup: "parse the headers as a struct, first character, then verify"). No colon scan.
+            val end = if (b[le - 1] == '\r'.code.toByte()) le - 1 else le
+            val n = end - p
+            val colon = when (b[p].toInt() or 0x20) {
+                'c'.code -> if (n > 14 && b[p + 14] == ':'.code.toByte() && ieq(b, p, "content-length")) 14
+                    else if (n > 10 && b[p + 10] == ':'.code.toByte() && ieq(b, p, "connection")) 10 else 0
+                'a'.code -> if (n > 13 && b[p + 13] == ':'.code.toByte() && ieq(b, p, "authorization")) 13 else 0
+                't'.code -> if (n > 17 && b[p + 17] == ':'.code.toByte() && ieq(b, p, "transfer-encoding")) return -1 else 0
+                else -> 0
+            }
+            if (colon != 0) {
+                var vs = p + colon + 1
                 while (vs < end && (b[vs] == ' '.code.toByte() || b[vs] == '\t'.code.toByte())) vs++
                 var ve = end
                 while (ve > vs && (b[ve - 1] == ' '.code.toByte() || b[ve - 1] == '\t'.code.toByte())) ve--
-                when (colon - p) {
-                    14 -> if (ieq(b, p, "content-length")) {
+                when (colon) {
+                    14 -> {
                         cl = 0
                         for (k in vs until ve) {
                             val d = b[k] - '0'.code.toByte()
@@ -263,12 +270,11 @@ class Server(private val host: String, private val port: Int, private val db: Db
                             if (cl > MAX_REQ) return -1
                         }
                     }
-                    13 -> if (ieq(b, p, "authorization")) { authS = vs; authE = ve }
-                    10 -> if (ieq(b, p, "connection")) {
+                    13 -> { authS = vs; authE = ve }
+                    10 -> {
                         if (icontains(b, vs, ve, "close")) close = true
                         else if (icontains(b, vs, ve, "keep-alive")) close = false
                     }
-                    17 -> if (ieq(b, p, "transfer-encoding")) return -1 // chunked bodies aren't supported
                 }
             }
             p = le + 1

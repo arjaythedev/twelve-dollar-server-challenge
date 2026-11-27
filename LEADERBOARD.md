@@ -489,6 +489,10 @@ Its follow-up **#525** (`7d359e1`, single-owner multi-ring io_uring, off-loop WA
 didn't beat the merged row) scored **209,000** (20,463 req/s, p95 96.5 / p99 198 ms, 0 err, 77 % CPU, 35 µs/req, 514 MB,
 2026-11-19). 220,000 passed the 2-minute probe but failed the 5-minute hold on p95/p99 (256 ms / 1.22 s at 82 % CPU);
 230,000 failed the 2-minute probe on refused connections (74 % err at 96 % CPU).
+Its replacement **#539** (`e6eccd8`, supersedes #525: io_uring error recovery, deeper accept queue, off-loop WAL
+checkpointer; held, not merged: it didn't beat the merged row) scored **200,000** (19,680 req/s, p95 9.3 / p99 159 ms,
+0 err, 74 % CPU, 35 µs/req, 501 MB, 2026-11-27). 210,000 failed the 2-minute probe on p95/p99 (2.26 s / 11.1 s at 81 %
+CPU); 220,000 failed it on refused connections (70 % err at 99 % CPU).
 
 ᶻ **swift-iouring-Tabonx** stays on its merged #173 row. Its follow-up **#293** (`38868fc`; held, not merged: it
 didn't beat the merged row, it tied it) also held **219,000** (21,352 req/s, p95 16.9 / p99 567 ms, 0 err, 63 % CPU,

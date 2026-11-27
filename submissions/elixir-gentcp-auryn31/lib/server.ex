@@ -1,10 +1,12 @@
 defmodule Server do
-  @moduledoc "HTTP/1.1 keep-alive server on raw :gen_tcp: one process per connection, OTP's C HTTP parser."
+  @moduledoc "HTTP/1.1 keep-alive server on OTP's :socket NIFs (direct syscalls, no port round trip): one process per connection, OTP's C HTTP parser."
 
   @idle 75_000
   @max_body 16_384
   @max_head 32_768
   @acceptors 32
+  # LimitNOFILE is 65535: past this many open connections, answer with `connection: close` so users turn over
+  @max_keepalive 30_000
 
   def start do
     path = env!("SQLITE_PATH")
@@ -14,10 +16,12 @@ defmodule Server do
     {:ok, addr} = :inet.getaddr(String.to_charlist(System.get_env("HOST", "127.0.0.1")), :inet)
     port = String.to_integer(System.get_env("PORT", "3000"))
     :persistent_term.put(:srv, {secret, :erlang.monotonic_time(:second)})
+    :persistent_term.put(:conns, :atomics.new(1, []))
 
-    {:ok, l} =
-      :gen_tcp.listen(port, [:binary, packet: :raw, active: false, reuseaddr: true, nodelay: true,
-        backlog: 4096, ip: addr, keepalive: true, send_timeout: 30_000, send_timeout_close: true])
+    {:ok, l} = :socket.open(:inet, :stream, :tcp)
+    :ok = :socket.setopt(l, {:socket, :reuseaddr}, true)
+    :ok = :socket.bind(l, %{family: :inet, port: port, addr: addr})
+    :ok = :socket.listen(l, 4096)
 
     for _ <- 1..@acceptors, do: spawn(fn -> accept(l) end)
     IO.puts("Listening on #{:inet.ntoa(addr)}:#{port}")
@@ -27,13 +31,14 @@ defmodule Server do
   defp env!(k), do: (case System.get_env(k) do v when v not in [nil, ""] -> v end)
 
   defp accept(l) do
-    case :gen_tcp.accept(l) do
+    case :socket.accept(l) do
       {:ok, s} ->
-        pid = spawn(fn -> receive do :go -> loop(s, <<>>) end end)
+        :socket.setopt(s, {:tcp, :nodelay}, true)
+        pid = spawn(fn -> receive do :go -> run(s) end end)
 
-        case :gen_tcp.controlling_process(s, pid) do
+        case :socket.setopt(s, {:otp, :controlling_process}, pid) do
           :ok -> send(pid, :go)
-          _ -> :gen_tcp.close(s)
+          _ -> :socket.close(s)
         end
 
       {:error, :emfile} -> Process.sleep(10)
@@ -41,6 +46,17 @@ defmodule Server do
     end
 
     accept(l)
+  end
+
+  defp run(s) do
+    c = :persistent_term.get(:conns)
+    :atomics.add(c, 1, 1)
+
+    try do
+      loop(s, <<>>)
+    after
+      :atomics.sub(c, 1, 1)
+    end
   end
 
   # --- connection loop: parse one request from buf, answer it, continue with the leftover bytes ---
@@ -77,12 +93,12 @@ defmodule Server do
     if byte_size(rest) >= len do
       <<b::binary-size(^len), rest2::binary>> = rest
       {status, out} = route(m, path |> strip_query(), auth, b)
-      close = close or vsn == {1, 0}
+      close = close or vsn == {1, 0} or :atomics.get(:persistent_term.get(:conns), 1) > @max_keepalive
 
-      case :gen_tcp.send(s, [head_line(status), "\r\ncontent-type: application/json\r\ncontent-length: ",
-             Integer.to_string(IO.iodata_length(out)), if(close, do: "\r\nconnection: close\r\n\r\n", else: "\r\n\r\n"), out]) do
+      case :socket.send(s, [head_line(status), "\r\ncontent-type: application/json\r\ncontent-length: ",
+             Integer.to_string(IO.iodata_length(out)), if(close, do: "\r\nconnection: close\r\n\r\n", else: "\r\n\r\n"), out], 30_000) do
         :ok when not close -> loop(s, rest2)
-        _ -> :gen_tcp.close(s)
+        _ -> :socket.close(s)
       end
     else
       more(s, buf0, buf0)
@@ -93,15 +109,15 @@ defmodule Server do
   defp more(s, buf0, _) when byte_size(buf0) > @max_head + @max_body, do: bad(s)
 
   defp more(s, buf0, _) do
-    case :gen_tcp.recv(s, 0, @idle) do
+    case :socket.recv(s, 0, @idle) do
       {:ok, d} -> loop(s, <<buf0::binary, d::binary>>)
-      _ -> :gen_tcp.close(s)
+      _ -> :socket.close(s)
     end
   end
 
   defp bad(s) do
-    :gen_tcp.send(s, "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
-    :gen_tcp.close(s)
+    :socket.send(s, "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n")
+    :socket.close(s)
   end
 
   defp parse_len(v) do

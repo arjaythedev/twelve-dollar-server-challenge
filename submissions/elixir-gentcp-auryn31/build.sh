@@ -32,8 +32,13 @@ if [[ ! -f $nif || build.sh -nt $nif || $sqlite/sqlite3.c -nt $nif ]]; then
   mkdir -p .deps/esqlite/priv
   link=(-shared)
   [[ $(uname -s) != Darwin ]] || link=(-dynamiclib -undefined dynamic_lookup)
+  # Run sqlite3_step on the normal scheduler: with everything in the page cache or mmap a step takes
+  # microseconds, so the hop to a dirty-IO thread (two OS threads on one core) costs more than the step.
+  sed 's/{"step", 1, esqlite_step, ERL_NIF_DIRTY_JOB_IO_BOUND}/{"step", 1, esqlite_step, 0}/' \
+    .deps/esqlite/c_src/esqlite3_nif.c > .deps/esqlite/c_src/esqlite3_nif_patched.c
+  grep -q '{"step", 1, esqlite_step, 0}' .deps/esqlite/c_src/esqlite3_nif_patched.c
   "${CC:-cc}" -O3 -DNDEBUG -std=gnu11 -fPIC -pthread \
-    -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION -I"$include" -I"$sqlite" \
-    .deps/esqlite/c_src/esqlite3_nif.c "$sqlite/sqlite3.c" "${link[@]}" -lm -o "$nif"
+    -DSQLITE_THREADSAFE=1 -DSQLITE_OMIT_LOAD_EXTENSION -I"$include" -I"$sqlite" -I.deps/esqlite/c_src \
+    .deps/esqlite/c_src/esqlite3_nif_patched.c "$sqlite/sqlite3.c" "${link[@]}" -lm -o "$nif"
 fi
 elixirc -pa .deps/esqlite/ebin -o bin lib/*.ex

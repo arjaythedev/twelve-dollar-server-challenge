@@ -6,7 +6,7 @@
 set -u
 sq=$1; plans=$2; out=$3; shift 3
 plain() { cc "$@" -I"$sq" -I"$plans" -c "$plans/feedbt.c" -o "$out"; }
-if [ "${FEED_PGO:-1}" = 0 ] || ! cc --version 2>/dev/null | head -1 | grep -qi -E 'gcc|Free Software'; then plain "$@"; exit $?; fi
+if [ "${FEED_PGO:-1}" = 0 ] || ! cc -v 2>&1 | grep -q '^gcc version'; then plain "$@"; exit $?; fi
 t=$(mktemp -d) || { plain "$@"; exit $?; }
 trap 'rm -rf "$t"' EXIT
 if cc "$@" -fprofile-generate -fprofile-update=single -fprofile-dir="$t" -I"$sq" -I"$plans" -c "$plans/feedbt.c" -o "$t/gen.o" \

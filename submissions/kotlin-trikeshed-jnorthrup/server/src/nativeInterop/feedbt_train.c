@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
       "BEGIN;"
       "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) INSERT INTO users (id, username) SELECT i, 'user_' || i FROM n;"
       "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200000) INSERT INTO posts (id, user_id, body, created_at) "
-      "SELECT i, 1 + (i * 7919) % 20000, 'Fast tomorrow small bug big droplet number ' || i || ' rarely everything?', strftime('%Y-%m-%dT%H:%M:%fZ', 1735689600 + i * 0.5) FROM n;"
+      "SELECT i, 1 + (i * 7919) % 20000, 'Fast tomorrow small bug big droplet number ' || i || ' rarely everything?', strftime('%Y-%m-%dT%H:%M:%fZ', 1735689600 + i * 0.5, 'unixepoch') FROM n;"
       "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400000) INSERT OR IGNORE INTO likes (user_id, post_id) "
       "SELECT 1 + (i * 104729) % 20000, 1 + (i * 15485863) % 200000 FROM n;"
       "COMMIT; ANALYZE;");

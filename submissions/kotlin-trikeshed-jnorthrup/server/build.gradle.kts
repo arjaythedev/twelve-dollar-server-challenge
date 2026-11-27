@@ -160,12 +160,13 @@ tasks.register<Exec>("sqliteArchive") {
     val dir = sqliteDir.get().asFile
     val plans = project.file("src/nativeInterop")
     inputs.file(File(dir, "sqlite3.c"))
-    inputs.files(File(plans, "feedbt.c"), File(plans, "feedbt.h"))
+    inputs.files(File(plans, "feedbt.c"), File(plans, "feedbt.h"), File(plans, "feedbt_train.c"), File(plans, "pgo.sh"))
+    inputs.property("feedPgo", providers.environmentVariable("FEED_PGO").orElse("1"))
     outputs.file(File(dir, "libsqlite3.a"))
     workingDir(dir)
-    commandLine("sh", "-c", (listOf("cc", "-O2", "-fPIC", "-c", "-DSQLITE_DISABLE_LFS") + sqliteOptions +
-        listOf("-I.", "-I${plans.path}", File(plans, "feedbt.c").path, "-o", "sqlite3.o")).joinToString(" ") +
-        " && rm -f libsqlite3.a && ar rcs libsqlite3.a sqlite3.o && rm sqlite3.o")
+    // pgo.sh builds feedbt.c profile-guided (GCC; FEED_PGO=0 turns it off), or plain when it cannot; see the script.
+    commandLine("sh", "-c", (listOf("sh", File(plans, "pgo.sh").path, ".", plans.path, "sqlite3.o", "-O2", "-fPIC", "-DSQLITE_DISABLE_LFS") +
+        sqliteOptions).joinToString(" ") + " && rm -f libsqlite3.a && ar rcs libsqlite3.a sqlite3.o && rm sqlite3.o")
 }
 
 // liburing from the TrikeShed subrepo's pinned source tree, configured and built here (static only).

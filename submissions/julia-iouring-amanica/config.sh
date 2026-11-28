@@ -10,7 +10,7 @@ SQLITE_YEAR=2026
 SQLITE_SHA3_256=92281c86e2957f9b9305890f9ac04204caa7b677cc868dc326d942689df28e30   # as published on sqlite.org
 SQLITE_URL="https://sqlite.org/${SQLITE_YEAR}/sqlite-amalgamation-${SQLITE_ID}.zip"
 
-# GC soft target for the Julia heap (julia --heap-size-hint). The box has 2 GB for everything.
+# GC soft target for the Julia heap (julia --heap-size-hint; the JIT fallback only). The box has 2 GB for everything.
 JULIA_HEAP_HINT=512M
 
 # Network transport: auto (io_uring if the kernel allows it, else epoll), uring, or epoll.

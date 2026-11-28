@@ -1,11 +1,10 @@
 //go:build linux
 
-// The Go side of the SQLite shim (see db.h). cgo compiles db.c, which includes sqlite/sqlite3.c, which build.sh
-// downloads next to this file, into the binary.
+// The Go side of the SQLite shim (see db.h). build.sh compiles db.c, which includes sqlite/sqlite3.c, into
+// db.syso; the go tool links every .syso file it finds next to the Go files.
 package main
 
 /*
-#cgo CFLAGS: -DSQLITE_THREADSAFE=2 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_OMIT_DEPRECATED -DSQLITE_OMIT_SHARED_CACHE -DSQLITE_DQS=0 -DHAVE_USLEEP=1
 #cgo LDFLAGS: -lm
 #include <stdlib.h>
 #include "db.h"
@@ -51,10 +50,33 @@ func dbStats() (walPages, walMax, checkpoints int) {
 	return int(a), int(b), int(c)
 }
 
+// dbWalWrites reports the write calls that reached the WAL file and the frames SQLite wrote,
+// since the last call.
+func dbWalWrites() (writes, frames int) {
+	var a, b C.long
+	C.db_wal_writes(&a, &b)
+	return int(a), int(b)
+}
+
+// dbWalCheck is for the test: true starts comparing what SQLite asks to be written to the
+// WAL with what reaches the file; false reports whether the two have been the same.
+func dbWalCheck(start bool) bool {
+	if start {
+		return C.db_wal_check(1) != 0
+	}
+	return C.db_wal_check(0) != 0
+}
+
 func dbPageMemory() (blockKB, hugeKB int) {
 	var a, b C.long
 	C.db_page_memory(&a, &b)
 	return int(a), int(b)
+}
+
+func dbTextMemory() (movedKB, hugeKB int, left string) {
+	var a, b C.long
+	why := C.db_text_memory(&a, &b)
+	return int(a), int(b), C.GoString(why)
 }
 
 func dbHealth() bool { return C.db_health() == 1 }
@@ -73,6 +95,11 @@ func dbPost(id int64, buf []byte) int {
 // appendString (cgo cannot be used from a test file).
 func dbJSONString(dst, s []byte) int {
 	return int(C.db_json_string((*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(s))), C.int(len(s)), (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(dst))), C.int(len(dst))))
+}
+
+// dbJSONInt is the C side's integer writer, for the same reason.
+func dbJSONInt(dst []byte, v int64) int {
+	return int(C.db_json_int(C.int64_t(v), (*C.uint8_t)(unsafe.Pointer(unsafe.SliceData(dst))), C.int(len(dst))))
 }
 
 func dbPostExists(id int64) int { return int(C.db_post_exists(C.int64_t(id))) }

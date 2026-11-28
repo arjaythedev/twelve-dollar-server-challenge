@@ -1,3 +1,10 @@
+//go:build ignore
+
+// build.sh compiles this file with gcc itself, into db.syso, which the go tool links. The line
+// above keeps the go tool from compiling it a second time. (Why not leave it to cgo: for the
+// profile-guided build gcc must compile the file twice under the same object name, and cgo
+// compiles in a temporary folder with a new name every time.)
+//
 // See db.h. Plain SQL through prepared statements (B-tree reads replace parts of this in stage 5),
 // one transaction per loop pass, and a background thread that checkpoints the WAL.
 #define _GNU_SOURCE // before any header: SQLite uses mremap
@@ -225,17 +232,21 @@ static int prep(const char *sql, sqlite3_stmt **st) {
 // The memory SQLite's page cache keeps its pages in, on 2 MB pages.
 //
 // SQLite lets the application hand it one block of memory for page contents
-// (SQLITE_CONFIG_PAGECACHE); the cache itself stays SQLite's own. A 16 MB cache on the usual
-// 4 KB pages is 4,096 pages of memory, more than the CPU's address-translation cache (TLB)
+// (SQLITE_CONFIG_PAGECACHE); the cache itself stays SQLite's own. A 32 MB cache on the usual
+// 4 KB pages is 8,192 pages of memory, more than the CPU's address-translation cache (TLB)
 // covers, so a B-tree descent pays for page-table walks on top of its cache misses, and in
-// a virtual machine each walk is two-dimensional. On 2 MB pages the whole cache is 10 entries.
+// a virtual machine each walk is two-dimensional. On 2 MB pages the whole block (38 MB with the
+// page headers and a margin) is 19 entries.
 // Linux gives a process such pages if it asks for them region by region (madvise), which is
 // a request about our own memory, not a setting of the box. The block is touched once here,
 // at startup, so the kernel finds and clears the memory before the first request, not
-// during one. If any of this fails SQLite allocates its pages the ordinary way.
+// during one. It is touched from the top down: SQLite hands out the slots of the block from
+// the highest address first, and on a box whose free memory is fragmented the kernel has
+// 2 MB pages for only the first part that is touched, so those go where the pages in use
+// are. If any of this fails SQLite allocates its pages the ordinary way.
 static uint8_t *page_block;
 static size_t page_block_len;
-#define CACHE_PAGES 4096 // 16 MB of 4 KB pages; PRAGMA cache_size below says the same
+#define CACHE_PAGES 8192 // 32 MB of 4 KB pages; PRAGMA cache_size below says the same
 static void page_memory(void) {
   int header = 0;
   sqlite3_config(SQLITE_CONFIG_PCACHE_HDRSZ, &header);
@@ -245,41 +256,309 @@ static void page_memory(void) {
   if (raw == MAP_FAILED) return;
   uint8_t *block = (uint8_t *)(((uintptr_t)raw + huge - 1) & ~(uintptr_t)(huge - 1));
   madvise(block, len, MADV_HUGEPAGE);
-  for (size_t at = 0; at < len; at += 4096) block[at] = 0;
+  for (size_t at = len; at; at -= 4096) block[at - 4096] = 0;
   if (sqlite3_config(SQLITE_CONFIG_PAGECACHE, block, (int)slot, (int)(len / slot)) != SQLITE_OK) return;
   page_block = block;
   page_block_len = len;
 }
 
-// For the startup log: the size of the block in kB and how much of it the kernel put on
-// 2 MB pages (from /proc/self/smaps). Where huge pages are switched off or none are free,
-// the second number is 0 and the block works as ordinary pages.
-void db_page_memory(long *block_kb, long *huge_kb) {
-  *block_kb = (long)(page_block_len >> 10);
-  *huge_kb = 0;
-  FILE *f = page_block ? fopen("/proc/self/smaps", "r") : 0;
-  if (!f) return;
+// How much of an address range the kernel has put on 2 MB pages, in kB (from
+// /proc/self/smaps).
+static long huge_kb_in(uintptr_t lo, uintptr_t hi) {
+  long total = 0;
+  FILE *f = fopen("/proc/self/smaps", "r");
+  if (!f) return 0;
   char line[256];
   int ours = 0;
   while (fgets(line, sizeof line, f)) {
     unsigned long from, to;
     long kb;
     if (sscanf(line, "%lx-%lx ", &from, &to) == 2) {
-      ours = from < (unsigned long)(uintptr_t)page_block + page_block_len && to > (unsigned long)(uintptr_t)page_block;
+      ours = from < hi && to > lo;
     } else if (ours && sscanf(line, "AnonHugePages: %ld kB", &kb) == 1) {
-      *huge_kb += kb;
+      total += kb;
     }
   }
   fclose(f);
+  return total;
+}
+
+// For the startup log: the size of the block in kB and how much of it the kernel put on
+// 2 MB pages. Where huge pages are switched off or none are free, the second number is 0
+// and the block works as ordinary pages.
+void db_page_memory(long *block_kb, long *huge_kb) {
+  *block_kb = (long)(page_block_len >> 10);
+  *huge_kb = page_block ? huge_kb_in((uintptr_t)page_block, (uintptr_t)page_block + page_block_len) : 0;
+}
+
+// The program's own code on a 2 MB page.
+//
+// The instructions of a program are memory too, and the CPU translates their addresses
+// through the same small cache (the instruction TLB). This binary's code is about 2.3 MB,
+// which is some 600 pages of 4 KB. The kernel of the scoring image can put anonymous memory
+// on 2 MB pages but not a program file's text (it is built without huge pages for files), so
+// the text is copied: into anonymous memory that asks for 2 MB pages, which is then moved
+// over the original addresses with one mremap call. The bytes at every address are the same
+// before and after, so the code that is running, this function included, does not notice.
+//
+// Only whole 2 MB units inside the binary's read-only start (its header pages and its text)
+// are moved, and the linker puts SQLite, the C in this file and the Go loop in the first
+// one. The moved range is read-only and executable as a whole; nothing in it is ever
+// writable. It runs before the Go runtime starts, while the process has one thread. It asks
+// only about this process's own memory and changes no setting of the box. Where the box has
+// huge pages switched off, the text has no whole unit, or any call fails, the text stays as
+// the kernel mapped it; the startup log says which happened.
+static uintptr_t text_from, text_to;
+static const char *text_left = "not tried";
+__attribute__((constructor)) static void text_to_huge(void) {
+  const uintptr_t H = 2u << 20;
+  char exe[512], line[1024];
+  FILE *f = fopen("/sys/kernel/mm/transparent_hugepage/enabled", "r");
+  if (!f || !fgets(line, sizeof line, f) || strstr(line, "[never]")) {
+    if (f) fclose(f);
+    text_left = "2 MB pages are off on this box";
+    return;
+  }
+  fclose(f);
+  ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  f = fopen("/proc/self/maps", "r");
+  if (n <= 0 || !f) {
+    if (f) fclose(f);
+    text_left = "cannot read the memory map";
+    return;
+  }
+  exe[n] = 0;
+  uintptr_t lo = 0, hi = 0;
+  while (fgets(line, sizeof line, f)) { // the binary's mappings, from its start to the end of its text
+    unsigned long s, e;
+    char perm[8];
+    if (sscanf(line, "%lx-%lx %7s", &s, &e, perm) != 3 || !strstr(line, exe)) continue;
+    if (!lo) lo = hi = s;
+    if (s != hi || perm[1] == 'w') break;
+    hi = e;
+    if (perm[2] == 'x') break;
+  }
+  fclose(f);
+  uintptr_t a = (lo + H - 1) & ~(H - 1), b = hi & ~(H - 1);
+  if (!lo || b <= a) {
+    text_left = "no whole 2 MB unit in the text";
+    return;
+  }
+  size_t len = b - a;
+  char *raw = mmap(0, len + H, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (raw == MAP_FAILED) {
+    text_left = "no memory for the copy";
+    return;
+  }
+  char *copy = (char *)(((uintptr_t)raw + H - 1) & ~(H - 1));
+  madvise(copy, len, MADV_HUGEPAGE);
+  memcpy(copy, (void *)a, len);
+  if (mprotect(copy, len, PROT_READ | PROT_EXEC) ||
+      mremap(copy, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void *)a) == MAP_FAILED) {
+    munmap(raw, len + H);
+    text_left = "the kernel refused the move";
+    return;
+  }
+  // The copy has moved; give back the alignment slack on both sides of where it was.
+  if (copy > raw) munmap(raw, (size_t)(copy - raw));
+  munmap(copy + len, (size_t)(raw + H - copy));
+  text_from = a;
+  text_to = b;
+  text_left = "";
+}
+
+// For the startup log: how much of the program text was moved (kB), how much of that the
+// kernel put on 2 MB pages, and, when nothing was moved, why.
+const char *db_text_memory(long *moved_kb, long *huge_kb) {
+  *moved_kb = (long)((text_to - text_from) >> 10);
+  *huge_kb = text_to ? huge_kb_in(text_from, text_to) : 0;
+  return text_left;
+}
+
+// ---- WAL writes: one write per commit ---------------------------------------------------------
+//
+// SQLite writes each WAL frame with two calls (a 24-byte header, then the page), so a commit
+// of four pages is eight pwrite calls. This is a file layer (sqlite3_vfs, SQLite's public
+// interface for that) on top of SQLite's own "unix-excl": for the WAL file, a write that
+// continues exactly where the one before it ended is kept in a buffer, and the buffer goes
+// to the file in one call when the page of the commit frame arrives. Every other call on the
+// file (read, sync, truncate, size, lock, file control, close, a write somewhere else, a
+// write that does not fit) first writes what is buffered and then goes through unchanged.
+// So the file receives the same bytes at the same offsets in the same order as without the
+// layer; the commit frame is in the kernel before SQLite updates the WAL's index and before
+// COMMIT returns; and a sync happens where SQLite asks for it. A failed write is reported
+// from the call that caused it, inside the transaction, as SQLite's own would be.
+// The design and the commit-frame test (bytes 4-7 of a frame header hold the database size
+// and are zero except on a commit frame) are go-iouring-davidefrageri's (#354, shim.c), who
+// names c-iouring-pavlyhalim (#245) for the pattern.
+//
+// "unix-excl" itself: the process takes the lock on the database file once and keeps it, the
+// WAL's index lives in ordinary memory shared by our three connections instead of a -shm
+// file, and a transaction makes no fcntl() locking calls. No other process can open the
+// database while the server runs. (As rust-iouring-kensac, #264, and #354.)
+#define WAL_HDR 24
+#define WAL_BUF (128 << 10)
+
+typedef struct {
+  sqlite3_file base;
+  sqlite3_file *real;
+  int is_wal, commit, len;
+  sqlite3_int64 off, last_end;
+  unsigned char *buf;
+} wal_file;
+#define WF(p) ((wal_file *)(p))
+#define REAL(p) (WF(p)->real)
+#define WF_REAL_OFF ((sizeof(wal_file) + 15) & ~(size_t)15)
+
+static sqlite3_vfs *vfs_under, vfs_wal;
+static atomic_long wal_writes, wal_frames; // write calls that reached the WAL file; frames SQLite wrote
+// For the test only: a running hash of every (offset, byte) SQLite asked to be written to the
+// WAL, and of every one handed to the file. With nothing buffered the two must be equal.
+static int wal_check;
+static unsigned long long wal_asked, wal_given;
+static void wal_hash(unsigned long long *h, const unsigned char *b, int n, sqlite3_int64 off) {
+  for (int i = 0; i < n; i++) *h = (*h ^ (unsigned long long)(off + i) ^ ((unsigned long long)b[i] << 56)) * 1099511628211ULL;
+}
+
+static int wf_put(wal_file *f, const void *b, int n, sqlite3_int64 off) {
+  atomic_fetch_add(&wal_writes, 1);
+  if (wal_check) wal_hash(&wal_given, b, n, off);
+  return f->real->pMethods->xWrite(f->real, b, n, off);
+}
+static int wf_flush(wal_file *f) {
+  if (!f->len) return SQLITE_OK;
+  int n = f->len;
+  f->len = 0;
+  return wf_put(f, f->buf, n, f->off);
+}
+#define FLUSH(p)                   \
+  do {                             \
+    int rc_ = wf_flush(WF(p));     \
+    if (rc_ != SQLITE_OK) return rc_; \
+  } while (0)
+
+static int wf_write(sqlite3_file *p, const void *b, int n, sqlite3_int64 off) {
+  wal_file *f = WF(p);
+  if (!f->is_wal) return f->real->pMethods->xWrite(f->real, b, n, off);
+  if (wal_check) wal_hash(&wal_asked, b, n, off);
+  int continues = off == f->last_end;
+  f->last_end = off + n;
+  if (f->len + n > WAL_BUF) FLUSH(p);
+  if (!continues || n > WAL_BUF) {
+    FLUSH(p);
+    f->commit = 0;
+    return wf_put(f, b, n, off);
+  }
+  if (!f->len) f->off = off;
+  memcpy(f->buf + f->len, b, (size_t)n);
+  f->len += n;
+  if (n == WAL_HDR) {
+    const unsigned char *h = b;
+    f->commit = (h[4] | h[5] | h[6] | h[7]) != 0;
+    atomic_fetch_add(&wal_frames, 1);
+    return SQLITE_OK;
+  }
+  if (f->commit) {
+    f->commit = 0;
+    return wf_flush(f);
+  }
+  return SQLITE_OK;
+}
+static int wf_close(sqlite3_file *p) {
+  wal_file *f = WF(p);
+  int rc = wf_flush(f), rc2 = f->real->pMethods ? f->real->pMethods->xClose(f->real) : SQLITE_OK;
+  sqlite3_free(f->buf);
+  f->buf = 0;
+  return rc != SQLITE_OK ? rc : rc2;
+}
+static int wf_read(sqlite3_file *p, void *b, int n, sqlite3_int64 off) { FLUSH(p); return REAL(p)->pMethods->xRead(REAL(p), b, n, off); }
+static int wf_truncate(sqlite3_file *p, sqlite3_int64 size) { FLUSH(p); return REAL(p)->pMethods->xTruncate(REAL(p), size); }
+static int wf_sync(sqlite3_file *p, int flags) { FLUSH(p); return REAL(p)->pMethods->xSync(REAL(p), flags); }
+static int wf_size(sqlite3_file *p, sqlite3_int64 *size) { FLUSH(p); return REAL(p)->pMethods->xFileSize(REAL(p), size); }
+static int wf_lock(sqlite3_file *p, int l) { FLUSH(p); return REAL(p)->pMethods->xLock(REAL(p), l); }
+static int wf_unlock(sqlite3_file *p, int l) { FLUSH(p); return REAL(p)->pMethods->xUnlock(REAL(p), l); }
+static int wf_reserved(sqlite3_file *p, int *out) { return REAL(p)->pMethods->xCheckReservedLock(REAL(p), out); }
+static int wf_control(sqlite3_file *p, int op, void *arg) { FLUSH(p); return REAL(p)->pMethods->xFileControl(REAL(p), op, arg); }
+static int wf_sector(sqlite3_file *p) { return REAL(p)->pMethods->xSectorSize(REAL(p)); }
+static int wf_device(sqlite3_file *p) { return REAL(p)->pMethods->xDeviceCharacteristics(REAL(p)); }
+static int wf_shm_map(sqlite3_file *p, int pg, int sz, int extend, void volatile **out) { return REAL(p)->pMethods->xShmMap(REAL(p), pg, sz, extend, out); }
+static int wf_shm_lock(sqlite3_file *p, int off, int n, int flags) { return REAL(p)->pMethods->xShmLock(REAL(p), off, n, flags); }
+static void wf_shm_barrier(sqlite3_file *p) { REAL(p)->pMethods->xShmBarrier(REAL(p)); }
+static int wf_shm_unmap(sqlite3_file *p, int del) { return REAL(p)->pMethods->xShmUnmap(REAL(p), del); }
+static int wf_fetch(sqlite3_file *p, sqlite3_int64 off, int n, void **pp) { FLUSH(p); return REAL(p)->pMethods->xFetch(REAL(p), off, n, pp); }
+static int wf_unfetch(sqlite3_file *p, sqlite3_int64 off, void *pg) { return REAL(p)->pMethods->xUnfetch(REAL(p), off, pg); }
+
+static const sqlite3_io_methods wf_methods = {3, wf_close, wf_read, wf_write, wf_truncate, wf_sync, wf_size, wf_lock, wf_unlock, wf_reserved,
+                                              wf_control, wf_sector, wf_device, wf_shm_map, wf_shm_lock, wf_shm_barrier, wf_shm_unmap, wf_fetch, wf_unfetch};
+
+static int wv_open(sqlite3_vfs *v, sqlite3_filename name, sqlite3_file *p, int flags, int *out_flags) {
+  (void)v;
+  wal_file *f = WF(p);
+  memset(f, 0, sizeof *f);
+  f->last_end = -1;
+  f->real = (sqlite3_file *)((char *)p + WF_REAL_OFF);
+  int rc = vfs_under->xOpen(vfs_under, name, f->real, flags, out_flags);
+  if (!f->real->pMethods) return rc;
+  f->is_wal = (flags & SQLITE_OPEN_WAL) != 0;
+  if (f->real->pMethods->iVersion < 3 || (f->is_wal && !(f->buf = sqlite3_malloc(WAL_BUF)))) {
+    f->real->pMethods->xClose(f->real);
+    return f->is_wal && !f->buf ? SQLITE_NOMEM : SQLITE_CANTOPEN;
+  }
+  p->pMethods = &wf_methods;
+  return rc;
+}
+static int wv_delete(sqlite3_vfs *v, const char *z, int sync) { (void)v; return vfs_under->xDelete(vfs_under, z, sync); }
+static int wv_access(sqlite3_vfs *v, const char *z, int flags, int *out) { (void)v; return vfs_under->xAccess(vfs_under, z, flags, out); }
+static int wv_full_pathname(sqlite3_vfs *v, const char *z, int n, char *out) { (void)v; return vfs_under->xFullPathname(vfs_under, z, n, out); }
+static int wv_randomness(sqlite3_vfs *v, int n, char *out) { (void)v; return vfs_under->xRandomness(vfs_under, n, out); }
+static int wv_sleep(sqlite3_vfs *v, int us) { (void)v; return vfs_under->xSleep(vfs_under, us); }
+static int wv_current_time(sqlite3_vfs *v, double *t) { (void)v; return vfs_under->xCurrentTime(vfs_under, t); }
+static int wv_last_error(sqlite3_vfs *v, int n, char *m) { (void)v; return vfs_under->xGetLastError(vfs_under, n, m); }
+static int wv_current_time64(sqlite3_vfs *v, sqlite3_int64 *t) { (void)v; return vfs_under->xCurrentTimeInt64(vfs_under, t); }
+
+// The name of the file layer the connections open with: ours if it could be set up, else
+// SQLite's "unix-excl" as it is.
+static const char *wal_vfs(void) {
+  if (vfs_wal.zName) return vfs_wal.zName;
+  vfs_under = sqlite3_vfs_find("unix-excl");
+  if (!vfs_under || vfs_under->iVersion < 2) return "unix-excl";
+  vfs_wal.iVersion = 2;
+  vfs_wal.szOsFile = (int)WF_REAL_OFF + vfs_under->szOsFile;
+  vfs_wal.mxPathname = vfs_under->mxPathname;
+  vfs_wal.xOpen = wv_open, vfs_wal.xDelete = wv_delete, vfs_wal.xAccess = wv_access, vfs_wal.xFullPathname = wv_full_pathname;
+  vfs_wal.xRandomness = wv_randomness, vfs_wal.xSleep = wv_sleep, vfs_wal.xCurrentTime = wv_current_time;
+  vfs_wal.xGetLastError = wv_last_error, vfs_wal.xCurrentTimeInt64 = wv_current_time64;
+  if (sqlite3_vfs_register(&vfs_wal, 0) != SQLITE_OK) return "unix-excl";
+  return vfs_wal.zName = "wal-one-write";
+}
+
+// For the stats line: write calls that reached the WAL file and frames SQLite wrote, since
+// the last call. With the layer working there is about one write per commit.
+void db_wal_writes(long *writes, long *frames) {
+  *writes = atomic_exchange(&wal_writes, 0);
+  *frames = atomic_exchange(&wal_frames, 0);
+}
+
+// For the test: start hashing (on = 1), or report whether everything SQLite has asked to be
+// written since then reached the file, byte for byte and in order (on = 0; 1 if so).
+int db_wal_check(int on) {
+  if (on) {
+    wal_check = 1, wal_asked = wal_given = 0;
+    return 1;
+  }
+  return wal_asked == wal_given && wal_asked != 0;
 }
 
 int db_open(const char *path) {
   page_memory();
-  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, 0) != SQLITE_OK) return fail("open");
+  const char *vfs = wal_vfs();
+  if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) return fail("open");
   // WAL is already set in the seed file. synchronous=NORMAL is the weakest setting rule 6 allows.
-  // cache_size: SQLite's own page cache, 16 MB instead of the default 2 MB. With 2 MB the hot
-  // pages did not fit and were fetched again from the kernel on most requests.
-  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-16384;", 0, 0, 0) != SQLITE_OK) return fail("pragma");
+  // cache_size: SQLite's own page cache, 32 MB instead of the default 2 MB. With 2 MB the hot
+  // pages did not fit and were fetched again from the kernel on most requests; with 16 MB one
+  // page fetch in 1,300 still missed (300 reads a second on the loop thread at 150,000 users,
+  // 600 at 250,000); with 32 MB none does.
+  if (sqlite3_exec(db, "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA cache_size=-32768;", 0, 0, 0) != SQLITE_OK) return fail("pragma");
   if (prep("SELECT 1", &st_health)) return -1;
   if (prep(POST_COLS "ORDER BY p.created_at DESC, p.id DESC LIMIT 20", &st_feed)) return -1;
   if (prep(POST_COLS "WHERE p.id = ?", &st_post)) return -1;
@@ -290,8 +569,8 @@ int db_open(const char *path) {
 
   bt_setup();
 
-  if (sqlite3_open_v2(path, &ckpt_db, SQLITE_OPEN_READWRITE, 0) != SQLITE_OK) return fail("open (finisher)");
-  if (sqlite3_open_v2(path, &copy_db, SQLITE_OPEN_READWRITE, 0) != SQLITE_OK) return fail("open (copier)");
+  if (sqlite3_open_v2(path, &ckpt_db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) return fail("open (finisher)");
+  if (sqlite3_open_v2(path, &copy_db, SQLITE_OPEN_READWRITE, vfs) != SQLITE_OK) return fail("open (copier)");
   if ((db_fd = open(path, O_RDWR | O_CLOEXEC)) < 0) return fail("open (for sync)");
   sqlite3_exec(ckpt_db, "PRAGMA synchronous=NORMAL;", 0, 0, 0);
   sqlite3_exec(copy_db, "PRAGMA synchronous=NORMAL;", 0, 0, 0);
@@ -361,15 +640,18 @@ static inline void wr_lit(wr_t *w, const char *s, size_t n) {
 }
 #define WR(w, s) wr_lit(w, s, sizeof(s) - 1)
 
-// Decimal digits two at a time from a table: half the divisions of the one-digit loop, and
-// no division at all for a number below 10 (most like counts).
+// Decimal digits two at a time from a table, written straight into the output from the last
+// digit back. The number of digits is known first: for a value below 2^32 from the position
+// of its top bit (1233/4096 is log10 of 2) and one comparison, with 32-bit arithmetic from
+// there on; for a larger one by counting. A number below 10 (most like counts) is one store.
 static const char digit_pairs[] =
     "00010203040506070809101112131415161718192021222324252627282930313233343536373839"
     "40414243444546474849505152535455565758596061626364656667686970717273747576777879"
     "8081828384858687888990919293949596979899";
 
 static void wr_int(wr_t *w, int64_t v) {
-  if (!wr_room(w, 24)) return;
+  static const uint32_t pow10[10] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
+  if (!wr_room(w, 24)) return; // a sign and at most 20 digits
   uint8_t *p = w->p;
   uint64_t u = (uint64_t)v;
   if (v < 0) {
@@ -381,23 +663,41 @@ static void wr_int(wr_t *w, int64_t v) {
     w->p = p;
     return;
   }
-  char tmp[40]; // digits end at tmp[20]; the zeroed rest is so a fixed 20 bytes can be copied
-  memset(tmp + 20, 0, 20);
-  int i = 20;
+  if (u <= 0xffffffffu) {
+    uint32_t x = (uint32_t)u;
+    unsigned t = (unsigned)(32 - __builtin_clz(x)) * 1233 >> 12; // digits, or one less
+    unsigned n = t + (x >= pow10[t]);
+    uint8_t *q = p + n;
+    w->p = q;
+    while (x >= 100) {
+      uint32_t r = x % 100;
+      x /= 100;
+      q -= 2;
+      memcpy(q, digit_pairs + 2 * r, 2);
+    }
+    if (x >= 10) memcpy(q - 2, digit_pairs + 2 * x, 2);
+    else q[-1] = (uint8_t)('0' + x);
+    return;
+  }
+  unsigned n = 10;
+  for (uint64_t t = 10000000000ull; n < 20 && u >= t; t *= 10) n++;
+  uint8_t *q = p + n;
+  w->p = q;
   while (u >= 100) {
     unsigned r = (unsigned)(u % 100);
     u /= 100;
-    i -= 2;
-    memcpy(tmp + i, digit_pairs + 2 * r, 2);
+    q -= 2;
+    memcpy(q, digit_pairs + 2 * r, 2);
   }
-  if (u >= 10) {
-    i -= 2;
-    memcpy(tmp + i, digit_pairs + 2 * u, 2);
-  } else {
-    tmp[--i] = (char)('0' + u);
-  }
-  memcpy(p, tmp + i, 20); // 20 - i of these are digits; the room for all 20 was checked
-  w->p = p + (20 - i);
+  if (u >= 10) memcpy(q - 2, digit_pairs + 2 * u, 2);
+  else q[-1] = (uint8_t)('0' + u);
+}
+
+// For json_test.go: the integer writer alone.
+int db_json_int(int64_t v, uint8_t *out, int cap) {
+  wr_t w = {out, out + cap, 0};
+  wr_int(&w, v);
+  return w.full ? -1 : (int)(w.p - out);
 }
 
 #if defined(__SSE2__)
@@ -422,10 +722,44 @@ static void wr_str(wr_t *w, const uint8_t *s, size_t n) {
   uint8_t *p = w->p;
   *p++ = '"';
   size_t i = 0;
+#if defined(__SSE2__)
+  const __m128i quote = _mm_set1_epi8('"'), slash = _mm_set1_epi8('\\'), low = _mm_set1_epi8(0x1f);
+#define BAD16(x) _mm_movemask_epi8(_mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(x, quote), _mm_cmpeq_epi8(x, slash)), _mm_cmpeq_epi8(_mm_min_epu8(x, low), x)))
+  // The usual case first: nothing to escape. Whole blocks, then the last 16 bytes as one more
+  // block that overlaps the one before it (8 to 15 bytes: the first 8 and the last 8), so no
+  // length has a byte-by-byte tail. The first block with something to escape goes to the
+  // general loop below, which starts again at the last position known to be clean.
+  if (n >= 16) {
+    for (; i + 16 <= n; i += 16) {
+      __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
+      _mm_storeu_si128((__m128i *)(p + i), x);
+      if (BAD16(x)) goto general;
+    }
+    if (i < n) {
+      __m128i x = _mm_loadu_si128((const __m128i *)(s + n - 16));
+      _mm_storeu_si128((__m128i *)(p + n - 16), x);
+      if (BAD16(x)) goto general;
+    }
+    p[n] = '"';
+    w->p = p + n + 1;
+    return;
+  }
+  if (n >= 8) {
+    __m128i x = _mm_unpacklo_epi64(_mm_loadl_epi64((const __m128i *)s), _mm_loadl_epi64((const __m128i *)(s + n - 8)));
+    if (BAD16(x)) goto general;
+    _mm_storel_epi64((__m128i *)p, x);
+    _mm_storel_epi64((__m128i *)(p + n - 8), _mm_unpackhi_epi64(x, x));
+    p[n] = '"';
+    w->p = p + n + 1;
+    return;
+  }
+general:
+  p += i;
+#undef BAD16
+#endif
   for (;;) {
     size_t k;
 #if defined(__SSE2__)
-    const __m128i quote = _mm_set1_epi8('"'), slash = _mm_set1_epi8('\\'), low = _mm_set1_epi8(0x1f);
     while (i + 16 <= n) {
       __m128i x = _mm_loadu_si128((const __m128i *)(s + i));
       _mm_storeu_si128((__m128i *)p, x);

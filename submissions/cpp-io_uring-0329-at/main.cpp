@@ -503,14 +503,15 @@ class Server {
         if (p5 - stat_at >= 1000000000ULL) {
           errlog("stats: pass={}/s cqes={} req={} enobufs={} gated={}/{} wait={:.1f}% drain={:.1f}% "
                  "read={:.1f}% commit={:.1f}% (max {:.1f}ms, >5ms {}) sweep={:.1f}% pool_miss={} "
-                 "pool={} enter[wait={} sqe={} ring={}] commits={}/s walframes={}/s",
+                 "pool={} enter[wait={} sqe={} ring={}] commits={}/s walframes={}/s likecache={}",
                  pass - stat_pass, cqes_sum, requests_sum, enobufs_ - enobufs_prev, held_gate,
                  pass - stat_pass, 100.0 * t_wait / (p5 - stat_at), 100.0 * t_drain / (p5 - stat_at),
                  100.0 * t_read / (p5 - stat_at), 100.0 * t_commit / (p5 - stat_at),
                  commit_max / 1e6, commit_slow, 100.0 * t_sweep / (p5 - stat_at),
                  app::pool_misses(), pool_.size(), io::Ring::enters(0) - enter_base_[0],
                  io::Ring::enters(1) - enter_base_[1], io::Ring::enters(2) - enter_base_[2],
-                 app::g_commits - commits_prev, app_->db.wal_frames_total() - wframes_prev);
+                 app::g_commits - commits_prev, app_->db.wal_frames_total() - wframes_prev,
+                 static_cast<int>(app_->db.like_cache_on()));
           enter_base_[0] = io::Ring::enters(0);
           enter_base_[1] = io::Ring::enters(1);
           enter_base_[2] = io::Ring::enters(2);

@@ -1009,6 +1009,32 @@ long long dbx_likes(dbx *h, long long post_id) {
  * to a seek per post.
  *
  * Returns 0 on success, 1 when the caller must fall back, -1 on a SQLite error. */
+/* 解一个 like 索引 cell 的第一列（post_id）。返回 0 成功，1 表示这个 cell 不符合
+ * 「单字节长度 + 两列小整数」的假设（调用方随即退回逐行 seek）。 */
+static int like_cell_id(MemPage *pg, int i, long long *out) {
+  const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
+  unsigned len = cell[0];
+  const unsigned char *p = cell + 1;
+  if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 1;
+  unsigned hdr = p[0], t = p[1];
+  if (hdr > len || hdr < 2 || t >= 0x80) return 1;
+  long long v;
+  if (t >= 1 && t <= 6) {
+    static const unsigned char sz[7] = {0, 1, 2, 3, 4, 6, 8};
+    unsigned k = sz[t];
+    if (hdr + k > len) return 1;
+    const unsigned char *q = p + hdr;
+    v = (signed char)q[0];
+    for (unsigned b = 1; b < k; b++) v = v << 8 | q[b];
+  } else if (t == 8 || t == 9) {
+    v = (long long)t - 8;
+  } else {
+    return 1;
+  }
+  *out = v;
+  return 0;
+}
+
 int dbx_likes_many(dbx *h, const long long *ids, int n, unsigned *counts) {
   if (n <= 0) return 0;
   memset(counts, 0, sizeof(unsigned) * (size_t)n);
@@ -1021,29 +1047,56 @@ int dbx_likes_many(dbx *h, const long long *ids, int n, unsigned *counts) {
     MemPage *pg = c->pPage;
     int i = c->ix, last = pg->leaf ? pg->nCell : i + 1; /* interior: just this entry */
     for (; i < last; i++) {
-      const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
-      unsigned len = cell[0];
-      const unsigned char *p = cell + 1;
-      if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 1;
-      unsigned hdr = p[0], t = p[1];
-      if (hdr >= len || hdr < 2 || t >= 0x80) return 1;
       long long v;
-      if (t >= 1 && t <= 6) {
-        static const unsigned char sz[7] = {0, 1, 2, 3, 4, 6, 8};
-        unsigned k = sz[t];
-        if (hdr + k > len) return 1;
-        const unsigned char *q = p + hdr;
-        v = (signed char)q[0];
-        for (unsigned b = 1; b < k; b++) v = v << 8 | q[b];
-      } else if (t == 8 || t == 9) {
-        v = (long long)t - 8;
-      } else {
-        return 1;
-      }
+      if (like_cell_id(pg, i, &v)) return 1;
       if (v > hi) return 0;
       while (j < n && ids[j] < v) j++;
       if (j == n) return 0;
       if (ids[j] == v) counts[j]++;
+    }
+    c->ix = (u16)(last - 1);
+    int rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) return 0;
+    if (rc != SQLITE_OK) return -1;
+  }
+}
+
+/* like 索引里最小 / 最大的 post_id（索引按 post_id 递增，所以首尾各解一个 cell 就够）。
+ * 返回 1 有行、0 空表、-1 失败。 */
+int dbx_likes_range(dbx *h, long long *lo, long long *hi) {
+  BtCursor *c = h->cur[DBX_LIKES_IDX];
+  int r = dbx_first(h, DBX_LIKES_IDX);
+  if (r < 0) return -1;
+  if (r == 0) return 0;
+  /* 根页常常是内部页，cell 是「子页号 + 键 + rowid」，不是我们要解的那张格式。 */
+  while (!c->pPage->leaf) {
+    if (sqlite3BtreeNext(c, 0) != SQLITE_OK) return -1;
+  }
+  if (like_cell_id(c->pPage, c->ix, lo)) return -1;
+  int empty = 1;
+  if (sqlite3BtreeLast(c, &empty) != SQLITE_OK) return -1;
+  if (empty) return 0;
+  if (like_cell_id(c->pPage, c->ix, hi)) return -1;
+  return 1;
+}
+
+/* 把整张 like 索引的直方图填进 counts（下标 = post_id - lo，长度 n）。一次顺序遍历，
+ * 不解分组、不留临时数组。返回 0 成功，-1 失败（cell 格式不认识或 post_id 越界）。 */
+int dbx_likes_fill(dbx *h, long long lo, unsigned *counts, size_t n) {
+  int r = dbx_first(h, DBX_LIKES_IDX);
+  if (r <= 0) return r < 0 ? -1 : 0;
+  BtCursor *c = h->cur[DBX_LIKES_IDX];
+  for (;;) {
+    MemPage *pg = c->pPage;
+    int i = c->ix, last = pg->nCell;
+    if (pg->leaf) {
+      for (; i < last; i++) {
+        long long v;
+        if (like_cell_id(pg, i, &v)) return -1;
+        long long d = v - lo;
+        if (d < 0 || (size_t)d >= n) return -1;
+        counts[d]++;
+      }
     }
     c->ix = (u16)(last - 1);
     int rc = sqlite3BtreeNext(c, 0);

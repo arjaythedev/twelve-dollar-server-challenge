@@ -166,12 +166,20 @@ void Db::text_put(const uint8_t* p, size_t n) {
 
 void Db::begin() {
   if (dbx_begin(h_) != 0) throw DbError{};
+  if (!like_counts_ok_ && !like_counts_off_ && !rebuild_like_counts()) {
+    /* 组数超过上限（或 cell 格式不认识）：永久退回逐次扫描，不再重试。 */
+    like_counts_off_ = true;
+  }
 }
 
 unsigned long long g_commits = 0;
 bool Db::commit() {
   g_commits++;
-  return dbx_commit(h_) == 0;
+  if (dbx_commit(h_) == 0) return true;
+  /* 事务没提交上：内存里的 like 计数已经跟着插入走了，可能和表不一致。标记失效，
+   * 下一次 begin() 重建；这一批的响应会整体变成 500，调用方不会读到旧计数。 */
+  like_counts_ok_ = false;
+  return false;
 }
 
 long long Db::wal_frames_total() const { return dbx_wal_frames_total(h_); }
@@ -384,7 +392,10 @@ bool Db::feed_rows() {
     }
   }
 
-  if (!rows_.empty()) {
+  if (!rows_.empty() && like_counts_ok_) {
+    for (size_t k = 0; k < rows_.size(); k++)
+      rows_[order_[k]].likes = static_cast<int64_t>(likes_of(rows_[order_[k]].id));
+  } else if (!rows_.empty()) {
     const size_t n = rows_.size();
     std::array<long long, kFeedLen> ids{};
     std::array<unsigned, kFeedLen> counts{};
@@ -402,6 +413,35 @@ bool Db::feed_rows() {
     for (size_t k = 0; k < n; k++) rows_[order_[k]].likes = counts[k];
   }
   return true;
+}
+
+/* 启动时扫一次全表。行数不超过 kLikeCap 组时建立缓存，否则放弃（feed 退回逐次扫）。
+ * 之后每次成功的 like 插入让对应计数 +1，所以只有在 commit 失败回滚或数据被外部
+ * 改动时才需要重建。 */
+bool Db::rebuild_like_counts() {
+  long long lo = 0, hi = 0;
+  int r = dbx_likes_range(h_, &lo, &hi);
+  if (r < 0) return false;
+  if (r == 0) {
+    like_counts_.clear();
+    like_base_ = 0;
+    like_counts_ok_ = true;
+    return true;
+  }
+  like_base_ = lo;
+  like_counts_.assign(static_cast<size_t>(hi - lo + 1), 0);
+  if (dbx_likes_fill(h_, lo, like_counts_.data(), like_counts_.size()) != 0) {
+    like_counts_.clear();
+    return false;
+  }
+  like_counts_ok_ = true;
+  return true;
+}
+
+unsigned Db::likes_of(int64_t id) const {
+  if (!like_counts_ok_ || id < like_base_) return 0;
+  const size_t idx = static_cast<size_t>(id - like_base_);
+  return idx < like_counts_.size() ? like_counts_[idx] : 0;
 }
 
 int Db::count_likes_one(long long id) {
@@ -464,7 +504,14 @@ int64_t Db::insert_post(int64_t user_id, const uint8_t* body, size_t n, char cre
 bool Db::insert_like(int64_t user_id, int64_t post_id) {
   begin();
   int r = dbx_insert_like(h_, user_id, post_id);
-  if (r == 1) return true;
+  if (r == 1) {
+    if (like_counts_ok_ && post_id >= like_base_) {
+      const size_t idx = static_cast<size_t>(post_id - like_base_);
+      if (idx >= like_counts_.size()) like_counts_.resize(idx + 64, 0);
+      like_counts_[idx]++;
+    }
+    return true;
+  }
   if (r == 0) return false;
   throw DbError{};
 }

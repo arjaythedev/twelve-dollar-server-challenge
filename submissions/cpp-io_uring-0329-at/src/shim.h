@@ -23,6 +23,10 @@ void dbx_ck_run(dbx *h, int tail);
 int dbx_writes_held(dbx *h);
 int dbx_wal_frames(dbx *h);
 long long dbx_wal_frames_total(dbx *h);
+/* like 索引的 post_id 范围：返回 1 有行、0 空表、-1 失败。 */
+int dbx_likes_range(dbx *h, long long *lo, long long *hi);
+/* 把 counts[post_id - lo] 填成该 post 的 like 行数。返回 0 成功、-1 失败。 */
+int dbx_likes_fill(dbx *h, long long lo, unsigned *counts, size_t n);
 void dbx_pcache_stats(unsigned long long *scans, unsigned long long *skipped);
 
 int dbx_first(dbx *h, int c);

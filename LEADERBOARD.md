@@ -115,7 +115,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 22 | go-iouring-trungdlp | #343 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᶿ | 25,841 | 99.5 | 246.0 | 0.00 | 81 | 28 | 736 | 2026-11-07 |
 | 22 | go-iouring-davidefrageri | #354 | Go (io_uring, cgo SQLite B-tree reads) | **270,000** ᴰ | 25,841 | 62.9 | 328.3 | 0.00 | 78 | 27 | 1,214 | 2026-11-08 |
 | 22 | c-iouring-Londopy | #438 | C (io_uring, SQLite B-tree reads and writes) | **270,000** ᶫ | 25,837 | 173.6 | 392.7 | 0.00 | 82 | 29 | 863 | 2026-11-15 |
-| 22 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
+| 22 | goose-iouring-anthknee | #473 | Goose (compiles to C, io_uring, SQLite B-tree reads) | **270,000** ᶹ | 25,802 | 142.3 | 749.7 | 0.00 | 81 | 28 | 1,354 | 2026-11-17 |
 | 22 | holyphp-io-uring-elifoxcoder | #490 | HolyPHP (io_uring, SQLite B-tree reads) | **270,000** ᵘ | 25,816 | 234.0 | 584.6 | 0.00 | 84 | 29 | 1,325 | 2026-11-17 |
 | 33 | rust-epoll-scooter1337 | #82 | Rust (io_uring) | **264,000** ˣ | 25,147 | 259 | 499 | 0.00 | 84 | 30 | 630 | 2026-10-21 |
 | 34 | csharp-kestrel-mbobka | #316 | C# (.NET 10 ReadyToRun, Kestrel host, io_uring) | **260,000** | 24,980 | 134 | 286 | 0.00 | 82 | 30 | 692 | 2026-11-05 |
@@ -1612,6 +1612,12 @@ leaked on every close plus a port of the same author's c-iouring-unorig-username
 commit, checkpoint thread; not merged: it scored below the merged row) held **240,000** (23,212 req/s, p95 33.6 / p99
 189.9 ms, 0 err, 72 % CPU, 28 µs/req, 624 MB, 2026-11-28), 42/42 tests: 250,000 failed the 2-minute probe on p99
 (1.43 s at 77 % CPU, 0 errors) and 260,000 on p95/p99 (2.40 / 8.41 s at 87 % CPU).
+
+ᶹ **goose-iouring-anthknee** stays on its merged #473 row. Its follow-up **#552** (`179b060`, shim VFS buffering page
+writes during FULL checkpoints, batched author lookups and a second likes-index cursor to skip empty like scans; not
+merged: it scored below the merged row) held **250,000** (24,111 req/s, p95 37.5 / p99 596.4 ms, 0 err, 70 % CPU,
+26 µs/req, 1,132 MB, 2026-11-28), 42/42 tests: 260,000 failed the 2-minute probe on p95/p99 (144 ms / 2.40 s at 72 %
+CPU, 0 errors) and 280,000 on p99 (2.31 s at 83 % CPU).
 
 ## Patches (ᵖ) and failures
 

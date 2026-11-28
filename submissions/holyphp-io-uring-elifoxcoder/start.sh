@@ -74,6 +74,23 @@ export HPHP_FEED_USER_RAW="${HPHP_FEED_USER_RAW:-1}"
 # Resolve the feed's 20 author rows with one generic sorted B-tree batch seek
 # instead of one cursor seek per author. Set 0 to compare the legacy path.
 export HPHP_FEED_BATCH_USERS="${HPHP_FEED_BATCH_USERS:-1}"
+# Read the feed's newest posts with one generic B-tree tail walk plus batched
+# payload/key reads (three builtin calls) instead of ~100 per-row cursor
+# calls; overflow records fall back to the per-row path. Mirrored A/B/B/A at
+# 130k connections: -1.2% CPU per request. Set 0 for the per-row walk.
+export HPHP_FEED_TAIL_BATCH="${HPHP_FEED_TAIL_BATCH:-1}"
+# Group commit: queued writes wait up to 1 ms (or until 256 are queued) so
+# several poll cycles share one COMMIT; replies still go out only after their
+# commit. Each commit rewrites the hot pages (page 1, posts/likes tails and
+# index leaves) into the WAL, so fewer commits mean fewer page writes,
+# checksums and checkpoint copies. Mirrored A/B/B/A at 130k connections:
+# about -2.7% CPU per request, 20% fewer write syscalls, +0.5 ms p95.
+# Set 0 to commit every poll cycle.
+export HPHP_WRITE_GROUP_MS="${HPHP_WRITE_GROUP_MS:-1}"
+# Provided receive buffers per ring stay at the runtime default (4096): with
+# 1024 buffers and no ring eventfd (#497 at 08da156) the box kept 29 us/request
+# but held only 257k (p99 1.1 s at 270k). HPHP_PBUF_N and HPHP_RING_EVENTFD=0
+# (or async: io-wq completions only) remain available for experiments.
 # These typed fast-array accesses are used only with in-range feed-loop indices.
 # Set 0 to restore runtime bounds checks while diagnosing array logic.
 export HPHP_IARR_FAST="${HPHP_IARR_FAST:-1}"

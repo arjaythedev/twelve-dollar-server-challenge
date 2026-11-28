@@ -188,6 +188,7 @@ App::App(Db&& db, const uint8_t* secret, size_t secret_len)
 
 bool App::handle(const http::Request& req, ByteBuf& out, bool writes_ok) {
   const uint32_t mark = out.len;
+  wrote_last = false;
   const uint8_t* p = req.path;
   const uint32_t pl = req.path_len;
   try {
@@ -225,6 +226,7 @@ bool App::handle(const http::Request& req, ByteBuf& out, bool writes_ok) {
       if (path_is(req, "/posts")) {
         if (!writes_ok) return true;
         create(req, out);
+        wrote_last = true;
       } else if (pl >= 7 && std::memcmp(p, "/posts/", 7) == 0) {
         const uint8_t* rest = p + 7;
         const uint32_t rl = pl - 7;
@@ -237,6 +239,7 @@ bool App::handle(const http::Request& req, ByteBuf& out, bool writes_ok) {
           }
           if (!writes_ok) return true;
           like(req, rest, idl, out);
+          wrote_last = true;
         } else {
           error(out, 404, "not found");
         }

@@ -26,6 +26,9 @@ namespace {
 /* 单调时钟，纳秒。用于给 hold 期间的检查点循环设时间上限。 */
 
 void checkpoint_loop(dbx* h, CkState* st, bool tail) {
+  /* NO_CKPT=1：诊断用，关掉 checkpoint 后 WAL 帧数单调增长，
+   * wal_cb 的差值才能精确反映「提交时写了多少帧」。别在正式提交里用。 */
+  if (std::getenv("NO_CKPT")) return;
   if (!tail) setpriority(PRIO_PROCESS, 0, 19);
   std::unique_lock<std::mutex> lk(st->mu);
   while (!st->stop.load()) {
@@ -165,7 +168,13 @@ void Db::begin() {
   if (dbx_begin(h_) != 0) throw DbError{};
 }
 
-bool Db::commit() { return dbx_commit(h_) == 0; }
+unsigned long long g_commits = 0;
+bool Db::commit() {
+  g_commits++;
+  return dbx_commit(h_) == 0;
+}
+
+long long Db::wal_frames_total() const { return dbx_wal_frames_total(h_); }
 
 void Db::tick() {}
 

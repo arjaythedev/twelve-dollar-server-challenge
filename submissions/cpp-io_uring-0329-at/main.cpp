@@ -28,6 +28,8 @@
 #include "src/io/ring.hpp"
 #include "src/net/connection.hpp"
 
+namespace app { extern unsigned long long g_commits; }  /* STATS 行的 commits/s */
+
 namespace {
 
 constexpr uint32_t kTargetConns = 400000;  /* connection ceiling the ring count must cover */
@@ -77,6 +79,11 @@ constexpr size_t kPublishEvery = 256;
  * 但把 COMMIT 推到 391 次/秒（约 1.2% CPU）；256 是折中：pass 6.9 ms、COMMIT 98 次/秒，本地
  * 20k 连接的 p99 从 64 时的 227 ms 降到 87.6 ms。 */
 constexpr uint32_t kAnswersPerPass = 256;
+/* 组提交窗口。我们每个 pass 都提交（285k 时约 2,600 次/秒），而每次只带 0.2 个写请求，
+ * 于是 85% 的提交是空的，而每写一条 like 要动 4–7 个页——WAL 帧率被推到约 22,500 帧/秒
+ * （90 MB/s），4,096 帧的闸门每 180 ms 就关一次，写请求反复被挂起 250 ms，评测机上就是
+ * likes p99 4.9 s。把 20 ms 内的写攒成一次提交，帧数降一个数量级（同一批帖子的页码被复用）。 */
+constexpr uint64_t kCommitWindowNs = 20000000ULL;
 constexpr uint32_t kIdleSeconds = 90;
 
 constexpr uint64_t kEvAccept = 1;
@@ -179,6 +186,11 @@ class Server {
     if (const char* a = std::getenv("ANSWERS")) {
       long v = std::strtol(a, nullptr, 10);
       if (v > 0 && v <= 65536) answers_cap_ = static_cast<uint32_t>(v);
+    }
+    /* COMMIT_WINDOW_MS：组提交窗口。0 = 关闭（退回每 pass 一次提交），负值同关。 */
+    if (const char* cw = std::getenv("COMMIT_WINDOW_MS")) {
+      const long v = std::strtol(cw, nullptr, 10);
+      commit_window_ns_ = v > 0 ? static_cast<uint64_t>(v) * 1000000ULL : 0;
     }
   }
 
@@ -356,6 +368,7 @@ class Server {
     uint64_t stat_at = now_ns(), slow_total = 0, held_gate = 0;
     uint64_t cqes_sum = 0, requests_sum = 0, prev_responded = 0, reqs = 0, last_reqs = 1;
     uint64_t commit_max = 0, commit_slow = 0, enobufs_prev = 0;
+    unsigned long long commits_prev = 0, wframes_prev = 0;
     uint64_t last_sweep = now_ns();
     now_sec_ = now_sec();
     for (;;) {
@@ -490,13 +503,14 @@ class Server {
         if (p5 - stat_at >= 1000000000ULL) {
           errlog("stats: pass={}/s cqes={} req={} enobufs={} gated={}/{} wait={:.1f}% drain={:.1f}% "
                  "read={:.1f}% commit={:.1f}% (max {:.1f}ms, >5ms {}) sweep={:.1f}% pool_miss={} "
-                 "pool={} enter[wait={} sqe={} ring={}]",
+                 "pool={} enter[wait={} sqe={} ring={}] commits={}/s walframes={}/s",
                  pass - stat_pass, cqes_sum, requests_sum, enobufs_ - enobufs_prev, held_gate,
                  pass - stat_pass, 100.0 * t_wait / (p5 - stat_at), 100.0 * t_drain / (p5 - stat_at),
                  100.0 * t_read / (p5 - stat_at), 100.0 * t_commit / (p5 - stat_at),
                  commit_max / 1e6, commit_slow, 100.0 * t_sweep / (p5 - stat_at),
                  app::pool_misses(), pool_.size(), io::Ring::enters(0) - enter_base_[0],
-                 io::Ring::enters(1) - enter_base_[1], io::Ring::enters(2) - enter_base_[2]);
+                 io::Ring::enters(1) - enter_base_[1], io::Ring::enters(2) - enter_base_[2],
+                 app::g_commits - commits_prev, app_->db.wal_frames_total() - wframes_prev);
           enter_base_[0] = io::Ring::enters(0);
           enter_base_[1] = io::Ring::enters(1);
           enter_base_[2] = io::Ring::enters(2);
@@ -506,6 +520,8 @@ class Server {
           cqes_sum = requests_sum = held_gate = 0;
           commit_max = commit_slow = 0;
           enobufs_prev = enobufs_;
+          commits_prev = app::g_commits;
+          wframes_prev = app_->db.wal_frames_total();
         }
       }
     }
@@ -821,6 +837,7 @@ class Server {
         mark(w, idx);
         c.answered = true;
         app_->handle(req, out_of(c), writes_ok_);
+        if (app_->wrote_last) c.wrote_db = true;
         off += used;
       } else if (pr == app::http::Parsed::Partial) [[likely]] {
         break;
@@ -1081,34 +1098,82 @@ class Server {
     return n;
   }
 
+  /* 把一条已答完的连接收尾：要么把响应交给内核，要么关连接。*/
+  void flush_response(Worker& w, uint32_t idx, bool commit_ok) {
+    net::Connection& c = w.table().at(idx);
+    if (!commit_ok && c.answered) {
+      app::ByteBuf& out = out_of(c);
+      out.len = 0;
+      app::error(out, 500, "internal server error");
+      c.close_after = true;
+    }
+    c.wrote_db = false;
+    c.in_batch = false;
+    c.answered = false;
+    responded_++;
+    if (!c.open || c.closing || c.write == net::WriteState::Sending ||
+        c.write == net::WriteState::Flushed)
+      return;
+    if (c.out && c.out->len) {
+      c.wire = c.out;
+      c.out = nullptr;
+      c.sent = 0;
+      arm_send(w, w.index(), idx, c);
+    } else if (c.close_after) {
+      arm_close(w, w.index(), idx, c);
+    }
+  }
+
   void commit_and_flush() {
-    bool ok = app_->db.commit();
+    const uint64_t now = now_ns();
+    const bool have_pending = !pend_commit_.empty();
+    const bool need = app_->wrote || have_pending;
+    /* 组提交窗口内先不提交：读响应照常立刻发，写响应留在 c.out 里等下一次提交。
+     * serve() 的响应是追加到 c.out 的，所以推迟期间同一连接再来请求也只会排在后面，
+     * 顺序不会乱。 */
+    if (need && commit_window_ns_ != 0 && last_commit_ns_ != 0 &&
+        now - last_commit_ns_ < commit_window_ns_) {
+      for (auto& wp : workers_) {
+        Worker& w = *wp;
+        for (uint32_t idx : w.dirty()) {
+          net::Connection& c = w.table().at(idx);
+          c.in_batch = false;
+          c.answered = false;
+          if (c.wrote_db) {
+            if (c.open && !c.closing && !c.commit_pending) {
+              c.commit_pending = true;
+              pend_commit_.push_back(ReadyRef{w.index(), idx, c.gen, 0});
+            }
+            continue;
+          }
+          flush_response(w, idx, true);
+        }
+        w.dirty().clear();
+      }
+      return;
+    }
+    bool ok = true;
+    if (need) {
+      ok = app_->db.commit();
+      last_commit_ns_ = now;
+    }
     app_->wrote = false;
+    /* 先补发上一轮攒下的写响应，再发本 pass 的。*/
+    if (!pend_commit_.empty()) {
+      for (const ReadyRef& pr : pend_commit_) {
+        if (pr.wi >= workers_.size()) continue;
+        Worker& w = *workers_[pr.wi];
+        net::Connection& c = w.table().at(pr.idx);
+        /* 槽位已被回收复用：旧响应跟着旧连接一起没了，别发给新连接。 */
+        if (c.gen != pr.gen) continue;
+        c.commit_pending = false;
+        flush_response(w, pr.idx, ok);
+      }
+      pend_commit_.clear();
+    }
     for (auto& wp : workers_) {
       Worker& w = *wp;
-      for (uint32_t idx : w.dirty()) {
-        net::Connection& c = w.table().at(idx);
-        if (!ok && c.answered) {
-          app::ByteBuf& out = out_of(c);
-          out.len = 0;
-          app::error(out, 500, "internal server error");
-          c.close_after = true;
-        }
-        c.in_batch = false;
-        c.answered = false;
-        responded_++;
-        if (!c.open || c.closing || c.write == net::WriteState::Sending ||
-            c.write == net::WriteState::Flushed)
-          continue;
-        if (c.out && c.out->len) {
-          c.wire = c.out;
-          c.out = nullptr;
-          c.sent = 0;
-          arm_send(w, w.index(), idx, c);
-        } else if (c.close_after) {
-          arm_close(w, w.index(), idx, c);
-        }
-      }
+      for (uint32_t idx : w.dirty()) flush_response(w, idx, ok);
       w.dirty().clear();
     }
   }
@@ -1126,6 +1191,12 @@ class Server {
   uint32_t reads_budget_ = 0;
   uint64_t enobufs_ = 0;
   uint64_t last_trim = 0;
+  uint64_t last_commit_ns_ = 0;
+    uint64_t commit_window_ns_ = kCommitWindowNs;
+  /* 等提交的写响应：(worker, slot)。提交后统一发出去。 */
+    /* 等提交的写响应。带 gen：推迟期间连接可能被关闭、槽位被新连接复用，
+     * 只按 (worker, slot) 找回来就会把旧响应发给别人。 */
+    std::vector<ReadyRef> pend_commit_;
   bool zc_ok_ = true; /* 内核支持零拷贝发送；-EINVAL 后永久关闭 */
   std::deque<ReadyRef> ready_;
   unsigned cq_;

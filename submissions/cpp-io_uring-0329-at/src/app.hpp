@@ -24,6 +24,8 @@ class App {
   Db db;
 
   bool wrote = false;
+  /* 上一次 handle() 有没有真的写库（组提交据此决定哪些响应要等提交） */
+  bool wrote_last = false;
 
  private:
   void health(ByteBuf& out);

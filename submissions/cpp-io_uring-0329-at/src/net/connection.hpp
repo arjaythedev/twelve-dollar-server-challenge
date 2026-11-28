@@ -37,6 +37,11 @@ struct Connection {
   bool ready_queued = false;
   bool zbuf_done = false; /* 零拷贝发送的 NOTIF 已到 */
   bool zc_used = false;   /* 这次发送用的是 SEND_ZC（决定要不要等 NOTIF） */
+  /* 这条连接攒着的响应里包含写（like/发帖），必须在 COMMIT 返回之后才能交给内核。
+   * 组提交把 20 ms 内的写攒到一起，未提交前这些响应就留在 c.out 里不发。 */
+  bool wrote_db = false;
+  /* 已经在 pend_commit_ 里等着了（推迟可能跨多个 pass，别重复入队） */
+  bool commit_pending = false;
   uint32_t sent = 0;
   uint32_t last_active = 0;
   app::ByteBuf* out = nullptr;

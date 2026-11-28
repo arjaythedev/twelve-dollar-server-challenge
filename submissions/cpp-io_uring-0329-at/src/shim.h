@@ -22,6 +22,7 @@ int dbx_ck_wants(dbx *h, int tail);
 void dbx_ck_run(dbx *h, int tail);
 int dbx_writes_held(dbx *h);
 int dbx_wal_frames(dbx *h);
+long long dbx_wal_frames_total(dbx *h);
 void dbx_pcache_stats(unsigned long long *scans, unsigned long long *skipped);
 
 int dbx_first(dbx *h, int c);

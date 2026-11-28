@@ -41,6 +41,7 @@ class Db {
 
   bool commit();
   void tick();
+  [[nodiscard]] long long wal_frames_total() const;
   /* 每个 pass 调一次：推进检查点状态机，需要线程干活时唤醒它。 */
   void ck_kick();
   bool writes_held() const;

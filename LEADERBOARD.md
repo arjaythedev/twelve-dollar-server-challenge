@@ -965,7 +965,13 @@ errors. #534 stays open. **#537** (`dfa7ed8`: #486 with the read sweep capped at
 every 10 s, on by default) held **280,000** (26,734 req/s, p95 36.0 / p99 201.6 ms, 0 err, 76 % CPU, 26 µs/req,
 1,520 MB, 2026-11-20), below #486's 300,000, so not merged: 290,000 failed the 2-minute probe on p95/p99 (750 ms /
 1.68 s at 80 % CPU), 300,000 on p95/p99 (319 ms / 1.40 s at 81 % CPU) and 320,000 on p95/p99 (1.26 / 1.63 s at 93 %
-CPU), all with 0 errors. #538 stays open.
+CPU), all with 0 errors. #538 stays open. **#540** (`18fbe7c`: #486 with newest-first pass order, `TCP_QUICKACK`
+restored through io_uring setsockopt, connection limits sized from `/proc/meminfo`, and `BT_HOLD`, which keeps a
+batch's `users` leaf-page references until its cursors close) held **266,000** (25,525 req/s, p95 18.1 / p99 88.3 ms,
+0 err, 67 % CPU, 24 µs/req, 1,359 MB, 2026-11-28), below #486's 300,000, so not merged: 280,000 passed the 2-minute
+probe but failed the 5-minute hold on p99 (7.77 s at 72 % CPU); 290,000 failed the 2-minute probe on p99 (3.83 s at
+76 % CPU), 300,000 on p95/p99 (1.00 / 6.83 s at 81 % CPU) and 320,000 on p99 (3.58 s at 79 % CPU), all with 0 errors.
+#540 stays open.
 
 **Connection collapses in scored entries' failing probes.** v-epoll-i098 #191: 270,000 passed the 2-minute probe but
 failed the 5-minute hold with 60 % errors, nearly all `connection refused` from mid-hold on (an earlier attempt at

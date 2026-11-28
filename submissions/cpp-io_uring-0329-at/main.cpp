@@ -410,6 +410,9 @@ class Server {
       }
       const uint64_t p1 = now_ns();
       last_cqes = 0;
+      // 旧 ready 先获得本轮额度；否则新 CQE 可每轮耗尽额度，让老化策略永远无机会运行。
+      run_ready();
+      // 即使答复额度已耗尽也收割 CQ，归还接收缓冲；新请求留在连接上排队。
       for (size_t i = 0; i < workers_.size(); i++)
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
       // 先处理更早的 pass 不得不延后的请求，再处理本 pass 读到的：这样请求才不会排在它之后到达的
@@ -1133,9 +1136,9 @@ class Server {
     const uint64_t now = now_ns();
     const bool have_pending = !pend_commit_.empty();
     const bool need = app_->wrote || have_pending;
-    /* 组提交窗口内先不提交：读响应照常立刻发，写响应留在 c.out 里等下一次提交。
-     * serve() 的响应是追加到 c.out 的，所以推迟期间同一连接再来请求也只会排在后面，
-     * 顺序不会乱。 */
+    /* One SQLite connection shares the transaction across all clients. Once it has
+     * writes, any read can observe them: retain every dirty connection until COMMIT,
+     * not just the writer. Preserve whole-connection response ordering as well. */
     if (need && commit_window_ns_ != 0 && last_commit_ns_ != 0 &&
         now - last_commit_ns_ < commit_window_ns_) {
       for (auto& wp : workers_) {
@@ -1143,17 +1146,13 @@ class Server {
         for (uint32_t idx : w.dirty()) {
           net::Connection& c = w.table().at(idx);
           c.in_batch = false;
-          /* 这个连接要么本 pass 写了库、要么之前那批写还在等提交：它的 c.out 里排在被推迟的
-           * 写响应后面，现在把 c.out 交给内核就等于在提交之前回答了一个写请求。整条连接一起等。 */
-          if (c.wrote_db || c.commit_pending) {
-            /* answered 故意不清：提交失败时 flush_response 要拿它把这一批换成 500。 */
-            if (c.open && !c.closing && !c.commit_pending) {
-              c.commit_pending = true;
-              pend_commit_.push_back(ReadyRef{w.index(), idx, c.gen, 0});
-            }
-            continue;
+          /* Even another client's read may depend on this uncommitted transaction.
+           * Keep answered set so a failed COMMIT replaces its response with a 500.
+           * commit_pending deduplicates clients touched again in later passes. */
+          if (c.open && !c.closing && !c.commit_pending) {
+            c.commit_pending = true;
+            pend_commit_.push_back(ReadyRef{w.index(), idx, c.gen, 0});
           }
-          flush_response(w, idx, true);
         }
         w.dirty().clear();
       }

@@ -25,4 +25,7 @@ with tempfile.TemporaryDirectory(prefix='cpp-data-test-') as tmp:
  test=test[:a]+constants+loop+chr(10)+kick+chr(10)+test[z:]
  (B/'dispatch.cpp').write_text(test); run(common+[B/'dispatch.cpp','-lpthread','-o',B/'dispatch']); env=os.environ.copy();env.pop('NO_CKPT',None);run([B/'dispatch'],env=env)
  run(['python3', S/'tests/check_held.py'])
+ run(['python3', S/'tests/check_ready_priority.py'])
+ run(['python3', S/'tests/check_commit_visibility.py'])
+ run(['python3', S/'tests/check_feed_utf8.py', B, R])
  print('ALL_DATA_AND_DISPATCH_TESTS_PASS',flush=True)

@@ -113,7 +113,9 @@ class Db {
   /* 表尾那篇 post 的 created_at：新帖的时间戳只要比它小，索引顺序就不再等于 id 顺序。 */
   char feed_max_created_[40] = {};
   uint32_t feed_max_len_ = 0;
-  std::array<uint8_t, 16384> text_buf_{};
+  // 20 posts × (500 code points × 4 UTF-8 bytes + 24-byte timestamp +
+  // up to 256 bytes of uncached author record) fit below 64 KiB.
+  std::array<uint8_t, 65536> text_buf_{};
   size_t text_len_ = 0;
   std::vector<uint32_t> order_;
 };

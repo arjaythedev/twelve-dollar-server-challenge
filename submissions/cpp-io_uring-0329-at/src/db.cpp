@@ -61,6 +61,8 @@ void checkpoint_loop(dbx* h, CkState* st, int role) {
 
 
 constexpr size_t kFeedLen = 20;
+// Dense counters are useful only while their ID span fits a bounded budget.
+constexpr size_t kLikeCap = (16u * 1024u * 1024u) / sizeof(unsigned);
 
 uint64_t varint(const uint8_t* p, size_t len, size_t& i) {
   if (i < len && p[i] < 0x80) return p[i++];
@@ -604,8 +606,14 @@ bool Db::rebuild_like_counts() {
     like_counts_ok_ = true;
     return true;
   }
+  // Unsigned subtraction avoids signed overflow even for extreme rowids.
+  if (hi < lo || static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo) >= kLikeCap) {
+    std::vector<unsigned>().swap(like_counts_);
+    return false;
+  }
   like_base_ = lo;
-  like_counts_.assign(static_cast<size_t>(hi - lo + 1), 0);
+  like_counts_.assign(static_cast<size_t>(static_cast<uint64_t>(hi) -
+                                         static_cast<uint64_t>(lo)) + 1, 0);
   if (dbx_likes_fill(h_, lo, like_counts_.data(), like_counts_.size()) != 0) {
     like_counts_.clear();
     return false;
@@ -616,8 +624,8 @@ bool Db::rebuild_like_counts() {
 
 unsigned Db::likes_of(int64_t id) const {
   if (!like_counts_ok_ || id < like_base_) return 0;
-  const size_t idx = static_cast<size_t>(id - like_base_);
-  return idx < like_counts_.size() ? like_counts_[idx] : 0;
+  const uint64_t idx = static_cast<uint64_t>(id) - static_cast<uint64_t>(like_base_);
+  return idx < like_counts_.size() ? like_counts_[static_cast<size_t>(idx)] : 0;
 }
 
 int Db::count_likes_one(long long id) {
@@ -701,9 +709,21 @@ bool Db::insert_like(int64_t user_id, int64_t post_id) {
     // Rebuild on next begin() instead of silently losing that new like.
     if (like_counts_ok_ && post_id < like_base_) like_counts_ok_ = false;
     if (like_counts_ok_ && post_id >= like_base_) {
-      const size_t idx = static_cast<size_t>(post_id - like_base_);
-      if (idx >= like_counts_.size()) like_counts_.resize(idx + 64, 0);
-      like_counts_[idx]++;
+      const uint64_t distance = static_cast<uint64_t>(post_id) - static_cast<uint64_t>(like_base_);
+      if (distance >= kLikeCap) {
+        like_counts_ok_ = false;
+        like_counts_off_ = true;
+        std::vector<unsigned>().swap(like_counts_);
+      } else {
+        const size_t idx = static_cast<size_t>(distance);
+        if (idx >= like_counts_.size()) {
+          const size_t size = std::min(idx + 64, kLikeCap);
+          // Do not let vector::resize's geometric growth exceed the budget.
+          if (size > like_counts_.capacity()) like_counts_.reserve(size);
+          like_counts_.resize(size, 0);
+        }
+        like_counts_[idx]++;
+      }
     }
     return true;
   }

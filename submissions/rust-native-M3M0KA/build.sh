@@ -9,6 +9,31 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p build bin
 
+LIBURING_COMMIT="f4e42a515cd78c8c9cac2be14222834be5f8df2b"
+LIBURING_SHA="2bce6c36035b9bac516f1a335caa595bb300a3048c9767876a33fc1ad84d30b6"
+if [ -z "${FEED_LIBURING_DIR:-}" ]; then
+  FEED_LIBURING_DIR="$PWD/build/liburing"
+  if [ ! -f "$FEED_LIBURING_DIR/src/liburing.a" ]; then
+    LIBURING_TGZ="build/liburing-${LIBURING_COMMIT}.tar.gz"
+    [ -f "$LIBURING_TGZ" ] || curl -fsSL --retry 3 -o "$LIBURING_TGZ" \
+      "https://github.com/axboe/liburing/archive/${LIBURING_COMMIT}.tar.gz"
+    echo "$LIBURING_SHA  $LIBURING_TGZ" | sha256sum -c -
+    rm -rf "$FEED_LIBURING_DIR"
+    mkdir -p "$FEED_LIBURING_DIR"
+    tar -xzf "$LIBURING_TGZ" --strip-components=1 -C "$FEED_LIBURING_DIR"
+    (cd "$FEED_LIBURING_DIR" && ./configure --cc="${CC:-cc}" && make -C src -j"$(nproc)" liburing.a)
+  fi
+fi
+
+test -f "$FEED_LIBURING_DIR/src/include/liburing.h"
+test -f "$FEED_LIBURING_DIR/src/liburing.a"
+L2_TEST_RUSTFLAGS=()
+if [[ "${FEED_L2_TEST_BYTE_BUDGET:-0}" == 1 ]]; then
+  L2_TEST_RUSTFLAGS=(--cfg=l2_test_byte_budget)
+fi
+cc -O2 -Wall -Wextra -Werror -I"$FEED_LIBURING_DIR/src/include" \
+  -c src/l2_uring.c -o build/l2_uring.o
+
 SQLITE_ZIP=sqlite-amalgamation-3540100.zip
 SQLITE_URL="https://www.sqlite.org/2026/$SQLITE_ZIP"
 SQLITE_SHA=0a9c8e34352dad46006aa82836d5383bff9dc6bc9ce5a60553c05aa30e6ad1f9
@@ -43,33 +68,33 @@ sqlite_obj() { # $1 extra flags, $2 output
 }
 
 RUSTFLAGS_BASE="-C opt-level=3 -C codegen-units=1 -C lto=fat -C panic=abort \
- -C target-cpu=native -C force-frame-pointers=no"
+ -C target-cpu=${FEED_RUST_CPU:-native} -C force-frame-pointers=no"
 
+FEED_OUTPUT=${FEED_OUTPUT:-bin/feed}
 rust_build() { # $1 extra rustc flags
-  rustc --edition 2021 $RUSTFLAGS_BASE $1 src/main.rs -o bin/feed \
-    -C link-arg=build/sqlite3.o -C link-arg=-lm -C link-arg=-lpthread
+  rustc --edition 2021 $RUSTFLAGS_BASE "${L2_TEST_RUSTFLAGS[@]}" $1 src/main.rs -o "$FEED_OUTPUT" \
+    -C link-arg=build/sqlite3.o -C link-arg=build/l2_uring.o \
+    -C link-arg="$FEED_LIBURING_DIR/src/liburing.a" \
+    -C link-arg=-lm -C link-arg=-lpthread
 }
 
 if [ "${1:-}" = "--no-pgo" ]; then
   sqlite_obj "" build/sqlite3.o
   rust_build ""
+  echo "built $FEED_OUTPUT (no-pgo)"
 else
-  if (
-    set -e
-    rm -rf build/pgo
-    mkdir -p build/pgo
-    sqlite_obj "-fprofile-generate -fprofile-update=single -fprofile-dir=build/pgo" build/sqlite3.o
-    $CC -O2 -Ibuild -fprofile-generate -fprofile-update=single -fprofile-dir=build/pgo \
-      src/pgo_train.c build/sqlite3.o -o build/pgo_train -lm -lpthread
-    ./build/pgo_train build/train.db
-    sqlite_obj "-fprofile-use -fprofile-partial-training -Wno-missing-profile -fprofile-dir=build/pgo" build/sqlite3.o
-  ); then
-    rust_build ""
-  else
-    echo "PGO step failed; building without a profile" >&2
-    sqlite_obj "" build/sqlite3.o
-    rust_build ""
-  fi
+  rm -rf build/pgo build/train.db*
+  mkdir -p build/pgo
+  sqlite_obj "-fprofile-generate -fprofile-update=single -fprofile-dir=build/pgo" build/sqlite3.o
+  $CC -O2 -Ibuild -fprofile-generate -fprofile-update=single -fprofile-dir=build/pgo \
+    src/pgo_train.c build/sqlite3.o -o build/pgo_train -lm -lpthread
+  ./build/pgo_train build/train.db
+  rm -f build/train.db*
+  compgen -G "build/pgo/*.gcda" >/dev/null
+  for g in build/pgo/*.gcda; do
+    test -s "$g"
+  done
+  sqlite_obj "-fprofile-use -fprofile-partial-training -Wno-missing-profile -fprofile-dir=build/pgo" build/sqlite3.o
+  rust_build ""
+  echo "built $FEED_OUTPUT (pgo)"
 fi
-
-echo "built bin/feed"

@@ -335,6 +335,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 | — | v-epoll-quaesitor-scientiam | #166 | V (io_uring) | **failed** (install timeout) | | | | | | | | 2026-10-30 |
 | — | d-arsd-threadedcgi-cyrusmsk | #161 | D (arsd threaded cgi) | **failed** (0: timeouts at 500 users) | | | | | | | | 2026-10-31 |
+| — | rust-iouring-viniciusvidaldev | #548 | Rust (raw io_uring)ᵖ | **failed** (tests hang) | | | | | | | | 2026-11-28 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -1685,6 +1686,11 @@ committed in this repo.
   its socket, both at ~0 % CPU for over an hour, so the client was waiting for a reply the server never sent. The build
   hit the rig's 90-minute timeout (exit 124) and the app never ran (1/42 tests). Not patched. The author's `c3fdb10`
   fixes the training client and was re-run unpatched: 270,000 (the row above).
+- **Rust #548 — tests hung** (`8578ea2`, direct): the first build failed because cargo picked up an older `rustc` 1.75
+  already on the box instead of install.sh's 1.99.1 (`build.sh` doesn't put `/usr/local/cargo/bin` on `PATH`).
+  Patch for the run: `export PATH=/usr/local/cargo/bin:$PATH` in `build.sh`. With that it built and the app came up,
+  but it never answered the suite's first read (golden reads on a fresh database) and the suite hit its timeout
+  (exit 124) on the 1 vCPU box (kernel 6.8.0-117). Not load tested.
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
 

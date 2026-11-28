@@ -230,6 +230,29 @@ from this round and changes two defaults in `start.sh`:
   connections (WSL), and about −10 % CPU for the same requests on the Ubuntu
   6.8 VM at 80k users. 42/42 Direct and 42/42 Classic pass.
 
+On the box (#490 at `bcf0061`) that held 270,000 at 84 % CPU and 29 µs/request
+(p95 234 ms / p99 585 ms); 280,000 failed narrowly at 88 %. The next round
+turns on smaller generic savings, each measured with mirrored runs at 130k
+connections on one pinned CPU (WSL, not box results):
+
+- **Feed tail in one walk** (`HPHP_FEED_TAIL_BATCH=1`): the newest posts come
+  from one generic B-tree tail walk plus batched payload/key reads (three
+  builtin calls) instead of ~100 per-row cursor calls; overflow records fall
+  back to the per-row path. 39.3 → 38.8 µs/request.
+- **1,024 provided receive buffers per ring** (`HPHP_PBUF_N=1024`, the Rust
+  leader's count) instead of 4,096: the buffer ring is consumed in order, so a
+  smaller pool stays cache-warm; ~10 MB less pinned memory. About −1 %.
+- **No eventfd on the rings** (`HPHP_RING_EVENTFD=0`, as in the multi-ring
+  Rust loop): no eventfd signal per CQ flush, no wake-poll CQE on ring 0 and
+  no counter reads; secondary rings are drained after ring 0's bounded wait.
+  41.5 → 40.5 µs/request on average, with run-to-run spread of similar size.
+  `HPHP_RING_EVENTFD=async` (io-wq completions only) is available but measured
+  no gain.
+- `parse()` checks a socket's generation only when more pipelined bytes
+  follow, not after every GET.
+
+42/42 Direct and 42/42 Classic pass with these defaults.
+
 ### The allocation round (`2f8507b` … `d75dd29`)
 
 Instrumentation first: `runtime_stats()` exposes generic runtime counters

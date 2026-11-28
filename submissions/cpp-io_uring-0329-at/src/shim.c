@@ -842,6 +842,11 @@ void dbx_ck_run(dbx *h, int tail) {
 
 /* 非阻塞：写被挂起时返回真。读照常。hold 上限 400 ms，只有日志碰到 65,536 帧的兜底线时
  * 才放宽到 800 ms——那种情况说明线程已经追不上，拷完的概率更大，免得同一次积压被反复 hold。 */
+/* 当前 WAL 的帧数。检查点线程用它判断自己是不是已经落后到需要提优先级。 */
+long long dbx_wal_frames_now(dbx *h) {
+  return atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
+}
+
 int dbx_writes_held(dbx *h) {
   if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
   long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);

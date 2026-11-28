@@ -21,6 +21,8 @@ int dbx_ck_kick(dbx *h);
 int dbx_ck_wants(dbx *h, int tail);
 void dbx_ck_run(dbx *h, int tail);
 int dbx_writes_held(dbx *h);
+/* 当前 WAL 里的帧数（兼作闸门计数，检查点拷完会被清零）。 */
+long long dbx_wal_frames_now(dbx *h);
 long long dbx_wal_frames_total(dbx *h);
 /* like 索引的 post_id 范围：返回 1 有行、0 空表、-1 失败。 */
 int dbx_likes_range(dbx *h, long long *lo, long long *hi);

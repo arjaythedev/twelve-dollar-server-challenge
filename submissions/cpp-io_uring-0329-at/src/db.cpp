@@ -29,11 +29,30 @@ void checkpoint_loop(dbx* h, CkState* st, bool tail) {
   /* NO_CKPT=1：诊断用，关掉 checkpoint 后 WAL 帧数单调增长，
    * wal_cb 的差值才能精确反映「提交时写了多少帧」。别在正式提交里用。 */
   if (std::getenv("NO_CKPT")) return;
-  if (!tail) setpriority(PRIO_PROCESS, 0, 19);
+  /* 大块拷贝线程平时跑 nice 19（见上面的说明），**只在日志明显落后时提到 nice 10**
+   * （c-iouring-jowinjestine #404 同样在他家的 bulk 线程上按日志长度换 nice）。
+   * 单 vCPU 上 nice 19 与 nice 0 的时间片权重是 15 : 1024，忙起来这个线程只拿到约 1% 的
+   * CPU：一轮 64 MiB 的拷贝要拖几十秒，日志一路涨到 65,536 帧的兜底线，最后变成事件循环
+   * 自己同步拷一次——那一刀才是 p99 上看得见的。nice 10 的权重是 110，拿到约 7 倍的 CPU。
+   * 注意这**不是**照抄 delneg 的「hold 期间 usleep 200 µs」：他们的 hold 期间跑着的是那个
+   * 被饿死的线程，所以让出 CPU 有用；我们的 hold（TAIL）跑在 nice 0 的线程上，本来就能抢到
+   * 时间片，真正被饿死的是这里的大块线程。 */
+  constexpr int kNiceIdle = 19;
+  constexpr int kNiceBehind = 10;
+  constexpr long long kBehindFrames = 32768; /* 2 倍闸门 */
+  int nice = kNiceIdle;
+  if (!tail) setpriority(PRIO_PROCESS, 0, nice);
   std::unique_lock<std::mutex> lk(st->mu);
   while (!st->stop.load()) {
     st->cv.wait(lk, [&] { return st->stop.load() || dbx_ck_wants(h, tail); });
     if (st->stop.load()) break;
+    if (!tail) {
+      const int want = dbx_wal_frames_now(h) >= kBehindFrames ? kNiceBehind : kNiceIdle;
+      if (want != nice) {
+        setpriority(PRIO_PROCESS, 0, want);
+        nice = want;
+      }
+    }
     lk.unlock();
     /* 一次唤醒做一次：「大块」线程连着做几次 PASSIVE 直到落后不超过 64 帧；「尾段」线程
      * 只拷最后几十帧。状态由主循环的 dbx_ck_kick 推进。 */

@@ -7,6 +7,7 @@ use std::{env, sync::Arc, time::Instant};
 use tokio::net::TcpListener;
 
 pub mod auth;
+pub mod conn;
 pub mod db;
 pub mod handlers;
 pub mod json;
@@ -52,8 +53,7 @@ async fn main() {
         .fallback(handlers::not_found)
         .with_state(state);
 
-    axum::serve(listener, app)
-        .tcp_nodelay(true)
-        .await
-        .unwrap();
+    let app = app.into_make_service_with_connect_info::<conn::ConnectionInfo>();
+
+    axum::serve(listener, app).tcp_nodelay(true).await.unwrap();
 }

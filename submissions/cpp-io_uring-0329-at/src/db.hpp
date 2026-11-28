@@ -45,6 +45,8 @@ class Db {
   [[nodiscard]] bool like_cache_on() const { return like_counts_ok_; }
   /* 作者名缓存是否生效（STATS 行）。 */
   [[nodiscard]] bool author_cache_on() const { return authors_ok_; }
+  /* feed 是否走 posts 表尾（STATS 行）。false 表示退回索引扫描 + 按 id 回表。 */
+  [[nodiscard]] bool feed_from_table() const { return feed_table_ok_; }
   /* 每个 pass 调一次：推进检查点状态机，需要线程干活时唤醒它。 */
   void ck_kick();
   bool writes_held() const;
@@ -82,6 +84,9 @@ class Db {
   bool author(int64_t user_id, ByteBuf& out);
   int64_t count_likes(int64_t id);
   int count_likes_one(long long id);
+  /* 索引顺序（created_at DESC, id DESC）与 rowid 倒序一致的校验：成立时 feed 直接从 posts
+   * 表尾倒着走 20 行，省掉「先扫索引、再按 id 回表」那两趟记录解码。 */
+  bool check_feed_order();
   bool feed_rows();
   void feed_json(ByteBuf& out);
 
@@ -99,6 +104,11 @@ class Db {
   std::vector<uint8_t> author_names_;
   bool authors_ok_ = false;
   bool authors_off_ = false;
+  bool feed_table_ok_ = false;
+  bool feed_table_checked_ = false;
+  /* 表尾那篇 post 的 created_at：新帖的时间戳只要比它小，索引顺序就不再等于 id 顺序。 */
+  char feed_max_created_[40] = {};
+  uint32_t feed_max_len_ = 0;
   std::array<uint8_t, 16384> text_buf_{};
   size_t text_len_ = 0;
   std::vector<uint32_t> order_;

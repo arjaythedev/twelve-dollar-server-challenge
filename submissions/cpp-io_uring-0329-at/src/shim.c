@@ -910,6 +910,18 @@ int dbx_first(dbx *h, int c) {
   return empty ? 0 : 1;
 }
 
+int dbx_last(dbx *h, int c) {
+  int empty = 1;
+  if (sqlite3BtreeLast(h->cur[c], &empty) != SQLITE_OK) return -1;
+  return empty ? 0 : 1;
+}
+
+int dbx_prev(dbx *h, int c) {
+  int rc = sqlite3BtreePrevious(h->cur[c], 0);
+  if (rc == SQLITE_OK) return 1;
+  return rc == SQLITE_DONE ? 0 : -1;
+}
+
 int dbx_next(dbx *h, int c) {
   int rc = sqlite3BtreeNext(h->cur[c], 0);
   if (rc == SQLITE_OK) return 1;

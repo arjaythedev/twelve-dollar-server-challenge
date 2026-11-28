@@ -35,6 +35,8 @@ long long dbx_key(dbx *h, int c);
 int dbx_seek_ge_table(dbx *h, int c, long long key);
 int dbx_seek_ge(dbx *h, int c, long long key);
 int dbx_next(dbx *h, int c);
+int dbx_last(dbx *h, int c);
+int dbx_prev(dbx *h, int c);
 const unsigned char *dbx_record(dbx *h, int c, unsigned *len);
 
 long long dbx_likes(dbx *h, long long post_id);

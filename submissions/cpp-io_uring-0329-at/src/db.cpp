@@ -174,6 +174,8 @@ Db::Db(Db&& other) noexcept
   other.author_len_ = std::move(other.author_len_);
   other.author_names_ = std::move(other.author_names_);
   other.authors_ok_ = false;
+  other.feed_table_ok_ = false;
+  other.feed_table_checked_ = true;
 }
 
 Db::~Db() {
@@ -197,6 +199,10 @@ void Db::begin() {
   if (!like_counts_ok_ && !like_counts_off_ && !rebuild_like_counts()) {
     /* 组数超过上限（或 cell 格式不认识）：永久退回逐次扫描，不再重试。 */
     like_counts_off_ = true;
+  }
+  if (!feed_table_checked_) {
+    feed_table_checked_ = true;
+    feed_table_ok_ = check_feed_order();
   }
   if (!authors_ok_ && !authors_off_) {
     /* NO_AUTHORS=1 关掉缓存，用来在本机做 A/B（缓存本身只是把 users 表读进内存）。 */
@@ -359,10 +365,67 @@ bool Db::author_name(int64_t id, const uint8_t*& p, uint32_t& n) const {
   return true;
 }
 
+bool Db::check_feed_order() {
+  /* NO_TABLE=1：强制走「索引取 id + 回表」的旧路径，用来在本机做 A/B。 */
+  if (std::getenv("NO_TABLE")) return false;
+  long long ids[kFeedLen] = {};
+  size_t n = 0;
+  int r = dbx_first(h_, DBX_FEED_IDX);
+  while (r == 1 && n < kFeedLen) {
+    uint32_t plen = 0;
+    const uint8_t* p = payload(h_, DBX_FEED_IDX, plen);
+    Col c[3];
+    columns(p, plen, c);
+    ids[n] = int_of(c[1]);
+    if (n == 0) {
+      uint32_t clen = 0;
+      const uint8_t* created = text_of(c[0], clen);
+      if (clen >= sizeof feed_max_created_) return false;
+      std::memcpy(feed_max_created_, created, clen);
+      feed_max_len_ = clen;
+    }
+    n++;
+    r = dbx_next(h_, DBX_FEED_IDX);
+  }
+  if (r < 0 || n == 0) return false;
+  int rt = dbx_last(h_, DBX_POSTS);
+  size_t k = 0;
+  while (rt == 1 && k < n) {
+    if (dbx_key(h_, DBX_POSTS) != ids[k]) return false;
+    k++;
+    rt = dbx_prev(h_, DBX_POSTS);
+  }
+  return k == n;
+}
+
 bool Db::feed_rows() {
   rows_.clear();
   text_len_ = 0;
 
+  if (feed_table_ok_) {
+    int rt = dbx_last(h_, DBX_POSTS);
+    while (rt == 1 && rows_.size() < kFeedLen) {
+      uint32_t plen = 0;
+      const uint8_t* p = payload(h_, DBX_POSTS, plen);
+      Col c[4];
+      columns(p, plen, c);
+      Row row{};
+      row.id = dbx_key(h_, DBX_POSTS);
+      row.user_id = int_of(c[1]);
+      uint32_t n = 0;
+      const uint8_t* body = text_of(c[2], n);
+      row.body_off = static_cast<uint32_t>(text_len_);
+      row.body_len = n;
+      text_put(body, n);
+      const uint8_t* created = text_of(c[3], n);
+      row.created_off = static_cast<uint32_t>(text_len_);
+      row.created_len = n;
+      text_put(created, n);
+      rows_.push_back(row);
+      rt = dbx_prev(h_, DBX_POSTS);
+    }
+    if (rt < 0) throw DbError{};
+  } else {
   int r = dbx_first(h_, DBX_FEED_IDX);
   while (r == 1 && rows_.size() < kFeedLen) {
     uint32_t plen = 0;
@@ -380,6 +443,7 @@ bool Db::feed_rows() {
     r = dbx_next(h_, DBX_FEED_IDX);
   }
   if (r < 0) throw DbError{};
+  }
 
   order_.clear();
   for (size_t i = rows_.size(); i-- > 0;) order_.push_back(static_cast<uint32_t>(i));
@@ -396,7 +460,7 @@ bool Db::feed_rows() {
     });
   }
 
-  {
+  if (!feed_table_ok_) {
     const long long lo = rows_[order_[0]].id;
     const long long hi = rows_[order_.back()].id;
     const long long span = hi - lo;
@@ -593,6 +657,16 @@ int64_t Db::insert_post(int64_t user_id, const uint8_t* body, size_t n, char cre
                       created, &cn) != 0)
     throw DbError{};
   created_len = cn;
+  if (feed_table_ok_) {
+    const std::string_view now(created, static_cast<size_t>(cn));
+    if (now < std::string_view(feed_max_created_, feed_max_len_)) {
+      /* 时钟倒退：新帖的 created_at 比现有最大的还小，索引顺序不再等于 id 顺序。 */
+      feed_table_ok_ = false;
+    } else {
+      std::memcpy(feed_max_created_, created, static_cast<size_t>(cn));
+      feed_max_len_ = static_cast<uint32_t>(cn);
+    }
+  }
   return static_cast<int64_t>(id);
 }
 

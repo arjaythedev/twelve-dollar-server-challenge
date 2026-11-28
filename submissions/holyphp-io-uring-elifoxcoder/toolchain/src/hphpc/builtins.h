@@ -31,6 +31,10 @@ typedef enum {
     B_RANGE,         /* (int, int) -> array */
     B_SORT,          /* array in-place -> bool */
     B_MISC,          /* anything; checked loosely */
+    /* color-aware io builtins */
+    B_PRINTF_COLOR,  /* (string, int color) -> void  print() with color */
+    B_PRINTLN_COLOR, /* (string, int color) -> void println() with color */
+    B_READLINE_COLOR,/* (string prompt, int color) -> string input() with color */
 } BuiltinShape;
 
 typedef struct Builtin {
@@ -38,16 +42,16 @@ typedef struct Builtin {
     BuiltinShape shape;
     const Type *ret;
     bool unsafe;               /* callable only inside unsafe */
-    bool variadic;
+    bool variadic;             /* takes ... like printf */
 } Builtin;
 
 const Builtin *builtin_lookup(const char *name);
 void builtins_init(void);      /* create shared Type singletons */
 
 /* shared primitive type singletons */
-extern Type *ty_int, *ty_i8, *ty_i16, *ty_i32, *ty_i64,
+extern Type *ty_int, *ty_i8, *ty_i16, *ty_i32, *ty_i64, *ty_i128,
     *ty_float, *ty_f32, *ty_f64, *ty_bool, *ty_string, *ty_void, *ty_mixed,
-    *ty_null, *ty_false;
+    *ty_null;
 Type *type_array_of(const Type *elem);
 
 #endif

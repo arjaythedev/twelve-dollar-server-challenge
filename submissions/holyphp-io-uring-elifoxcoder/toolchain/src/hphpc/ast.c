@@ -24,7 +24,7 @@ bool type_is_ref(TypeKind k) { return k == TY_REF || k == TY_MUTREF; }
 
 bool type_is_numeric(TypeKind k) {
     switch (k) {
-    case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64:
+    case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64: case TY_I128:
     case TY_FLOAT: case TY_F32: case TY_F64:
         return true;
     default:
@@ -34,7 +34,7 @@ bool type_is_numeric(TypeKind k) {
 
 bool type_is_integral(TypeKind k) {
     switch (k) {
-    case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64:
+    case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64: case TY_I128:
     case TY_BOOL:
         return true;
     default:
@@ -52,7 +52,7 @@ bool type_is_smart_ptr(TypeKind k) {
 
 bool type_is_value(TypeKind k) {
     switch (k) {
-    case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64:
+    case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64: case TY_I128:
     case TY_FLOAT: case TY_F32: case TY_F64:
     case TY_BOOL: case TY_ENUM:
         return true;
@@ -112,8 +112,6 @@ const Type *type_without_null(const Type *t) {
 bool type_same_member(const Type *a, const Type *b) {
     if (!a || !b) return false;
     if (a->kind != b->kind) return false;
-    if (a->kind == TY_BOOL && (a->bool_const || b->bool_const))
-        return a->bool_const != 0 && a->bool_const == b->bool_const;
     switch (a->kind) {
     case TY_CLASS: case TY_STRUCT: case TY_INTERFACE: case TY_ENUM: case TY_FN:
         return a->name && b->name && strcmp(a->name, b->name) == 0;
@@ -161,6 +159,7 @@ const char *type_kind_name(TypeKind k) {
     case TY_INT: return "int";
     case TY_I8: return "i8"; case TY_I16: return "i16";
     case TY_I32: return "i32"; case TY_I64: return "i64";
+    case TY_I128: return "i128";
     case TY_FLOAT: return "float";
     case TY_F32: return "f32"; case TY_F64: return "f64";
     case TY_BOOL: return "bool";

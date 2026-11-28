@@ -17,7 +17,7 @@ typedef enum {
     T_FLOAT,
     T_STR,          /* simple string literal, no interpolation */
     T_TPL,          /* double-quoted with interpolation -> Token.tpl.parts */
-    T_KW_FN, T_KW_LET, T_KW_MUT, T_KW_OWN, T_KW_UNSAFE, T_KW_MATCH,
+    T_KW_FN, T_KW_LET, T_KW_MUT, T_KW_OWN, T_KW_WEAK, T_KW_UNSAFE, T_KW_MATCH,
     T_KW_IF, T_KW_ELSE, T_KW_ELSEIF, T_KW_WHILE, T_KW_FOR, T_KW_FOREACH,
     T_KW_AS, T_KW_IN, T_KW_RETURN, T_KW_ECHO, T_KW_PRINT, T_KW_BREAK, T_KW_CONTINUE,
     T_KW_CLASS, T_KW_EXTENDS, T_KW_IMPLEMENTS, T_KW_INTERFACE, T_KW_TRAIT,
@@ -54,6 +54,8 @@ struct Token {
     const char *text;   /* identifier / literal source text */
     size_t len;
     long long ival;
+    __int128 ival128;   /* T_INT value beyond the int64 range (type i128) */
+    bool ival_big;
     double fval;
     /* T_TPL parts: alternating (string chunk, expr source) */
     struct { PtrVec strs, exprs; } tpl;

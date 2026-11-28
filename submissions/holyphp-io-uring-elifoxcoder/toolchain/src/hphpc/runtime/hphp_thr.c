@@ -55,6 +55,27 @@
 static hval thr_null(void) { return hp_null; }
 static hval thr_bool(bool b) { return hp_of_bool(b); }
 
+/* Dynamic values must also satisfy the channel's transfer contract. Containers
+ * are scanned recursively; object identity and closures require an explicit
+ * statically proven ownership/Sync path and cannot pass through an erased hval. */
+static bool thr_value_transferable(hval v, int depth) {
+    if (depth > 128) return false;
+    switch (v.tag) {
+    case HV_NULL: case HV_INT: case HV_FLOAT: case HV_BOOL: case HV_STR:
+        return true;
+    case HV_ARR:
+        if (!v.u.a) return true;
+        for (size_t i = 0; i < v.u.a->len; i++) {
+            if (!thr_value_transferable(v.u.a->vals[i], depth + 1)) return false;
+            if (v.u.a->is_map && v.u.a->keys &&
+                !thr_value_transferable(v.u.a->keys[i], depth + 1)) return false;
+        }
+        return true;
+    case HV_OBJ: case HV_CLO: return false;
+    }
+    return false;
+}
+
 static int64_t thr_now_ms(void) {
 #ifdef _WIN32
     return (int64_t)GetTickCount64();
@@ -80,9 +101,8 @@ typedef struct ThrRec {
     int64_t id;
     bool joined;                       /* false until join has consumed it */
     pthread_t pt;
+    pthread_t creator;
     hclosure *clo;                     /* the spawned closure */
-    hval *args;                        /* packed args (hp_arr_of memory) */
-    int nargs;
 } ThrRec;
 
 static ThrRec *g_thr;
@@ -108,11 +128,10 @@ static void *thr_trampoline(void *p) {
     free(p);
     hval r = hp_closure_call(b.clo, b.nargs, b.args);
     (void)r;                           /* results travel via channels */
-    /* mark the record joinable-done; join() waits on the pthread itself */
-    pthread_mutex_lock(&g_thr_mu);
-    ThrRec *rec = thr_rec(b.self_id);
-    if (rec) rec->clo = NULL;          /* drop the closure ref */
-    pthread_mutex_unlock(&g_thr_mu);
+    free(b.args);
+    /* The record owns a strong closure reference until its creator joins.
+     * Do not release it here: the closure's RC and global cycle registry are
+     * owned by the creator thread and are not worker-thread safe. */
     return NULL;
 }
 
@@ -126,21 +145,6 @@ hval hpbi_thr_spawn(hval clo, hval args) {
         for (int64_t i = 0; i < an; i++)
             packed[n++] = hp_arr_get(args.u.a, hp_of_int(i));
     }
-    pthread_mutex_lock(&g_thr_mu);
-    if (g_thr_len == g_thr_cap) {
-        g_thr_cap = g_thr_cap ? g_thr_cap * 2 : 16;
-        g_thr = (ThrRec *)realloc(g_thr, g_thr_cap * sizeof(ThrRec));
-        if (!g_thr) { fprintf(stderr, "hphp: out of memory\n"); exit(1); }
-    }
-    ThrRec *rec = &g_thr[g_thr_len];
-    rec->id = g_thr_next++;
-    rec->joined = false;
-    rec->clo = clo.u.c;
-    rec->args = NULL;
-    rec->nargs = 0;
-    int64_t id = rec->id;
-    pthread_mutex_unlock(&g_thr_mu);
-
     ThrBoot *boot = (ThrBoot *)malloc(sizeof(ThrBoot));
     if (!boot) return thr_bool(false);
     boot->clo = clo.u.c;
@@ -152,17 +156,33 @@ hval hpbi_thr_spawn(hval clo, hval args) {
     } else {
         boot->args = NULL;
     }
+
+    /* Keep the closure alive after the caller releases its temporary value.
+     * The increment and eventual decrement happen on the creator thread. */
+    hp_val_rc_inc(hp_of_clo(clo.u.c));
+    pthread_mutex_lock(&g_thr_mu);
+    if (g_thr_len == g_thr_cap) {
+        g_thr_cap = g_thr_cap ? g_thr_cap * 2 : 16;
+        g_thr = (ThrRec *)realloc(g_thr, g_thr_cap * sizeof(ThrRec));
+        if (!g_thr) { fprintf(stderr, "hphp: out of memory\n"); exit(1); }
+    }
+    ThrRec *rec = &g_thr[g_thr_len];
+    rec->id = g_thr_next++;
+    rec->joined = false;
+    rec->creator = pthread_self();
+    rec->clo = clo.u.c;
+    int64_t id = rec->id;
     boot->self_id = id;
+    hp_runtime_thread_starting();
     if (pthread_create(&rec->pt, NULL, thr_trampoline, boot) != 0) {
+        g_thr_len--;
+        pthread_mutex_unlock(&g_thr_mu);
         free(boot->args);
         free(boot);
-        pthread_mutex_lock(&g_thr_mu);
-        /* remove the placeholder record */
-        for (size_t i = 0; i < g_thr_len; i++)
-            if (g_thr[i].id == id) { g_thr[i] = g_thr[--g_thr_len]; break; }
-        pthread_mutex_unlock(&g_thr_mu);
+        hp_val_rc_dec(hp_of_clo(clo.u.c));
         return thr_bool(false);
     }
+    pthread_mutex_unlock(&g_thr_mu);
     return hp_of_int(id);
 }
 
@@ -171,19 +191,26 @@ hval hpbi_thr_join(hval tid) {
     pthread_mutex_lock(&g_thr_mu);
     ThrRec *rec = thr_rec(id);
     pthread_t pt;
+    pthread_t creator;
     bool have = rec && !rec->joined;
-    if (have) { pt = rec->pt; rec->joined = true; }
+    if (have) { pt = rec->pt; creator = rec->creator; rec->joined = true; }
     pthread_mutex_unlock(&g_thr_mu);
     if (!have) return thr_bool(false);
     pthread_join(pt, NULL);
+    hclosure *release_clo = NULL;
     pthread_mutex_lock(&g_thr_mu);
     for (size_t i = 0; i < g_thr_len; i++)
         if (g_thr[i].id == id) {
-            free(g_thr[i].args);
+            if (pthread_equal(creator, pthread_self()))
+                release_clo = g_thr[i].clo;
             g_thr[i] = g_thr[--g_thr_len];
             break;
         }
     pthread_mutex_unlock(&g_thr_mu);
+    /* A non-creator join cannot safely touch the creator's non-atomic heap
+     * counts. In that uncommon case the retained closure is leaked instead
+     * of being released from the wrong thread. */
+    if (release_clo) hp_val_rc_dec(hp_of_clo(release_clo));
     return thr_bool(true);
 }
 
@@ -438,8 +465,14 @@ static bool chan_recv_impl(int64_t id, hval *out, bool block) {
 }
 
 hval hpbi_chan_send(hval idv, hval v) {
+    if (!thr_value_transferable(v, 0)) {
+        hp_val_rc_dec(v);
+        hp_throw_str("non-Sync value sent through channel");
+        return thr_null();
+    }
     bool ok = chan_send_impl(hp_val_to_int(idv), v, true);
     if (!ok) {
+        hp_val_rc_dec(v); /* moved message is consumed even on a closed channel */
         hp_throw_str("send on closed or unknown channel");
         return thr_null();
     }
@@ -453,7 +486,14 @@ hval hpbi_chan_recv(hval idv) {
 }
 
 hval hpbi_chan_try_send(hval idv, hval v) {
-    return thr_bool(chan_send_impl(hp_val_to_int(idv), v, false));
+    if (!thr_value_transferable(v, 0)) {
+        hp_val_rc_dec(v);
+        hp_throw_str("non-Sync value sent through channel");
+        return thr_bool(false);
+    }
+    bool ok = chan_send_impl(hp_val_to_int(idv), v, false);
+    if (!ok) hp_val_rc_dec(v);
+    return thr_bool(ok);
 }
 
 hval hpbi_chan_try_recv(hval idv) {
@@ -715,10 +755,15 @@ typedef struct {
 
 static void *pmap_worker(void *p) {
     PmapJob *j = (PmapJob *)p;
-    hval r = hp_closure_call(j->clo, 1, &j->item);
-    hval msg = hp_of_arr(hp_map_of(4, (const hval[]){
+    hval args[2] = { j->item, hp_of_int(j->idx) };
+    hval r = hp_closure_call(j->clo, 2, args);
+    bool ok = thr_value_transferable(r, 0);
+    if (!ok) hp_val_rc_dec(r);
+    hval msg = hp_of_arr(hp_map_of(6, (const hval[]){
         hp_of_str(hp_str_lit("idx")), hp_of_int(j->idx),
-        hp_of_str(hp_str_lit("val")), r }));
+        hp_of_str(hp_str_lit("val")), ok ? r : hp_null,
+        hp_of_str(hp_str_lit("ok")), hp_of_bool(ok) }));
+    if (ok) hp_val_rc_dec(r); /* hp_map_of retained the result value */
     chan_send_impl(j->ch, msg, true);
     free(j);
     return NULL;
@@ -729,6 +774,13 @@ hval hpbi_thr_parallel_map(hval clo, hval items, hval workersv) {
         return hp_of_bool(false);
     int64_t n = hp_arr_len(items.u.a);
     if (n == 0) return hp_of_arr(hp_arr_new());
+    for (int64_t i = 0; i < n; i++) {
+        hval item = hp_arr_get(items.u.a, hp_of_int(i));
+        if (!thr_value_transferable(item, 0)) {
+            hp_throw_str("non-Sync value passed to parallel map");
+            return hp_of_bool(false);
+        }
+    }
     int64_t workers = hp_val_to_int(workersv);
     if (workers < 1) workers = 4;
     if (workers > n) workers = n;
@@ -744,12 +796,14 @@ hval hpbi_thr_parallel_map(hval clo, hval items, hval workersv) {
         if (!j) continue;
         j->clo = clo.u.c;
         j->item = hp_arr_get(items.u.a, hp_of_int(i));
+        hp_val_rc_inc(j->item); /* owns its argument through callback cleanup */
         j->ch = ch;
         j->idx = i;
         if (i < workers) {
+            hp_runtime_thread_starting();
             if (pthread_create(&pts[launched], NULL, pmap_worker, j) == 0)
                 launched++;
-            else { free(j); continue; }
+            else { hp_val_rc_dec(j->item); free(j); continue; }
         } else {
             /* more items than workers: run inline after starting the first
              * `workers` threads — workers finish, then the rest run here */
@@ -762,6 +816,7 @@ hval hpbi_thr_parallel_map(hval clo, hval items, hval workersv) {
     harr *out = hp_arr_new();
     hval *slots = (hval *)calloc((size_t)n, sizeof(hval));
     bool *have = (bool *)calloc((size_t)n, sizeof(bool));
+    bool transfer_error = false;
     if (slots && have) {
         int64_t got = 0;
         while (got < n) {
@@ -770,18 +825,30 @@ hval hpbi_thr_parallel_map(hval clo, hval items, hval workersv) {
             if (msg.tag != HV_ARR || !msg.u.a) continue;
             hval iv = hp_arr_get(msg.u.a, hp_of_str(hp_str_lit("idx")));
             hval vv = hp_arr_get(msg.u.a, hp_of_str(hp_str_lit("val")));
+            hval okv = hp_arr_get(msg.u.a, hp_of_str(hp_str_lit("ok")));
             int64_t idx = hp_val_to_int(iv);
             if (idx >= 0 && idx < n && !have[idx]) {
                 have[idx] = true;
-                slots[idx] = vv;
+                if (!hp_val_to_bool(okv)) transfer_error = true;
+                else {
+                    slots[idx] = vv;
+                    hp_val_rc_inc(vv);
+                }
                 got++;
             }
+            hp_val_rc_dec(msg);
         }
         for (int64_t i = 0; i < n; i++)
-            hp_arr_push(out, have[i] ? slots[i] : hp_null);
+            if (have[i]) hp_arr_push_take(out, slots[i]);
+            else hp_arr_push(out, hp_null);
     }
     free(slots);
     free(have);
     hpbi_chan_close(chv);
+    if (transfer_error) {
+        hp_val_rc_dec(hp_of_arr(out));
+        hp_throw_str("non-Sync result returned from parallel map");
+        return hp_of_bool(false);
+    }
     return hp_of_arr(out);
 }

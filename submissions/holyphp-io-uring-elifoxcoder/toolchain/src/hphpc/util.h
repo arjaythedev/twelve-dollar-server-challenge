@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -19,6 +20,7 @@ void *xcalloc(size_t n, size_t sz);
 char *xstrdup(const char *s);
 char *xstrndup(const char *s, size_t n);
 void fatal(const char *fmt, ...);
+extern jmp_buf *hp_fatal_jmp;   /* fuzz target only; see util.c */
 char *fmt(const char *fmt, ...); /* formatted string, malloc'd */
 
 /* Growable vector of pointers */

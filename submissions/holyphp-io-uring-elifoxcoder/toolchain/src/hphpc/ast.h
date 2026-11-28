@@ -19,7 +19,7 @@ typedef struct AstClass AstClass;
 /* ---- Types ---- */
 typedef enum {
     TY_ERROR = 0,
-    TY_INT, TY_I8, TY_I16, TY_I32, TY_I64,
+    TY_INT, TY_I8, TY_I16, TY_I32, TY_I64, TY_I128,
     TY_FLOAT, TY_F32, TY_F64,
     TY_BOOL, TY_STRING, TY_VOID, TY_MIXED,
     TY_ARRAY,      /* .elem   : value array (COW), PHP-like */
@@ -44,9 +44,6 @@ typedef enum {
 
 struct Type {
     TypeKind kind;
-    /* 0 = ordinary bool, 1 = singleton false, 2 = singleton true.
-     * Used internally for precise PHP builtin unions such as int|false. */
-    uint8_t bool_const;
     const Type *elem, *key, *val;
     const Type *ok, *err;      /* Result */
     const char *name;          /* struct/class/interface/enum */
@@ -54,6 +51,8 @@ struct Type {
     /* union members (TY_UNION) */
     const Type **members;
     size_t nmembers;
+    AstFn *closure_fn;        /* concrete closure origin, when statically known */
+    bool thread_safe_callback; /* callable whose captures passed worker checks */
     /* function types */
     struct { const Type **params; size_t nparams; const Type *ret; bool variadic; } fn;
 };
@@ -102,8 +101,9 @@ struct Expr {
     Token tok;
     const Type *type;          /* filled by sema */
     bool is_stmt_value;        /* discardable result */
+    bool is_move_source;       /* this expression moves an own<T> place */
     union {
-        struct { long long ival; } i;
+        struct { long long ival; __int128 wide; bool is_wide; } i;
         struct { double fval; } f;
         struct { const char *s; } str;
         struct { PtrVec strs; PtrVec exprs; } tpl;   /* const char* / Expr* */
@@ -135,6 +135,13 @@ struct Expr {
     bool is_nullcoal;     /* EX_BIN ?? */
     bool discard;         /* result unused (sema) */
     const char *builtin;  /* builtin call name (EX_CALL/EX_METHOD/EX_STATIC) */
+    void *borrow_origin;   /* sema: referent propagated through a borrow-returning call */
+    void *borrow_parent;   /* sema: source reference temporarily reborrowed */
+    const Expr *borrow_place; /* sema: projected place held by this reference */
+    int borrow_param_index;
+    bool has_borrow_param;
+    bool has_borrow_receiver; /* sema: reference result borrows the method receiver */
+    bool borrow_lifetime_deferred; /* sema: return check awaits call summary */
 };
 
 /* ---- Statements ---- */
@@ -149,6 +156,8 @@ typedef enum {
 struct Stmt {
     StmtKind kind;
     Token tok;
+    int region_id;             /* codegen id for loop-local region storage */
+    bool has_region_locals;    /* safety analysis found iteration-local values */
     union {
         struct { Expr *expr; bool discard; } expr;
         struct { const char *name; bool is_mut, is_own; Expr *init; Type *ann; Token name_tok; void *sym; } let;
@@ -192,6 +201,9 @@ struct Param {
     Token name_tok;
     const Type *resolved;      /* sema */
     void *sym;                 /* VarSym* (sema) */
+    bool captures_heap_alias;  /* closure may retain/mutate object argument */
+    bool mutates_heap_alias;   /* borrow analysis: body may mutate object argument */
+    bool borrow_only;          /* safety-mode summary: input is only borrowed */
 };
 
 struct MatchCase {
@@ -205,7 +217,7 @@ struct StructField {
     const char *name;
     Type *type;
     Vis vis;
-    bool is_mut, is_static;
+    bool is_mut, is_static, is_weak;
     Expr *dflt;
     Token name_tok;
     size_t index;              /* position in struct */
@@ -221,12 +233,24 @@ struct AstFn {
     bool ret_inferred;         /* sema: no return type written, inferred */
     PtrVec body;               /* Stmt* */
     bool is_method, is_static, is_abstract, is_pub;
+    bool has_body;             /* distinguishes an empty definition from a prototype */
     bool is_closure, is_unsafe, is_ctor;
+    bool thread_worker;        /* checker verified this closure for a worker */
+    bool enforce_memory_safety;
     bool proto_emitted;        /* codegen: closure prototype already printed */
     Vis vis;
     AstClass *cls;
     const Type *ftype;         /* filled by sema */
     PtrVec captures;           /* VarSym* — closure captures (sema) */
+    PtrVec thread_moves;       /* VarSym* — non-Sync captures transferred to worker */
+    PtrVec borrow_global_writes; /* VarSym* — globals modified directly or by callees */
+    PtrVec borrow_global_escapes; /* VarSym* — globals retained by escaping closures */
+    PtrVec borrow_heap_escapes; /* Type* — unknown heap roots retained by closures */
+    bool borrow_unknown_global_write; /* indirect/external call can mutate hidden global state */
+    void *borrow_return_global; /* VarSym* — stable global returned by a reference-returning fn */
+    const Expr *borrow_return_place; /* receiver-relative projection, when all returns agree */
+    bool borrow_return_place_resolved;
+    bool borrow_mutates_receiver; /* borrow analysis: method may mutate its receiver */
     void *this_sym;            /* VarSym* of implicit $this (sema) */
     bool uses_this;
     AstClass *owner_cls;       /* closures: class of the enclosing method */
@@ -283,6 +307,7 @@ typedef struct Program {
     PtrVec decls;              /* Decl* */
     PtrVec stmts;              /* top-level Stmt* */
     const char *file;
+    bool enforce_memory_safety;
 } Program;
 
 /* constructors (parser) */

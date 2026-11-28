@@ -7,6 +7,7 @@
  */
 #define _DEFAULT_SOURCE 1   /* S_IFDIR/S_IFREG, dirent on glibc */
 #include "pkgcore.h"
+#include "project.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -352,6 +353,12 @@ typedef struct {
     size_t n;
 } PackList;
 
+/* Project folders that never belong in a package archive: installed
+ * dependencies, version control and build output. */
+static bool pack_skip_top(const char *name) {
+    return !strcmp(name, ".hphp") || !strcmp(name, ".git") || !strcmp(name, "build");
+}
+
 static void collect_dir(const char *dir, const char *rel, PackList *pl) {
     char pattern[1024];
     snprintf(pattern, sizeof pattern, "%s%s%s",
@@ -363,6 +370,7 @@ static void collect_dir(const char *dir, const char *rel, PackList *pl) {
     do {
         if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
         if (!strcmp(fd.cFileName, "hphp.lock")) continue;
+        if (!rel[0] && pack_skip_top(fd.cFileName)) continue;
         char *sub = rel[0] ? fmt("%s/%s", rel, fd.cFileName) : fmt("%s", fd.cFileName);
         char *full = fmt("%s/%s", dir, sub);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) collect_dir(dir, sub, pl);
@@ -382,6 +390,7 @@ static void collect_dir(const char *dir, const char *rel, PackList *pl) {
     while ((de = readdir(dp))) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
         if (!strcmp(de->d_name, "hphp.lock")) continue;
+        if (!rel[0] && pack_skip_top(de->d_name)) continue;
         char *sub = rel[0] ? fmt("%s/%s", rel, de->d_name) : fmt("%s", de->d_name);
         char *full = fmt("%s/%s", dir, sub);
         struct stat st;
@@ -412,6 +421,19 @@ void pkg_pack_dir(const char *dir, const char *hpx_path) {
         char *d = read_all(full, &got);
         buf_write(&b, d ? d : "", got);
         free(d); free(full);
+    }
+    /* A project described by hphp.yaml also ships a generated hphp.json, so
+     * the registry and older clients can read the archive's manifest. */
+    bool has_json = false;
+    for (size_t i = 0; i < pl.n; i++)
+        if (!strcmp(pl.files[i], PKG_MANIFEST)) has_json = true;
+    if (!has_json) {
+        char *js = project_manifest_as_json(dir);
+        if (js) {
+            buf_printf(&b, "%s %zu\n", PKG_MANIFEST, strlen(js));
+            buf_puts(&b, js);
+            free(js);
+        }
     }
     buf_puts(&b, "HPHX1\n");
     write_all(hpx_path, b.data, b.len);

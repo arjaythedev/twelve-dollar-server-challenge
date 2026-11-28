@@ -25,6 +25,7 @@
 #include "sema.h"
 #include "codegen.h"
 #include "builtins.h"
+#include "diag.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,7 +34,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#define HPHP_VERSION "1.0.2"
+#define HPHP_VERSION "1.1.0"
 
 /* Used by install/search/publish when the user has not configured a registry
  * (no registry_url file, no $HPHP_REGISTRY). Hosted alongside the project;
@@ -41,8 +42,10 @@
 #define PKG_DEFAULT_REGISTRY "http://hphp.ch:8930"
 
 #include "runtime_embed.h" /* the runtime, embedded in this binary */
+#include "sqlite_embed.h"  /* generated: sqlite3.h + this host's libsqlite3.a */
 #include "pkgcore.h"
 #include "pkgnet.h"
+#include "project.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -201,7 +204,11 @@ static char *hphp_dir(void) {
  * lines only ever contain simple relative paths. */
 static const char *work_dir(void) {
 #ifdef _WIN32
+    /* HPHP_WORK_DIR overrides the scratch directory (must not contain
+     * spaces), e.g. for sandboxed builds that may only write in one tree. */
     static const char *wd = "C:/hphpbuild";
+    const char *env = getenv("HPHP_WORK_DIR");
+    if (env && *env && !strchr(env, ' ')) wd = env;
     (void)hphp_dir();
     return wd;
 #else
@@ -540,7 +547,12 @@ static char *embed_read(const char *self, const char *file) {
     if (strcmp(file, "hphp_thr.c") == 0) return xstrdup(hp_embed_thr_c);
     if (strcmp(file, "hphp_ui.c") == 0) return xstrdup(hp_embed_ui_c);
     if (strcmp(file, "hphp_wv2.c") == 0) return xstrdup(hp_embed_wv2_c);
+    if (strcmp(file, "hphp_uring.c") == 0) return xstrdup(hp_embed_uring_c);
+    if (strcmp(file, "hphp_sqlite.c") == 0) return xstrdup(hp_embed_sqlite_c);
+    if (strcmp(file, "sqlite3.h") == 0) return xstrdup(hp_embed_sqlite3_h);
     if (strcmp(file, "hphp_rt.h") == 0) return xstrdup(hp_embed_rt_h);
+    if (strcmp(file, "hphp_modules.h") == 0) return xstrdup(hp_embed_modules_h);
+    if (strcmp(file, "hphp_ext.h") == 0) return xstrdup(hp_embed_ext_h);
     fatal("hphp: unknown runtime file '%s'", file);
     return NULL;
 }
@@ -553,15 +565,17 @@ static void mkdir_p(const char *dir) {
 #endif
 }
 
-/* Write the three runtime files into <wd>/rt. Overwrite unconditionally so
+/* Write the runtime files into <wd>/rt. Overwrite unconditionally so
  * the runtime always matches the compiler version. */
 static void extract_runtime(const char *wd, const char *self) {
     static const char *files[] = {"hphp_rt.c", "hphp_std.c", "hphp_thr.c", "hphp_ui.c",
-                                  "hphp_wv2.c", "hphp_rt.h"};
+                                  "hphp_wv2.c", "hphp_uring.c", "hphp_sqlite.c",
+                                  "hphp_rt.h", "hphp_modules.h", "hphp_ext.h",
+                                  "sqlite3.h"};
     mkdir_p(wd);
     char *rtdir = path_join(wd, "rt");
     mkdir_p(rtdir);
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 11; i++) {
         char *data = embed_read(self, files[i]);
         char *dest = fmt("%s/%s", rtdir, files[i]);
         FILE *f = fopen(dest, "wb");
@@ -596,9 +610,10 @@ static void build_tag(char *buf, size_t n) {
  * so nothing else can be using them. HPHP_KEEP_C=1 keeps the generated C
  * (prog_<tag>.c) so it can be read after the build. */
 static void cleanup_build_files(const char *wd, const char *tag) {
-    static const char *base[6] = {"prog", "hp_rt", "hp_std", "hp_thr", "hp_ui", "hp_wv2"};
+    static const char *base[8] = {"prog", "hp_rt", "hp_std", "hp_thr", "hp_ui",
+                                 "hp_wv2", "hp_uring", "hp_sqlite"};
     char path[1024];
-    for (int i = 0; i < 6; i++) {
+    for (int i = 0; i < 8; i++) {
         snprintf(path, sizeof path, "%s/%s_%s.o", wd, base[i], tag);
         remove_quiet(path);
     }
@@ -606,7 +621,71 @@ static void cleanup_build_files(const char *wd, const char *tag) {
     if (!getenv("HPHP_KEEP_C")) remove_quiet(path);
     snprintf(path, sizeof path, "%s/prog_%s.out", wd, tag);
     remove_quiet(path);
+    snprintf(path, sizeof path, "%s/hp_sqlite_%s.a", wd, tag);
+    remove_quiet(path);
 }
+
+/* The SQLite archive is embedded in the compiler as base64 (see
+ * scripts/genembed.c); decode it when a program uses the SQLite or B-tree
+ * builtins. */
+static int b64_val(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1; /* padding and line breaks are skipped */
+}
+
+static unsigned char *b64_decode(const char *s, size_t n, size_t *outn) {
+    unsigned char *out = malloc(n / 4 * 3 + 3);
+    if (!out) return NULL;
+    size_t o = 0;
+    unsigned acc = 0;
+    int bits = 0;
+    for (size_t i = 0; i < n; i++) {
+        int v = b64_val((unsigned char)s[i]);
+        if (v < 0) continue;
+        acc = (acc << 6) | (unsigned)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out[o++] = (unsigned char)((acc >> bits) & 0xFF);
+        }
+    }
+    *outn = o;
+    return out;
+}
+
+/* Return the linker argument for SQLite. HPHP_SQLITE_LIB overrides the
+ * embedded archive (a system library or a local debug build). The archive is
+ * written into the build dir, whose name is relative and quote-free because
+ * the link command already runs inside it. */
+static char *sqlite_link_lib(const char *wd, const char *tag) {
+    const char *env = getenv("HPHP_SQLITE_LIB");
+    if (env && *env) return xstrdup(env);
+    if (hp_embed_sqlite_lib_b64_len > 0) {
+        char *name = fmt("hp_sqlite_%s.a", tag);
+        char *path = path_join(wd, name);
+        size_t n = 0;
+        unsigned char *bytes = b64_decode(hp_embed_sqlite_lib_b64,
+                                          hp_embed_sqlite_lib_b64_len, &n);
+        FILE *f = bytes ? fopen(path, "wb") : NULL;
+        int ok = f != NULL && n > 0 && fwrite(bytes, 1, n, f) == n;
+        if (f && fclose(f) != 0) ok = 0;
+        free(bytes);
+        free(path);
+        if (ok) return name;
+        free(name);
+        fprintf(stderr, "hphp: cannot unpack the embedded SQLite library\n");
+    }
+#if defined(_WIN32)
+    fprintf(stderr, "hphp: this compiler has no embedded SQLite library; "
+                    "set HPHP_SQLITE_LIB\n");
+#endif
+    return xstrdup("-lsqlite3");
+}
+
 
 /* Compile the C inputs in wd (relative paths only) and link them to
  * <wd>/prog-<tag>.out, then move the finished image to exepath. Never links
@@ -644,10 +723,11 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
     /* Cache slots keep stable names (the cache is keyed by source hash, not
      * by run), while the files on disk carry the per-run tag so parallel
      * hphp processes never collide. */
-    const char *objbase[6] = {"prog", "hp_rt", "hp_std", "hp_thr", "hp_ui", "hp_wv2"};
-    char objnames[6][64];   /* cache names:  prog.o, hp_rt.o, ... */
-    char objs[6][64];       /* on-disk names: prog_<tag>.o, ... */
-    for (int i = 0; i < 6; i++) {
+    const char *objbase[8] = {"prog", "hp_rt", "hp_std", "hp_thr", "hp_ui", "hp_wv2",
+                              "hp_uring", "hp_sqlite"};
+    char objnames[8][64];   /* cache names:  prog.o, hp_rt.o, ... */
+    char objs[8][64];       /* on-disk names: prog_<tag>.o, ... */
+    for (int i = 0; i < 8; i++) {
         snprintf(objnames[i], sizeof objnames[i], "%s.o", objbase[i]);
         snprintf(objs[i], sizeof objs[i], "%s_%s.o", objbase[i], tag);
     }
@@ -658,20 +738,11 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
     char *out_abs = path_join(wd, out);
     int verbose = getenv("HPHP_VERBOSE") != NULL;
     (void)rt;
-    /* HPHP_CFLAGS is a debugging aid (sanitizers, coverage); it is appended
-     * to the optimisation flag the backend already uses. */
-    const char *extra = getenv("HPHP_CFLAGS");
-    /* Release builds can select target-specific optimization flags without
-     * changing HolyPHP source semantics. Keep -O2 as the portable default;
-     * the challenge box can opt into native CPU tuning and LTO at build time. */
-    const char *release_opt = getenv("HPHP_OPT");
-    const char *opt = dev ? "-O0" :
-                      (release_opt && *release_opt ? release_opt : "-O2");
-    char optbuf[512];
-    if (extra && *extra) {
-        snprintf(optbuf, sizeof optbuf, "%s %s", opt, extra);
-        opt = optbuf;
-    }
+    /* HPHP_OPT replaces the optimisation flags for generated code, runtime
+     * objects and the link (e.g. "-O3 -march=native -flto" for a server
+     * built on its target machine) */
+    const char *opt_env = getenv("HPHP_OPT");
+    const char *opt = dev ? "-O0" : (opt_env && *opt_env ? opt_env : "-O2");
 
     /* ---- which runtime modules this program actually uses ----
      * hp_rt and hp_std are the base and always come along. Thread, UI and
@@ -681,20 +752,60 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
      * hpwv2_*. The base is linked into every program, so those references are
      * there whatever the program does: scanning only the generated code left
      * every hello world with an undefined hpui_dispatch at link time. */
-    bool needed[6] = {true, true, true, false, false, false};
+    bool needed[8] = {true, true, true, false, false, false, false, false};
     {
         char *genc = read_file_string(cpath);
         const char *stdc = hp_embed_std_c ? hp_embed_std_c : "";
         if (!genc) {
             needed[3] = needed[4] = needed[5] = true;   /* cannot tell: all */
+            needed[6] = needed[7] = true;
         } else {
-            needed[3] = strstr(genc, "hp_thr_") != NULL || strstr(stdc, "hp_thr_") != NULL;
+            needed[3] = strstr(genc, "hp_thr_") != NULL ||
+                        strstr(genc, "hpbi_thr_") != NULL ||
+                        strstr(genc, "hpbi_chan_") != NULL ||
+                        strstr(genc, "hpbi_mutex_") != NULL ||
+                        strstr(genc, "hpbi_barrier_") != NULL ||
+                        strstr(genc, "hpbi_atomic_") != NULL ||
+                        strstr(stdc, "hp_thr_") != NULL ||
+                        strstr(stdc, "hpbi_thr_") != NULL ||
+                        strstr(stdc, "hpbi_chan_") != NULL ||
+                        strstr(stdc, "hpbi_mutex_") != NULL ||
+                        strstr(stdc, "hpbi_barrier_") != NULL ||
+                        strstr(stdc, "hpbi_atomic_") != NULL;
             needed[4] = strstr(genc, "hp_ui_") != NULL || strstr(genc, "hpui_") != NULL ||
                         strstr(stdc, "hp_ui_") != NULL || strstr(stdc, "hpui_") != NULL;
             needed[5] = strstr(genc, "hp_wv2_") != NULL || strstr(genc, "hpwv2_") != NULL ||
                         strstr(stdc, "hp_wv2_") != NULL || strstr(stdc, "hpwv2_") != NULL;
+            /* Optional modules: only a generated call pulls them in. hphp_std.c
+             * does not reference them, so a plain program neither compiles nor
+             * links io_uring or the SQLite B-tree binding. */
+            needed[6] = strstr(genc, "hpbi_stream_") != NULL ||
+                        strstr(genc, "hpbi_epoll_") != NULL ||
+                        strstr(genc, "hpbi_uring_") != NULL ||
+                        strstr(genc, "hpbi_nofile_limit") != NULL ||
+                        strstr(genc, "hpbi_accept_emfile") != NULL ||
+                        strstr(genc, "hpbi_runtime_stats") != NULL ||
+                        strstr(genc, "hpbi_runtime_diag_write") != NULL ||
+                        /* typed fast-path calls (codegen T[] table) */
+                        strstr(genc, "hp_stream_send") != NULL ||
+                        strstr(genc, "hp_stream_recv_release_t") != NULL ||
+                        strstr(genc, "hp_epoll_") != NULL;
+            needed[7] = strstr(genc, "hpbi_sqlite_") != NULL ||
+                        strstr(genc, "hpbi_bt_") != NULL ||
+                        strstr(genc, " hp_sqlite_") != NULL ||   /* typed fast path */
+                        strstr(genc, " hp_bt_") != NULL;
             free(genc);
         }
+    }
+
+    /* Keep the single-thread runtime object distinct: its RC operations can
+     * compile without the runtime thread-mode checks. */
+    char rt_cache_key_buf[256];
+    const char *rt_cache_key = rt_key;
+    if (rt_key && rt_key[0]) {
+        snprintf(rt_cache_key_buf, sizeof rt_cache_key_buf, "%s_%s", rt_key,
+                 needed[3] ? "threads" : "single");
+        rt_cache_key = rt_cache_key_buf;
     }
 
     /* ---- incremental cache: two levels ----
@@ -703,14 +814,14 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
      * a new program does not pay for compiling them again. Only this
      * program's own object and its linked image are under the program key. */
     bool use_cache = cache_key && cache_key[0];
-    bool have[6] = {false};
+    bool have[8] = {false};
     if (use_cache) {
-        if (rt_key && rt_key[0]) {
-            for (int i = 1; i < 6; i++) {
+        if (rt_cache_key && rt_cache_key[0]) {
+            for (int i = 1; i < 8; i++) {
                 if (!needed[i]) continue;
-                if (!cache_has_object(rt_key, objnames[i])) continue;
+                if (!cache_has_object(rt_cache_key, objnames[i])) continue;
                 char *dest = path_join(wd, objs[i]);
-                have[i] = cache_get_object(rt_key, objnames[i], dest);
+                have[i] = cache_get_object(rt_cache_key, objnames[i], dest);
                 free(dest);
             }
         }
@@ -724,7 +835,7 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
                              (int)have[3], (int)have[4], (int)have[5]);
     }
     bool all_cached = use_cache;
-    for (int i = 0; i < 6; i++)
+    for (int i = 0; i < 8; i++)
         if (needed[i] && !have[i]) all_cached = false;
     if (all_cached && verbose) fprintf(stderr, "[hphp backend] cache hit: all objects restored, skipping compile\n");
 
@@ -744,19 +855,25 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
     }
 #endif
 
+    char *sqlite_lib = needed[7] ? sqlite_link_lib(wd, tag) : NULL;
+
     for (int attempt = 1; attempt <= 3; attempt++) {
         /* --- compile the objects (skip if fully cached) --- */
         bool compiled = true;
-        const char *srcs[6] = {csrc, "rt/hphp_rt.c", "rt/hphp_std.c",
-                               "rt/hphp_thr.c", "rt/hphp_ui.c", "rt/hphp_wv2.c"};
+        const char *srcs[8] = {csrc, "rt/hphp_rt.c", "rt/hphp_std.c",
+                               "rt/hphp_thr.c", "rt/hphp_ui.c", "rt/hphp_wv2.c",
+                               "rt/hphp_uring.c", "rt/hphp_sqlite.c"};
         if (!all_cached) {
         /* compile only the objects that are missing (and wanted at all) */
-        char *ccmds[6];
-        int cidx[6];
+        char *ccmds[8];
+        int cidx[8];
         int ncmd = 0;
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 8; i++) {
             if (!needed[i] || have[i]) continue;
-            ccmds[ncmd] = fmt("gcc %s -std=c11 -I rt -c %s -o %s", opt, srcs[i], objs[i]);
+            const char *thread_mode = (i == 1 && !needed[3])
+                ? "-DHP_RUNTIME_NO_THREADS " : "";
+            ccmds[ncmd] = fmt("gcc %s %s-std=c11 -I rt -include rt/hphp_ext.h -c %s -o %s",
+                              opt, thread_mode, srcs[i], objs[i]);
             cidx[ncmd] = i;
             ncmd++;
         }
@@ -783,7 +900,7 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
         if (compiled && use_cache) {
             for (int j = 0; j < ncmd; j++) {
                 int i = cidx[j];
-                const char *slot = (i == 0) ? cache_key : rt_key;
+                const char *slot = (i == 0) ? cache_key : rt_cache_key;
                 if (!slot || !slot[0]) continue;
                 char *srcp = path_join(wd, objs[i]);
                 cache_put_object(slot, objnames[i], srcp);
@@ -806,6 +923,7 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
                 remove_quiet(exepath);
                 if (move_file(cached, exepath) == 0 && file_looks_like_exe(exepath)) {
                     free(cached);
+                    free(sqlite_lib);
                     cleanup_build_files(wd, tag);
                     return 0;
                 }
@@ -816,7 +934,7 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
         /* --- link: mingw ld directly, plain gcc as fallback --- */
         /* only the modules that were actually built go to the linker */
         char objlist[512] = "";
-        for (int i = 0; i < 6; i++) {
+        for (int i = 0; i < 8; i++) {
             if (!needed[i]) continue;
             if (objlist[0]) strcat(objlist, " ");
             strcat(objlist, objs[i]);
@@ -842,13 +960,13 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
             char *crtdir = path_dir_of(crt2);
             char *link = fmt(
                 "\"%s\" -m i386pep -Bdynamic -o %s %s %s "
-                "-L\"%s\" -L\"%s\" %s "
+                "-L\"%s\" -L\"%s\" %s %s "
                 "-lmingw32 -lgcc -lgcc_eh -lmingwex -lmsvcrt -lkernel32 "
                 "-lws2_32 -lpthread -ladvapi32 -lshell32 -luser32 "
                 "-lgdi32 -lgdiplus -lcomctl32 -lcomdlg32 -lole32 -loleaut32 -luuid "
                 "-lversion -lshlwapi -lwinmm \"%s\" \"%s\"",
                 ld, out, crt2, crtbegin, gccdir, crtdir, objlist,
-                manifest, crtend);
+                sqlite_lib ? sqlite_lib : "", manifest, crtend);
             rc = run_direct(link, !verbose);
             if (verbose) fprintf(stderr, "[hphp backend] direct-ld rc=%d nonempty=%d exe=%d\n",
                                   rc, (int)file_nonempty(out_abs),
@@ -859,18 +977,18 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
         }
         if (rc != 0 || !file_nonempty(out_abs)) {
 #ifdef _WIN32
-            char *link = fmt("gcc %s %s %s -o %s -lm -lws2_32 "
+            char *link = fmt("gcc %s %s %s %s -o %s -lm -lws2_32 "
                              "-lgdi32 -lgdiplus -lcomctl32 -lcomdlg32 -lole32 -loleaut32 "
                              "-luuid -lversion -lshlwapi -lwinmm",
-                             opt, subsys, objlist, out);
+                             opt, subsys, objlist, sqlite_lib ? sqlite_lib : "", out);
 #else
-            /* POSIX: sockets live in libc, the UI layer is inert stubs.
-             * HPHP_SQLITE_LIB points at a static SQLite built by build.sh
-             * (THREADSAFE=0); without it the system library is used. */
-            const char *slib = getenv("HPHP_SQLITE_LIB");
-            char *link = (slib && *slib)
-                ? fmt("gcc %s %s -o %s -lm -lpthread %s", opt, objlist, out, slib)
-                : fmt("gcc %s %s -o %s -lm -lpthread -lsqlite3", opt, objlist, out);
+            /* POSIX: sockets live in libc, the UI layer is inert stubs, and
+             * the io_uring module talks to the kernel through raw syscalls
+             * (no liburing). SQLite is an optional module: a program links
+             * the archive embedded in this compiler (or HPHP_SQLITE_LIB)
+             * only when it calls one of its builtins. */
+            char *link = fmt("gcc %s %s %s -o %s -lm -lpthread", opt, objlist,
+                             sqlite_lib ? sqlite_lib : "", out);
 #endif
             rc = run_direct(link, !verbose);
             if (verbose) fprintf(stderr, "[hphp backend] gcc-fallback rc=%d nonempty=%d exe=%d\n",
@@ -890,10 +1008,12 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
             if (verbose) fprintf(stderr, "[hphp backend] moving %s -> %s\n", out, exepath);
             remove_quiet(exepath);
             if (move_file(out_abs, exepath) == 0 && file_looks_like_exe(exepath)) {
+                free(sqlite_lib);
                 cleanup_build_files(wd, tag);
                 return 0;
             }
             fprintf(stderr, "hphp: cannot place executable at %s\n", exepath);
+            free(sqlite_lib);
             cleanup_build_files(wd, tag);
             return -1;
         }
@@ -907,6 +1027,7 @@ static int cc_build_in_dir(const char *wd, const char *rt, const char *cpath,
 #else
     chdir(prev);
 #endif
+    free(sqlite_lib);
     cleanup_build_files(wd, tag);
     return -1;
 }
@@ -934,12 +1055,20 @@ static int spawn_wait(const char *exepath, PtrVec args) {
 #else
     Buf cmdline;
     buf_init(&cmdline);
+    const char *cpu_limit = getenv("HPHP_RUN_CPU_LIMIT");
+    unsigned cpu_soft = 0, cpu_hard = 0;
+    if (cpu_limit && sscanf(cpu_limit, "%u:%u", &cpu_soft, &cpu_hard) == 2 &&
+        cpu_soft > 0 && cpu_hard >= cpu_soft && cpu_hard <= 3600)
+        buf_printf(&cmdline, "/usr/bin/prlimit --cpu=%u:%u -- ", cpu_soft, cpu_hard);
     buf_printf(&cmdline, "\"%s\"", exepath);
     for (size_t i = 0; i < args.len; i++)
         buf_printf(&cmdline, " \"%s\"", (const char *)args.items[i]);
     int rc = system(cmdline.data);
     free(cmdline.data);
-    return rc;
+    if (rc == -1) return 127;
+    if (WIFEXITED(rc)) return WEXITSTATUS(rc);
+    if (WIFSIGNALED(rc)) return 128 + WTERMSIG(rc);
+    return 1;
 #endif
 }
 
@@ -1037,6 +1166,14 @@ static bool upwards_lib(LoadCtx *ctx, const char *start_dir, const char *spec) {
         char *pkg = fmt("%s/lib/%s", dir, rel);
         free(rel);
         if (load_candidate(ctx, pkg)) { hit = true; break; }
+        /* Runtime packages shipped in the repository live under
+         * packages/lib/<name>/<name>.hphp. Prefer that source to a stale
+         * user-installed copy so repo checks exercise the version being
+         * edited. */
+        rel = lib_rel_spec(spec);
+        pkg = fmt("%s/packages/lib/%s", dir, rel);
+        free(rel);
+        if (load_candidate(ctx, pkg)) { hit = true; break; }
         char *slash = strrchr(dir, '/');
         char *bslash = strrchr(dir, '\\');
         char *cut = slash > bslash ? slash : bslash;
@@ -1045,6 +1182,20 @@ static bool upwards_lib(LoadCtx *ctx, const char *start_dir, const char *spec) {
     }
     free(dir);
     return hit;
+}
+
+bool pkg_is_official(const char *name);
+
+/* "thread.hphp" / "thread/x.hphp" -> is "thread" an official library? */
+static bool import_names_official(const char *spec) {
+    char pkg[128];
+    const char *slash = strchr(spec, '/');
+    size_t n = slash ? (size_t)(slash - spec) : strlen(spec);
+    if (!slash && n > 5 && !strcmp(spec + n - 5, ".hphp")) n -= 5;
+    if (n == 0 || n >= sizeof pkg) return false;
+    memcpy(pkg, spec, n);
+    pkg[n] = 0;
+    return pkg_is_official(pkg);
 }
 
 static bool load_import(LoadCtx *ctx, const char *importer, const char *spec) {
@@ -1082,9 +1233,15 @@ static bool load_import(LoadCtx *ctx, const char *importer, const char *spec) {
         char *idir = path_dir_of(importer);
         if (upwards_lib(ctx, idir, spec)) { free(idir); return true; }
         char *cands[3];
+        /* the importing project's own .hphp/packages/ (hphp install) */
+        char *vend = project_vendor_candidate(idir, spec);
+        if (vend && load_candidate(ctx, vend)) { free(idir); return true; }
         cands[0] = fmt("src/hphpc/std/%s", spec);
         cands[1] = fmt("%s/%s", idir, spec);
-        cands[2] = pkg_import_candidate(spec);   /* installed packages */
+        /* installed packages - but never for an official library: a copy
+         * installed for the user goes stale when the compiler is updated,
+         * and the official one is always the compiler's own (see below) */
+        cands[2] = import_names_official(spec) ? NULL : pkg_import_candidate(spec);
         free(idir);
         for (int i = 0; i < 3; i++) {
             if (load_candidate(ctx, cands[i])) return true;
@@ -1126,7 +1283,7 @@ static Program *load_source_recursive(LoadCtx *ctx, const char *path, const char
         if (!load_import(ctx, path, im->path)) {
             char *dir = path_dir_of(path);
             fatal("%s: cannot import \"%s\"\n"
-                  "  searched: lib/, src/hphpc/std/, %s/, installed packages, $HPHP_PATH, built-in libraries",
+                  "  searched: lib/, the project's .hphp/packages/, src/hphpc/std/, %s/, installed packages, $HPHP_PATH, built-in libraries",
                   path, im->path, dir);
         }
     }
@@ -1164,7 +1321,8 @@ static bool rm_rf_path(const char *path);   /* wrapper over pkgcore helper */
 static void pkg_read_manifest_of(const char *dir, PkgManifest *m) {
     char *mf = fmt("%s/" PKG_MANIFEST, dir);
     char *js = read_file_soft(mf);
-    if (!js) fatal("%s: missing " PKG_MANIFEST, dir);
+    if (!js) js = project_manifest_as_json(dir);   /* hphp.yaml project */
+    if (!js) fatal("%s: missing " PROJECT_MANIFEST " (or " PKG_MANIFEST ")", dir);
     *m = pkg_manifest_parse(js, dir);
     free(js); free(mf);
 }
@@ -1185,12 +1343,34 @@ static int pkg_cmd_pack(int argc, char **argv) {
 }
 
 /* Install from a local .hpx file (no network needed). */
-static int pkg_install_file(const char *hpx_path) {
+/* project.h hook: is `name` one of the libraries bundled with hphp? */
+bool pkg_is_official(const char *name) {
+    char *entry = fmt("%s/%s.hphp", name, name);
+    bool known = false;
+    for (size_t i = 0; i < hp_embed_libs_len; i++)
+        if (strcmp(hp_embed_libs[i].name, entry) == 0) { known = true; break; }
+    free(entry);
+    return known;
+}
+
+/* Install an archive for the user. `source` is "bundled", "registry <url>"
+ * or "file <path>"; anything but bundled is a community package and is
+ * shown for review first (skipped with --trust). */
+static int pkg_install_file_from(const char *hpx_path, const char *source, bool trust) {
     /* peek the manifest: extract to a temp pkg dir then read it */
     char *tmp = pkg_home_file("cache/.tmp-install");
+    rm_rf(tmp);
     pkg_extract(hpx_path, tmp);
     PkgManifest m;
     pkg_read_manifest_of(tmp, &m);
+    bool official = !strcmp(source, "bundled");
+    if (!official && pkg_is_official(m.name))
+        fatal("\"%s\" is the name of an official HolyPHP library; a community package\n"
+              "  may not replace it (%s)", m.name, source);
+    if (!official && !project_review_package(tmp, m.name, m.version, source, trust)) {
+        rm_rf(tmp);
+        return 1;
+    }
     char *destdir = pkg_dir_of(m.name);
     rm_rf(destdir);
     mkdir_p(destdir);
@@ -1218,22 +1398,22 @@ static char *pkg_registry_url_or_default(void) {
     return xstrdup(PKG_DEFAULT_REGISTRY);
 }
 
-static int pkg_install_registry(const char *name) {
+/* Download <name> from the registry into the cache. Returns the .hpx path,
+ * or NULL (unreachable, missing or an error; *why says which). */
+static char *pkg_registry_hpx(const char *name, const char **why) {
     char *base = pkg_registry_url_or_default();
     char *url = fmt("%s/pkg/%s", base, name);
     size_t n;
     int status = 0;
     char *body = pkgnet_get(url, &n, &status);
-    if (!body) return 2;   /* unreachable — caller may fall back */
-    if (status == 404) {
-        fprintf(stderr, "package not found on registry: %s\n", name);
-        return 2;
-    }
+    free(url);
+    free(base);
+    if (!body) { *why = "registry unreachable"; return NULL; }
     if (status != 200) {
-        fprintf(stderr, "registry error %d for %s\n", status, name);
-        return 2;
+        *why = status == 404 ? "not on the registry" : "registry error";
+        free(body);
+        return NULL;
     }
-    /* save to cache, then install from the file */
     char *cache = pkg_home_file("cache");
     mkdir_p(cache);
     char *out = fmt("%s/%s.hpx", cache, name);
@@ -1242,7 +1422,46 @@ static int pkg_install_registry(const char *name) {
     fwrite(body, 1, n, f);
     fclose(f);
     free(body);
-    return pkg_install_file(out);
+    free(cache);
+    return out;
+}
+
+static int pkg_install_registry(const char *name, bool trust) {
+    const char *why = NULL;
+    char *hpx = pkg_registry_hpx(name, &why);
+    if (!hpx) {
+        if (strcmp(why, "registry unreachable"))
+            fprintf(stderr, "%s: %s\n", name, why);
+        return 2;
+    }
+    char *base = pkg_registry_url_or_default();
+    char *source = fmt("registry %s", base);
+    int rc = pkg_install_file_from(hpx, source, trust);
+    free(source);
+    free(base);
+    return rc;
+}
+
+static char *pkg_embedded_hpx(const char *name);
+
+/* project.h hook: an archive for `name` without installing it anywhere. */
+char *pkg_fetch_hpx(const char *name, char **source) {
+    /* official libraries always come from the compiler itself: a registry
+     * package with the same name can never replace them */
+    char *hpx = pkg_embedded_hpx(name);
+    if (hpx) {
+        *source = xstrdup("bundled");
+        return hpx;
+    }
+    const char *why = NULL;
+    hpx = pkg_registry_hpx(name, &why);
+    if (hpx) {
+        char *base = pkg_registry_url_or_default();
+        *source = fmt("registry %s", base);
+        free(base);
+        return hpx;
+    }
+    return NULL;
 }
 
 /* Install a library that ships inside the hphp binary itself (the package
@@ -1252,6 +1471,16 @@ static int pkg_install_registry(const char *name) {
  * it is staged, not just the entry file. Returns 0 on success, 1 when the
  * name is not a bundled library. */
 static int pkg_install_embedded(const char *name) {
+    char *hpx = pkg_embedded_hpx(name);
+    if (!hpx) return 1;
+    int rc = pkg_install_file_from(hpx, "bundled", true);
+    free(hpx);
+    return rc;
+}
+
+/* Pack a bundled library into cache/<name>-bundled.hpx; NULL when `name`
+ * is not bundled. */
+static char *pkg_embedded_hpx(const char *name) {
     /* normalize "websocket.hphp" -> "websocket" */
     char stem[128];
     snprintf(stem, sizeof stem, "%s", name);
@@ -1266,11 +1495,14 @@ static int pkg_install_embedded(const char *name) {
         if (strcmp(hp_embed_libs[i].name, entry) == 0) { known = true; break; }
     }
     free(entry);
-    if (!known) return 1;
+    if (!known) return NULL;
 
     /* stage the sources into a temp dir, then pack it into a real .hpx so
      * the installed layout is identical to a registry install */
     {
+        char *cache = pkg_home_file("cache");
+        mkdir_p(cache);        /* one level on Windows: create cache/ first */
+        free(cache);
         char *stage = pkg_home_file("cache/.embedded");
         FILE *f;
         rm_rf(stage);
@@ -1302,28 +1534,34 @@ static int pkg_install_embedded(const char *name) {
             "  \"author\": \"HolyPHP\"\n"
             "}\n", stem, HPHP_VERSION, stem);
         fclose(f);
-        char *hpx = fmt("%s/%s.hpx", stage, stem);
+        char *hpx = pkg_home_file(fmt("cache/%s-bundled.hpx", stem));
         pkg_pack_dir(stage, hpx);
-        int rc = pkg_install_file(hpx);
         rm_rf(stage);
-        return rc;
+        return hpx;
     }
 }
 
 static int pkg_cmd_install(int argc, char **argv) {
-    if (argc < 1) { fprintf(stderr, "usage: hphp pkg install <name | ./file.hpx>\n"); return 1; }
-    const char *what = argv[0];
-    bool looks_file = strchr(what, '/') || strstr(what, ".hpx");
-    if (looks_file) return pkg_install_file(what);
-    int rc = pkg_install_registry(what);
-    if (rc == 2) {
-        /* registry unreachable / missing: fall back to the bundled copy */
-        fprintf(stderr, "(registry unreachable — trying the libraries bundled in hphp)\n");
-        rc = pkg_install_embedded(what);
-        if (rc != 0)
-            fatal("cannot install \"%s\": registry unreachable and not a bundled library", what);
-        return 0;
+    const char *what = NULL;
+    bool trust = false;
+    for (int i = 0; i < argc; i++) {
+        if (!strcmp(argv[i], "--trust") || !strcmp(argv[i], "--yes") || !strcmp(argv[i], "-y")) trust = true;
+        else if (!what) what = argv[i];
     }
+    if (!what) { fprintf(stderr, "usage: hphp pkg install <name | ./file.hpx> [--trust]\n"); return 1; }
+    bool looks_file = strchr(what, '/') || strstr(what, ".hpx");
+    if (looks_file) {
+        char *source = fmt("file %s", what);
+        int rc = pkg_install_file_from(what, source, trust);
+        free(source);
+        return rc;
+    }
+    /* official libraries come from the compiler, never from the registry */
+    if (pkg_install_embedded(what) == 0) return 0;
+    int rc = pkg_install_registry(what, trust);
+    if (rc == 2)
+        fatal("cannot install \"%s\": not an official library and not on the registry\n"
+              "  (check the name with: hphp pkg search %s)", what, what);
     return rc;
 }
 
@@ -1533,17 +1771,19 @@ int do_check_file(const char *path) {
     merge_programs(w, c.programs);
     Program *r = c.programs.items[c.programs.len - 1];
     w->stmts = r->stmts;
+    w->enforce_memory_safety = r->enforce_memory_safety;
     builtins_init();
     sema_run(w);
     if (!sema_result_ok()) {
-        fprintf(stderr, "hphp: compilation failed\n");
+        diag_summary(path);
         return 1;
     }
-    fprintf(stderr, "%s: OK (types and borrows check)\n", path);
+    diag_ok(path);
     return 0;
 }
 
 int main(int argc, char **argv) {
+    diag_init();
     if (argc < 2 || strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
         fprintf(stderr,
                 "HolyPHP %s — a low-level, PHP-flavored compiled language\n"
@@ -1554,8 +1794,18 @@ int main(int argc, char **argv) {
         "       hphp build <file.hphp> [-o app]  build a native executable\n"
                 "       hphp check <file.hphp>         type- & borrow-check only\n"
                 "       hphp emit <file.hphp>          inspect the internal representation\n"
+                "\n"
+                "projects (a folder with hphp.yaml):\n"
+                "       hphp create [name]             new project, asks a few questions (--help)\n"
+                "       hphp run | build | check       without a file: the project's entry\n"
+                "       hphp install                   install everything in hphp.yaml (keeps hphp.lock)\n"
+                "       hphp install <pkg>[@version]   add a dependency (--dev for require-dev)\n"
+                "       hphp update [pkg]              move dependencies to the newest allowed version\n"
+                "       hphp remove <pkg>              drop a dependency\n"
+                "       hphp deps                      list the installed dependencies\n"
+                "       hphp test [filter]             run tests/*.hphp\n"
+                "\n"
                 "       hphp pkg <command> [args]      package manager (hphp pkg help)\n"
-                "       hphp install <package>         install a package (shorthand)\n"
                 "       hphp version                   print version\n",
                 HPHP_VERSION);
         return argc < 2 ? 1 : 0;
@@ -1572,9 +1822,34 @@ int main(int argc, char **argv) {
     if (strcmp(cmd, "pkg") == 0 || strcmp(cmd, "package") == 0) {
         return pkg_command(argc - 2, argv + 2);   /* consumes argv[2..] */
     }
-    /* hphp install <pkg> — the common case, same as `hphp pkg install` */
-    if (strcmp(cmd, "install") == 0) {
-        return pkg_cmd_install(argc - 2, argv + 2);
+    if (strcmp(cmd, "create") == 0 || strcmp(cmd, "new") == 0) {
+        return project_cmd_create(argc - 2, argv + 2);
+    }
+    /* project commands; `hphp install <pkg>` outside a project keeps the
+     * old meaning (per-user install, same as `hphp pkg install`) */
+    if (strcmp(cmd, "install") == 0 || strcmp(cmd, "update") == 0 ||
+        strcmp(cmd, "remove") == 0 || strcmp(cmd, "deps") == 0 ||
+        strcmp(cmd, "test") == 0) {
+        char *root = project_find_root(".");
+        bool hpx_file = argc > 2 && strstr(argv[2], ".hpx");
+        if (!strcmp(cmd, "install") && (!root || hpx_file)) {
+            if (argc < 3) {
+                fprintf(stderr, "hphp install: no " PROJECT_MANIFEST " here or above.\n"
+                                "  start a project with: hphp create\n"
+                                "  or install for your user: hphp install <package>\n");
+                return 1;
+            }
+            return pkg_cmd_install(argc - 2, argv + 2);
+        }
+        if (!root) {
+            fprintf(stderr, "hphp %s: no " PROJECT_MANIFEST " here or above (start one with: hphp create)\n", cmd);
+            return 1;
+        }
+        if (!strcmp(cmd, "install")) return project_cmd_install(root, argc - 2, argv + 2);
+        if (!strcmp(cmd, "update")) return project_cmd_update(root, argc - 2, argv + 2);
+        if (!strcmp(cmd, "remove")) return project_cmd_remove(root, argc - 2, argv + 2);
+        if (!strcmp(cmd, "deps")) return project_cmd_deps(root);
+        return project_cmd_test(root, argc - 2, argv + 2, find_compiler(argv[0]));
     }
     /* default command is "run" — hphp file.hphp just works */
     if (strcmp(cmd, "run") != 0 && strcmp(cmd, "build") != 0 &&
@@ -1590,7 +1865,15 @@ int main(int argc, char **argv) {
         else if (!file) file = argv[i];
         else ptrvec_push(&prog_args, argv[i]);
     }
-    if (!file) { fprintf(stderr, "hphp: no input file\n"); return 1; }
+    if (!file) {
+        /* inside a project: the entry from hphp.yaml */
+        file = project_default_entry();
+        if (!file) {
+            fprintf(stderr, "hphp: no input file (and no " PROJECT_MANIFEST " here; see: hphp create)\n");
+            return 1;
+        }
+        if (!outname && strcmp(cmd, "build") == 0) outname = project_default_output();
+    }
     bool do_emit = strcmp(cmd, "emit") == 0;
     bool do_check = strcmp(cmd, "check") == 0;
 
@@ -1604,15 +1887,16 @@ int main(int argc, char **argv) {
     /* root file = last loaded (it imports its deps first) */
     Program *root = ctx.programs.items[ctx.programs.len - 1];
     whole->stmts = root->stmts;
+    whole->enforce_memory_safety = root->enforce_memory_safety;
 
     builtins_init();
     sema_run(whole);
     if (!sema_result_ok()) {
-        fprintf(stderr, "hphp: compilation failed\n");
+        diag_summary(file);
         return 1;
     }
     if (do_check) {
-        fprintf(stderr, "%s: OK (types and borrows check)\n", file);
+        diag_ok(file);
         return 0;
     }
 
@@ -1664,6 +1948,16 @@ int main(int argc, char **argv) {
         char *rt_tagged = fmt("%s_dev", rt_key);
         free(rt_key);
         rt_key = rt_tagged;
+    } else if (getenv("HPHP_OPT") && *getenv("HPHP_OPT")) {
+        /* the same for custom flags (HPHP_OPT): one slot per flag set */
+        unsigned long h = 5381;
+        for (const char *c = getenv("HPHP_OPT"); *c; c++) h = h * 33 + (unsigned char)*c;
+        char *tagged = fmt("%s_o%08lx", cache_key, h & 0xffffffffUL);
+        free(cache_key);
+        cache_key = tagged;
+        char *rt_tagged = fmt("%s_o%08lx", rt_key, h & 0xffffffffUL);
+        free(rt_key);
+        rt_key = rt_tagged;
     }
     bool no_cache = getenv("HPHP_NO_CACHE") != NULL;
     (void)no_cache;
@@ -1710,7 +2004,11 @@ int main(int argc, char **argv) {
         const char *cut = slash > bslash ? slash : bslash;
         if (cut) {
             char *dir = xstrndup(file, cut - file);
-            exepath = fmt("%s/%s", dir, stem);
+            /* absolute: the backend builds from inside its own work dir, so
+             * "sub/prog" would land (and be looked for) in the wrong place */
+            bool abs_dir = dir[0] == '/' || dir[0] == '\\' ||
+                           (dir[0] && dir[1] == ':');
+            exepath = abs_dir ? fmt("%s/%s", dir, stem) : fmt("%s/%s/%s", cwd, dir, stem);
 #ifdef _WIN32
             exepath = fmt("%s.exe", exepath);
 #endif

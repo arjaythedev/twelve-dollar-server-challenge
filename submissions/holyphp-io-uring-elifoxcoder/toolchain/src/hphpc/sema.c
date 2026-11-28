@@ -11,6 +11,7 @@
  */
 #include "sema.h"
 #include "builtins.h"
+#include "diag.h"
 #include <stdarg.h>
 
 /* ---------------- global symbol tables ---------------- */
@@ -49,13 +50,22 @@ typedef struct Scope {
     AstFn *cur_fn;
     AstClass *cur_class;
     bool in_unsafe;
+    bool enforce_memory_safety;
     int loop_depth;
+    int depth;
     const Type *self_type;
     int seq;                   /* creation order, for capture analysis */
 } Scope;
 
 static void check_stmt(Scope *sc, Stmt *s);
 static const Type *check_expr(Scope *sc, Expr *e);
+static Type *class_type_of(AstClass *c);
+
+static const Type *nullable_type_of(const Type *inner) {
+    Type *t = type_new(TY_NULLABLE);
+    t->elem = inner;
+    return t;
+}
 
 /* ---- closure capture collection ----
  * While checking a closure body, every variable that resolves OUTSIDE the
@@ -74,6 +84,190 @@ static int g_scope_seq = 0;
  * (in any function) resolve to the SAME VarSym so codegen emits one file-
  * scope definition per name and every use shares it. */
 static PtrVec g_program_globals = {0};
+static PtrVec g_borrow_fns = {0};
+
+static VarSym *expr_root_var(Expr *e) {
+    if (!e) return NULL;
+    switch (e->kind) {
+    case EX_VAR: return (VarSym *)e->u.var.sym;
+    case EX_FIELD: return expr_root_var(e->u.field.obj);
+    case EX_INDEX: return expr_root_var(e->u.index.obj);
+    case EX_DEREF: return expr_root_var(e->u.deref.operand);
+    default: return NULL;
+    }
+}
+
+/* True when evaluating this place traverses a shared reference anywhere in
+ * its base chain. Looking only at the final expression type misses paths such
+ * as `get_ref()->child->value`, whose visible type is just the child type. */
+static bool expr_through_shared_ref(const Expr *e) {
+    if (!e) return false;
+    if (e->type && e->type->kind == TY_REF) return true;
+    if (e->borrow_origin) {
+        const VarSym *origin = e->borrow_origin;
+        if (origin->shared_alias ||
+            (origin->type && origin->type->kind == TY_REF)) return true;
+    }
+    switch (e->kind) {
+    case EX_VAR:
+        return e->u.var.sym && ((VarSym *)e->u.var.sym)->shared_alias;
+    case EX_FIELD: return expr_through_shared_ref(e->u.field.obj);
+    case EX_INDEX: return expr_through_shared_ref(e->u.index.obj);
+    case EX_DEREF: return expr_through_shared_ref(e->u.deref.operand);
+    case EX_ASSIGN: return expr_through_shared_ref(e->u.assign.value);
+    case EX_BIN:
+        return expr_through_shared_ref(e->u.bin.l) ||
+               expr_through_shared_ref(e->u.bin.r);
+    case EX_TERNARY:
+        return expr_through_shared_ref(e->u.tern.then) ||
+               expr_through_shared_ref(e->u.tern.els);
+    case EX_MATCH:
+        for (size_t i = 0; i < e->u.matchexpr.cases.len; i++) {
+            MatchCase *c = e->u.matchexpr.cases.items[i];
+            if (expr_through_shared_ref(c->body)) return true;
+        }
+        return expr_through_shared_ref(e->u.matchexpr.dflt);
+    case EX_ARRAY_LIT:
+        for (size_t i = 0; i < e->u.arr.elems.len; i++)
+            if (expr_through_shared_ref(e->u.arr.elems.items[i])) return true;
+        return false;
+    case EX_MAP_LIT:
+        for (size_t i = 0; i < e->u.map.vals.len; i++) {
+            if (expr_through_shared_ref(e->u.map.keys.items[i]) ||
+                expr_through_shared_ref(e->u.map.vals.items[i])) return true;
+        }
+        return false;
+    case EX_TUPLE_LIT:
+        for (size_t i = 0; i < e->u.tuple.elems.len; i++)
+            if (expr_through_shared_ref(e->u.tuple.elems.items[i])) return true;
+        return false;
+    case EX_CAST: return expr_through_shared_ref(e->u.cast.operand);
+    default: return false;
+    }
+}
+
+static bool type_is_mutable_alias(const Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_CLASS: case TY_STRUCT: case TY_INTERFACE:
+    case TY_ARRAY: case TY_VEC: case TY_MAP: case TY_SET:
+    case TY_OWN: case TY_RC: case TY_PTR: case TY_FN: case TY_MIXED:
+        return true;
+    case TY_OPTION: case TY_NULLABLE: case TY_REF: case TY_MUTREF:
+        return type_is_mutable_alias(t->elem);
+    case TY_RESULT:
+        return type_is_mutable_alias(t->ok) || type_is_mutable_alias(t->err);
+    case TY_TUPLE: case TY_UNION:
+        for (size_t i = 0; i < t->nmembers; i++)
+            if (type_is_mutable_alias(t->members[i])) return true;
+        return false;
+    default: return false;
+    }
+}
+
+/* Cross-thread captures are limited to immutable value types for now.
+ * Class-name conventions are not a Sync proof: user code can define a
+ * mutable class named Channel/Mutex/etc. Arrays and all class instances are
+ * rejected until the language has a verifiable Sync contract. */
+static bool thread_capture_is_sync(const Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64:
+    case TY_FLOAT: case TY_F32: case TY_F64: case TY_BOOL: case TY_STRING:
+    case TY_ENUM: case TY_NULL:
+        return true;
+    case TY_CLASS: case TY_STRUCT: case TY_INTERFACE:
+        return false;
+    case TY_NULLABLE: case TY_OPTION:
+        return thread_capture_is_sync(t->elem);
+    case TY_FN:
+        return t->thread_safe_callback;
+    default:
+        return false;
+    }
+}
+
+static bool thread_capture_is_movable_value(const Type *t);
+
+static bool validate_thread_callback(Expr *value, const Type *type,
+                                     const Token *where, const char *callee) {
+    if (type && (type->kind == TY_NULLABLE || type->kind == TY_OPTION))
+        type = type->elem;
+    AstFn *closure = type && type->kind == TY_FN ? type->closure_fn : NULL;
+    if (!closure && value && value->kind == EX_CLOSURE)
+        closure = value->u.closure.fn;
+    if (type && type->kind == TY_FN && type->thread_safe_callback) return true;
+    if (!closure) {
+        sema_error(where ? where : (value ? &value->tok : NULL),
+                   "%s() requires a statically known thread_callable value",
+                   callee);
+        return false;
+    }
+    closure->thread_worker = true;
+    for (size_t i = 0; i < closure->captures.len; i++) {
+        VarSym *capture = closure->captures.items[i];
+        if (capture->captured_byref) {
+            sema_error(&capture->tok,
+                       "thread closure captures mutable or non-Sync value $%s; use a value container or a channel",
+                       capture->name);
+        } else if (!thread_capture_is_sync(capture->type)) {
+            if (thread_capture_is_movable_value(capture->type))
+                ptrvec_push(&closure->thread_moves, capture);
+            else
+                sema_error(&capture->tok,
+                           "thread closure captures mutable or non-Sync value $%s; use a value container or a channel",
+                           capture->name);
+        }
+    }
+    if (closure->uses_this &&
+        !thread_capture_is_sync(class_type_of(closure->owner_cls)))
+        sema_error(where ? where : &closure->name_tok,
+                   "thread closure captures mutable $this; use a channel or synchronized primitive");
+    if (type && type->kind == TY_FN) ((Type *)type)->thread_safe_callback = true;
+    return true;
+}
+
+/* Value containers have COW semantics, so a transferred container owner can
+ * be used by a worker while aliases detach on write. Its elements still have
+ * to be safe value types: a container of mutable object handles is not Sync. */
+static bool thread_capture_is_movable_value(const Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_ARRAY: case TY_VEC: case TY_SET:
+        return thread_capture_is_sync(t->elem) ||
+               (t->elem && (t->elem->kind == TY_ARRAY || t->elem->kind == TY_VEC ||
+                            t->elem->kind == TY_MAP || t->elem->kind == TY_SET) &&
+                thread_capture_is_movable_value(t->elem));
+    case TY_MAP:
+        return thread_capture_is_sync(t->key) &&
+               (thread_capture_is_sync(t->val) || thread_capture_is_movable_value(t->val));
+    default: return false;
+    }
+}
+
+static bool thread_sendable_value(const Type *t) {
+    if (!t) return false;
+    if (thread_capture_is_sync(t) || t->kind == TY_MIXED) return true;
+    switch (t->kind) {
+    case TY_ARRAY: case TY_VEC: case TY_SET:
+        return thread_sendable_value(t->elem);
+    case TY_MAP:
+        return thread_sendable_value(t->key) && thread_sendable_value(t->val);
+    case TY_NULLABLE: case TY_OPTION:
+        return thread_sendable_value(t->elem);
+    default: break;
+    }
+    return t && t->kind == TY_OWN && t->elem &&
+           (t->elem->kind == TY_CLASS || t->elem->kind == TY_STRUCT ||
+            t->elem->kind == TY_INTERFACE);
+}
+
+static void enqueue_borrow_fn(AstFn *fn) {
+    if (!fn) return;
+    for (size_t i = 0; i < g_borrow_fns.len; i++)
+        if (g_borrow_fns.items[i] == fn) return;
+    ptrvec_push(&g_borrow_fns, fn);
+}
 static VarSym *program_global_find(const char *name) {
     for (size_t i = 0; i < g_program_globals.len; i++) {
         VarSym *v = g_program_globals.items[i];
@@ -107,17 +301,222 @@ static void note_capture(VarSym *v) {
 
 void sema_error(const Token *tok, const char *fmt, ...) {
     sema_ok = false;
+    char msg[4096];
     va_list ap;
     va_start(ap, fmt);
-    fprintf(stderr, "%s:%zu:%zu: error: ", tok ? tok->file : "?", tok ? tok->line : 0, tok ? tok->col : 0);
-    vfprintf(stderr, fmt, ap);
-    fprintf(stderr, "\n");
+    vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
+    if (tok && tok->file)
+        diag_at("error", tok->file, tok->line, tok->col, tok->len, msg);
+    else
+        diag_at("error", "?", 0, 0, 1, msg);
 }
 
 bool sema_result_ok(void) { return sema_ok; }
 
 /* ---------------- type helpers ---------------- */
+typedef struct SemaTypePair {
+    const Type *a, *b;
+} SemaTypePair;
+
+static bool heap_types_may_alias_walk(const Type *a, const Type *b,
+                                     SemaTypePair *seen, size_t *nseen, int depth);
+
+static bool heap_type_children_may_alias(const Type *t, const Type *other,
+                                        SemaTypePair *seen, size_t *nseen, int depth) {
+    if (!t) return false;
+    const Type *base = t;
+    while (base && (base->kind == TY_REF || base->kind == TY_MUTREF ||
+                    base->kind == TY_PTR || base->kind == TY_OWN || base->kind == TY_RC))
+        base = base->elem;
+    if (base && (base->kind == TY_CLASS || base->kind == TY_STRUCT ||
+                 base->kind == TY_INTERFACE)) {
+        AstClass *cls = (AstClass *)base->decl;
+        for (AstClass *c = cls; c; c = c->base)
+            for (size_t i = 0; i < c->fields.len; i++) {
+                StructField *field = c->fields.items[i];
+                if (heap_types_may_alias_walk(field->type, other, seen, nseen, depth + 1))
+                    return true;
+            }
+    }
+    switch (t->kind) {
+    case TY_REF: case TY_MUTREF: case TY_PTR: case TY_OWN: case TY_RC:
+    case TY_OPTION: case TY_NULLABLE:
+    case TY_ARRAY: case TY_VEC: case TY_SET:
+        return heap_types_may_alias_walk(t->elem, other, seen, nseen, depth + 1);
+    case TY_MAP:
+        return heap_types_may_alias_walk(t->key, other, seen, nseen, depth + 1) ||
+               heap_types_may_alias_walk(t->val, other, seen, nseen, depth + 1);
+    case TY_RESULT:
+        return heap_types_may_alias_walk(t->ok, other, seen, nseen, depth + 1) ||
+               heap_types_may_alias_walk(t->err, other, seen, nseen, depth + 1);
+    case TY_TUPLE: case TY_UNION:
+        for (size_t i = 0; i < t->nmembers; i++)
+            if (heap_types_may_alias_walk(t->members[i], other, seen, nseen, depth + 1))
+                return true;
+        return false;
+    case TY_FN:
+        return true; /* opaque closure environment may retain any heap alias */
+    default:
+        return false;
+    }
+}
+
+static bool same_mutable_storage_family(TypeKind a, TypeKind b) {
+    bool a_collection = a == TY_ARRAY || a == TY_VEC || a == TY_MAP ||
+                       a == TY_SET || a == TY_TUPLE;
+    bool b_collection = b == TY_ARRAY || b == TY_VEC || b == TY_MAP ||
+                       b == TY_SET || b == TY_TUPLE;
+    return a_collection && b_collection;
+}
+
+static bool heap_types_may_alias_walk(const Type *a, const Type *b,
+                                     SemaTypePair *seen, size_t *nseen, int depth) {
+    if (!a || !b) return false;
+    if (depth > 64) return true; /* fail closed for unusually deep type graphs */
+    if (a->kind == TY_MIXED || b->kind == TY_MIXED ||
+        a->kind == TY_FN || b->kind == TY_FN) return true;
+    /* Arrays, maps, vectors, sets and tuples all use mutable harr* storage.
+     * Element types alone cannot prove their backing allocations disjoint. */
+    if (same_mutable_storage_family(a->kind, b->kind)) return true;
+    bool a_heap = a->kind == TY_CLASS || a->kind == TY_STRUCT || a->kind == TY_INTERFACE;
+    bool b_heap = b->kind == TY_CLASS || b->kind == TY_STRUCT || b->kind == TY_INTERFACE;
+    if (a_heap && b_heap) {
+        /* One concrete class can satisfy both interfaces. */
+        if (a->kind == TY_INTERFACE && b->kind == TY_INTERFACE) return true;
+        if (a->kind == b->kind && a->name == b->name) return true;
+        AstClass *ac = (AstClass *)a->decl;
+        AstClass *bc = (AstClass *)b->decl;
+        for (AstClass *c = ac; c; c = c->base) if (c == bc && bc) return true;
+        for (AstClass *c = bc; c; c = c->base) if (c == ac && ac) return true;
+        if (a->kind == TY_INTERFACE && bc) {
+            for (AstClass *c = bc; c; c = c->base)
+                for (size_t i = 0; i < c->interfaces.len; i++)
+                    if (a->name && strcmp(c->interfaces.items[i], a->name) == 0) return true;
+        }
+        if (b->kind == TY_INTERFACE && ac) {
+            for (AstClass *c = ac; c; c = c->base)
+                for (size_t i = 0; i < c->interfaces.len; i++)
+                    if (b->name && strcmp(c->interfaces.items[i], b->name) == 0) return true;
+        }
+    }
+    for (size_t i = 0; i < *nseen; i++)
+        if ((seen[i].a == a && seen[i].b == b) ||
+            (seen[i].a == b && seen[i].b == a)) return false;
+    if (*nseen >= 128) return true;
+    seen[(*nseen)++] = (SemaTypePair){a, b};
+    if (heap_type_children_may_alias(a, b, seen, nseen, depth) ||
+        heap_type_children_may_alias(b, a, seen, nseen, depth)) {
+        (*nseen)--;
+        return true;
+    }
+    (*nseen)--;
+    return false;
+}
+
+static bool heap_types_may_alias(const Type *a, const Type *b) {
+    SemaTypePair seen[128];
+    size_t nseen = 0;
+    return heap_types_may_alias_walk(a, b, seen, &nseen, 0);
+}
+
+static bool type_can_contain_heap_alias(const Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_CLASS: case TY_STRUCT: case TY_INTERFACE: case TY_MIXED: case TY_FN:
+    case TY_ARRAY: case TY_VEC: case TY_SET: case TY_MAP: case TY_TUPLE:
+        return true;
+    case TY_REF: case TY_MUTREF: case TY_PTR: case TY_OWN: case TY_RC:
+    case TY_OPTION: case TY_NULLABLE:
+        return type_can_contain_heap_alias(t->elem);
+    case TY_RESULT:
+        return type_can_contain_heap_alias(t->ok) || type_can_contain_heap_alias(t->err);
+    case TY_UNION:
+        for (size_t i = 0; i < t->nmembers; i++)
+            if (type_can_contain_heap_alias(t->members[i])) return true;
+        return false;
+    default:
+        return false;
+    }
+}
+
+static bool expr_is_fresh_heap_value(const Expr *e) {
+    if (!e) return false;
+    return e->kind == EX_NEW || e->kind == EX_CLOSURE ||
+           e->kind == EX_ARRAY_LIT || e->kind == EX_MAP_LIT ||
+           e->kind == EX_TUPLE_LIT;
+}
+
+static bool scope_has_borrow_of_heap_alias(Scope *sc, VarSym *object) {
+    const VarSym *identity = object->alias_origin ? object->alias_origin : object;
+    for (Scope *s = sc; s; s = s->parent) for (size_t i = 0; i < s->nvars; i++) {
+        VarSym *v = s->vars[i];
+        if (!v || !v->borrow_origin) continue;
+        const VarSym *borrowed = v->borrow_origin->alias_origin
+            ? v->borrow_origin->alias_origin : v->borrow_origin;
+        if (borrowed == identity) return true;
+        if ((object->alias_unknown || identity->is_param ||
+             v->borrow_origin->alias_unknown || v->borrow_origin->is_param ||
+             type_can_contain_heap_alias(identity->type)) &&
+            heap_types_may_alias(identity->type, v->borrow_origin->type)) return true;
+        if (object->type && object->type->kind == TY_MIXED) return true;
+    }
+    return false;
+}
+
+static void mark_heap_capture(Scope *sc, VarSym *object, const Token *tok,
+                              bool by_reference) {
+    if (!object || (!by_reference && !type_is_mutable_alias(object->type))) return;
+    const VarSym *identity = object->alias_origin ? object->alias_origin : object;
+    if ((by_reference || !object->captured_heap_alias) &&
+        !identity->captured_heap_alias && scope_has_borrow_of_heap_alias(sc, object))
+        sema_error(tok, "cannot capture $%s while it is borrowed; closure capture lifetime tracking is unavailable",
+                   object->name);
+    object->captured_heap_alias = true;
+    if (identity != object) ((VarSym *)identity)->captured_heap_alias = true;
+    AstFn *owner = identity->owner_fn ? identity->owner_fn : object->owner_fn;
+    if (owner && (identity->is_param || object->is_param))
+        for (size_t i = 0; i < owner->params.len; i++) {
+            Param *pm = owner->params.items[i];
+            if (pm->sym == identity || pm->sym == object)
+                pm->captures_heap_alias = true;
+        }
+    for (Scope *s = sc; s; s = s->parent) for (size_t i = 0; i < s->nvars; i++) {
+        VarSym *v = s->vars[i];
+        if (!v || !type_is_mutable_alias(v->type)) continue;
+        const VarSym *vid = v->alias_origin ? v->alias_origin : v;
+        if (vid == identity || object->alias_unknown ||
+            (object->type && object->type->kind == TY_MIXED) ||
+            (type_can_contain_heap_alias(object->type) &&
+             heap_types_may_alias(object->type, v->type)) ||
+            (v->alias_unknown && heap_types_may_alias(object->type, v->type)))
+            v->captured_heap_alias = true;
+    }
+}
+
+static bool heap_alias_captured(Scope *sc, VarSym *object) {
+    if (!object) return false;
+    /* A reference binding is a different local symbol from the place it
+     * borrows. Closure capture marks the captured place, so resolve that
+     * place before checking whether a new borrow could outlive its owner. */
+    const VarSym *referent = object->borrow_origin ? object->borrow_origin : object;
+    const VarSym *identity = referent->alias_origin ? referent->alias_origin : referent;
+    if (object->captured_heap_alias || identity->captured_heap_alias) return true;
+    for (Scope *s = sc; s; s = s->parent) for (size_t i = 0; i < s->nvars; i++) {
+        VarSym *v = s->vars[i];
+        if (!v || !v->captured_heap_alias) continue;
+        const VarSym *captured = v->borrow_origin ? v->borrow_origin : v;
+        const VarSym *vid = captured->alias_origin ? captured->alias_origin : captured;
+        if (vid == identity || object->alias_unknown || referent->alias_unknown ||
+            v->alias_unknown ||
+            ((object->is_param || referent->is_param ||
+              type_can_contain_heap_alias(captured->type) ||
+              type_can_contain_heap_alias(referent->type)) &&
+             heap_types_may_alias(referent->type, captured->type))) return true;
+    }
+    return false;
+}
+
 static const Type *unify_numeric(const Type *a, const Type *b) {
     if (!a || !b) return ty_mixed;
     bool af = a->kind == TY_FLOAT || a->kind == TY_F32 || a->kind == TY_F64;
@@ -128,8 +527,10 @@ static const Type *unify_numeric(const Type *a, const Type *b) {
         return ty_float;
     }
     if (a->kind == TY_INT && b->kind == TY_INT) return ty_int;
-    /* mixed-size ints: widen to i64 */
+    /* mixed-size ints: widen to the widest operand; i128 wins over all of
+     * them, so `$wide + 1` stays exact instead of dropping to 64 bits */
     if (type_is_integral(a->kind) && type_is_integral(b->kind)) {
+        if (a->kind == TY_I128 || b->kind == TY_I128) return ty_i128;
         if (a->kind == TY_I8 && b->kind == TY_I8) return ty_i8;
         if (a->kind == TY_I16 && b->kind == TY_I16) return ty_i16;
         if (a->kind == TY_I32 && b->kind == TY_I32) return ty_i32;
@@ -139,6 +540,49 @@ static const Type *unify_numeric(const Type *a, const Type *b) {
 }
 
 static bool types_compatible(const Type *want, const Type *got);
+
+/* ---------- i128 is not an hval payload ----------
+ *
+ * hval's union holds 64 bits, so an i128 cannot be stored in an array, a
+ * map, a mixed slot or a closure environment without losing its top half.
+ * The language refuses that silently-lossy conversion and says what to do
+ * instead. Narrowing to a smaller integer is refused too: it is only
+ * allowed through an explicit cast. */
+static void reject_i128_lossy(const Token *tok, const Type *want, const Type *got,
+                              const char *what) {
+    if (!got || got->kind != TY_I128 || !want || want->kind == TY_I128) return;
+    switch (want->kind) {
+    case TY_MIXED: case TY_ARRAY: case TY_VEC: case TY_MAP: case TY_SET:
+    case TY_TUPLE: case TY_OPTION: case TY_RESULT: case TY_NULLABLE:
+    case TY_UNION: case TY_NULL:
+        sema_error(tok, "%s: i128 does not fit in %s; convert with (int) or strval() first",
+                   what, type_to_string(want));
+        return;
+    case TY_STRING: case TY_BOOL:
+        sema_error(tok, "%s: i128 does not convert to %s implicitly; use an explicit cast or strval()",
+                   what, type_to_string(want));
+        return;
+    default:
+        break;
+    }
+    if (type_is_integral(want->kind))
+        sema_error(tok, "%s: cannot narrow i128 to %s implicitly; use an explicit cast",
+                   what, type_to_string(want));
+}
+
+static void reject_untracked_reference(const Expr *arg, const Type *got,
+                                       const Type *param, const char *where) {
+    if (got && got->kind != TY_REF && got->kind != TY_MUTREF &&
+        type_is_mutable_alias(got) && expr_through_shared_ref(arg))
+        sema_error(arg ? &arg->tok : NULL,
+                   "cannot pass mutable alias derived from a shared reference to %s",
+                   where);
+    if (!got || (got->kind != TY_REF && got->kind != TY_MUTREF)) return;
+    if (!param || (param->kind != TY_REF && param->kind != TY_MUTREF))
+        sema_error(arg ? &arg->tok : NULL,
+                   "cannot pass a reference to %s because its parameter has no reference lifetime contract",
+                   where);
+}
 
 /* ---------------- narrowing ----------------
  *
@@ -457,22 +901,7 @@ static void collect_facts(const Expr *e, FactSet *tf, FactSet *ff) {
              * member: an int pattern can never equal a float slot, so that
              * comparison proves nothing at all. */
             const Type *ot = other->type;
-            /* PHP builtins such as strpos return a singleton false, not an
-             * arbitrary bool. Preserve that fact in int|false slots so a
-             * strict false guard can refine the surviving path to int. */
-            if (other->kind == EX_BOOL && !other->u.boolean.b) ot = ty_false;
             if (!ot || !slot_admits(v->type, ot)) return;
-            if (ot == ty_false) {
-                const Type *not_false = type_without_type(v->type, ty_false);
-                if (op == T_EQ2) {
-                    fact_add(tf, v, ty_false);
-                    fact_add(ff, v, not_false);
-                } else {
-                    fact_add(tf, v, not_false);
-                    fact_add(ff, v, ty_false);
-                }
-                return;
-            }
             if (op == T_EQ2) fact_add(tf, v, ot);
             else fact_add(ff, v, ot);
         }
@@ -608,10 +1037,6 @@ static bool types_equal(const Type *a, const Type *b) {
         return false;
     }
     switch (a->kind) {
-    case TY_BOOL:
-        if (a->bool_const || b->bool_const)
-            return a->bool_const != 0 && a->bool_const == b->bool_const;
-        return true;
     case TY_ARRAY: case TY_VEC: case TY_SET: case TY_OPTION:
     case TY_REF: case TY_MUTREF: case TY_PTR: case TY_OWN: case TY_RC:
         /* PHP-style: a plain `array` annotation is generic; accept any
@@ -648,16 +1073,56 @@ static bool types_equal(const Type *a, const Type *b) {
     }
 }
 
+bool sema_type_is_linear(const Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_OWN:
+        return true;
+    case TY_ARRAY: case TY_VEC: case TY_SET: case TY_OPTION: case TY_NULLABLE:
+        return sema_type_is_linear(t->elem);
+    case TY_MAP:
+        return sema_type_is_linear(t->key) || sema_type_is_linear(t->val);
+    case TY_RESULT:
+        return sema_type_is_linear(t->ok) || sema_type_is_linear(t->err);
+    case TY_TUPLE: case TY_UNION:
+        for (size_t i = 0; i < t->nmembers; i++)
+            if (sema_type_is_linear(t->members[i])) return true;
+        return false;
+    default:
+        return false;
+    }
+}
+
+static Expr *compose_borrow_projection(const Expr *prefix, const Expr *relative) {
+    if (!relative || relative->kind == EX_VAR) return (Expr *)prefix;
+    Expr *base = relative->kind == EX_FIELD ? relative->u.field.obj :
+                 relative->kind == EX_INDEX ? relative->u.index.obj : NULL;
+    if (!base) return (Expr *)prefix;
+    Expr *copy = xmalloc(sizeof(*copy));
+    *copy = *relative;
+    Expr *composed_base = compose_borrow_projection(prefix, base);
+    if (relative->kind == EX_FIELD) copy->u.field.obj = composed_base;
+    else copy->u.index.obj = composed_base;
+    return copy;
+}
+
+static bool expr_is_movable_place(const Expr *e) {
+    return e && (e->kind == EX_VAR || e->kind == EX_FIELD || e->kind == EX_INDEX);
+}
+
 static bool types_compatible(const Type *want, const Type *got) {
-    if (!want || want->kind == TY_MIXED) return true;
+    if (!want) return true;
     if (!got) return true;
+    if (want->kind == TY_MIXED) return !sema_type_is_linear(got);
     /* PHP coercive typing: a dynamically typed value (untyped property, map
      * entry, mixed param) converts to any declared type at the boundary —
      * codegen emits the hp_val_to_* conversion. */
-    if (got->kind == TY_MIXED || got->kind == TY_OPTION || got->kind == TY_RESULT)
+    if (sema_type_is_linear(want) && got->kind == TY_MIXED) return false;
+    if (got->kind == TY_MIXED) return true;
+    if (got->kind == TY_OPTION || got->kind == TY_RESULT) {
+        if (sema_type_is_linear(want)) return types_equal(want, got);
         return true;
-    if (want->kind == TY_BOOL && got->kind == TY_BOOL)
-        return want->bool_const == 0 || want->bool_const == got->bool_const;
+    }
     /* `callable`/variadic fn types accept any closure */
     if (want->kind == TY_FN && want->fn.variadic && got->kind == TY_FN) return true;
     if (got->kind == TY_FN && got->fn.variadic) return true;
@@ -709,27 +1174,65 @@ static bool types_compatible(const Type *want, const Type *got) {
     if (types_equal(want, got)) return true;
     /* numeric widening */
     if (type_is_numeric(want->kind) && type_is_numeric(got->kind)) return true;
-    /* returning/passing a fresh object: own<T> coerces to T (ownership
-     * transfers to the receiving slot; codegen already stores raw structs) */
-    if ((want->kind == TY_CLASS || want->kind == TY_STRUCT) &&
-        got->kind == TY_OWN && got->elem &&
-        (got->elem->kind == TY_CLASS || got->elem->kind == TY_STRUCT) &&
-        got->elem->name == want->name)
-        return true;
-    if (want->kind == TY_OWN && got->kind == TY_CLASS &&
-        want->elem && want->elem->name == got->name)
-        return true;
-    /* &T accepts T (auto-borrow) */
-    if (want->kind == TY_REF && types_compatible(want->elem, got)) return true;
+    /* own<T> is linear. Do not erase it into a copyable T slot, or invent
+     * ownership by wrapping a potentially aliased T pointer. Callers must
+     * preserve the ownership type at every storage and call boundary. */
+    /* References must be explicit (`&$x`). Implicit auto-borrowing would
+     * create a loan that has no expression or lifetime record to attach to. */
     if (want->kind == TY_MUTREF && got->kind != TY_MUTREF) return false;
     return false;
+}
+
+/* `new C(...)` is typed as a plain, copyable object handle C (see EX_NEW):
+ * that is what PHP code means by it, and it may be aliased, passed and
+ * stored freely. It is also the one C-typed value that may initialise an
+ * explicit `own C` slot: the object was allocated by this very expression,
+ * so no other handle to it exists and handing it to an exclusive owner
+ * cannot create an alias. Any other C value (a variable, a field, a call
+ * result) may still be aliased elsewhere, so types_compatible keeps
+ * refusing C -> own C for those. */
+static bool fresh_object_fits_own(const Type *want, const Expr *value) {
+    if (!want || !value) return false;
+    if (want->kind == TY_NULLABLE) want = want->elem;   /* ?own C */
+    if (!want || want->kind != TY_OWN || !want->elem) return false;
+    /* `$c ? new C() : new C()` / `$c ? new C() : null`: whichever arm runs
+     * yields a fresh object (or null, which every own slot accepts). */
+    if (value->kind == EX_TERNARY) {
+        const Expr *arms[2] = { value->u.tern.then, value->u.tern.els };
+        for (int i = 0; i < 2; i++)
+            if (!arms[i] || !(arms[i]->kind == EX_NULL ||
+                              fresh_object_fits_own(want, arms[i])))
+                return false;
+        return true;
+    }
+    if (value->kind != EX_NEW) return false;
+    const Type *got = value->type;
+    if (!got || (got->kind != TY_CLASS && got->kind != TY_STRUCT)) return false;
+    return types_compatible(want->elem, got);
+}
+
+/* types_compatible() for a concrete value expression flowing into a slot of
+ * type `want` (assignment, initialisation, argument, return). */
+static bool value_fits_slot(const Type *want, const Type *got, const Expr *value) {
+    return types_compatible(want, got) || fresh_object_fits_own(want, value);
 }
 
 /* ---------------- scopes ---------------- */
 static void scope_init(Scope *s, Scope *parent) {
     memset(s, 0, sizeof(*s));
     s->parent = parent;
+    s->depth = parent ? parent->depth + 1 : 0;
     s->seq = g_scope_seq++;
+}
+
+static void scope_child_init(Scope *child, Scope *parent) {
+    scope_init(child, parent);
+    child->cur_fn = parent->cur_fn;
+    child->cur_class = parent->cur_class;
+    child->in_unsafe = parent->in_unsafe;
+    child->enforce_memory_safety = parent->enforce_memory_safety;
+    child->loop_depth = parent->loop_depth;
+    child->self_type = parent->self_type;
 }
 
 static VarSym *scope_find(Scope *s, const char *name) {
@@ -752,10 +1255,24 @@ static VarSym *scope_declare(Scope *s, const char *name, const Type *t, Token to
     v->type = t;
     v->tok = tok;
     v->is_mut = is_mut;
+    v->scope_depth = s->depth;
     v->uid = (int)var_uid++;
     v->decl_seq = s->seq;
+    v->owner_fn = s->cur_fn;
     s->vars[s->nvars++] = v;
     return v;
+}
+
+static void validate_ref_holder_scope(VarSym *holder, const Token *tok) {
+    if (!holder || !holder->borrow_origin || holder->borrow_scope_error_reported)
+        return;
+    const VarSym *origin = holder->borrow_origin;
+    if (origin->is_program_global || origin->is_global_alias) return;
+    if (holder->scope_depth >= origin->scope_depth) return;
+    sema_error(tok ? tok : &holder->tok,
+               "reference $%s outlives the block containing its referent $%s",
+               holder->name, origin->name);
+    holder->borrow_scope_error_reported = true;
 }
 
 /* ---------------- forward decls ---------------- */
@@ -789,10 +1306,18 @@ static void check_byref_arg(Scope *sc, Param *pm, Expr *arg) {
         return;
     }
     const Type *pt = pm->type ? resolve_type(sc, pm->type, pm->name_tok) : NULL;
+    VarSym *v = (VarSym *)arg->u.var.sym;
+    if (v->type && (v->type->kind == TY_REF || v->type->kind == TY_MUTREF)) {
+        sema_error(&arg->tok,
+                   "cannot pass reference binding $%s itself to a PHP by-reference parameter",
+                   v->name);
+        return;
+    }
+    if (!v->is_mut)
+        sema_error(&arg->tok, "cannot pass immutable $%s to a by-reference parameter", v->name);
     bool wants_hval = !pt || pt->kind == TY_MIXED || pt->kind == TY_TUPLE ||
                       pt->kind == TY_OPTION || pt->kind == TY_RESULT;
     if (!wants_hval) return;
-    VarSym *v = (VarSym *)arg->u.var.sym;
     if (!v->is_auto || v->is_param) return;
     if (v->is_program_global || v->is_global_alias) return;  /* file-scope slot */
     if (v->captured_byref) return;                           /* already boxed */
@@ -957,6 +1482,327 @@ static AstFn *find_function(const char *name) {
     return NULL;
 }
 
+static int returned_ref_param_expr(AstFn *fn, Expr *e) {
+    if (!fn || !e) return -1;
+    if (e->kind == EX_TERNARY) {
+        int then_source = returned_ref_param_expr(fn, e->u.tern.then);
+        int else_source = returned_ref_param_expr(fn, e->u.tern.els);
+        return then_source == else_source ? then_source : -2;
+    }
+    if (e->kind == EX_MATCH) {
+        bool seen = false;
+        int source = -1;
+        for (size_t i = 0; i < e->u.matchexpr.cases.len; i++) {
+            MatchCase *arm = e->u.matchexpr.cases.items[i];
+            int arm_source = returned_ref_param_expr(fn, arm->body);
+            if (!seen) {
+                source = arm_source;
+                seen = true;
+            } else if (source != arm_source) {
+                return -2;
+            }
+        }
+        if (e->u.matchexpr.dflt) {
+            int default_source = returned_ref_param_expr(fn, e->u.matchexpr.dflt);
+            if (seen && source != default_source) return -2;
+            source = default_source;
+            seen = true;
+        }
+        return seen ? source : -2;
+    }
+    /* A returned local reference can be a reborrow of a parameter, e.g.
+     * `let $r: &mut int = $x; return $r;`. Follow the semantic borrow origin
+     * instead of requiring the source spelling to be the parameter name. */
+    VarSym *value = e->kind == EX_VAR ? (VarSym *)e->u.var.sym :
+                    e->borrow_origin ? (VarSym *)e->borrow_origin : NULL;
+    if (!value && (e->kind == EX_BORROW || e->kind == EX_MUTBORROW))
+        value = expr_root_var(e->u.borrow.operand);
+    if (value && value->borrow_pending) return -2;
+    VarSym *origin = value && value->borrow_origin
+        ? (VarSym *)value->borrow_origin : value;
+    if (fn->this_sym && origin == fn->this_sym) return -3; /* implicit receiver */
+    for (size_t i = 0; i < fn->params.len; i++) {
+        Param *p = fn->params.items[i];
+        VarSym *param = (VarSym *)p->sym;
+        bool reference_param = p->by_ref || (p->type &&
+            (p->type->kind == TY_REF || p->type->kind == TY_MUTREF));
+        if (!origin || origin != param || !reference_param) continue;
+        return (int)i;
+    }
+    return -2;
+}
+
+static void scan_return_ref_param_seq(AstFn *fn, PtrVec stmts, int *found) {
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *s = stmts.items[i];
+        if (!s) continue;
+        if (s->kind == ST_RETURN) {
+            if (!s->u.ret.value) continue;
+            int idx = returned_ref_param_expr(fn, s->u.ret.value);
+            if (idx >= 0 || idx == -3) {
+                if (*found == -1 || *found == idx) *found = idx;
+                else *found = -2;
+            } else if (fn->ret && (fn->ret->kind == TY_REF || fn->ret->kind == TY_MUTREF)) {
+                *found = -2;
+            }
+        } else if (s->kind == ST_IF) {
+            scan_return_ref_param_seq(fn, s->u.if_.then, found);
+            scan_return_ref_param_seq(fn, s->u.if_.els, found);
+        } else if (s->kind == ST_WHILE) scan_return_ref_param_seq(fn, s->u.while_.body, found);
+        else if (s->kind == ST_DO) scan_return_ref_param_seq(fn, s->u.do_.body, found);
+        else if (s->kind == ST_FOR) scan_return_ref_param_seq(fn, s->u.for_.body, found);
+        else if (s->kind == ST_FOREACH) scan_return_ref_param_seq(fn, s->u.foreach.body, found);
+        else if (s->kind == ST_BLOCK) scan_return_ref_param_seq(fn, s->u.block.stmts, found);
+        else if (s->kind == ST_UNSAFE_BLOCK) scan_return_ref_param_seq(fn, s->u.unsafe.stmts, found);
+        else if (s->kind == ST_TRY) {
+            scan_return_ref_param_seq(fn, s->u.try.body, found);
+            scan_return_ref_param_seq(fn, s->u.try.fin, found);
+            for (size_t j = 0; j < s->u.try.catches.len; j++)
+                scan_return_ref_param_seq(fn, ((CatchClause *)s->u.try.catches.items[j])->body, found);
+        } else if (s->kind == ST_SWITCH) {
+            for (size_t j = 0; j < s->u.switch_.cases.len; j++)
+                scan_return_ref_param_seq(fn, ((SwitchCase *)s->u.switch_.cases.items[j])->body, found);
+        }
+    }
+}
+
+static int fn_return_ref_param(AstFn *fn) {
+    if (!fn || !fn->ret || (fn->ret->kind != TY_REF && fn->ret->kind != TY_MUTREF)) return -1;
+    int found = -1;
+    scan_return_ref_param_seq(fn, fn->body, &found);
+    return found;
+}
+
+static bool same_receiver_projection(const Expr *a, const Expr *b) {
+    if (a == b) return true;
+    if (!a || !b || a->kind != b->kind) return false;
+    if (a->kind == EX_VAR) {
+        if (a->u.var.sym == b->u.var.sym) return true;
+        VarSym *av = (VarSym *)a->u.var.sym;
+        VarSym *bv = (VarSym *)b->u.var.sym;
+        return av && bv && av->name == s_this && bv->name == s_this;
+    }
+    if (a->kind == EX_FIELD)
+        return a->u.field.name && b->u.field.name &&
+               strcmp(a->u.field.name, b->u.field.name) == 0 &&
+               same_receiver_projection(a->u.field.obj, b->u.field.obj);
+    if (a->kind == EX_INDEX)
+        return a->u.index.idx == b->u.index.idx &&
+               same_receiver_projection(a->u.index.obj, b->u.index.obj);
+    if (a->kind == EX_DEREF)
+        return same_receiver_projection(a->u.deref.operand, b->u.deref.operand);
+    /* Index projections need value-sensitive alias reasoning; use the whole
+     * receiver if separate return branches select indexed places. */
+    return false;
+}
+
+static const Expr *returned_ref_place(const Expr *e) {
+    if (!e) return NULL;
+    if (e->borrow_place) return e->borrow_place;
+    if (e->kind == EX_VAR && e->u.var.sym)
+        return ((VarSym *)e->u.var.sym)->borrow_place;
+    if (e->kind == EX_BORROW || e->kind == EX_MUTBORROW)
+        return e->u.borrow.operand;
+    return NULL;
+}
+
+static void scan_receiver_return_places(PtrVec stmts, AstFn *fn,
+                                        const Expr **place, bool *seen,
+                                        bool *ambiguous) {
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *s = stmts.items[i];
+        if (!s) continue;
+        if (s->kind == ST_RETURN && s->u.ret.value &&
+            returned_ref_param_expr(fn, s->u.ret.value) == -3) {
+            const Expr *candidate = returned_ref_place(s->u.ret.value);
+            if (!*seen) { *place = candidate; *seen = true; }
+            else if (!same_receiver_projection(*place, candidate)) *ambiguous = true;
+        }
+        switch (s->kind) {
+        case ST_IF:
+            scan_receiver_return_places(s->u.if_.then, fn, place, seen, ambiguous);
+            scan_receiver_return_places(s->u.if_.els, fn, place, seen, ambiguous);
+            break;
+        case ST_WHILE: scan_receiver_return_places(s->u.while_.body, fn, place, seen, ambiguous); break;
+        case ST_DO: scan_receiver_return_places(s->u.do_.body, fn, place, seen, ambiguous); break;
+        case ST_FOR:
+            scan_receiver_return_places(s->u.for_.init, fn, place, seen, ambiguous);
+            scan_receiver_return_places(s->u.for_.step, fn, place, seen, ambiguous);
+            scan_receiver_return_places(s->u.for_.body, fn, place, seen, ambiguous);
+            break;
+        case ST_FOREACH: scan_receiver_return_places(s->u.foreach.body, fn, place, seen, ambiguous); break;
+        case ST_BLOCK: scan_receiver_return_places(s->u.block.stmts, fn, place, seen, ambiguous); break;
+        case ST_UNSAFE_BLOCK: scan_receiver_return_places(s->u.unsafe.stmts, fn, place, seen, ambiguous); break;
+        case ST_TRY:
+            scan_receiver_return_places(s->u.try.body, fn, place, seen, ambiguous);
+            scan_receiver_return_places(s->u.try.fin, fn, place, seen, ambiguous);
+            for (size_t j = 0; j < s->u.try.catches.len; j++)
+                scan_receiver_return_places(((CatchClause *)s->u.try.catches.items[j])->body,
+                                            fn, place, seen, ambiguous);
+            break;
+        case ST_SWITCH:
+            for (size_t j = 0; j < s->u.switch_.cases.len; j++)
+                scan_receiver_return_places(((SwitchCase *)s->u.switch_.cases.items[j])->body,
+                                            fn, place, seen, ambiguous);
+            break;
+        default: break;
+        }
+    }
+}
+
+static const Expr *fn_return_receiver_place(AstFn *fn) {
+    if (!fn || fn_return_ref_param(fn) != -3) return NULL;
+    if (!fn->borrow_return_place_resolved) {
+        const Expr *place = NULL;
+        bool seen = false, ambiguous = false;
+        scan_receiver_return_places(fn->body, fn, &place, &seen, &ambiguous);
+        fn->borrow_return_place = seen && !ambiguous ? place : NULL;
+        fn->borrow_return_place_resolved = true;
+    }
+    return fn->borrow_return_place;
+}
+
+static VarSym *ref_return_origin(Expr *e) {
+    if (!e) return NULL;
+    if (e->borrow_origin) return (VarSym *)e->borrow_origin;
+    if (e->kind == EX_VAR) {
+        VarSym *v = (VarSym *)e->u.var.sym;
+        return v && v->borrow_origin ? (VarSym *)v->borrow_origin : v;
+    }
+    if (e->kind == EX_BORROW || e->kind == EX_MUTBORROW) {
+        Expr *operand = e->u.borrow.operand;
+        if (operand && operand->kind == EX_VAR)
+            return (VarSym *)operand->u.var.sym;
+    }
+    return NULL;
+}
+
+static bool is_global_lifetime_origin(const VarSym *v) {
+    return v && (v->is_program_global || v->is_global_alias);
+}
+
+static void scan_return_ref_global_seq(AstFn *fn, PtrVec stmts,
+                                       VarSym **found, bool *ambiguous) {
+    (void)fn;
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *s = stmts.items[i];
+        if (!s) continue;
+        if (s->kind == ST_RETURN && s->u.ret.value) {
+            const Type *t = s->u.ret.value->type;
+            if (!t || (t->kind != TY_REF && t->kind != TY_MUTREF)) continue;
+            VarSym *origin = ref_return_origin(s->u.ret.value);
+            if (!is_global_lifetime_origin(origin)) {
+                *ambiguous = true;
+            } else if (!*found || (*found)->uid == origin->uid) {
+                *found = origin;
+            } else {
+                *ambiguous = true;
+            }
+        } else if (s->kind == ST_IF) {
+            scan_return_ref_global_seq(fn, s->u.if_.then, found, ambiguous);
+            scan_return_ref_global_seq(fn, s->u.if_.els, found, ambiguous);
+        } else if (s->kind == ST_WHILE) scan_return_ref_global_seq(fn, s->u.while_.body, found, ambiguous);
+        else if (s->kind == ST_DO) scan_return_ref_global_seq(fn, s->u.do_.body, found, ambiguous);
+        else if (s->kind == ST_FOR) scan_return_ref_global_seq(fn, s->u.for_.body, found, ambiguous);
+        else if (s->kind == ST_FOREACH) scan_return_ref_global_seq(fn, s->u.foreach.body, found, ambiguous);
+        else if (s->kind == ST_BLOCK) scan_return_ref_global_seq(fn, s->u.block.stmts, found, ambiguous);
+        else if (s->kind == ST_UNSAFE_BLOCK) scan_return_ref_global_seq(fn, s->u.unsafe.stmts, found, ambiguous);
+        else if (s->kind == ST_TRY) {
+            scan_return_ref_global_seq(fn, s->u.try.body, found, ambiguous);
+            scan_return_ref_global_seq(fn, s->u.try.fin, found, ambiguous);
+            for (size_t j = 0; j < s->u.try.catches.len; j++)
+                scan_return_ref_global_seq(fn, ((CatchClause *)s->u.try.catches.items[j])->body,
+                                           found, ambiguous);
+        } else if (s->kind == ST_SWITCH) {
+            for (size_t j = 0; j < s->u.switch_.cases.len; j++)
+                scan_return_ref_global_seq(fn, ((SwitchCase *)s->u.switch_.cases.items[j])->body,
+                                           found, ambiguous);
+        }
+    }
+}
+
+static VarSym *fn_return_ref_global(AstFn *fn) {
+    if (!fn || !fn->ret || (fn->ret->kind != TY_REF && fn->ret->kind != TY_MUTREF))
+        return NULL;
+    VarSym *found = NULL;
+    bool ambiguous = false;
+    scan_return_ref_global_seq(fn, fn->body, &found, &ambiguous);
+    return ambiguous ? NULL : found;
+}
+
+/* Virtual dispatch may select an override at runtime, while a call site's
+ * borrow summary is derived from its statically resolved method. Require an
+ * override to preserve the inherited reference source so that summary stays
+ * valid for every possible receiver class. */
+static void validate_virtual_ref_return_contracts(void) {
+    for (size_t i = 0; i < g_borrow_fns.len; i++) {
+        AstFn *method = g_borrow_fns.items[i];
+        if (!method || !method->is_method || !method->cls || !method->cls->base)
+            continue;
+        AstFn *inherited = NULL;
+        for (AstClass *base = method->cls->base; base && !inherited; base = base->base)
+            inherited = class_find_method(base, method->name);
+        if (!inherited || !inherited->ret || !method->ret) continue;
+        bool inherited_ref = inherited->ret->kind == TY_REF ||
+                             inherited->ret->kind == TY_MUTREF;
+        bool method_ref = method->ret->kind == TY_REF ||
+                          method->ret->kind == TY_MUTREF;
+        if (!inherited_ref && !method_ref) continue;
+        if (!inherited_ref || !method_ref ||
+            !types_compatible(inherited->ret, method->ret)) {
+            sema_error(&method->name_tok,
+                       "override %s::%s() must preserve the inherited reference return type",
+                       method->cls->name, method->name);
+            continue;
+        }
+
+        int inherited_param = fn_return_ref_param(inherited);
+        int method_param = fn_return_ref_param(method);
+        VarSym *inherited_global = fn_return_ref_global(inherited);
+        VarSym *method_global = fn_return_ref_global(method);
+        bool inherited_known = inherited_param >= 0 || inherited_param == -3 ||
+                               inherited_global;
+        if (!inherited_known) continue; /* an abstract/ambiguous base has no usable summary */
+
+        bool same_source = inherited_param == -3
+            ? method_param == -3 && !method_global
+            : inherited_param >= 0
+            ? method_param == inherited_param && !method_global
+            : method_global && method_global->uid == inherited_global->uid &&
+              method_param < 0;
+        if (!same_source)
+            sema_error(&method->name_tok,
+                       "override %s::%s() must return a reference from the same parameter or global as the inherited method",
+                       method->cls->name, method->name);
+        else if (inherited_param == -3) {
+            const Expr *base_place = fn_return_receiver_place(inherited);
+            const Expr *override_place = fn_return_receiver_place(method);
+            /* A broad base summary (NULL) already covers every receiver
+             * projection. A precise base summary requires every override to
+             * preserve that projection or a base-typed call could undertrack. */
+            if (base_place && !same_receiver_projection(base_place, override_place))
+                sema_error(&method->name_tok,
+                           "override %s::%s() must preserve the inherited receiver field borrow",
+                           method->cls->name, method->name);
+        }
+    }
+}
+
+static AstFn *ref_return_target(const Expr *e) {
+    if (!e) return NULL;
+    switch (e->kind) {
+    case EX_CALL: return e->u.call.target;
+    case EX_METHOD: return e->u.method.target;
+    case EX_STATIC: return e->u.staticcall.target;
+    default: return NULL;
+    }
+}
+
+static bool target_returns_ref(const AstFn *fn) {
+    return fn && fn->ret &&
+        (fn->ret->kind == TY_REF || fn->ret->kind == TY_MUTREF);
+}
+
 static AstClass *find_class(const char *name) {
     for (ClassSym *s = classes; s; s = s->next)
         if (s->name == intern(name)) return s->cls;
@@ -976,6 +1822,23 @@ static bool class_derives(AstClass *c, const AstClass *base) {
 }
 
 /* ---------------- type resolution ---------------- */
+static bool type_holds_i128(const Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_I128: return true;
+    case TY_ARRAY: case TY_VEC: case TY_SET: case TY_OPTION: case TY_NULLABLE:
+    case TY_OWN: case TY_RC:
+        return type_holds_i128(t->elem);
+    case TY_MAP: return type_holds_i128(t->key) || type_holds_i128(t->val);
+    case TY_RESULT: return type_holds_i128(t->ok) || type_holds_i128(t->err);
+    case TY_UNION:
+        for (size_t i = 0; i < t->nmembers; i++)
+            if (type_holds_i128(t->members[i])) return true;
+        return false;
+    default: return false;
+    }
+}
+
 static const Type *resolve_type(Scope *sc, Type *t, Token tok) {
     (void)sc;
     if (!t) return NULL;
@@ -1025,49 +1888,25 @@ static const Type *resolve_type(Scope *sc, Type *t, Token tok) {
     }
     default: break;
     }
+    switch (t->kind) {
+    case TY_ARRAY: case TY_VEC: case TY_MAP: case TY_SET:
+    case TY_OPTION: case TY_RESULT: case TY_NULLABLE: case TY_UNION:
+        if (type_holds_i128(t))
+            sema_error(&tok,
+                       "i128 cannot be stored in %s; arrays and dynamic values hold 64-bit integers (convert with (int) or strval() first)",
+                       type_to_string(t));
+        break;
+    default: break;
+    }
     return t;
 }
 
-/* ---------------- borrow checker ---------------- */
-#define MAX_LOANS 64
-typedef struct Loan {
-    const VarSym *var;     /* borrowed variable */
-    bool is_mut;
-    int from_expr;         /* expression uid that created the loan (scope path id) */
-    size_t line;
-    bool released;
-} Loan;
-
-static Loan loans[MAX_LOANS];
-static size_t nloans = 0;
-static int loan_scope_id = 1;
-
-static void loans_release_all(void) {
-    nloans = 0;
-}
-static void loans_push(const VarSym *var, bool is_mut, size_t line) {
-    if (nloans >= MAX_LOANS) return;
-    loans[nloans++] = (Loan){ var, is_mut, loan_scope_id, line, false };
-}
-static void loans_pop_scope(void) {
-    for (size_t i = nloans; i > 0; i--) {
-        if (loans[i - 1].from_expr == loan_scope_id) nloans = i - 1;
-        else break;
-    }
+static bool borrow_origin_outlives_function(const VarSym *v) {
+    return is_global_lifetime_origin(v) || (v && v->is_param &&
+           (v->is_param_ref || (v->type &&
+            (v->type->kind == TY_REF || v->type->kind == TY_MUTREF))));
 }
 
-static const Type *sym_type_of_enum(AstEnum *e);
-
-/* how many live loans of var; returns bit 1 = shared, bit 2 = mut */
-static int loans_of(const VarSym *var) {
-    int r = 0;
-    for (size_t i = 0; i < nloans; i++)
-        if (!loans[i].released && loans[i].var == var)
-            r |= loans[i].is_mut ? 2 : 1;
-    return r;
-}
-
-/* ---------------- expression checking ---------------- */
 static const Type *deref_pointerish(const Type *t) {
     if (!t) return NULL;
     if (t->kind == TY_REF || t->kind == TY_MUTREF || t->kind == TY_PTR)
@@ -1094,6 +1933,9 @@ static const Type *check_bin(Scope *sc, Expr *e) {
     }
     /* null coalescing */
     if (e->is_nullcoal) {
+        if ((lt && lt->kind == TY_I128) || (rt && rt->kind == TY_I128))
+            sema_error(&e->tok,
+                       "i128 cannot flow through ??; convert with (int) or strval() first");
         e->type = lt;
         return e->type;
     }
@@ -1123,14 +1965,15 @@ static const Type *check_bin(Scope *sc, Expr *e) {
         return e->type;
     }
     /* shifts << >> — the result is always an integer; numeric strings and
-     * hval operands are converted by the runtime (PHP semantics) */
+     * hval operands are converted by the runtime (PHP semantics). An i128
+     * operand keeps the result 128 bits wide. */
     if (op == T_SHL || op == T_SHR) {
         bool lok = type_is_numeric(lt->kind) || lt->kind == TY_STRING || lt->kind == TY_MIXED;
         bool rok = type_is_numeric(rt->kind) || rt->kind == TY_STRING || rt->kind == TY_MIXED;
         if (!lok || !rok)
             sema_error(&e->u.bin.op, "%s requires numeric operands, got %s and %s",
                        tok_kind_name(op), type_to_string(lt), type_to_string(rt));
-        e->type = ty_int;
+        e->type = (lt->kind == TY_I128 || rt->kind == TY_I128) ? ty_i128 : ty_int;
         return e->type;
     }
     /* bitwise */
@@ -1142,17 +1985,18 @@ static const Type *check_bin(Scope *sc, Expr *e) {
         e->type = unify_numeric(lt, rt);
         return e->type;
     }
-    /* pointer arithmetic (unsafe only): ptr + int / ptr - int -> ptr */
-    if ((op == T_PLUS || op == T_MINUS) && lt->kind == TY_PTR &&
-        (type_is_integral(rt->kind) || rt->kind == TY_INT)) {
-        e->type = lt;
-        return e->type;
-    }
     /* arithmetic */
     if (op == T_PLUS || op == T_MINUS || op == T_STAR || op == T_SLASH ||
         op == T_PERCENT || op == T_POW) {
         if (type_is_numeric(lt->kind) && type_is_numeric(rt->kind)) {
-            e->type = op == T_SLASH ? ty_float : unify_numeric(lt, rt);
+            /* i128 / i128 is exact 128-bit integer division, not PHP's
+             * float division: converting to double would throw away the
+             * precision the type exists for. Mixed with a float stays
+             * float. */
+            bool wide_div = op == T_SLASH &&
+                type_is_integral(lt->kind) && type_is_integral(rt->kind) &&
+                (lt->kind == TY_I128 || rt->kind == TY_I128);
+            e->type = (op == T_SLASH && !wide_div) ? ty_float : unify_numeric(lt, rt);
             return e->type;
         }
         /* PHP numeric-string arithmetic: "1" + "2" is 3, "1.5" * 2 is
@@ -1207,15 +2051,23 @@ static const Type *check_method_call(Scope *sc, Expr *e) {
     Expr *obj = e->u.method.obj;
     const Type *ot = check_expr(sc, obj);
     const char *mname = e->u.method.name;
+    const Type *receiver_base = ot;
+    while (receiver_base && (receiver_base->kind == TY_REF ||
+                             receiver_base->kind == TY_MUTREF ||
+                             receiver_base->kind == TY_OWN ||
+                             receiver_base->kind == TY_RC))
+        receiver_base = receiver_base->elem;
     /* builtin Exception support: getMessage() */
-    if (ot->kind == TY_CLASS && ot->name == intern("Exception")) {
+    if (receiver_base && receiver_base->kind == TY_CLASS &&
+        receiver_base->name == intern("Exception")) {
         if (strcmp(mname, "getMessage") == 0) {
             e->builtin = "exception_get_message";
             e->type = ty_string;
             return e->type;
         }
     }
-    if (ot->kind == TY_ARRAY || ot->kind == TY_VEC || ot->kind == TY_MAP || ot->kind == TY_SET) {
+    if (receiver_base && (receiver_base->kind == TY_ARRAY || receiver_base->kind == TY_VEC ||
+                          receiver_base->kind == TY_MAP || receiver_base->kind == TY_SET)) {
         /* collection builtins */
         static const struct { const char *n; const Type *ret; } coll[] = {
             {"len", NULL}, {"push", NULL}, {"pop", NULL},
@@ -1224,12 +2076,38 @@ static const Type *check_method_call(Scope *sc, Expr *e) {
         };
         (void)coll;
         if (strcmp(mname, "len") == 0) { e->builtin = "count"; e->type = ty_int; return e->type; }
-        if (strcmp(mname, "push") == 0) { e->builtin = "array_push"; e->type = ty_int; return e->type; }
-        if (strcmp(mname, "pop") == 0) { e->builtin = "array_pop"; e->type = elem_type_of(ot, NULL); return e->type ? e->type : ty_mixed; }
-        if (strcmp(mname, "get") == 0) { e->builtin = "array_get"; e->type = elem_type_of(ot, NULL) ? elem_type_of(ot, NULL) : ty_mixed; return e->type; }
+        if (strcmp(mname, "push") == 0) {
+            if (e->u.method.args.len != 1)
+                sema_error(&e->u.method.name_tok, "push() expects exactly one value");
+            for (size_t i = 0; i < e->u.method.args.len; i++) {
+                Expr *arg = e->u.method.args.items[i];
+                const Type *at = check_expr(sc, arg);
+                reject_untracked_reference(arg, at, NULL, "collection push()");
+                reject_i128_lossy(&arg->tok, ty_mixed, at, "value");
+                if (sema_type_is_linear(at)) {
+                    if (!sema_type_is_linear(receiver_base->kind == TY_MAP
+                                                ? receiver_base->val : receiver_base->elem))
+                        sema_error(&arg->tok, "cannot insert an ownership value into a copyable collection");
+                    else if (expr_is_movable_place(arg)) arg->is_move_source = true;
+                }
+            }
+            e->builtin = "array_push"; e->type = ty_int; return e->type;
+        }
+        if (strcmp(mname, "pop") == 0) { e->builtin = "array_pop"; e->type = elem_type_of(receiver_base, NULL); return e->type ? e->type : ty_mixed; }
+        if (strcmp(mname, "get") == 0) {
+            e->builtin = "array_get";
+            e->type = elem_type_of(receiver_base, NULL) ? elem_type_of(receiver_base, NULL) : ty_mixed;
+            if (sema_type_is_linear(e->type))
+                sema_error(&e->u.method.name_tok, "get() cannot copy an ownership value; use pop() or index move syntax");
+            return e->type;
+        }
         if (strcmp(mname, "has") == 0) { e->builtin = "array_key_exists"; e->type = ty_bool; return e->type; }
         if (strcmp(mname, "keys") == 0) { e->builtin = "array_keys"; e->type = ty_mixed; return e->type; }
-        if (strcmp(mname, "values") == 0) { e->builtin = "array_values"; e->type = ty_mixed; return e->type; }
+        if (strcmp(mname, "values") == 0) {
+            if (sema_type_is_linear(receiver_base))
+                sema_error(&e->u.method.name_tok, "values() cannot copy a collection containing ownership values");
+            e->builtin = "array_values"; e->type = ty_mixed; return e->type;
+        }
     }
     /* smart pointer auto-deref */
     if (ot->kind == TY_OWN || ot->kind == TY_RC || ot->kind == TY_REF || ot->kind == TY_MUTREF) {
@@ -1262,7 +2140,11 @@ static const Type *check_method_call(Scope *sc, Expr *e) {
                         const Type *pt = resolve_type(sc, pm->type, pm->name_tok);
                         Expr *arg = e->u.method.args.items[i];
                         const Type *at = check_expr(sc, arg);
-                        if (pt && !types_compatible(pt, at))
+                        if (pt && pt->kind == TY_FN && pt->thread_safe_callback)
+                            validate_thread_callback(arg, at, &arg->tok, mname);
+                        reject_untracked_reference(arg, at, pt, mname);
+                        reject_i128_lossy(&arg->tok, pt ? pt : ty_mixed, at, "argument");
+                        if (pt && !value_fits_slot(pt, at, arg))
                             sema_error(&arg->tok, "argument %zu to %s::%s(): expected %s, got %s",
                                        i + 1, c->name, mname, type_to_string(pt), type_to_string(at));
                         check_byref_arg(sc, pm, arg);
@@ -1293,8 +2175,15 @@ static const Type *check_method_call(Scope *sc, Expr *e) {
             StructField *f = class_find_field(c, mname);
             if (!f && c->base) f = class_find_field(c->base, mname);
             if (f) {
-                for (size_t i = 0; i < e->u.method.args.len; i++)
-                    check_expr(sc, e->u.method.args.items[i]);
+                for (size_t i = 0; i < e->u.method.args.len; i++) {
+                    Expr *arg = e->u.method.args.items[i];
+                    const Type *at = check_expr(sc, arg);
+                    if (sema_type_is_linear(at) &&
+                        (arg->kind == EX_VAR || arg->kind == EX_FIELD || arg->kind == EX_INDEX))
+                        sema_error(&arg->tok, "cannot pass an ownership value to a dynamically typed method");
+                    reject_untracked_reference(arg, at, NULL, "a dynamic method call");
+                    reject_i128_lossy(&arg->tok, ty_mixed, at, "argument");
+                }
                 e->u.method.sf = f;
                 e->u.method.target = NULL;
                 e->type = (f->type && f->type->kind == TY_FN && f->type->fn.ret)
@@ -1316,7 +2205,27 @@ static const Type *check_method_call(Scope *sc, Expr *e) {
             const Type *pt = resolve_type(sc, pm->type, pm->name_tok);
             Expr *arg = e->u.method.args.items[i];
             const Type *at = check_expr(sc, arg);
-            if (pt && !types_compatible(pt, at))
+            if (pt && pt->kind == TY_FN && pt->thread_safe_callback)
+                validate_thread_callback(arg, at, &arg->tok, mname);
+            if (c->name && strcmp(c->name, "Channel") == 0 && i == 0 &&
+                (strcmp(mname, "send") == 0 || strcmp(mname, "trySend") == 0)) {
+                if (!thread_sendable_value(at)) {
+                    sema_error(&arg->tok, "Channel::%s() cannot send non-Sync value %s",
+                               mname, type_to_string(at));
+                } else if (at && (at->kind == TY_STRING || at->kind == TY_ARRAY ||
+                                  at->kind == TY_VEC || at->kind == TY_MAP ||
+                                  at->kind == TY_SET || sema_type_is_linear(at)) &&
+                           expr_is_movable_place(arg)) {
+                    arg->is_move_source = true;
+                }
+            }
+            if (sema_type_is_linear(at) && !pm->by_ref &&
+                (arg->kind == EX_VAR || arg->kind == EX_FIELD || arg->kind == EX_INDEX)) {
+                arg->is_move_source = true;
+            }
+            reject_untracked_reference(arg, at, pt, mname);
+            reject_i128_lossy(&arg->tok, pt ? pt : ty_mixed, at, "argument");
+            if (pt && !value_fits_slot(pt, at, arg))
                 sema_error(&arg->tok, "argument %zu to %s::%s(): expected %s, got %s",
                            i + 1, c->name, mname, type_to_string(pt), type_to_string(at));
             check_byref_arg(sc, pm, arg);
@@ -1350,13 +2259,64 @@ static const Type *check_builtin_call(Scope *sc, Expr *e, const Builtin *b) {
                 }
             }
             e->type = ty_int;
-            for (size_t i = 0; i < na; i++)
-                check_expr(sc, e->u.call.args.items[i]);
+            for (size_t i = 0; i < na; i++) {
+                Expr *arg = e->u.call.args.items[i];
+                const Type *at = check_expr(sc, arg);
+                reject_untracked_reference(arg, at, NULL, b->name);
+            }
             return e->type;
         }
     }
-    for (size_t i = 0; i < na; i++)
-        check_expr(sc, e->u.call.args.items[i]);
+    for (size_t i = 0; i < na; i++) {
+        Expr *arg = e->u.call.args.items[i];
+        const Type *at = check_expr(sc, arg);
+        if (strcmp(b->name, "unset") == 0 &&
+            (arg->kind == EX_FIELD || arg->kind == EX_INDEX || arg->kind == EX_DEREF) &&
+            expr_through_shared_ref(arg))
+            sema_error(&arg->tok,
+                       "cannot unset a place reached through a shared reference; use &mut");
+        reject_untracked_reference(arg, at, NULL, b->name);
+    }
+    if ((strcmp(b->name, "thr_spawn") == 0 ||
+         strcmp(b->name, "thr_parallel_map") == 0) && na > 0) {
+        Expr *worker = e->u.call.args.items[0];
+        validate_thread_callback(worker, worker->type, &worker->tok, b->name);
+    }
+    if ((strcmp(b->name, "chan_send") == 0 ||
+         strcmp(b->name, "chan_try_send") == 0) && na == 2) {
+        Expr *value = e->u.call.args.items[1];
+        if (!thread_sendable_value(value->type)) {
+            sema_error(&value->tok,
+                       "%s() cannot send non-Sync value %s; move a value container or an own value",
+                       b->name, type_to_string(value->type));
+        } else if (value->type &&
+                   (value->type->kind == TY_STRING || value->type->kind == TY_ARRAY ||
+                    value->type->kind == TY_VEC || value->type->kind == TY_MAP ||
+                    value->type->kind == TY_SET || sema_type_is_linear(value->type)) &&
+                   expr_is_movable_place(value)) {
+            value->is_move_source = true;
+        }
+    }
+    if (strcmp(b->name, "array_push") == 0 && na >= 2) {
+        const Type *container = ((Expr *)e->u.call.args.items[0])->type;
+        const Type *element = container && container->kind == TY_MAP
+            ? container->val : container && (container->kind == TY_ARRAY ||
+              container->kind == TY_VEC || container->kind == TY_SET) ? container->elem : NULL;
+        for (size_t i = 1; i < na; i++) {
+            Expr *value = e->u.call.args.items[i];
+            if (!sema_type_is_linear(value->type)) continue;
+            if (!sema_type_is_linear(element))
+                sema_error(&value->tok, "cannot insert an ownership value into a copyable collection");
+            else if (expr_is_movable_place(value)) value->is_move_source = true;
+        }
+    }
+    if ((strcmp(b->name, "array_values") == 0 || strcmp(b->name, "array_merge") == 0) && na) {
+        for (size_t i = 0; i < na; i++) {
+            Expr *arg = e->u.call.args.items[i];
+            if (sema_type_is_linear(arg->type))
+                sema_error(&arg->tok, "%s() cannot copy a collection containing ownership values", b->name);
+        }
+    }
     switch (b->shape) {
     case B_STR1:
         if (na != 1) sema_error(&e->tok, "%s() expects 1 argument, got %zu", b->name, na);
@@ -1385,6 +2345,15 @@ static const Type *check_builtin_call(Scope *sc, Expr *e, const Builtin *b) {
     case B_PRINT:
         e->type = b->ret;
         break;
+    case B_PRINTF_COLOR:
+    case B_PRINTLN_COLOR:
+        if (na < 1 || na > 2) sema_error(&e->tok, "%s() expects 1 or 2 arguments, got %zu", b->name, na);
+        e->type = b->ret;
+        break;
+    case B_READLINE_COLOR:
+        if (na < 1 || na > 2) sema_error(&e->tok, "%s() expects 1 or 2 arguments, got %zu", b->name, na);
+        e->type = b->ret;
+        break;
     case B_MISC:
         /* compact("a", "b", ...): rewrite to a real map literal keyed by
          * the argument strings, pulling values from local scope. */
@@ -1396,6 +2365,12 @@ static const Type *check_builtin_call(Scope *sc, Expr *e, const Builtin *b) {
                 const char *vn = a->u.str.s;
                 VarSym *vs = scope_find(sc, vn);
                 if (!vs) continue;                 /* unknown: skipped, PHP-like */
+                if (sema_type_is_linear(vs->type)) {
+                    sema_error(&a->tok,
+                               "compact() cannot erase ownership type %s into a mixed map",
+                               type_to_string(vs->type));
+                    continue;
+                }
                 Expr *k = expr_new(EX_STR, a->tok);
                 k->u.str.s = vn;
                 k->type = ty_string;
@@ -1410,7 +2385,13 @@ static const Type *check_builtin_call(Scope *sc, Expr *e, const Builtin *b) {
             e->type = type_array_of(ty_mixed);
             return e->type;
         }
-        e->type = b->ret;
+        if (strcmp(b->name, "array_pop") == 0 && na) {
+            const Type *container = ((Expr *)e->u.call.args.items[0])->type;
+            e->type = container && (container->kind == TY_ARRAY || container->kind == TY_VEC ||
+                                    container->kind == TY_SET) ? container->elem : b->ret;
+        } else {
+            e->type = b->ret;
+        }
         break;
     case B_ZERO:
         if (na != 0) sema_error(&e->tok, "%s() expects no arguments", b->name);
@@ -1418,6 +2399,10 @@ static const Type *check_builtin_call(Scope *sc, Expr *e, const Builtin *b) {
         break;
     case B_ARRAY:
         e->type = type_array_of(ty_mixed);
+        for (size_t i = 0; i < na; i++)
+            if (sema_type_is_linear(((Expr *)e->u.call.args.items[i])->type))
+                sema_error(&((Expr *)e->u.call.args.items[i])->tok,
+                           "array() cannot infer a single linear element type; use a typed array literal");
         break;
     case B_MAXMIN:
         if (na == 0) sema_error(&e->tok, "%s() expects at least 1 argument", b->name);
@@ -1457,14 +2442,20 @@ static const Type *check_call(Scope *sc, Expr *e) {
          * bare name (`foo()`) always means the function, never $foo */
         VarSym *local = callee->u.var.bare_name ? NULL : scope_find(sc, name);
         if (!local || (local->type && local->type->kind != TY_FN)) {
+            /* A declared function takes precedence over a builtin with the
+             * same spelling. Otherwise a perfectly valid user declaration
+             * such as `function passthru(int &$x)` is emitted as a call to
+             * the runtime builtin instead of the declared function. */
+            AstFn *fn = find_function(name);
             const Builtin *b = builtin_lookup(name);
-            if (b) {
-                if (b->unsafe && !sc->in_unsafe) {
+            if (b && !fn) {
+                if (b->unsafe && sc->enforce_memory_safety) {
+                    sema_error(&e->tok, "unsafe builtin '%s' is forbidden by declare(enforce_memory_safety=1)", name);
+                } else if (b->unsafe && !sc->in_unsafe) {
                     sema_error(&e->tok, "call to unsafe function '%s' requires an unsafe block", name);
                 }
                 return check_builtin_call(sc, e, b);
             }
-            AstFn *fn = find_function(name);
             if (!fn && !local) {
                 sema_error(&e->tok, "call to undefined function '%s()'", name);
                 for (size_t i = 0; i < e->u.call.args.len; i++)
@@ -1484,7 +2475,15 @@ static const Type *check_call(Scope *sc, Expr *e) {
                     const Type *pt = resolve_type(sc, pm->type, pm->name_tok);
                     Expr *arg = e->u.call.args.items[i];
                     const Type *at = check_expr(sc, arg);
-                    if (pt && pm->type && !types_compatible(pt, at))
+                    if (pt && pt->kind == TY_FN && pt->thread_safe_callback)
+                        validate_thread_callback(arg, at, &arg->tok, name);
+                    if (sema_type_is_linear(at) && !pm->by_ref &&
+                        (arg->kind == EX_VAR || arg->kind == EX_FIELD || arg->kind == EX_INDEX)) {
+                        arg->is_move_source = true;
+                    }
+                    reject_untracked_reference(arg, at, pt, name);
+                    reject_i128_lossy(&arg->tok, pt ? pt : ty_mixed, at, "argument");
+                    if (pt && pm->type && !value_fits_slot(pt, at, arg))
                         sema_error(&arg->tok, "argument %zu to %s(): expected %s, got %s",
                                    i + 1, name, type_to_string(pt), type_to_string(at));
                     check_byref_arg(sc, pm, arg);
@@ -1498,6 +2497,28 @@ static const Type *check_call(Scope *sc, Expr *e) {
                     fn->ret_inferred = true;
                 }
                 e->type = fn->ret ? resolve_type(sc, fn->ret, fn->name_tok) : ty_mixed;
+                int rbp = fn_return_ref_param(fn);
+                if (rbp >= 0 && (size_t)rbp < na) {
+                    e->borrow_param_index = rbp;
+                    e->has_borrow_param = true;
+                    Expr *arg = e->u.call.args.items[rbp];
+                    VarSym *src = arg && arg->kind == EX_VAR
+                        ? (VarSym *)arg->u.var.sym : NULL;
+                    if (src) {
+                        e->borrow_origin = (void *)(src->borrow_origin ? src->borrow_origin : src);
+                        e->borrow_place = src->borrow_place;
+                        if (src->type && (src->type->kind == TY_REF || src->type->kind == TY_MUTREF))
+                            e->borrow_parent = src;
+                    } else if (arg && (arg->kind == EX_BORROW || arg->kind == EX_MUTBORROW)) {
+                        e->borrow_origin = arg->borrow_origin
+                            ? arg->borrow_origin : expr_root_var(arg->u.borrow.operand);
+                        e->borrow_parent = arg->borrow_parent;
+                        e->borrow_place = arg->borrow_place;
+                    }
+                } else {
+                    VarSym *global = fn_return_ref_global(fn);
+                    if (global) e->borrow_origin = global;
+                }
                 return e->type;
             }
         }
@@ -1513,7 +2534,12 @@ static const Type *check_call(Scope *sc, Expr *e) {
             const Type *pt = (!any && i < ft->fn.nparams) ? ft->fn.params[i] : NULL;
             Expr *arg = e->u.call.args.items[i];
             const Type *at = check_expr(sc, arg);
-            if (pt && !types_compatible(pt, at))
+            if (sema_type_is_linear(at) &&
+                (arg->kind == EX_VAR || arg->kind == EX_FIELD || arg->kind == EX_INDEX))
+                arg->is_move_source = true;
+            reject_untracked_reference(arg, at, pt, "an indirect call");
+            reject_i128_lossy(&arg->tok, pt ? pt : ty_mixed, at, "argument");
+            if (pt && !value_fits_slot(pt, at, arg))
                 sema_error(&arg->tok, "argument %zu: expected %s, got %s",
                            i + 1, type_to_string(pt), type_to_string(at));
         }
@@ -1524,8 +2550,15 @@ static const Type *check_call(Scope *sc, Expr *e) {
      * entry, an untyped parameter): allowed like PHP, dispatched by the
      * runtime, which throws a catchable error if it isn't callable. */
     if (ft->kind == TY_MIXED) {
-        for (size_t i = 0; i < e->u.call.args.len; i++)
-            check_expr(sc, e->u.call.args.items[i]);
+        for (size_t i = 0; i < e->u.call.args.len; i++) {
+            Expr *arg = e->u.call.args.items[i];
+            const Type *at = check_expr(sc, arg);
+            if (sema_type_is_linear(at) &&
+                (arg->kind == EX_VAR || arg->kind == EX_FIELD || arg->kind == EX_INDEX))
+                sema_error(&arg->tok, "cannot pass an ownership value to a dynamically typed call");
+            reject_untracked_reference(arg, at, NULL, "a dynamic call");
+            reject_i128_lossy(&arg->tok, ty_mixed, at, "argument");
+        }
         e->type = ty_mixed;
         return e->type;
     }
@@ -1536,10 +2569,10 @@ static const Type *check_call(Scope *sc, Expr *e) {
     return e->type;
 }
 
-static const Type *check_expr(Scope *sc, Expr *e) {
+static const Type *check_expr_inner(Scope *sc, Expr *e) {
     if (!e) return ty_mixed;
     switch (e->kind) {
-    case EX_INT: e->type = ty_int; return e->type;
+    case EX_INT: e->type = e->u.i.is_wide ? ty_i128 : ty_int; return e->type;
     case EX_FLOAT: e->type = ty_float; return e->type;
     case EX_STR: e->type = ty_string; return e->type;
     case EX_BOOL: e->type = ty_bool; return e->type;
@@ -1572,7 +2605,8 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 /* $this inside a closure: mark the closure (and outer ones) */
                 for (int d = g_clo_depth - 1; d >= 0; d--) g_clo_this[d] = true;
             }
-            e->u.var.sym = NULL;
+            e->u.var.sym = g_clo_depth == 0 && sc->cur_fn
+                ? sc->cur_fn->this_sym : NULL;
             e->type = st ? st : ty_mixed;
             return e->type;
         }
@@ -1584,7 +2618,16 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             v = program_global_find(e->u.var.name);
         }
         if (!v && e->u.var.name && (strncmp(e->u.var.name, "PHP_", 4) == 0 || strncmp(e->u.var.name, "JSON_", 5) == 0 ||
-            strcmp(e->u.var.name, "M_PI") == 0 || strcmp(e->u.var.name, "M_E") == 0)) {
+            strcmp(e->u.var.name, "M_PI") == 0 || strcmp(e->u.var.name, "M_E") == 0 ||
+            strcmp(e->u.var.name, "RESET") == 0 || strcmp(e->u.var.name, "BLACK") == 0 ||
+            strcmp(e->u.var.name, "RED") == 0 || strcmp(e->u.var.name, "GREEN") == 0 ||
+            strcmp(e->u.var.name, "YELLOW") == 0 || strcmp(e->u.var.name, "BLUE") == 0 ||
+            strcmp(e->u.var.name, "MAGENTA") == 0 || strcmp(e->u.var.name, "CYAN") == 0 ||
+            strcmp(e->u.var.name, "WHITE") == 0 || strcmp(e->u.var.name, "BRIGHT_BLACK") == 0 ||
+            strcmp(e->u.var.name, "BRIGHT_RED") == 0 || strcmp(e->u.var.name, "BRIGHT_GREEN") == 0 ||
+            strcmp(e->u.var.name, "BRIGHT_YELLOW") == 0 || strcmp(e->u.var.name, "BRIGHT_BLUE") == 0 ||
+            strcmp(e->u.var.name, "BRIGHT_MAGENTA") == 0 || strcmp(e->u.var.name, "BRIGHT_CYAN") == 0 ||
+            strcmp(e->u.var.name, "BRIGHT_WHITE") == 0)) {
             /* M_PI / M_E are handled by the codegen constant branch below; here
              * they only need to pass the unknown-name guard with float type. */
             /* PHP predefined constants: PHP_INT_MAX, PHP_EOL, PHP_OS, ... */
@@ -1610,6 +2653,14 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 e->type = ty_int;
             else if (strcmp(n, "PHP_TRUE") == 0 || strcmp(n, "PHP_FALSE") == 0 || strcmp(n, "PHP_NULL") == 0)
                 e->type = ty_mixed;
+            else if (strcmp(n, "RESET") == 0 || strcmp(n, "BLACK") == 0 || strcmp(n, "RED") == 0 ||
+                     strcmp(n, "GREEN") == 0 || strcmp(n, "YELLOW") == 0 || strcmp(n, "BLUE") == 0 ||
+                     strcmp(n, "MAGENTA") == 0 || strcmp(n, "CYAN") == 0 || strcmp(n, "WHITE") == 0 ||
+                     strcmp(n, "BRIGHT_BLACK") == 0 || strcmp(n, "BRIGHT_RED") == 0 ||
+                     strcmp(n, "BRIGHT_GREEN") == 0 || strcmp(n, "BRIGHT_YELLOW") == 0 ||
+                     strcmp(n, "BRIGHT_BLUE") == 0 || strcmp(n, "BRIGHT_MAGENTA") == 0 ||
+                     strcmp(n, "BRIGHT_CYAN") == 0 || strcmp(n, "BRIGHT_WHITE") == 0)
+                e->type = ty_int;
             else
                 sema_error(&e->tok, "undefined constant %s", n);
             return e->type;
@@ -1622,6 +2673,12 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         /* capture analysis: var declared outside the innermost closure? */
         if (g_clo_depth > 0 && !v->is_program_global &&
             v->decl_seq < g_clo_body_seq[g_clo_depth - 1]) {
+            if (v->type && (v->type->kind == TY_REF || v->type->kind == TY_MUTREF))
+                sema_error(&e->tok,
+                           "closures cannot capture reference binding $%s without closure lifetime tracking",
+                           v->name);
+            else
+                mark_heap_capture(sc, v, &e->tok, false);
             note_capture(v);
             for (int d = g_clo_depth - 2; d >= 0; d--) {
                 if (v->decl_seq >= g_clo_body_seq[d]) break;
@@ -1632,16 +2689,25 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             }
         }
         e->u.var.sym = v;
-        if (v->moved_from) {
-            sema_error(&e->tok, "use of moved value $%s", e->u.var.name);
-        }
         e->type = refined_type_of(v);
         return e->type;
     }
     case EX_TUPLE_LIT: {
         Type *t = type_new(TY_TUPLE);
-        for (size_t i = 0; i < e->u.tuple.elems.len; i++)
-            check_expr(sc, e->u.tuple.elems.items[i]);
+        t->nmembers = e->u.tuple.elems.len;
+        t->members = t->nmembers ? xcalloc(t->nmembers, sizeof(*t->members)) : NULL;
+        for (size_t i = 0; i < e->u.tuple.elems.len; i++) {
+            Expr *item = e->u.tuple.elems.items[i];
+            const Type *et = check_expr(sc, item);
+            if (et && et->kind == TY_I128)
+                sema_error(&item->tok,
+                           "cannot store i128 in a tuple; convert with (int) or strval() first");
+            ((const Type **)t->members)[i] = et;
+            if (et && (et->kind == TY_REF || et->kind == TY_MUTREF))
+                sema_error(&e->tok, "references cannot be stored in tuples because this type has no lifetime tracking");
+            if (sema_type_is_linear(et) && expr_is_movable_place(item))
+                item->is_move_source = true;
+        }
         e->type = t;
         return e->type;
     }
@@ -1651,9 +2717,27 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         if (is_map) {
             Type *mt = type_new(TY_MAP);
             const Type *kt = NULL, *vt = NULL;
+            bool has_linear_value = false;
             for (size_t i = 0; i < e->u.map.vals.len; i++) {
                 const Type *k2 = check_expr(sc, e->u.map.keys.items[i]);
                 const Type *v2 = check_expr(sc, e->u.map.vals.items[i]);
+                Expr *key_expr = e->u.map.keys.items[i];
+                Expr *value_expr = e->u.map.vals.items[i];
+                if (k2 && k2->kind == TY_I128)
+                    sema_error(&key_expr->tok,
+                               "cannot store i128 in a map key; convert with (int) or strval() first");
+                if (v2 && v2->kind == TY_I128)
+                    sema_error(&value_expr->tok,
+                               "cannot store i128 in a map; convert with (int) or strval() first");
+                if (sema_type_is_linear(k2))
+                    sema_error(&key_expr->tok, "ownership values cannot be copied into map keys");
+                if (sema_type_is_linear(v2)) {
+                    has_linear_value = true;
+                    if (expr_is_movable_place(value_expr)) value_expr->is_move_source = true;
+                }
+                if ((k2 && (k2->kind == TY_REF || k2->kind == TY_MUTREF)) ||
+                    (v2 && (v2->kind == TY_REF || v2->kind == TY_MUTREF)))
+                    sema_error(&e->tok, "references cannot be stored in maps because this type has no lifetime tracking");
                 /* Every entry contributes: a mixed-value map like
                  * ["name" => "Ada", "alter" => 25] must be hval-valued,
                  * otherwise the int entry gets compiled as a string.
@@ -1668,11 +2752,24 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             }
             mt->key = kt ? slot_elem_type(kt) : ty_mixed;
             mt->val = vt ? slot_elem_type(vt) : ty_mixed;
+            if (has_linear_value && !sema_type_is_linear(mt->val))
+                sema_error(&e->tok, "a map containing own values must have one statically known linear value type");
             e->type = mt;
             return e->type;
         }
+        bool has_linear_elem = false;
         for (size_t i = 0; i < e->u.arr.elems.len; i++) {
-            const Type *et = check_expr(sc, e->u.arr.elems.items[i]);
+            Expr *item = e->u.arr.elems.items[i];
+            const Type *et = check_expr(sc, item);
+            if (et && (et->kind == TY_REF || et->kind == TY_MUTREF))
+                sema_error(&e->tok, "references cannot be stored in arrays because this type has no lifetime tracking");
+            if (et && et->kind == TY_I128)
+                sema_error(&item->tok,
+                           "cannot store i128 in an array; convert with (int) or strval() first");
+            if (sema_type_is_linear(et)) {
+                has_linear_elem = true;
+                if (expr_is_movable_place(item)) item->is_move_source = true;
+            }
             if (!elem) elem = et;
             /* see the map case: slots hold hvals, so never unify numerics
              * here — [1, 2.5] must stay mixed, not become float */
@@ -1680,6 +2777,8 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         }
         Type *at = type_new(TY_ARRAY);
         at->elem = elem ? slot_elem_type(elem) : ty_mixed;
+        if (has_linear_elem && !sema_type_is_linear(at->elem))
+            sema_error(&e->tok, "an array containing own values must have one statically known linear element type");
         e->type = at;
         return e->type;
     }
@@ -1724,7 +2823,8 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                     e->u.field.owner = ot;
                     /* an untyped property is hval-valued, never NULL-typed:
                      * `pub $cb = null;` is the PHP-style dynamic member */
-                    e->type = f->type ? resolve_type(sc, f->type, f->name_tok) : ty_mixed;
+                    const Type *ft = f->type ? resolve_type(sc, f->type, f->name_tok) : ty_mixed;
+                    e->type = f->is_weak ? nullable_type_of(ft) : ft;
                     return e->type;
                 }
             }
@@ -1786,7 +2886,9 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                     const Type *pt = resolve_type(sc, pm->type, pm->name_tok);
                     Expr *arg = e->u.staticcall.args.items[i];
                     const Type *at = check_expr(sc, arg);
-                    if (pt && pm->type && !types_compatible(pt, at))
+                    reject_untracked_reference(arg, at, pt, m->name);
+                    reject_i128_lossy(&arg->tok, pt ? pt : ty_mixed, at, "argument");
+                    if (pt && pm->type && !value_fits_slot(pt, at, arg))
                         sema_error(&arg->tok, "argument %zu: expected %s, got %s",
                                    i + 1, type_to_string(pt), type_to_string(at));
                     check_byref_arg(sc, pm, arg);
@@ -1819,7 +2921,9 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 const Type *pt = resolve_type(sc, pm->type, pm->name_tok);
                 Expr *arg = e->u.staticcall.args.items[i];
                 const Type *at = check_expr(sc, arg);
-                if (pt && pm->type && !types_compatible(pt, at))
+                reject_untracked_reference(arg, at, pt, fn->name);
+                reject_i128_lossy(&arg->tok, pt ? pt : ty_mixed, at, "argument");
+                if (pt && pm->type && !value_fits_slot(pt, at, arg))
                     sema_error(&arg->tok, "argument %zu: expected %s, got %s",
                                i + 1, type_to_string(pt), type_to_string(at));
                 check_byref_arg(sc, pm, arg);
@@ -1839,7 +2943,15 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             size_t na = e->u.newexpr.args.len;
             if (na > 1)
                 sema_error(&e->tok, "Exception::__construct() expects at most 1 argument");
-            for (size_t i = 0; i < na; i++) check_expr(sc, e->u.newexpr.args.items[i]);
+            for (size_t i = 0; i < na; i++) {
+                Expr *arg = e->u.newexpr.args.items[i];
+                const Type *at = check_expr(sc, arg);
+                if (sema_type_is_linear(at) &&
+                    (arg->kind == EX_VAR || arg->kind == EX_FIELD || arg->kind == EX_INDEX))
+                    arg->is_move_source = true;
+                reject_untracked_reference(arg, at, NULL, "Exception::__construct");
+                reject_i128_lossy(&arg->tok, ty_mixed, at, "argument");
+            }
             Type *t = type_new(TY_CLASS);
             t->name = intern("Exception");
             e->type = t;
@@ -1865,7 +2977,14 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 const Type *pt = resolve_type(sc, pm->type, pm->name_tok);
                 Expr *arg = e->u.newexpr.args.items[i];
                 const Type *at = check_expr(sc, arg);
-                if (pt && pm->type && !types_compatible(pt, at))
+                if (pt && pt->kind == TY_FN && pt->thread_safe_callback)
+                    validate_thread_callback(arg, at, &arg->tok, "a constructor");
+                if (sema_type_is_linear(at) && !pm->by_ref &&
+                    (arg->kind == EX_VAR || arg->kind == EX_FIELD || arg->kind == EX_INDEX))
+                    arg->is_move_source = true;
+                reject_untracked_reference(arg, at, pt, "a constructor");
+                reject_i128_lossy(&arg->tok, pt ? pt : ty_mixed, at, "argument");
+                if (pt && pm->type && !value_fits_slot(pt, at, arg))
                     sema_error(&arg->tok, "argument %zu to %s(): expected %s, got %s",
                                i + 1, c->name, type_to_string(pt), type_to_string(at));
                 /* a constructor is built by hpu_%s_new_args(), which has no
@@ -1876,10 +2995,14 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         } else if (na != 0) {
             sema_error(&e->tok, "%s has no constructor, expected 0 arguments, got %zu", c->name, na);
         }
-        /* new returns own<T> */
-        Type *t = type_new(TY_OWN);
-        t->elem = class_type_of(c);
-        e->type = t;
+        /* `new C` is an ordinary PHP object handle of type C, not own<C>.
+         * own<C> is linear (moved on every assignment/pass/return, never
+         * erased back to C), so typing every `new` as own<C> turned plain
+         * PHP such as `$s = new C(); f($s); f($s);` or
+         * `$this->w = new Widget();` into ownership errors. Ownership is
+         * opt-in: an explicit `own C` slot accepts this fresh value via
+         * fresh_object_fits_own(), and is linear from then on. */
+        e->type = class_type_of(c);
         return e->type;
     }
     case EX_BIN: return check_bin(sc, e);
@@ -1907,6 +3030,8 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         /* list destructuring "[$a, $b] = expr;" / "[$k => $v] = expr;" */
         if (tgt->kind == EX_ARRAY_LIT && e->u.assign.op.kind == T_ASSIGN) {
             const Type *st = e->u.assign.value ? check_expr(sc, e->u.assign.value) : ty_mixed;
+            if (sema_type_is_linear(st))
+                sema_error(&tgt->tok, "cannot destructure a collection containing ownership values");
             bool keyed = tgt->u.map.vals.len > 0;
             if (keyed) {
                 /* pattern keys participate in checking so codegen can box them */
@@ -1920,12 +3045,35 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 if (!slot) continue;   /* skip slot: [$a, , $c] */
                 if (slot->kind != EX_VAR)
                     sema_error(&slot->tok, "destructuring target must be a variable");
-                else if (!scope_find(sc, slot->u.var.name)) {
-                    VarSym *sv = scope_declare(sc, slot->u.var.name, ty_mixed, slot->tok, true);
-                    sv->is_auto = true;
+                else {
+                    VarSym *sv = scope_find(sc, slot->u.var.name);
+                    if (!sv) {
+                        sv = scope_declare(sc, slot->u.var.name, ty_mixed, slot->tok, true);
+                        sv->is_auto = true;
+                    } else if (!sv->is_mut) {
+                        sema_error(&slot->tok,
+                                   "cannot assign to immutable variable $%s (declare with let mut)",
+                                   slot->u.var.name);
+                    }
                     slot->u.var.sym = sv;
-                } else {
-                    slot->u.var.sym = scope_find(sc, slot->u.var.name);
+                    const Type *slot_type = st;
+                    if (keyed && st && st->kind == TY_MAP)
+                        slot_type = st->val;
+                    else if (!keyed && st && st->kind == TY_TUPLE && i < st->nmembers)
+                        slot_type = st->members[i];
+                    else if (!keyed && st &&
+                             (st->kind == TY_ARRAY || st->kind == TY_VEC ||
+                              st->kind == TY_SET))
+                        slot_type = st->elem;
+                    if (type_is_mutable_alias(slot_type) &&
+                        expr_through_shared_ref(e->u.assign.value)) {
+                        if (sv->is_program_global || sv->is_global_alias)
+                            sema_error(&slot->tok,
+                                       "cannot store destructured mutable alias derived from a shared reference in global $%s",
+                                       sv->name);
+                        else
+                            sv->shared_alias = true;
+                    }
                 }
             }
             e->type = (st && (st->kind == TY_ARRAY || st->kind == TY_VEC)) ? st : ty_mixed;
@@ -1936,6 +3084,7 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         const Type *tt = NULL;
         if (tgt->kind == EX_VAR) {
             VarSym *v = scope_find(sc, tgt->u.var.name);
+            bool newly_declared = false;
             if (!v && sc->cur_fn == NULL)
                 v = program_global_find(tgt->u.var.name);   /* `global $x;` seen earlier */
             if (!v) {
@@ -1943,8 +3092,12 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                  * type annotation: "$x: int = 5". */
                 const Type *ann = e->u.assign.ann
                     ? resolve_type(sc, e->u.assign.ann, tgt->tok) : NULL;
+                if (ann && sema_type_is_linear(vt) && !sema_type_is_linear(ann))
+                    sema_error(&e->tok,
+                               "cannot store ownership value %s in copyable variable $%s (%s)",
+                               type_to_string(vt), tgt->u.var.name, type_to_string(ann));
                 if (ann && e->u.assign.value &&
-                    !types_compatible(ann, vt) && ann->kind != TY_MIXED)
+                    !value_fits_slot(ann, vt, e->u.assign.value) && ann->kind != TY_MIXED)
                     sema_error(&e->tok, "cannot initialize $%s (type %s) with %s",
                                tgt->u.var.name, type_to_string(ann), type_to_string(vt));
                 /* `$x = null;` declares a dynamic variable: PHP allows a later
@@ -1952,12 +3105,14 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                  * otherwise. A `?T` annotation is what pins it down. */
                 const Type *vt2 = (!ann && vt && vt->kind == TY_NULL) ? ty_mixed : vt;
                 v = scope_declare(sc, tgt->u.var.name, ann ? ann : vt2, tgt->tok, true);
+                newly_declared = true;
                 v->is_auto = true;
                 /* register so later `global $x;` in functions binds THIS sym
                  * (is_program_global is set by the ST_GLOBAL binder itself) */
                 if (sc->cur_fn == NULL && !program_global_find(tgt->u.var.name))
                     ptrvec_push(&g_program_globals, v);
                 tgt->u.var.sym = v;
+                tt = v->type;
             } else {
                 tgt->u.var.sym = v; /* codegen needs the symbol for naming */
                 tt = v->type;
@@ -1969,27 +3124,142 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 refine_assign(v, e->u.assign.op.kind == T_ASSIGN ? vt : NULL);
                 if (!v->is_mut)
                     sema_error(&tgt->tok, "cannot assign to immutable variable $%s (declare with let mut)", tgt->u.var.name);
-                if (v->type && (v->type->kind == TY_OWN || v->type->kind == TY_RC) &&
-                    e->u.assign.value) {
-                    /* move semantics */
-                    VarSym *src = e->u.assign.value->kind == EX_VAR ? scope_find(sc, e->u.assign.value->u.var.name) : NULL;
-                    if (src && (src->type->kind == TY_OWN || src->type->kind == TY_RC)) {
-                        src->moved_from = true;
-                    }
-                }
+                if (v->type && (v->type->kind == TY_REF || v->type->kind == TY_MUTREF))
+                    sema_error(&tgt->tok, "reassigning reference bindings is not supported; declare a new reference binding");
             }
+            if (type_can_contain_heap_alias(v->type) && e->u.assign.op.kind == T_ASSIGN) {
+                Expr *rhs = e->u.assign.value;
+                VarSym *src = rhs && rhs->kind == EX_VAR ? rhs->u.var.sym : NULL;
+                bool source_was_unaliased = src && !src->is_mut && !src->alias_unknown;
+                if (newly_declared && source_was_unaliased) {
+                    v->alias_origin = src->alias_origin ? src->alias_origin : src;
+                } else if (!newly_declared || !expr_is_fresh_heap_value(rhs)) {
+                    v->alias_origin = NULL;
+                    v->alias_unknown = true;
+                }
+                /* A second binding to a heap value makes the source a shared
+                 * owner too. Move-out checks must not treat either slot as
+                 * uniquely owning its fields after this point. */
+                if (src && src != v) src->alias_unknown = true;
+            }
+            if (e->u.assign.value && vt && vt->kind != TY_REF && vt->kind != TY_MUTREF &&
+                type_is_mutable_alias(vt) &&
+                expr_through_shared_ref(e->u.assign.value)) {
+                if (v->is_program_global || v->is_global_alias)
+                    sema_error(&tgt->tok,
+                               "cannot store mutable alias derived from a shared reference in global $%s",
+                               v->name);
+                else
+                    v->shared_alias = true;
+            }
+            if (vt && (vt->kind == TY_REF || vt->kind == TY_MUTREF)) {
+                if (v->is_program_global || v->is_global_alias)
+                    sema_error(&tgt->tok,
+                               "cannot store a borrowed reference in global $%s; global reference lifetimes are not tracked",
+                               v->name);
+                if (!v->type || (v->type->kind != TY_REF && v->type->kind != TY_MUTREF))
+                    sema_error(&tgt->tok,
+                               "cannot erase a reference lifetime by storing the reference as %s",
+                               type_to_string(v->type ? v->type : ty_mixed));
+                Expr *rhs = e->u.assign.value;
+                if (!newly_declared || !rhs) {
+                    sema_error(&tgt->tok, "reference values may only initialize a tracked local binding");
+                } else if (rhs->borrow_origin) {
+                    v->borrow_origin = rhs->borrow_origin;
+                    v->borrow_parent = rhs->borrow_parent;
+                    v->borrow_place = rhs->borrow_place;
+                    v->borrow_mut = vt->kind == TY_MUTREF;
+                } else if (rhs->kind == EX_CALL && rhs->u.call.target &&
+                           rhs->u.call.target->ret &&
+                           (rhs->u.call.target->ret->kind == TY_REF ||
+                            rhs->u.call.target->ret->kind == TY_MUTREF)) {
+                    v->borrow_pending = true;
+                } else if (rhs->kind == EX_VAR) {
+                    VarSym *src = (VarSym *)rhs->u.var.sym;
+                    if (!src || !src->type ||
+                        (src->type->kind != TY_REF && src->type->kind != TY_MUTREF)) {
+                        sema_error(&tgt->tok, "reference values may only initialize a tracked local binding");
+                    } else if (src->borrow_pending) {
+                        v->borrow_pending = true;
+                    } else {
+                        v->borrow_origin = src->borrow_origin ? src->borrow_origin : src;
+                        v->borrow_parent = src;
+                        v->borrow_mut = vt->kind == TY_MUTREF;
+                    }
+                } else if (rhs->kind == EX_BORROW || rhs->kind == EX_MUTBORROW) {
+                    Expr *operand = rhs->u.borrow.operand;
+                    VarSym *src = rhs->borrow_origin
+                        ? (VarSym *)rhs->borrow_origin : expr_root_var(operand);
+                    if (src && src->borrow_pending) {
+                        v->borrow_pending = true;
+                    } else if (src) {
+                        v->borrow_origin = src->borrow_origin ? src->borrow_origin : src;
+                        v->borrow_parent = (src->type &&
+                            (src->type->kind == TY_REF || src->type->kind == TY_MUTREF)) ? src : NULL;
+                        v->borrow_mut = vt->kind == TY_MUTREF;
+                    } else {
+                        sema_error(&tgt->tok, "reference values may only initialize a tracked local binding");
+                    }
+                } else {
+                    sema_error(&tgt->tok, "reference values may only initialize a tracked local binding");
+                }
+                validate_ref_holder_scope(v, &tgt->tok);
+            }
+        } else if (tgt->kind == EX_DEREF) {
+            if (tgt->u.deref.operand->kind != EX_VAR)
+                sema_error(&tgt->tok,
+                           "writing through nested dereferences requires reborrow tracking, which is not available");
+            const Type *pt = check_expr(sc, tgt->u.deref.operand);
+            if (pt && pt->kind == TY_REF)
+                sema_error(&tgt->tok, "cannot write through an immutable reference; use &mut");
+            else if (!pt || pt->kind != TY_MUTREF)
+                sema_error(&tgt->tok, "writing through a dereference requires a mutable reference");
+            tt = pt && pt->elem ? pt->elem : ty_mixed;
+            tgt->type = tt;
         } else if (tgt->kind == EX_INDEX || tgt->kind == EX_FIELD) {
+            Expr *base = tgt->kind == EX_INDEX ? tgt->u.index.obj : tgt->u.field.obj;
+            const Type *bt = check_expr(sc, base);
+            if ((bt && bt->kind == TY_REF) || expr_through_shared_ref(base))
+                sema_error(&tgt->tok, "cannot mutate through an immutable reference; use &mut");
             tt = check_expr(sc, tgt);
+            if (tgt->kind == EX_FIELD && tgt->u.field.sf &&
+                ((StructField *)tgt->u.field.sf)->is_weak &&
+                e->u.assign.op.kind != T_ASSIGN)
+                sema_error(&tgt->tok, "weak properties support plain assignment only");
+            if (vt && (vt->kind == TY_REF || vt->kind == TY_MUTREF))
+                sema_error(&tgt->tok, "references cannot be stored in fields or collection slots without lifetime tracking");
             /* element assignment on collections is allowed by runtime;
              * PHP-style: elements accept any value (arrays are dynamic) */
             if (tgt->kind == EX_INDEX) tt = NULL; /* skip element-type check */
-        } else if (tgt->kind == EX_DEREF) {
-            tt = check_expr(sc, tgt);
-            if (e->u.assign.op.kind != T_ASSIGN)
-                sema_error(&tgt->tok, "raw pointer stores currently require plain assignment");
         } else {
             tt = check_expr(sc, tgt);
             sema_error(&tgt->tok, "invalid assignment target");
+        }
+        if ((e->u.assign.op.kind == T_ASSIGN || e->u.assign.op.kind == T_QQASSIGN) &&
+            tt && tt->kind == TY_FN && tt->thread_safe_callback &&
+            e->u.assign.value)
+            validate_thread_callback(e->u.assign.value, vt, &tgt->tok,
+                                     "thread_callable assignment");
+        if (tgt->kind != EX_VAR && e->u.assign.value && vt &&
+            vt->kind != TY_REF && vt->kind != TY_MUTREF && type_is_mutable_alias(vt) &&
+            expr_through_shared_ref(e->u.assign.value))
+            sema_error(&tgt->tok,
+                       "cannot store mutable alias %s derived from a shared reference",
+                       type_to_string(vt));
+        /* i128 has no 64-bit boxing: refuse the lossy stores (see
+         * reject_i128_lossy). A plain `$a[0] = $wide;` lands here with the
+         * element type or NULL; an element slot is an hval, so check the
+         * container's element type explicitly when sema skipped it. */
+        if (tgt->kind == EX_INDEX && vt && vt->kind == TY_I128) {
+            const Type *ot = tgt->u.index.obj->type;
+            const Type *elem = ot && ot->kind == TY_MAP ? ot->val :
+                               ot && (ot->kind == TY_ARRAY || ot->kind == TY_VEC ||
+                                      ot->kind == TY_SET) ? ot->elem : NULL;
+            if (!elem || elem->kind != TY_I128)
+                sema_error(&tgt->tok,
+                           "cannot store i128 in an array element; convert with (int) or strval() first");
+        } else {
+            reject_i128_lossy(&e->tok, tt, vt, "cannot assign");
         }
         /* compound assignment: a .= b, a += b ... (??= behaves like =) */
         TokKind op = e->u.assign.op.kind;
@@ -2011,6 +3281,9 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             } else {
                 sema_error(&e->u.assign.op, "invalid operand types for compound assignment");
             }
+            if (op != T_DOTASSIGN && vt && vt->kind == TY_I128 &&
+                tt && tt->kind != TY_I128)
+                reject_i128_lossy(&e->tok, tt, vt, "compound assignment");
         }
         /* An empty array literal fits any array slot: `$xs = [];` is how a
          * typed list is cleared, and there are no elements to contradict the
@@ -2018,9 +3291,21 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         bool empty_lit = e->u.assign.value && e->u.assign.value->kind == EX_ARRAY_LIT &&
                          e->u.assign.value->u.arr.elems.len == 0 &&
                          e->u.assign.value->u.map.vals.len == 0;
-        if (tt && !empty_lit && !types_compatible(tt, vt) &&
+        if ((op == T_ASSIGN || op == T_QQASSIGN) && sema_type_is_linear(vt) &&
+            e->u.assign.value &&
+            (e->u.assign.value->kind == EX_VAR || e->u.assign.value->kind == EX_FIELD ||
+             e->u.assign.value->kind == EX_INDEX))
+            e->u.assign.value->is_move_source = true;
+        if (tt && !empty_lit && !value_fits_slot(tt, vt, e->u.assign.value) &&
             tt->kind != TY_MIXED && vt->kind != TY_MIXED)
             sema_error(&e->tok, "cannot assign %s to %s", type_to_string(vt), type_to_string(tt));
+        if (tt && sema_type_is_linear(vt) && !sema_type_is_linear(tt))
+            sema_error(&e->tok, "cannot assign ownership value %s to copyable type %s",
+                       type_to_string(vt), type_to_string(tt));
+        if (tt && sema_type_is_linear(tt) && !sema_type_is_linear(vt) &&
+            !value_fits_slot(tt, vt, e->u.assign.value))
+            sema_error(&e->tok, "cannot assign non-linear value %s to ownership type %s",
+                       type_to_string(vt), type_to_string(tt));
         e->type = tt ? tt : ty_mixed;
         return e->type;
     }
@@ -2038,6 +3323,16 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         const Type *b = check_expr(sc, e->u.tern.els);
         refine_restore(mark);
         e->type = types_compatible(a, b) ? a : (types_compatible(b, a) ? b : ty_mixed);
+        if (sema_type_is_linear(a) != sema_type_is_linear(b) ||
+            ((sema_type_is_linear(a) || sema_type_is_linear(b)) &&
+             !sema_type_is_linear(e->type)))
+            sema_error(&e->tok, "ternary arms cannot erase or mix ownership types");
+        /* The selected arm transfers its value into the ternary result. Mark
+         * each arm separately; borrow.c records the arms as exclusive paths. */
+        if (sema_type_is_linear(a) && expr_is_movable_place(e->u.tern.then))
+            e->u.tern.then->is_move_source = true;
+        if (sema_type_is_linear(b) && expr_is_movable_place(e->u.tern.els))
+            e->u.tern.els->is_move_source = true;
         return e->type;
     }
     case EX_MATCH: {
@@ -2090,6 +3385,8 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             push_facts(&af);
             const Type *bt = check_expr(sc, mc->body);
             refine_restore(mark);
+            if (sema_type_is_linear(bt) && expr_is_movable_place(mc->body))
+                mc->body->is_move_source = true;
             if (!rt) rt = bt;
             else if (!types_compatible(rt, bt)) rt = ty_mixed;
         }
@@ -2098,11 +3395,33 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             push_facts(&df);
             const Type *bt = check_expr(sc, e->u.matchexpr.dflt);
             refine_restore(mark);
+            if (sema_type_is_linear(bt) && expr_is_movable_place(e->u.matchexpr.dflt))
+                e->u.matchexpr.dflt->is_move_source = true;
             if (!rt) rt = bt;
         } else if (e->u.matchexpr.cases.len == 0) {
             sema_error(&e->tok, "match expression has no arms");
         }
         e->type = rt ? rt : ty_mixed;
+        if (sema_type_is_linear(e->type)) {
+            /* all selected arms must retain a compatible linear result */
+            for (size_t i = 0; i < e->u.matchexpr.cases.len; i++) {
+                MatchCase *mc = e->u.matchexpr.cases.items[i];
+                if (!sema_type_is_linear(mc->body->type))
+                    sema_error(&mc->body->tok, "match arms must preserve the ownership result type");
+            }
+            if (e->u.matchexpr.dflt && !sema_type_is_linear(e->u.matchexpr.dflt->type))
+                sema_error(&e->u.matchexpr.dflt->tok,
+                           "match arms must preserve the ownership result type");
+        } else {
+            bool has_linear_arm = false;
+            for (size_t i = 0; i < e->u.matchexpr.cases.len; i++)
+                if (sema_type_is_linear(((MatchCase *)e->u.matchexpr.cases.items[i])->body->type))
+                    has_linear_arm = true;
+            if (e->u.matchexpr.dflt && sema_type_is_linear(e->u.matchexpr.dflt->type))
+                has_linear_arm = true;
+            if (has_linear_arm)
+                sema_error(&e->tok, "match expression cannot erase an ownership value into a copyable result");
+        }
         return e->type;
     }
     case EX_CLOSURE: {
@@ -2135,6 +3454,7 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         fs.cur_class = sc->cur_class;
         fs.self_type = sc->self_type;
         fs.in_unsafe = sc->in_unsafe;
+        fs.enforce_memory_safety = fn->enforce_memory_safety;
         g_clo_body_seq[d] = fs.seq;
         /* declare real params */
         for (size_t i = 0; i < fn->params.len; i++) {
@@ -2142,6 +3462,12 @@ static const Type *check_expr(Scope *sc, Expr *e) {
             VarSym *v = scope_declare(&fs, pm->name, pm->resolved, pm->name_tok, pm->is_mut);
             pm->sym = v;
             v->is_param = true;
+            v->owner_fn = fn;
+            /* closures are called with hvals (hfn_t returns hval, arguments
+             * are boxed), so a 128-bit parameter has no representation */
+            if (pm->resolved && pm->resolved->kind == TY_I128)
+                sema_error(&pm->name_tok,
+                           "a closure cannot take an i128 parameter; convert with (int) or strval() first");
             /* PHP by-ref parameters alias the caller's variable: the callee
              * sees writes, the caller sees the callee's writes. Codegen passes
              * &slot (typed pointer); is_param_ref makes reads/writes emit
@@ -2164,6 +3490,14 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 sema_error(&pm->name_tok, "use(): undefined variable $%s", pm->name);
                 continue;
             }
+            /* a closure environment holds hvals; an i128 would lose its top
+             * half on the way in (and the captured read would see a string) */
+            if (outer->type && outer->type->kind == TY_I128) {
+                sema_error(&pm->name_tok,
+                           "cannot capture i128 variable $%s in a closure; convert with (int) or strval() first",
+                           pm->name);
+                continue;
+            }
             if (outer->is_global_alias || outer->is_program_global) {
                 /* `global $x;` + `use (&$x)`: the file-scope slot is already
                  * shared, so the closure body references it directly. Boxing
@@ -2172,6 +3506,13 @@ static const Type *check_expr(Scope *sc, Expr *e) {
                 if (fs.nvars < MAX_SCOPE) fs.vars[fs.nvars++] = outer;
                 continue;
             }
+            if (outer->type && (outer->type->kind == TY_REF || outer->type->kind == TY_MUTREF)) {
+                sema_error(&pm->name_tok,
+                           "closures cannot capture reference binding $%s without closure lifetime tracking",
+                           pm->name);
+                continue;
+            }
+            mark_heap_capture(sc, outer, &pm->name_tok, pm->by_ref);
             if (pm->by_ref && outer->is_param_ref) {
                 /* the parameter is a raw pointer into the caller's frame;
                  * sharing it with a closure needs a write-back on every exit,
@@ -2192,6 +3533,9 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         /* closures without an explicit return type infer it from their
          * first `return expr;` — like PHP's ReturnTypeWillChange, simple */
         if (!fn->ret) fn->ret = type_new(TY_MIXED);
+        else if (fn->ret->kind == TY_I128)
+            sema_error(&fn->name_tok,
+                       "a closure cannot return i128; closures return a dynamic value; convert with (int) or strval() first");
         for (size_t i = 0; i < fn->body.len; i++)
             check_stmt(&fs, fn->body.items[i]);
         fn->captures = g_clo_caps[d];
@@ -2199,40 +3543,63 @@ static const Type *check_expr(Scope *sc, Expr *e) {
         const Type *ret = fn->ret ? resolve_type(sc, fn->ret, fn->name_tok) : ty_void;
         ft->fn.ret = ret;
         fn->ftype = ft;
+        ft->closure_fn = fn;
         e->type = ft;
+        enqueue_borrow_fn(fn);
         g_clo_depth--;
         return e->type;
     }
     case EX_BORROW: case EX_MUTBORROW: {
         Expr *op = e->u.borrow.operand;
-        if (op->kind != EX_VAR) {
-            sema_error(&e->tok, "can only borrow variables (found %s expression)", expr_kind_name(op->kind));
+        if (!op || (op->kind != EX_VAR && op->kind != EX_FIELD &&
+                    op->kind != EX_DEREF)) {
+            sema_error(&e->tok, "can only borrow a variable, field, or dereferenced place (found %s expression)",
+                       expr_kind_name(op ? op->kind : EX_NULL));
             e->type = ty_mixed;
             return e->type;
         }
-        VarSym *v = scope_find(sc, op->u.var.name);
+        const Type *source_type = check_expr(sc, op);
+        VarSym *v = expr_root_var(op);
         if (!v) {
-            sema_error(&op->tok, "undefined variable $%s", op->u.var.name);
+            if (op->kind == EX_VAR)
+                sema_error(&op->tok, "undefined variable $%s", op->u.var.name);
+            else
+                sema_error(&op->tok, "cannot determine the owner of this field place");
             e->type = ty_mixed;
             return e->type;
         }
         if (g_clo_depth > 0 && v->decl_seq < g_clo_body_seq[g_clo_depth - 1])
             note_capture(v);
         bool is_mut = e->kind == EX_MUTBORROW;
-        if (is_mut && !v->is_mut)
+        bool reborrow = v->type &&
+            (v->type->kind == TY_REF || v->type->kind == TY_MUTREF);
+    if (!reborrow && heap_alias_captured(sc, v) && type_is_mutable_alias(v->type))
+            sema_error(&e->tok,
+                       "cannot borrow object $%s while a closure may retain an alias; capture lifetime tracking is unavailable",
+                       v->name);
+        if (is_mut && reborrow && v->type->kind != TY_MUTREF)
+            sema_error(&e->tok, "cannot mutably reborrow shared reference $%s", v->name);
+        if (is_mut && v->shared_alias)
+            sema_error(&e->tok,
+                       "cannot create a mutable borrow from $%s because it aliases data reached through a shared reference",
+                       v->name);
+        if (is_mut && !reborrow && !v->is_mut)
             sema_error(&e->tok, "cannot mutably borrow immutable $%s", v->name);
-        /* borrow checker rule: many readers XOR one writer */
-        int existing = loans_of(v);
-        if (is_mut && existing)
-            sema_error(&e->tok, "cannot borrow $%s as mutable because it is also borrowed as immutable",
-                       v->name);
-        if (!is_mut && (existing & 2))
-            sema_error(&e->tok, "cannot borrow $%s as immutable because it is also borrowed as mutable",
-                       v->name);
-        loans_push(v, is_mut, e->tok.line);
-        op->u.var.sym = v; /* codegen needs the symbol to name the C var */
+        if (op->kind == EX_VAR) op->u.var.sym = v; /* codegen needs the resolved slot */
         Type *t = type_new(is_mut ? TY_MUTREF : TY_REF);
-        t->elem = v->type;
+        /* Borrowing the reference variable itself reborrows its referent.
+         * Borrowing a projected field through that reference instead has the
+         * field's type, while retaining the same underlying loan origin. */
+        t->elem = reborrow && op->kind == EX_VAR ? v->type->elem : source_type;
+        e->borrow_origin = v->borrow_origin ? (void *)v->borrow_origin : (void *)v;
+        e->borrow_parent = reborrow ? v : NULL;
+        if (reborrow && op->kind == EX_FIELD)
+            e->borrow_place = v->borrow_place
+                ? compose_borrow_projection(v->borrow_place, op) : op;
+        else if (reborrow && op->kind == EX_DEREF)
+            e->borrow_place = v->borrow_place ? v->borrow_place : op;
+        else
+            e->borrow_place = reborrow && v->borrow_place ? v->borrow_place : op;
         e->type = t;
         return e->type;
     }
@@ -2251,10 +3618,31 @@ static const Type *check_expr(Scope *sc, Expr *e) {
     case EX_CAST: {
         const Type *from = check_expr(sc, e->u.cast.operand);
         const Type *to = resolve_type(sc, (Type *)e->u.cast.to, e->u.cast.ty_tok);
+        if ((sema_type_is_linear(from) || sema_type_is_linear(to)) &&
+            !types_equal(from, to))
+            sema_error(&e->tok,
+                       "casts cannot change an ownership type; use an explicit move with the same type");
+        if (from && (from->kind == TY_REF || from->kind == TY_MUTREF))
+            sema_error(&e->tok, "references cannot be cast because casts would bypass lifetime checking");
         if (to->kind == TY_PTR && !sc->in_unsafe)
             sema_error(&e->tok, "cast to raw pointer '%s' requires an unsafe block", type_to_string(to));
         if (to->kind == TY_PTR && !type_is_pointerish(from->kind) && from->kind != TY_INT)
             sema_error(&e->tok, "cannot cast %s to raw pointer", type_to_string(from));
+        /* i128 only converts to scalars (and to another i128); anything else
+         * would have to go through an hval, which has 64 bits */
+        if (from && from->kind == TY_I128) {
+            switch (to->kind) {
+            case TY_INT: case TY_I8: case TY_I16: case TY_I32: case TY_I64:
+            case TY_I128: case TY_FLOAT: case TY_F32: case TY_F64:
+            case TY_BOOL: case TY_STRING:
+                break;
+            default:
+                sema_error(&e->tok,
+                           "cannot cast i128 to %s; convert with (int) or strval() first",
+                           type_to_string(to));
+                break;
+            }
+        }
         e->type = to;
         return e->type;
     }
@@ -2267,6 +3655,17 @@ static const Type *check_expr(Scope *sc, Expr *e) {
     }
     e->type = ty_mixed;
     return e->type;
+}
+
+/* Parser recovery and a few partially-built expressions can leave an inner
+ * checker without a type. Keep that representation local: every caller of
+ * check_expr receives a real error-tolerant type and can keep diagnosing. */
+static const Type *check_expr(Scope *sc, Expr *e) {
+    if (!e) return ty_mixed;
+    const Type *t = check_expr_inner(sc, e);
+    if (!t) t = ty_mixed;
+    e->type = t;
+    return t;
 }
 
 const char *expr_kind_name(ExprKind k) {
@@ -2320,6 +3719,99 @@ static bool type_is_condition(const Type *t) {
 /* ---------------- statements ---------------- */
 static void check_block(Scope *sc, PtrVec stmts);
 
+/* Find a direct assignment to a variable in a branch.  If both arms of an
+ * if assign a previously unseen name, PHP-style function scope makes that
+ * binding available after the if.  Predeclare it in the enclosing scope so
+ * both assignments and later reads resolve to the same VarSym. */
+static Expr *if_direct_assignment(PtrVec stmts, const char *name) {
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *stmt = stmts.items[i];
+        if (!stmt || stmt->kind != ST_EXPR || !stmt->u.expr.expr) continue;
+        Expr *expr = stmt->u.expr.expr;
+        if (expr->kind == EX_ASSIGN && expr->u.assign.target &&
+            expr->u.assign.target->kind == EX_VAR &&
+            expr->u.assign.target->u.var.name == intern(name))
+            return expr;
+    }
+    return NULL;
+}
+
+/* The scalar type an expression will certainly have, judged before it is
+ * checked and without side effects: literals, typed variables already in
+ * scope, builtins with a fixed int return, and integer arithmetic of those.
+ * NULL means "not sure"; the caller then keeps the dynamic slot. */
+static const Type *peek_scalar_type(Scope *sc, Expr *e) {
+    if (!e) return NULL;
+    switch (e->kind) {
+    case EX_INT: return ty_int;
+    case EX_FLOAT: return ty_float;
+    case EX_BOOL: return ty_bool;
+    case EX_VAR: {
+        VarSym *v = scope_find(sc, e->u.var.name);
+        if (!v || !v->type || v->captured_byref) return NULL;
+        if (v->type->kind == TY_INT) return ty_int;
+        if (v->type->kind == TY_FLOAT) return ty_float;
+        if (v->type->kind == TY_BOOL) return ty_bool;
+        return NULL;
+    }
+    case EX_CALL: {
+        Expr *callee = e->u.call.fn;
+        if (!callee || callee->kind != EX_VAR) return NULL;
+        const char *name = callee->u.var.name;
+        if (!callee->u.var.bare_name && scope_find(sc, name)) return NULL;
+        if (find_function(name)) return NULL;
+        const Builtin *b = builtin_lookup(name);
+        if (!b || b->ret != ty_int) return NULL;
+        if (b->shape == B_MAXMIN || b->shape == B_ABS) return NULL;
+        return ty_int;
+    }
+    case EX_UN:
+        return NULL;
+    case EX_BIN: {
+        switch (e->u.bin.op.kind) {
+        case T_PLUS: case T_MINUS: case T_STAR: case T_AMP: case T_PIPE:
+        case T_CARET: case T_SHL: case T_SHR:
+            break;
+        default:
+            return NULL;
+        }
+        const Type *l = peek_scalar_type(sc, e->u.bin.l);
+        const Type *r = peek_scalar_type(sc, e->u.bin.r);
+        return (l == ty_int && r == ty_int) ? ty_int : NULL;
+    }
+    default:
+        return NULL;
+    }
+}
+
+static void promote_if_definite_assignments(Scope *sc, PtrVec then_stmts,
+                                            PtrVec else_stmts) {
+    for (size_t i = 0; i < then_stmts.len; i++) {
+        Stmt *stmt = then_stmts.items[i];
+        if (!stmt || stmt->kind != ST_EXPR || !stmt->u.expr.expr) continue;
+        Expr *expr = stmt->u.expr.expr;
+        if (expr->kind != EX_ASSIGN || !expr->u.assign.target ||
+            expr->u.assign.target->kind != EX_VAR) continue;
+        const char *name = expr->u.assign.target->u.var.name;
+        Expr *other = scope_find(sc, name) ? NULL : if_direct_assignment(else_stmts, name);
+        if (!other) continue;
+        /* Both arms certainly store the same scalar type: the slot gets that
+         * type instead of a dynamic one (no boxing on every use). */
+        const Type *slot = ty_mixed;
+        if (expr->u.assign.op.kind == T_ASSIGN && other->u.assign.op.kind == T_ASSIGN &&
+            !expr->u.assign.ann && !other->u.assign.ann) {
+            const Type *a = peek_scalar_type(sc, expr->u.assign.value);
+            const Type *b = peek_scalar_type(sc, other->u.assign.value);
+            if (a && a == b) slot = a;
+        }
+        VarSym *v = scope_declare(sc, name, slot, expr->u.assign.target->tok, true);
+        if (!v) continue;
+        v->is_auto = true;
+        if (sc->cur_fn == NULL && !program_global_find(name))
+            ptrvec_push(&g_program_globals, v);
+    }
+}
+
 static void check_stmt(Scope *sc, Stmt *s) {
     switch (s->kind) {
     case ST_EXPR:
@@ -2345,6 +3837,12 @@ static void check_stmt(Scope *sc, Stmt *s) {
             if (!gv) gv = program_global_find(name);
             if (!gv) gv = program_global_get(name, tok);
             else if (!program_global_find(name)) ptrvec_push(&g_program_globals, gv);
+            /* file-scope `global` storage is an hval slot */
+            if (gv->type && gv->type->kind == TY_I128) {
+                sema_error(&tok, "cannot share i128 variable $%s through global; convert with (int) or strval() first",
+                           name);
+                break;
+            }
             gv->is_mut = true;
             gv->is_auto = true;
             gv->is_program_global = true;   /* storage becomes file-scope */
@@ -2384,7 +3882,11 @@ static void check_stmt(Scope *sc, Stmt *s) {
         const Type *t = NULL;
         if (s->u.let.ann) {
             t = resolve_type(sc, s->u.let.ann, s->tok);
-            if (!types_compatible(t, it) && t->kind != TY_MIXED)
+            if (sema_type_is_linear(it) && !sema_type_is_linear(t))
+                sema_error(&s->tok,
+                           "cannot initialize copyable $%s with ownership value %s",
+                           s->u.let.name, type_to_string(it));
+            if (!value_fits_slot(t, it, s->u.let.init) && t->kind != TY_MIXED)
                 sema_error(&s->tok, "initial value for $%s has type %s, expected %s",
                            s->u.let.name, type_to_string(it), type_to_string(t));
         } else {
@@ -2393,15 +3895,84 @@ static void check_stmt(Scope *sc, Stmt *s) {
         }
         VarSym *v = scope_declare(sc, s->u.let.name, t, s->u.let.name_tok, s->u.let.is_mut);
         s->u.let.sym = v;
-        /* move semantics for own<Rc> */
-        if (it && (it->kind == TY_OWN || it->kind == TY_RC) &&
-            s->u.let.init->kind == EX_VAR) {
-            VarSym *src = scope_find(sc, s->u.let.init->u.var.name);
-            if (src && !s->u.let.is_mut) {
-                /* moving out of a non-mut binding is fine (copy for Rc, move for own) */
-                src->moved_from = true;
+        if (t && t->kind == TY_FN && t->thread_safe_callback)
+            validate_thread_callback(s->u.let.init, it, &s->tok,
+                                     "thread_callable binding");
+        if (type_can_contain_heap_alias(t)) {
+            Expr *init = s->u.let.init;
+            if (init && init->kind == EX_VAR) {
+                VarSym *src = init->u.var.sym;
+                bool source_was_unaliased = src && !src->is_mut && !src->alias_unknown;
+                if (!v->is_mut && source_was_unaliased)
+                    v->alias_origin = src->alias_origin ? src->alias_origin : src;
+                else
+                    v->alias_unknown = true;
+                if (src) src->alias_unknown = true;
+            } else if (!expr_is_fresh_heap_value(init)) {
+                v->alias_unknown = true;
             }
         }
+        if (it && (it->kind == TY_REF || it->kind == TY_MUTREF)) {
+            if (!t || (t->kind != TY_REF && t->kind != TY_MUTREF))
+                sema_error(&s->tok,
+                           "cannot erase a reference lifetime by storing the reference as %s",
+                           type_to_string(t ? t : ty_mixed));
+            if (s->u.let.init->kind == EX_BORROW || s->u.let.init->kind == EX_MUTBORROW) {
+                Expr *borrow = s->u.let.init;
+                Expr *operand = borrow->u.borrow.operand;
+                VarSym *src = borrow->borrow_origin
+                    ? (VarSym *)borrow->borrow_origin : expr_root_var(operand);
+                if (!src) {
+                    sema_error(&s->tok, "cannot determine the lifetime of this borrow");
+                } else if (src->borrow_pending) {
+                    v->borrow_pending = true;
+                } else {
+                    v->borrow_origin = borrow->borrow_origin
+                        ? borrow->borrow_origin : (src->borrow_origin ? src->borrow_origin : src);
+                    v->borrow_parent = borrow->borrow_parent ? borrow->borrow_parent :
+                        ((operand->kind == EX_VAR && src->type &&
+                          (src->type->kind == TY_REF || src->type->kind == TY_MUTREF)) ? src : NULL);
+                    v->borrow_place = borrow->borrow_place;
+                    v->borrow_mut = it->kind == TY_MUTREF;
+                }
+            } else if (s->u.let.init->kind == EX_VAR) {
+                VarSym *src = scope_find(sc, s->u.let.init->u.var.name);
+                if (src && src->type &&
+                    (src->type->kind == TY_REF || src->type->kind == TY_MUTREF)) {
+                    if (src->borrow_pending) {
+                        v->borrow_pending = true;
+                    } else {
+                        v->borrow_origin = src->borrow_origin ? src->borrow_origin : src;
+                        v->borrow_parent = src;
+                        v->borrow_place = src->borrow_place;
+                        v->borrow_mut = it->kind == TY_MUTREF;
+                    }
+                } else {
+                    sema_error(&s->tok, "cannot track the lifetime of this reference value");
+                }
+            } else if (s->u.let.init->borrow_origin) {
+                v->borrow_origin = s->u.let.init->borrow_origin;
+                v->borrow_parent = s->u.let.init->borrow_parent;
+                v->borrow_place = s->u.let.init->borrow_place;
+                v->borrow_mut = it->kind == TY_MUTREF;
+            } else if (target_returns_ref(ref_return_target(s->u.let.init))) {
+                /* A forward-declared callee's borrow-return summary is not
+                 * known until all function bodies have been checked. */
+                v->borrow_pending = true;
+            } else {
+                sema_error(&s->tok, "cannot store a reference with an unknown lifetime");
+            }
+        }
+        if (it && it->kind != TY_REF && it->kind != TY_MUTREF &&
+            type_is_mutable_alias(it) && expr_through_shared_ref(s->u.let.init))
+            v->shared_alias = true;
+        validate_ref_holder_scope(v, &s->tok);
+        /* Storing a linear value consumes its source place. */
+        if (it && sema_type_is_linear(s->u.let.init->type) &&
+            types_compatible(it, s->u.let.init->type) &&
+            (s->u.let.init->kind == EX_VAR || s->u.let.init->kind == EX_FIELD ||
+             s->u.let.init->kind == EX_INDEX))
+            s->u.let.init->is_move_source = true;
         s->u.let.init->is_stmt_value = false;
         (void)v;
         break;
@@ -2410,12 +3981,50 @@ static void check_stmt(Scope *sc, Stmt *s) {
         const Type *rt = sc->cur_fn && sc->cur_fn->ret ? resolve_type(sc, sc->cur_fn->ret, s->tok) : ty_void;
         if (s->u.ret.value) {
             const Type *vt = check_expr(sc, s->u.ret.value);
+            if (vt && vt->kind != TY_REF && vt->kind != TY_MUTREF &&
+                type_is_mutable_alias(vt) && expr_through_shared_ref(s->u.ret.value))
+                sema_error(&s->tok,
+                           "cannot return mutable alias %s derived from a shared reference",
+                           type_to_string(vt));
+            if (sema_type_is_linear(vt) &&
+                (s->u.ret.value->kind == EX_VAR || s->u.ret.value->kind == EX_FIELD ||
+                 s->u.ret.value->kind == EX_INDEX))
+                s->u.ret.value->is_move_source = true;
+            if (vt && (vt->kind == TY_REF || vt->kind == TY_MUTREF)) {
+                VarSym *origin = NULL;
+                if (s->u.ret.value->borrow_origin)
+                    origin = s->u.ret.value->borrow_origin;
+                else if (s->u.ret.value->kind == EX_BORROW || s->u.ret.value->kind == EX_MUTBORROW)
+                    origin = s->u.ret.value->borrow_origin
+                        ? (VarSym *)s->u.ret.value->borrow_origin
+                        : expr_root_var(s->u.ret.value->u.borrow.operand);
+                else if (s->u.ret.value->kind == EX_VAR) {
+                    VarSym *rv = scope_find(sc, s->u.ret.value->u.var.name);
+                    origin = rv ? (VarSym *)rv->borrow_origin : NULL;
+                    if (rv && rv->is_param) origin = rv;
+                }
+                bool pending_call = target_returns_ref(
+                    ref_return_target(s->u.ret.value));
+                bool pending_local = s->u.ret.value->kind == EX_VAR &&
+                    s->u.ret.value->u.var.sym &&
+                    ((VarSym *)s->u.ret.value->u.var.sym)->borrow_pending;
+                if (pending_call || pending_local)
+                    s->u.ret.value->borrow_lifetime_deferred = true;
+                if (!borrow_origin_outlives_function(origin) && !pending_call && !pending_local)
+                    sema_error(&s->tok, "cannot return a reference to a local variable; the referent would not live long enough");
+            }
             /* an hval-typed value (untyped property, mixed call, map entry)
              * converts at runtime — PHP-style dynamic returns are allowed */
+            reject_i128_lossy(&s->tok, rt, vt, "cannot return");
             bool boxed = vt && (vt->kind == TY_MIXED || vt->kind == TY_OPTION ||
                                 vt->kind == TY_RESULT);
-            if (rt && rt->kind != TY_VOID && rt->kind != TY_MIXED && !boxed &&
-                !types_compatible(rt, vt))
+            if (sema_type_is_linear(vt) && !sema_type_is_linear(rt))
+                sema_error(&s->tok,
+                           "cannot return ownership value %s through copyable return type %s",
+                           type_to_string(vt), type_to_string(rt ? rt : ty_mixed));
+            if (rt && rt->kind != TY_VOID && rt->kind != TY_MIXED &&
+                (!boxed || sema_type_is_linear(rt) || sema_type_is_linear(vt)) &&
+                !value_fits_slot(rt, vt, s->u.ret.value))
                 sema_error(&s->tok, "return type mismatch: expected %s, got %s",
                            type_to_string(rt), type_to_string(vt));
             if (rt && rt->kind == TY_VOID)
@@ -2436,17 +4045,22 @@ static void check_stmt(Scope *sc, Stmt *s) {
         const Type *ct = check_expr(sc, s->u.if_.cond);
         if (!type_is_condition(ct))
             sema_error(&s->tok, "if condition must be bool, got %s", type_to_string(ct));
+        promote_if_definite_assignments(sc, s->u.if_.then, s->u.if_.els);
         /* what the condition proves holds inside the branch it guards */
         FactSet tf = {0}, ff = {0};
         collect_facts(s->u.if_.cond, &tf, &ff);
         int mark = refine_mark();
         unsigned then_seq = g_write_seq;
         push_facts(&tf);
-        check_block(sc, s->u.if_.then);
+        Scope then_sc;
+        scope_child_init(&then_sc, sc);
+        check_block(&then_sc, s->u.if_.then);
         refine_restore(mark);
         unsigned else_seq = g_write_seq;
         push_facts(&ff);
-        check_block(sc, s->u.if_.els);
+        Scope else_sc;
+        scope_child_init(&else_sc, sc);
+        check_block(&else_sc, s->u.if_.els);
         refine_restore(mark);
         /* A branch that never falls through - return, throw, break,
          * continue - leaves only one way to reach the code below the
@@ -2479,14 +4093,18 @@ static void check_stmt(Scope *sc, Stmt *s) {
         collect_facts(s->u.while_.cond, &tf, &ff);
         int mark = refine_mark();
         push_facts(&tf);
-        check_block(sc, s->u.while_.body);
+        Scope body_sc;
+        scope_child_init(&body_sc, sc);
+        check_block(&body_sc, s->u.while_.body);
         refine_restore(mark);
         sc->loop_depth--;
         break;
     }
     case ST_DO: {
         sc->loop_depth++;
-        check_block(sc, s->u.do_.body);
+        Scope body_sc;
+        scope_child_init(&body_sc, sc);
+        check_block(&body_sc, s->u.do_.body);
         sc->loop_depth--;
         const Type *ct = check_expr(sc, s->u.do_.cond);
         if (!type_is_condition(ct))
@@ -2553,7 +4171,9 @@ static void check_stmt(Scope *sc, Stmt *s) {
                 fact_add(&tf, subjv, sole);
                 push_facts(&tf);
             }
-            check_block(sc, cse->body);
+            Scope case_sc;
+            scope_child_init(&case_sc, sc);
+            check_block(&case_sc, cse->body);
             refine_restore(mark);
             prev_falls_out = !block_always_exits(cse->body);
         }
@@ -2571,14 +4191,24 @@ static void check_stmt(Scope *sc, Stmt *s) {
         for (size_t i = 0; i < s->u.for_.step.len; i++)
             check_stmt(sc, s->u.for_.step.items[i]);
         sc->loop_depth++;
-        check_block(sc, s->u.for_.body);
+        Scope body_sc;
+        scope_child_init(&body_sc, sc);
+        check_block(&body_sc, s->u.for_.body);
         sc->loop_depth--;
         break;
     }
     case ST_FOREACH: {
         const Type *it = check_expr(sc, s->u.foreach.iter);
+        if (sema_type_is_linear(it))
+            sema_error(&s->tok, "foreach cannot copy elements from a collection containing ownership values");
         const Type *elem = NULL, *key = NULL;
-        if (it->kind == TY_ARRAY || it->kind == TY_VEC || it->kind == TY_SET) {
+        if (it->kind == TY_ARRAY) {
+            /* an `array` becomes a keyed map as soon as a string key is
+             * assigned (PHP semantics), so its keys are dynamic: typing them
+             * int read a string key's pointer as a number */
+            elem = it->elem;
+            key = ty_mixed;
+        } else if (it->kind == TY_VEC || it->kind == TY_SET) {
             elem = it->elem;
             key = ty_int;
         } else if (it->kind == TY_MAP) {
@@ -2607,6 +4237,23 @@ static void check_stmt(Scope *sc, Stmt *s) {
         if (s->u.foreach.kvar) scope_declare(&inner, s->u.foreach.kvar, key, s->u.foreach.var_tok, false);
         s->u.foreach.vsym = inner.vars[inner.nvars - (s->u.foreach.kvar ? 2 : 1)];
         if (s->u.foreach.kvar) s->u.foreach.ksym = inner.vars[inner.nvars - 1];
+        /* foreach copies the element slot, but heap values inside that slot
+         * remain aliases of values reachable through the collection (and may
+         * also alias values elsewhere). The runtime stores class/container
+         * values as pointers, so treating the loop binding as a fresh owner
+         * would let writes through it bypass a live borrow. */
+        if (elem && type_is_mutable_alias(elem))
+            ((VarSym *)s->u.foreach.vsym)->alias_unknown = true;
+        if (s->u.foreach.ksym && key && type_is_mutable_alias(key))
+            ((VarSym *)s->u.foreach.ksym)->alias_unknown = true;
+        if (expr_through_shared_ref(s->u.foreach.iter)) {
+            if (elem && elem->kind != TY_REF && elem->kind != TY_MUTREF &&
+                type_is_mutable_alias(elem))
+                ((VarSym *)s->u.foreach.vsym)->shared_alias = true;
+            if (s->u.foreach.ksym && key && key->kind != TY_REF && key->kind != TY_MUTREF &&
+                type_is_mutable_alias(key))
+                ((VarSym *)s->u.foreach.ksym)->shared_alias = true;
+        }
         check_block(&inner, s->u.foreach.body);
         break;
     }
@@ -2626,6 +4273,8 @@ static void check_stmt(Scope *sc, Stmt *s) {
         break;
     }
     case ST_UNSAFE_BLOCK: {
+        if (sc->enforce_memory_safety)
+            sema_error(&s->tok, "unsafe block is forbidden by declare(enforce_memory_safety=1)");
         Scope inner;
         scope_init(&inner, sc);
         inner.cur_fn = sc->cur_fn;
@@ -2637,7 +4286,9 @@ static void check_stmt(Scope *sc, Stmt *s) {
         break;
     }
     case ST_TRY: {
-        check_block(sc, s->u.try.body);
+        Scope try_sc;
+        scope_child_init(&try_sc, sc);
+        check_block(&try_sc, s->u.try.body);
         for (size_t i = 0; i < s->u.try.catches.len; i++) {
             CatchClause *cc = s->u.try.catches.items[i];
             Scope inner;
@@ -2672,7 +4323,6 @@ static void check_block(Scope *sc, PtrVec stmts) {
     for (size_t i = 0; i < stmts.len; i++)
         check_stmt(sc, stmts.items[i]);
     refine_restore(mark);
-    loans_release_all();
 }
 
 /* ---------------- function & class bodies ---------------- */
@@ -2685,22 +4335,37 @@ static bool fn_has_value_return(AstFn *fn) {
 }
 
 static void check_fn_body(Scope *parent, AstFn *fn, const Type *self_type) {
+    /* The checker state is shared across declarations. Never let a loan from
+     * a previous function influence this function, or escape this one. */
     Scope sc;
     scope_init(&sc, parent);
     sc.cur_fn = fn;
     sc.self_type = self_type;
+    sc.enforce_memory_safety = fn->enforce_memory_safety;
     for (size_t i = 0; i < fn->params.len; i++) {
         Param *pm = fn->params.items[i];
         const Type *pt = pm->type ? resolve_type(&sc, pm->type, pm->name_tok) : ty_mixed;
         pm->resolved = pt;
         VarSym *v = scope_declare(&sc, pm->name, pt, pm->name_tok, pm->is_mut);
         v->is_param = true;
+        v->owner_fn = fn;
         /* by-ref param: alias the caller's slot (see check_fn_body) */
         if (pm->by_ref) {
             v->is_param_ref = true;
             v->is_mut = true;
         }
         pm->sym = v;
+    }
+    if (fn->is_method && self_type) {
+        Type *receiver_ref = type_new(TY_MUTREF);
+        receiver_ref->elem = self_type;
+        VarSym *receiver = scope_declare(&sc, s_this, receiver_ref,
+                                        fn->name_tok, true);
+        receiver->is_param = true;
+        receiver->owner_fn = fn;
+        fn->this_sym = receiver;
+    } else {
+        fn->this_sym = NULL;
     }
     /* PHP-style: a function with no written return type is checked as if it
      * returned mixed when any statement returns a value (its type is then
@@ -2714,6 +4379,7 @@ static void check_fn_body(Scope *parent, AstFn *fn, const Type *self_type) {
     for (size_t i = 0; i < fn->body.len; i++)
         check_stmt(&sc, fn->body.items[i]);
     refine_restore(rmark);
+    enqueue_borrow_fn(fn);
     if (fn->ret && fn->ret->kind != TY_VOID && fn->body.len) {
         /* not a full flow analysis; simple check: last stmt return? */
         Stmt *last = fn->body.items[fn->body.len - 1];
@@ -2733,7 +4399,13 @@ static void check_class(AstClass *c) {
     for (size_t i = 0; i < c->fields.len; i++) {
         StructField *f = c->fields.items[i];
         if (f->type) {
-            resolve_type(&sc, f->type, f->name_tok);
+            const Type *ft = resolve_type(&sc, f->type, f->name_tok);
+            if (f->is_weak && ft->kind != TY_CLASS && ft->kind != TY_INTERFACE)
+                sema_error(&f->name_tok, "weak property $%s must have a class or interface type", f->name);
+            if (f->is_weak && f->is_static)
+                sema_error(&f->name_tok, "weak properties cannot be static");
+            if (f->is_weak && f->dflt && f->dflt->kind != EX_NULL)
+                sema_error(&f->name_tok, "weak property defaults must be null");
         } else if (f->dflt) {
             const Type *dt = check_expr(&sc, f->dflt);
             /* `pub $cb = null;` is a dynamic slot: the field holds a
@@ -2743,6 +4415,8 @@ static void check_class(AstClass *c) {
         } else {
             sema_error(&f->name_tok, "field $%s needs a type annotation", f->name);
         }
+        if (f->is_weak && !f->type)
+            sema_error(&f->name_tok, "weak property $%s needs an explicit class type", f->name);
     }
     /* methods */
     for (size_t i = 0; i < c->methods.len; i++) {
@@ -2762,9 +4436,877 @@ static void check_class(AstClass *c) {
     }
 }
 
+/* Resolve reference-returning calls after every function body has a borrow
+ * summary. This makes forward calls behave like calls to earlier functions. */
+static bool resolve_ref_calls_stmt(Stmt *s);
+
+static bool resolve_ref_call_summary(Expr *e, AstFn *target, PtrVec args) {
+    if (!e || !target_returns_ref(target)) return false;
+    int index = fn_return_ref_param(target);
+    if (index == -3 && e->kind == EX_METHOD) {
+        Expr *receiver_expr = e->u.method.obj;
+        VarSym *src = expr_root_var(receiver_expr);
+        if (!src) return false;
+        VarSym *origin = src->borrow_origin ? (VarSym *)src->borrow_origin : src;
+        VarSym *parent = src->type &&
+            (src->type->kind == TY_REF || src->type->kind == TY_MUTREF) ? src : NULL;
+        if (e->has_borrow_receiver && e->borrow_origin == origin &&
+            e->borrow_parent == parent) return false;
+        const Expr *receiver_place = src->borrow_origin ? src->borrow_place :
+            (parent ? (src->borrow_place ? src->borrow_place : receiver_expr)
+                    : receiver_expr);
+        if (receiver_expr && receiver_expr->kind != EX_VAR &&
+            src->borrow_origin && src->borrow_place)
+            receiver_place = compose_borrow_projection(src->borrow_place, receiver_expr);
+        const Expr *relative_place = fn_return_receiver_place(target);
+        const Expr *place = relative_place && receiver_place
+            ? compose_borrow_projection(receiver_place, relative_place)
+            : receiver_place;
+        if (e->type->kind == TY_MUTREF &&
+            (parent ? src->type->kind != TY_MUTREF : !src->is_mut)) {
+            sema_error(&e->tok,
+                       "cannot return a mutable borrow from method %s() through immutable receiver",
+                       target->name);
+        }
+        e->has_borrow_receiver = true;
+        e->has_borrow_param = false;
+        e->borrow_param_index = -1;
+        e->borrow_origin = origin;
+        e->borrow_parent = parent;
+        e->borrow_place = place;
+        return true;
+    }
+    if (index >= 0 && (size_t)index < args.len) {
+        Expr *arg = args.items[index];
+        VarSym *src = arg && arg->kind == EX_VAR ? (VarSym *)arg->u.var.sym : NULL;
+        VarSym *origin = src && !src->borrow_pending
+            ? (VarSym *)(src->borrow_origin ? src->borrow_origin : src) : NULL;
+        VarSym *parent = src && src->type &&
+            (src->type->kind == TY_REF || src->type->kind == TY_MUTREF) ? src : NULL;
+        if (!src && arg && arg->borrow_origin) {
+            VarSym *borrowed = (VarSym *)arg->borrow_origin;
+            if (!borrowed->borrow_pending) {
+                origin = borrowed;
+                parent = (VarSym *)arg->borrow_parent;
+            }
+        } else if (!src && arg &&
+                   (arg->kind == EX_BORROW || arg->kind == EX_MUTBORROW)) {
+            VarSym *borrowed = expr_root_var(arg->u.borrow.operand);
+            if (borrowed && !borrowed->borrow_pending)
+                origin = borrowed->borrow_origin ?
+                    (VarSym *)borrowed->borrow_origin : borrowed;
+        }
+        const Expr *place = src ? src->borrow_place : (arg ? arg->borrow_place : NULL);
+        if (!origin) return false;
+        if (e->has_borrow_param && e->borrow_param_index == index &&
+            e->borrow_origin == origin && e->borrow_parent == parent &&
+            e->borrow_place == place) return false;
+        e->borrow_param_index = index;
+        e->has_borrow_param = true;
+        e->borrow_origin = origin;
+        e->borrow_parent = parent;
+        e->borrow_place = place;
+        return true;
+    }
+    VarSym *global = fn_return_ref_global(target);
+    if (global && (e->borrow_origin != global || e->borrow_parent ||
+                   e->has_borrow_param)) {
+        e->borrow_origin = global;
+        e->borrow_parent = NULL;
+        e->borrow_place = NULL;
+        e->has_borrow_param = false;
+        return true;
+    }
+    return false;
+}
+
+static bool resolve_ref_calls_expr(Expr *e) {
+    if (!e) return false;
+    bool changed = false;
+#define REX(x) do { if (resolve_ref_calls_expr((x))) changed = true; } while (0)
+    switch (e->kind) {
+    case EX_CALL:
+        REX(e->u.call.fn);
+        for (size_t i = 0; i < e->u.call.args.len; i++) REX(e->u.call.args.items[i]);
+        if (resolve_ref_call_summary(e, e->u.call.target, e->u.call.args)) changed = true;
+        break;
+    case EX_METHOD:
+        REX(e->u.method.obj);
+        for (size_t i = 0; i < e->u.method.args.len; i++) REX(e->u.method.args.items[i]);
+        if (resolve_ref_call_summary(e, e->u.method.target, e->u.method.args)) changed = true;
+        break;
+    case EX_STATIC:
+        for (size_t i = 0; i < e->u.staticcall.args.len; i++) REX(e->u.staticcall.args.items[i]);
+        if (resolve_ref_call_summary(e, e->u.staticcall.target, e->u.staticcall.args)) changed = true;
+        break;
+    case EX_NEW:
+        for (size_t i = 0; i < e->u.newexpr.args.len; i++) REX(e->u.newexpr.args.items[i]);
+        break;
+    case EX_INDEX: REX(e->u.index.obj); REX(e->u.index.idx); break;
+    case EX_FIELD: REX(e->u.field.obj); break;
+    case EX_BIN: REX(e->u.bin.l); REX(e->u.bin.r); REX(e->u.bin.slice_hi); break;
+    case EX_UN: REX(e->u.un.operand); break;
+    case EX_ASSIGN:
+        REX(e->u.assign.target);
+        REX(e->u.assign.value);
+        if (e->u.assign.target && e->u.assign.target->kind == EX_VAR && e->u.assign.value) {
+            VarSym *v = (VarSym *)e->u.assign.target->u.var.sym;
+            Expr *rhs = e->u.assign.value;
+            VarSym *src = NULL;
+            VarSym *origin = NULL;
+            VarSym *parent = NULL;
+            const Expr *place = NULL;
+            if (rhs->borrow_origin) {
+                origin = (VarSym *)rhs->borrow_origin;
+                parent = (VarSym *)rhs->borrow_parent;
+                place = rhs->borrow_place;
+            } else if (rhs->kind == EX_VAR) {
+                src = (VarSym *)rhs->u.var.sym;
+                if (src && !src->borrow_pending) {
+                    origin = src->borrow_origin ? (VarSym *)src->borrow_origin : src;
+                    parent = src;
+                    place = src->borrow_place;
+                }
+            } else if (rhs->kind == EX_BORROW || rhs->kind == EX_MUTBORROW) {
+                Expr *operand = rhs->u.borrow.operand;
+                src = rhs->borrow_origin ? (VarSym *)rhs->borrow_origin : expr_root_var(operand);
+                if (src && !src->borrow_pending) {
+                    origin = src->borrow_origin ? (VarSym *)src->borrow_origin : src;
+                    if (src->type && (src->type->kind == TY_REF || src->type->kind == TY_MUTREF))
+                        parent = src;
+                    place = rhs->borrow_place;
+                }
+            }
+            if (v && v->borrow_pending && origin) {
+                v->borrow_origin = origin;
+                v->borrow_parent = parent;
+                v->borrow_place = place;
+                v->borrow_mut = v->type && v->type->kind == TY_MUTREF;
+                v->borrow_pending = false;
+                changed = true;
+            }
+            validate_ref_holder_scope(v, &rhs->tok);
+        }
+        break;
+    case EX_TERNARY: REX(e->u.tern.cond); REX(e->u.tern.then); REX(e->u.tern.els); break;
+    case EX_MATCH:
+        REX(e->u.matchexpr.subject);
+        for (size_t i = 0; i < e->u.matchexpr.cases.len; i++) {
+            MatchCase *mc = e->u.matchexpr.cases.items[i];
+            for (size_t j = 0; j < mc->patterns.len; j++) REX(mc->patterns.items[j]);
+            REX(mc->body);
+        }
+        REX(e->u.matchexpr.dflt);
+        break;
+    case EX_CLOSURE:
+        if (e->u.closure.fn)
+            for (size_t i = 0; i < e->u.closure.fn->body.len; i++)
+                if (resolve_ref_calls_stmt(e->u.closure.fn->body.items[i])) changed = true;
+        break;
+    case EX_ARRAY_LIT:
+        if (e->u.map.vals.len) {
+            for (size_t i = 0; i < e->u.map.keys.len; i++) REX(e->u.map.keys.items[i]);
+            for (size_t i = 0; i < e->u.map.vals.len; i++) REX(e->u.map.vals.items[i]);
+        } else {
+            for (size_t i = 0; i < e->u.arr.elems.len; i++) REX(e->u.arr.elems.items[i]);
+        }
+        break;
+    case EX_MAP_LIT:
+        for (size_t i = 0; i < e->u.map.keys.len; i++) REX(e->u.map.keys.items[i]);
+        for (size_t i = 0; i < e->u.map.vals.len; i++) REX(e->u.map.vals.items[i]);
+        break;
+    case EX_TUPLE_LIT:
+        for (size_t i = 0; i < e->u.tuple.elems.len; i++) REX(e->u.tuple.elems.items[i]);
+        break;
+    case EX_BORROW: case EX_MUTBORROW: REX(e->u.borrow.operand); break;
+    case EX_DEREF: REX(e->u.deref.operand); break;
+    case EX_CAST: REX(e->u.cast.operand); break;
+    case EX_IS: REX(e->u.ischeck.operand); break;
+    case EX_ELLIPSIS: REX(e->u.ellipsis.inner); break;
+    default: break;
+    }
+#undef REX
+    return changed;
+}
+
+static bool resolve_ref_calls_seq(PtrVec stmts);
+
+static bool resolve_ref_calls_stmt(Stmt *s) {
+    if (!s) return false;
+    bool changed = false;
+#define RST(x) do { if (resolve_ref_calls_seq((x))) changed = true; } while (0)
+#define RSE(x) do { if (resolve_ref_calls_expr((x))) changed = true; } while (0)
+    switch (s->kind) {
+    case ST_EXPR: RSE(s->u.expr.expr); break;
+    case ST_LET:
+        RSE(s->u.let.init);
+        if (s->u.let.sym && s->u.let.init && s->u.let.init->borrow_origin) {
+            VarSym *v = s->u.let.sym;
+            if (v->borrow_origin != s->u.let.init->borrow_origin ||
+                v->borrow_parent != s->u.let.init->borrow_parent ||
+                v->borrow_place != s->u.let.init->borrow_place || v->borrow_pending) {
+                v->borrow_origin = s->u.let.init->borrow_origin;
+                v->borrow_parent = s->u.let.init->borrow_parent;
+                v->borrow_place = s->u.let.init->borrow_place;
+                v->borrow_mut = v->type && v->type->kind == TY_MUTREF;
+                v->borrow_pending = false;
+                changed = true;
+            }
+        } else if (s->u.let.sym && s->u.let.init &&
+                   (s->u.let.init->kind == EX_VAR || s->u.let.init->kind == EX_BORROW ||
+                    s->u.let.init->kind == EX_MUTBORROW)) {
+            VarSym *v = s->u.let.sym;
+            Expr *init = s->u.let.init;
+            VarSym *src = init->kind == EX_VAR ? (VarSym *)init->u.var.sym :
+                init->borrow_origin ? (VarSym *)init->borrow_origin :
+                expr_root_var(init->u.borrow.operand);
+            if (src && !src->borrow_pending) {
+                VarSym *origin = src->borrow_origin ? (VarSym *)src->borrow_origin : src;
+                VarSym *parent = init->kind == EX_VAR ? src :
+                    (src->type && (src->type->kind == TY_REF || src->type->kind == TY_MUTREF) ? src : NULL);
+                if (v->borrow_origin != origin || v->borrow_parent != parent ||
+                    v->borrow_place != init->borrow_place || v->borrow_pending) {
+                    v->borrow_origin = origin;
+                    v->borrow_parent = parent;
+                    v->borrow_place = init->borrow_place;
+                    v->borrow_mut = v->type && v->type->kind == TY_MUTREF;
+                    v->borrow_pending = false;
+                    changed = true;
+                }
+            }
+        }
+        if (s->u.let.sym) validate_ref_holder_scope(s->u.let.sym, &s->tok);
+        break;
+    case ST_RETURN: RSE(s->u.ret.value); break;
+    case ST_ECHO:
+        for (size_t i = 0; i < s->u.echo.exprs.len; i++) RSE(s->u.echo.exprs.items[i]);
+        break;
+    case ST_PRINT: RSE(s->u.print.expr); break;
+    case ST_IF: RSE(s->u.if_.cond); RST(s->u.if_.then); RST(s->u.if_.els); break;
+    case ST_WHILE: RSE(s->u.while_.cond); RST(s->u.while_.body); break;
+    case ST_DO: RSE(s->u.do_.cond); RST(s->u.do_.body); break;
+    case ST_FOR: RST(s->u.for_.init); RSE(s->u.for_.cond); RST(s->u.for_.step); RST(s->u.for_.body); break;
+    case ST_FOREACH: RSE(s->u.foreach.iter); RST(s->u.foreach.body); break;
+    case ST_BLOCK: RST(s->u.block.stmts); break;
+    case ST_UNSAFE_BLOCK: RST(s->u.unsafe.stmts); break;
+    case ST_TRY:
+        RST(s->u.try.body); RST(s->u.try.fin);
+        for (size_t i = 0; i < s->u.try.catches.len; i++)
+            RST(((CatchClause *)s->u.try.catches.items[i])->body);
+        break;
+    case ST_THROW: RSE(s->u.throw.expr); break;
+    case ST_SWITCH:
+        RSE(s->u.switch_.cond);
+        for (size_t i = 0; i < s->u.switch_.cases.len; i++) {
+            SwitchCase *cs = s->u.switch_.cases.items[i];
+            for (size_t j = 0; j < cs->patterns.len; j++) RSE(cs->patterns.items[j]);
+            RST(cs->body);
+        }
+        break;
+    default: break;
+    }
+#undef RST
+#undef RSE
+    return changed;
+}
+
+static bool resolve_ref_calls_seq(PtrVec stmts) {
+    bool changed = false;
+    for (size_t i = 0; i < stmts.len; i++)
+        if (resolve_ref_calls_stmt(stmts.items[i])) changed = true;
+    return changed;
+}
+
+/* A call's borrow summary can be unavailable when its caller is checked (for
+ * example, a forward declaration). Such returns are deferred above. Once
+ * summaries have reached a fixed point, recheck that the resolved referent
+ * outlives the current function; otherwise codegen would return a pointer to
+ * one of this function's stack slots. */
+static void check_deferred_ref_returns(AstFn *fn, PtrVec stmts) {
+    if (!fn) return;
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *s = stmts.items[i];
+        if (!s) continue;
+        if (s->kind == ST_RETURN && s->u.ret.value &&
+            s->u.ret.value->borrow_lifetime_deferred) {
+            Expr *value = s->u.ret.value;
+            const VarSym *origin = (const VarSym *)value->borrow_origin;
+            if (!origin && value->kind == EX_VAR && value->u.var.sym) {
+                VarSym *holder = value->u.var.sym;
+                origin = holder->borrow_origin
+                    ? (const VarSym *)holder->borrow_origin
+                    : (holder->borrow_pending ? NULL : holder);
+            }
+            if (origin && !borrow_origin_outlives_function(origin))
+                sema_error(&s->tok,
+                           "cannot return a reference to a local variable; the referent would not live long enough");
+        }
+        switch (s->kind) {
+        case ST_IF:
+            check_deferred_ref_returns(fn, s->u.if_.then);
+            check_deferred_ref_returns(fn, s->u.if_.els);
+            break;
+        case ST_WHILE: check_deferred_ref_returns(fn, s->u.while_.body); break;
+        case ST_DO: check_deferred_ref_returns(fn, s->u.do_.body); break;
+        case ST_FOR:
+            check_deferred_ref_returns(fn, s->u.for_.init);
+            check_deferred_ref_returns(fn, s->u.for_.step);
+            check_deferred_ref_returns(fn, s->u.for_.body);
+            break;
+        case ST_FOREACH: check_deferred_ref_returns(fn, s->u.foreach.body); break;
+        case ST_BLOCK: check_deferred_ref_returns(fn, s->u.block.stmts); break;
+        case ST_UNSAFE_BLOCK: check_deferred_ref_returns(fn, s->u.unsafe.stmts); break;
+        case ST_TRY:
+            check_deferred_ref_returns(fn, s->u.try.body);
+            check_deferred_ref_returns(fn, s->u.try.fin);
+            for (size_t j = 0; j < s->u.try.catches.len; j++)
+                check_deferred_ref_returns(fn,
+                    ((CatchClause *)s->u.try.catches.items[j])->body);
+            break;
+        case ST_SWITCH:
+            for (size_t j = 0; j < s->u.switch_.cases.len; j++)
+                check_deferred_ref_returns(fn,
+                    ((SwitchCase *)s->u.switch_.cases.items[j])->body);
+            break;
+        default: break;
+        }
+    }
+}
+
+static void diagnose_unresolved_ref_returns(PtrVec stmts) {
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *s = stmts.items[i];
+        if (!s) continue;
+        if (s->kind == ST_LET && s->u.let.sym &&
+            ((VarSym *)s->u.let.sym)->borrow_pending) {
+            sema_error(&s->tok, "cannot resolve the lifetime returned by this function call");
+        } else if (s->kind == ST_EXPR && s->u.expr.expr &&
+                   s->u.expr.expr->kind == EX_ASSIGN &&
+                   s->u.expr.expr->u.assign.target &&
+                   s->u.expr.expr->u.assign.target->kind == EX_VAR &&
+                   s->u.expr.expr->u.assign.target->u.var.sym &&
+                   ((VarSym *)s->u.expr.expr->u.assign.target->u.var.sym)->borrow_pending) {
+            sema_error(&s->tok, "cannot resolve the lifetime returned by this function call");
+        } else if (s->kind == ST_RETURN && s->u.ret.value &&
+                   (ref_return_target(s->u.ret.value) ||
+                    s->u.ret.value->kind == EX_VAR)) {
+            Expr *value = s->u.ret.value;
+            bool pending = target_returns_ref(ref_return_target(value)) &&
+                !value->borrow_origin;
+            pending = pending || (value->kind == EX_VAR && value->u.var.sym &&
+                                  ((VarSym *)value->u.var.sym)->borrow_pending);
+            if (pending)
+                sema_error(&s->tok, "cannot resolve the lifetime returned by this function call");
+        }
+        switch (s->kind) {
+        case ST_IF:
+            diagnose_unresolved_ref_returns(s->u.if_.then);
+            diagnose_unresolved_ref_returns(s->u.if_.els);
+            break;
+        case ST_WHILE: diagnose_unresolved_ref_returns(s->u.while_.body); break;
+        case ST_DO: diagnose_unresolved_ref_returns(s->u.do_.body); break;
+        case ST_FOR: diagnose_unresolved_ref_returns(s->u.for_.init);
+            diagnose_unresolved_ref_returns(s->u.for_.step);
+            diagnose_unresolved_ref_returns(s->u.for_.body); break;
+        case ST_FOREACH: diagnose_unresolved_ref_returns(s->u.foreach.body); break;
+        case ST_BLOCK: diagnose_unresolved_ref_returns(s->u.block.stmts); break;
+        case ST_UNSAFE_BLOCK: diagnose_unresolved_ref_returns(s->u.unsafe.stmts); break;
+        case ST_TRY:
+            diagnose_unresolved_ref_returns(s->u.try.body);
+            diagnose_unresolved_ref_returns(s->u.try.fin);
+            for (size_t j = 0; j < s->u.try.catches.len; j++)
+                diagnose_unresolved_ref_returns(((CatchClause *)s->u.try.catches.items[j])->body);
+            break;
+        case ST_SWITCH:
+            for (size_t j = 0; j < s->u.switch_.cases.len; j++)
+                diagnose_unresolved_ref_returns(((SwitchCase *)s->u.switch_.cases.items[j])->body);
+            break;
+        default: break;
+        }
+    }
+}
+
+/* Conservative first escape summary for safety mode. A parameter is
+ * borrow-only when every direct use is an argument to a read-only builtin or
+ * another parameter already proven borrow-only. All other expression forms
+ * recurse conservatively, so return/store/closure/unknown-call uses disqualify
+ * the summary. */
+static bool escape_expr_safe(Expr *e, VarSym *param);
+
+bool sema_method_param_borrow_only(const Expr *call, size_t arg_index) {
+    if (!call || call->kind != EX_METHOD || !call->u.method.obj || call->builtin ||
+        !call->u.method.target || !call->u.method.target->is_method ||
+        call->u.method.target->is_static ||
+        arg_index >= call->u.method.target->params.len)
+        return false;
+
+    AstFn *target = call->u.method.target;
+    Type *receiver_type = (Type *)call->u.method.obj->type;
+    while (receiver_type && (receiver_type->kind == TY_OWN ||
+                             receiver_type->kind == TY_RC))
+        receiver_type = (Type *)receiver_type->elem;
+    if (!receiver_type || receiver_type->kind != TY_CLASS ||
+        !receiver_type->decl || !target->cls)
+        return false; /* interfaces and unknown dispatch stay reference-counted */
+    AstClass *static_cls = (AstClass *)receiver_type->decl;
+    if (!class_derives(static_cls, target->cls)) return false;
+
+    Param *base_param = target->params.items[arg_index];
+    if (!base_param || !base_param->borrow_only) return false;
+
+    /* The statically resolved implementation applies unless a compiled
+     * descendant overrides it; include it even when its owner is an ancestor
+     * of the receiver's static class. */
+    bool saw_impl = target->has_body && !target->is_abstract;
+    for (size_t i = 0; i < g_borrow_fns.len; i++) {
+        AstFn *candidate = g_borrow_fns.items[i];
+        if (!candidate || !candidate->is_method || candidate->is_static ||
+            !candidate->cls || candidate->cls->is_interface ||
+            strcmp(candidate->name, target->name) != 0 ||
+            !class_derives(candidate->cls, static_cls))
+            continue;
+        /* Codegen's method table currently treats same-named private methods
+         * in descendants as dispatchable entries too, so include them here. */
+        if (candidate->is_abstract && !candidate->has_body) continue;
+        if (!candidate->has_body || arg_index >= candidate->params.len)
+            return false;
+        Param *pm = candidate->params.items[arg_index];
+        if (!pm || !pm->borrow_only) return false;
+        saw_impl = true;
+    }
+    return saw_impl;
+}
+
+static bool escape_arg_safe(Expr *arg, VarSym *param) {
+    if (arg && arg->kind == EX_VAR && arg->u.var.sym == param) return true;
+    return escape_expr_safe(arg, param);
+}
+
+static bool escape_expr_safe(Expr *e, VarSym *param) {
+    if (!e) return true;
+#define SAFE_CHILD(x) do { if (!escape_expr_safe((x), param)) return false; } while (0)
+    switch (e->kind) {
+    case EX_VAR:
+        return e->u.var.sym != param;
+    case EX_CALL: {
+        bool borrow_builtin = e->builtin &&
+            (!strcmp(e->builtin, "count") || !strcmp(e->builtin, "array_sum") ||
+             !strcmp(e->builtin, "strlen"));
+        AstFn *target = e->u.call.target;
+        for (size_t i = 0; i < e->u.call.args.len; i++) {
+            Expr *arg = e->u.call.args.items[i];
+            bool borrow_arg = borrow_builtin;
+            if (!borrow_arg && target && i < target->params.len)
+                borrow_arg = ((Param *)target->params.items[i])->borrow_only;
+            if (borrow_arg) {
+                if (!escape_arg_safe(arg, param)) return false;
+            } else SAFE_CHILD(arg);
+        }
+        if (e->u.call.fn && e->u.call.fn->kind != EX_VAR)
+            SAFE_CHILD(e->u.call.fn);
+        return true;
+    }
+    case EX_TPL:
+        for (size_t i = 0; i < e->u.tpl.exprs.len; i++) SAFE_CHILD(e->u.tpl.exprs.items[i]);
+        return true;
+    case EX_INDEX: SAFE_CHILD(e->u.index.obj); SAFE_CHILD(e->u.index.idx); return true;
+    case EX_FIELD: SAFE_CHILD(e->u.field.obj); return true;
+    case EX_METHOD: {
+        SAFE_CHILD(e->u.method.obj);
+        for (size_t i = 0; i < e->u.method.args.len; i++) {
+            Expr *arg = e->u.method.args.items[i];
+            bool borrow_arg = sema_method_param_borrow_only(e, i);
+            if (borrow_arg) {
+                if (!escape_arg_safe(arg, param)) return false;
+            } else SAFE_CHILD(arg);
+        }
+        return true;
+    }
+    case EX_STATIC:
+        for (size_t i = 0; i < e->u.staticcall.args.len; i++) SAFE_CHILD(e->u.staticcall.args.items[i]);
+        return true;
+    case EX_NEW:
+        for (size_t i = 0; i < e->u.newexpr.args.len; i++) SAFE_CHILD(e->u.newexpr.args.items[i]);
+        return true;
+    case EX_BIN: SAFE_CHILD(e->u.bin.l); SAFE_CHILD(e->u.bin.r); SAFE_CHILD(e->u.bin.slice_hi); return true;
+    case EX_UN: SAFE_CHILD(e->u.un.operand); return true;
+    case EX_ASSIGN: SAFE_CHILD(e->u.assign.target); SAFE_CHILD(e->u.assign.value); return true;
+    case EX_TERNARY: SAFE_CHILD(e->u.tern.cond); SAFE_CHILD(e->u.tern.then); SAFE_CHILD(e->u.tern.els); return true;
+    case EX_MATCH:
+        SAFE_CHILD(e->u.matchexpr.subject);
+        for (size_t i = 0; i < e->u.matchexpr.cases.len; i++) {
+            MatchCase *mc = e->u.matchexpr.cases.items[i];
+            for (size_t j = 0; j < mc->patterns.len; j++) SAFE_CHILD(mc->patterns.items[j]);
+            SAFE_CHILD(mc->body);
+        }
+        SAFE_CHILD(e->u.matchexpr.dflt); return true;
+    case EX_CLOSURE:
+        /* Capture summaries are not a complete escape proof yet. */
+        return false;
+    case EX_ARRAY_LIT:
+        for (size_t i = 0; i < e->u.arr.elems.len; i++) SAFE_CHILD(e->u.arr.elems.items[i]);
+        return true;
+    case EX_MAP_LIT:
+        for (size_t i = 0; i < e->u.map.keys.len; i++) SAFE_CHILD(e->u.map.keys.items[i]);
+        for (size_t i = 0; i < e->u.map.vals.len; i++) SAFE_CHILD(e->u.map.vals.items[i]);
+        return true;
+    case EX_TUPLE_LIT:
+        for (size_t i = 0; i < e->u.tuple.elems.len; i++) SAFE_CHILD(e->u.tuple.elems.items[i]);
+        return true;
+    case EX_BORROW: case EX_MUTBORROW: SAFE_CHILD(e->u.borrow.operand); return true;
+    case EX_DEREF: SAFE_CHILD(e->u.deref.operand); return true;
+    case EX_CAST: SAFE_CHILD(e->u.cast.operand); return true;
+    case EX_IS: SAFE_CHILD(e->u.ischeck.operand); return true;
+    case EX_ELLIPSIS: SAFE_CHILD(e->u.ellipsis.inner); return true;
+    default: return true;
+    }
+#undef SAFE_CHILD
+}
+
+static bool escape_stmts_safe(PtrVec stmts, VarSym *param) {
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *s = stmts.items[i];
+        if (!s) continue;
+#define SAFE_STMTS(v) do { if (!escape_stmts_safe((v), param)) return false; } while (0)
+        switch (s->kind) {
+        case ST_EXPR: if (!escape_expr_safe(s->u.expr.expr, param)) return false; break;
+        case ST_LET: if (!escape_expr_safe(s->u.let.init, param)) return false; break;
+        case ST_RETURN: if (!escape_expr_safe(s->u.ret.value, param)) return false; break;
+        case ST_ECHO:
+            for (size_t j=0;j<s->u.echo.exprs.len;j++) if(!escape_expr_safe(s->u.echo.exprs.items[j],param)) return false;
+            break;
+        case ST_PRINT: if (!escape_expr_safe(s->u.print.expr, param)) return false; break;
+        case ST_IF:
+            if (!escape_expr_safe(s->u.if_.cond,param)) return false;
+            SAFE_STMTS(s->u.if_.then); SAFE_STMTS(s->u.if_.els); break;
+        case ST_WHILE: if(!escape_expr_safe(s->u.while_.cond,param)) return false; SAFE_STMTS(s->u.while_.body); break;
+        case ST_DO: if(!escape_expr_safe(s->u.do_.cond,param)) return false; SAFE_STMTS(s->u.do_.body); break;
+        case ST_FOR:
+            SAFE_STMTS(s->u.for_.init); if(!escape_expr_safe(s->u.for_.cond,param)) return false;
+            SAFE_STMTS(s->u.for_.step); SAFE_STMTS(s->u.for_.body); break;
+        case ST_FOREACH: if(!escape_expr_safe(s->u.foreach.iter,param)) return false; SAFE_STMTS(s->u.foreach.body); break;
+        case ST_BLOCK: SAFE_STMTS(s->u.block.stmts); break;
+        case ST_UNSAFE_BLOCK: SAFE_STMTS(s->u.unsafe.stmts); break;
+        case ST_THROW: if(!escape_expr_safe(s->u.throw.expr,param)) return false; break;
+        case ST_TRY:
+            SAFE_STMTS(s->u.try.body); SAFE_STMTS(s->u.try.fin);
+            for(size_t j=0;j<s->u.try.catches.len;j++) SAFE_STMTS(((CatchClause*)s->u.try.catches.items[j])->body);
+            break;
+        case ST_SWITCH:
+            if(!escape_expr_safe(s->u.switch_.cond,param)) return false;
+            for(size_t j=0;j<s->u.switch_.cases.len;j++) {
+                SwitchCase *scase=s->u.switch_.cases.items[j];
+                for(size_t k=0;k<scase->patterns.len;k++)
+                    if(!escape_expr_safe(scase->patterns.items[k],param)) return false;
+                SAFE_STMTS(scase->body);
+            }
+            break;
+        default: break;
+        }
+#undef SAFE_STMTS
+    }
+    return true;
+}
+
+static bool escape_summary_type(const Type *t) {
+    if (!t) return false;
+    switch (t->kind) {
+    case TY_STRING: case TY_ARRAY: case TY_VEC: case TY_MAP: case TY_SET:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static void infer_borrow_only_params(Program *prog) {
+    PtrVec functions = {0};
+    for (size_t i = 0; i < prog->decls.len; i++) {
+        Decl *d = prog->decls.items[i];
+        if (d->kind == DK_FN) ptrvec_push(&functions, d->u.fn);
+        else if (d->kind == DK_CLASS || d->kind == DK_TRAIT || d->kind == DK_INTERFACE) {
+            AstClass *cls = d->u.cls;
+            for (size_t j = 0; j < cls->methods.len; j++)
+                ptrvec_push(&functions, cls->methods.items[j]);
+        }
+    }
+    for (size_t i = 0; i < functions.len; i++) {
+        AstFn *fn = functions.items[i];
+        if (!fn || !fn->has_body || !fn->enforce_memory_safety ||
+            fn->is_closure || fn->is_abstract) continue;
+        for (size_t j = 0; j < fn->params.len; j++) {
+            Param *pm = fn->params.items[j];
+            pm->borrow_only = !pm->by_ref && escape_summary_type(pm->resolved);
+        }
+    }
+    bool changed;
+    do {
+        changed = false;
+        for (size_t i = 0; i < functions.len; i++) {
+            AstFn *fn = functions.items[i];
+            if (!fn || !fn->has_body || !fn->enforce_memory_safety ||
+                fn->is_closure || fn->is_abstract) continue;
+            for (size_t j = 0; j < fn->params.len; j++) {
+                Param *pm = fn->params.items[j];
+                if (!pm->borrow_only) continue;
+                if (!escape_stmts_safe(fn->body, (VarSym *)pm->sym)) {
+                    pm->borrow_only = false;
+                    changed = true;
+                }
+            }
+        }
+    } while (changed);
+    free(functions.items);
+}
+
+static bool scalar_array_literal(const Expr *e) {
+    if (!e || e->kind != EX_ARRAY_LIT) return false;
+    for (size_t i = 0; i < e->u.arr.elems.len; i++) {
+        Expr *item = e->u.arr.elems.items[i];
+        if (!item || (item->kind != EX_INT && item->kind != EX_FLOAT &&
+                      item->kind != EX_BOOL && item->kind != EX_NULL)) return false;
+    }
+    return true;
+}
+
+static bool region_string_init(const Expr *e) {
+    return e && e->type && e->type->kind == TY_STRING &&
+           (e->kind == EX_BIN || e->kind == EX_TPL || e->kind == EX_STR);
+}
+
+static bool expr_uses_sym(const Expr *e, const VarSym *sym) {
+    if (!e) return false;
+#define USES(x) do { if (expr_uses_sym((x), sym)) return true; } while (0)
+    switch (e->kind) {
+    case EX_VAR: return e->u.var.sym == sym;
+    case EX_FIELD: USES(e->u.field.obj); break;
+    case EX_INDEX: USES(e->u.index.obj); USES(e->u.index.idx); break;
+    case EX_CALL:
+        USES(e->u.call.fn);
+        for (size_t i = 0; i < e->u.call.args.len; i++) USES(e->u.call.args.items[i]);
+        break;
+    case EX_METHOD:
+        USES(e->u.method.obj);
+        for (size_t i = 0; i < e->u.method.args.len; i++) USES(e->u.method.args.items[i]);
+        break;
+    case EX_STATIC:
+        for (size_t i = 0; i < e->u.staticcall.args.len; i++) USES(e->u.staticcall.args.items[i]);
+        break;
+    case EX_NEW:
+        for (size_t i = 0; i < e->u.newexpr.args.len; i++) USES(e->u.newexpr.args.items[i]);
+        break;
+    case EX_TPL:
+        for (size_t i = 0; i < e->u.tpl.exprs.len; i++) USES(e->u.tpl.exprs.items[i]);
+        break;
+    case EX_BIN: USES(e->u.bin.l); USES(e->u.bin.r); USES(e->u.bin.slice_hi); break;
+    case EX_UN: USES(e->u.un.operand); break;
+    case EX_ASSIGN: USES(e->u.assign.target); USES(e->u.assign.value); break;
+    case EX_TERNARY: USES(e->u.tern.cond); USES(e->u.tern.then); USES(e->u.tern.els); break;
+    case EX_MATCH:
+        USES(e->u.matchexpr.subject);
+        for (size_t i = 0; i < e->u.matchexpr.cases.len; i++) {
+            MatchCase *mc = e->u.matchexpr.cases.items[i];
+            for (size_t j = 0; j < mc->patterns.len; j++) USES(mc->patterns.items[j]);
+            USES(mc->body);
+        }
+        USES(e->u.matchexpr.dflt);
+        break;
+    case EX_ARRAY_LIT:
+        for (size_t i = 0; i < e->u.arr.elems.len; i++) USES(e->u.arr.elems.items[i]);
+        break;
+    case EX_MAP_LIT:
+        for (size_t i = 0; i < e->u.map.keys.len; i++) USES(e->u.map.keys.items[i]);
+        for (size_t i = 0; i < e->u.map.vals.len; i++) USES(e->u.map.vals.items[i]);
+        break;
+    case EX_TUPLE_LIT:
+        for (size_t i = 0; i < e->u.tuple.elems.len; i++) USES(e->u.tuple.elems.items[i]);
+        break;
+    case EX_BORROW: case EX_MUTBORROW: USES(e->u.borrow.operand); break;
+    case EX_DEREF: USES(e->u.deref.operand); break;
+    case EX_CAST: USES(e->u.cast.operand); break;
+    case EX_IS: USES(e->u.ischeck.operand); break;
+    case EX_ELLIPSIS: USES(e->u.ellipsis.inner); break;
+    case EX_CLOSURE:
+        for (size_t i = 0; e->u.closure.fn && i < e->u.closure.fn->captures.len; i++)
+            if (e->u.closure.fn->captures.items[i] == sym) return true;
+        break;
+    default: break;
+    }
+#undef USES
+    return false;
+}
+
+static bool stmts_use_sym_outside_loop(PtrVec stmts, const Stmt *loop,
+                                       const VarSym *sym);
+static bool stmt_uses_sym_outside_loop(Stmt *s, const Stmt *loop,
+                                       const VarSym *sym) {
+    if (!s) return false;
+#define EXPR_USES(e) expr_uses_sym((e), sym)
+#define CHILD(v) stmts_use_sym_outside_loop((v), loop, sym)
+    if (s == loop) {
+        switch (s->kind) {
+        case ST_WHILE: return EXPR_USES(s->u.while_.cond);
+        case ST_DO: return EXPR_USES(s->u.do_.cond);
+        case ST_FOR:
+            for (size_t i = 0; i < s->u.for_.init.len; i++)
+                if (stmt_uses_sym_outside_loop(s->u.for_.init.items[i], loop, sym)) return true;
+            for (size_t i = 0; i < s->u.for_.step.len; i++)
+                if (stmt_uses_sym_outside_loop(s->u.for_.step.items[i], loop, sym)) return true;
+            return EXPR_USES(s->u.for_.cond);
+        case ST_FOREACH: return EXPR_USES(s->u.foreach.iter);
+        default: return true;
+        }
+    }
+    switch (s->kind) {
+    case ST_EXPR: return EXPR_USES(s->u.expr.expr);
+    case ST_LET: return EXPR_USES(s->u.let.init);
+    case ST_RETURN: return EXPR_USES(s->u.ret.value);
+    case ST_ECHO:
+        for (size_t i = 0; i < s->u.echo.exprs.len; i++) if (EXPR_USES(s->u.echo.exprs.items[i])) return true;
+        break;
+    case ST_PRINT: return EXPR_USES(s->u.print.expr);
+    case ST_IF: return EXPR_USES(s->u.if_.cond) || CHILD(s->u.if_.then) || CHILD(s->u.if_.els);
+    case ST_WHILE: return EXPR_USES(s->u.while_.cond) || CHILD(s->u.while_.body);
+    case ST_DO: return EXPR_USES(s->u.do_.cond) || CHILD(s->u.do_.body);
+    case ST_FOR:
+        for (size_t i = 0; i < s->u.for_.init.len; i++) if (stmt_uses_sym_outside_loop(s->u.for_.init.items[i], loop, sym)) return true;
+        for (size_t i = 0; i < s->u.for_.step.len; i++) if (stmt_uses_sym_outside_loop(s->u.for_.step.items[i], loop, sym)) return true;
+        return EXPR_USES(s->u.for_.cond) || CHILD(s->u.for_.body);
+    case ST_FOREACH: return EXPR_USES(s->u.foreach.iter) || CHILD(s->u.foreach.body);
+    case ST_BLOCK: return CHILD(s->u.block.stmts);
+    case ST_UNSAFE_BLOCK: return CHILD(s->u.unsafe.stmts);
+    case ST_TRY:
+        if (CHILD(s->u.try.body) || CHILD(s->u.try.fin)) return true;
+        for (size_t i = 0; i < s->u.try.catches.len; i++)
+            if (CHILD(((CatchClause *)s->u.try.catches.items[i])->body)) return true;
+        break;
+    case ST_THROW: return EXPR_USES(s->u.throw.expr);
+    case ST_SWITCH:
+        if (EXPR_USES(s->u.switch_.cond)) return true;
+        for (size_t i = 0; i < s->u.switch_.cases.len; i++) {
+            SwitchCase *scase = s->u.switch_.cases.items[i];
+            for (size_t j = 0; j < scase->patterns.len; j++) if (EXPR_USES(scase->patterns.items[j])) return true;
+            if (CHILD(scase->body)) return true;
+        }
+        break;
+    default: break;
+    }
+#undef CHILD
+#undef EXPR_USES
+    return false;
+}
+static bool stmts_use_sym_outside_loop(PtrVec stmts, const Stmt *loop,
+                                       const VarSym *sym) {
+    for (size_t i = 0; i < stmts.len; i++)
+        if (stmt_uses_sym_outside_loop(stmts.items[i], loop, sym)) return true;
+    return false;
+}
+
+static bool iteration_region_init(const Expr *init, const VarSym *v) {
+    if (!init || !v || !v->type) return false;
+    if (v->type->kind == TY_ARRAY) return scalar_array_literal(init);
+    if (v->type->kind == TY_STRING)
+        return init->type && init->type->kind == TY_STRING && region_string_init(init);
+    return false;
+}
+
+static void infer_iteration_regions_block(AstFn *fn, Stmt *loop, PtrVec stmts) {
+    for (size_t i = 0; i < stmts.len; i++) {
+        Stmt *s = stmts.items[i];
+        if (!s) continue;
+        if (s->kind == ST_LET && s->u.let.sym) {
+            VarSym *v = (VarSym *)s->u.let.sym;
+            if (iteration_region_init(s->u.let.init, v) && !v->is_param &&
+                !v->is_program_global && !v->is_global_alias && !v->captured_byref &&
+                !v->captured && !v->captured_heap_alias && escape_stmts_safe(fn->body, v) &&
+                !stmts_use_sym_outside_loop(fn->body, loop, v)) {
+                v->region_local = true;
+                v->region_loop = loop;
+                loop->has_region_locals = true;
+            }
+            continue;
+        }
+        if (s->kind == ST_BLOCK) infer_iteration_regions_block(fn, loop, s->u.block.stmts);
+        else if (s->kind == ST_IF) {
+            infer_iteration_regions_block(fn, loop, s->u.if_.then);
+            infer_iteration_regions_block(fn, loop, s->u.if_.els);
+        } else if (s->kind == ST_UNSAFE_BLOCK)
+            infer_iteration_regions_block(fn, loop, s->u.unsafe.stmts);
+        else if (s->kind == ST_SWITCH) {
+            for (size_t j = 0; j < s->u.switch_.cases.len; j++)
+                infer_iteration_regions_block(fn, loop,
+                    ((SwitchCase *)s->u.switch_.cases.items[j])->body);
+        } else if (s->kind == ST_WHILE || s->kind == ST_DO ||
+                   s->kind == ST_FOR || s->kind == ST_FOREACH) {
+            /* Nested loops own a separate reset boundary. */
+            infer_iteration_regions_block(fn, s, (s->kind == ST_WHILE) ? s->u.while_.body :
+                (s->kind == ST_DO) ? s->u.do_.body :
+                (s->kind == ST_FOR) ? s->u.for_.body : s->u.foreach.body);
+        }
+    }
+}
+
+static void infer_local_regions_block(AstFn *fn, PtrVec stmts) {
+    for (size_t j = 0; j < stmts.len; j++) {
+        Stmt *s = stmts.items[j];
+        if (!s) continue;
+        if (s->kind == ST_LET && s->u.let.sym &&
+            scalar_array_literal(s->u.let.init)) {
+            VarSym *v = (VarSym *)s->u.let.sym;
+            if (v->type && v->type->kind == TY_ARRAY && !v->is_param &&
+                !v->is_program_global && !v->is_global_alias &&
+                !v->captured_byref && !v->captured && !v->captured_heap_alias &&
+                escape_stmts_safe(fn->body, v))
+                v->region_local = true;
+            continue;
+        }
+        /* Loop values use a reusable iteration region instead of the
+         * function-lifetime region used by ordinary local candidates. */
+        if (s->kind == ST_BLOCK) {
+            infer_local_regions_block(fn, s->u.block.stmts);
+        } else if (s->kind == ST_IF) {
+            infer_local_regions_block(fn, s->u.if_.then);
+            infer_local_regions_block(fn, s->u.if_.els);
+        } else if (s->kind == ST_UNSAFE_BLOCK) {
+            infer_local_regions_block(fn, s->u.unsafe.stmts);
+        } else if (s->kind == ST_SWITCH) {
+            for (size_t k = 0; k < s->u.switch_.cases.len; k++)
+                infer_local_regions_block(fn, ((SwitchCase *)s->u.switch_.cases.items[k])->body);
+        } else if (s->kind == ST_WHILE) {
+            infer_iteration_regions_block(fn, s, s->u.while_.body);
+        } else if (s->kind == ST_DO) {
+            infer_iteration_regions_block(fn, s, s->u.do_.body);
+        } else if (s->kind == ST_FOR) {
+            infer_iteration_regions_block(fn, s, s->u.for_.body);
+        } else if (s->kind == ST_FOREACH) {
+            infer_iteration_regions_block(fn, s, s->u.foreach.body);
+        }
+    }
+}
+
+static void infer_local_regions(Program *prog) {
+    PtrVec functions = {0};
+    for (size_t i = 0; i < prog->decls.len; i++) {
+        Decl *d = prog->decls.items[i];
+        if (d->kind == DK_FN) ptrvec_push(&functions, d->u.fn);
+        else if (d->kind == DK_CLASS || d->kind == DK_TRAIT || d->kind == DK_INTERFACE) {
+            AstClass *cls = d->u.cls;
+            for (size_t j = 0; j < cls->methods.len; j++)
+                ptrvec_push(&functions, cls->methods.items[j]);
+        }
+    }
+    for (size_t i = 0; i < functions.len; i++) {
+        AstFn *fn = functions.items[i];
+        if (!fn || !fn->enforce_memory_safety || fn->is_closure || fn->is_abstract)
+            continue;
+        infer_local_regions_block(fn, fn->body);
+    }
+    free(functions.items);
+}
+
 void sema_run(Program *prog) {
     builtins_init();
     sema_ok = true;
+    g_borrow_fns.len = 0;
     s_this = intern("this");
     s_argc = intern("argc");
     s_argv = intern("argv");
@@ -2785,7 +5327,30 @@ void sema_run(Program *prog) {
     /* top-level statements (the script part) */
     Scope sc;
     scope_init(&sc, NULL);
+    sc.enforce_memory_safety = prog->enforce_memory_safety;
     check_block(&sc, prog->stmts);
+    for (size_t pass = 0; pass <= g_borrow_fns.len; pass++) {
+        bool changed = resolve_ref_calls_seq(prog->stmts);
+        for (size_t i = 0; i < g_borrow_fns.len; i++) {
+            AstFn *fn = g_borrow_fns.items[i];
+            if (resolve_ref_calls_seq(fn->body)) changed = true;
+        }
+        if (!changed) break;
+    }
+    validate_virtual_ref_return_contracts();
+    for (size_t i = 0; i < g_borrow_fns.len; i++) {
+        AstFn *fn = g_borrow_fns.items[i];
+        check_deferred_ref_returns(fn, fn->body);
+    }
+    diagnose_unresolved_ref_returns(prog->stmts);
+    for (size_t i = 0; i < g_borrow_fns.len; i++)
+        diagnose_unresolved_ref_returns(((AstFn *)g_borrow_fns.items[i])->body);
+    borrow_infer_summaries(g_borrow_fns);
+    borrow_check_script(prog->stmts);
+    for (size_t i = 0; i < g_borrow_fns.len; i++)
+        borrow_check_function(g_borrow_fns.items[i]);
+    infer_borrow_only_params(prog);
+    infer_local_regions(prog);
 }
 
 const FnSig *sema_fn_sig(AstFn *fn) { return fn_make_sig(fn); }

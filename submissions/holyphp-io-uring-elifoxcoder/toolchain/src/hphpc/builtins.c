@@ -1,10 +1,9 @@
 /* builtins.c — PHP-compatible standard library function table. */
 #include "builtins.h"
 
-Type *ty_int, *ty_i8, *ty_i16, *ty_i32, *ty_i64,
+Type *ty_int, *ty_i8, *ty_i16, *ty_i32, *ty_i64, *ty_i128,
     *ty_float, *ty_f32, *ty_f64, *ty_bool, *ty_string, *ty_void, *ty_mixed,
-    *ty_null, *ty_false;
-static Type *ty_int_false;
+    *ty_null;
 
 static Builtin *tbl = NULL;
 static size_t tbl_len = 0, tbl_cap = 0;
@@ -29,19 +28,13 @@ void builtins_init(void) {
     ty_int = type_new(TY_INT);
     ty_i8 = type_new(TY_I8); ty_i16 = type_new(TY_I16);
     ty_i32 = type_new(TY_I32); ty_i64 = type_new(TY_I64);
+    ty_i128 = type_new(TY_I128);
     ty_float = type_new(TY_FLOAT); ty_f32 = type_new(TY_F32); ty_f64 = type_new(TY_F64);
     ty_bool = type_new(TY_BOOL);
     ty_string = type_new(TY_STRING);
     ty_void = type_new(TY_VOID);
     ty_mixed = type_new(TY_MIXED);
     ty_null = type_new(TY_NULL);
-    ty_false = type_new(TY_BOOL);
-    ty_false->bool_const = 1;
-    ty_int_false = type_new(TY_UNION);
-    ty_int_false->nmembers = 2;
-    ty_int_false->members = xmalloc(sizeof(Type *) * 2);
-    ((Type **)ty_int_false->members)[0] = ty_int;
-    ((Type **)ty_int_false->members)[1] = ty_false;
 
     /* PHP string functions */
     add("strlen",        B_LEN,     ty_int,    false, false);
@@ -62,13 +55,8 @@ void builtins_init(void) {
     add("substr",        B_MISC,    ty_string, false, false);
     add("strstr",        B_STR2,    ty_mixed,  false, false);   /* string|false, PHP-style */
     add("strchr",        B_STR2,    ty_mixed,  false, false);   /* alias, string|false */
-    add("strpos",        B_MISC,    ty_int_false, false, false); /* (hay, needle[, offset]) -> int|false */
+    add("strpos",        B_MISC,    ty_mixed,  false, false);   /* (hay, needle[, offset]) -> int|false, PHP-style */
     add("str_contains",  B_STR2,    ty_bool,   false, false);
-    add("str_at_eq",      B_MISC,    ty_bool,   false, false);
-    add("str_to_int",      B_MISC,    ty_int,    false, false);
-    add("str_to_int_range", B_MISC,   ty_int,    false, false);
-    add("http_request_bounds", B_MISC, ty_int, false, false);
-    add("str_find_range", B_MISC, ty_int, false, false);
     add("str_starts_with", B_STR2,  ty_bool,   false, false);
     add("str_ends_with", B_STR2,    ty_bool,   false, false);
     add("strcmp",        B_CMP,     ty_int,    false, false);
@@ -96,15 +84,6 @@ void builtins_init(void) {
     /* crypto */
     add("sha256",           B_STR1, ty_string, false, false);
     add("hash_hmac",        B_MISC, ty_mixed,  false, false);  /* (algo, data, key[, raw]) */
-    add("jwt_verify",       B_MISC, ty_string, false, false);  /* (token, secret, now) -> payload|"" */
-    add("jwt_verifier_new", B_MISC, ty_string, false, false);  /* (secret) -> reusable HMAC key state */
-    add("jwt_verify_prepared", B_MISC, ty_string, false, false); /* (token, key_state, now) -> payload|"" */
-    add("json_str_field",   B_MISC, ty_string, false, false);  /* (json, key) -> value|"" */
-    add("json_num_field",   B_MISC, ty_int,    false, false);  /* (json, key) -> int|-1 */
-    add("str_pos_ci",       B_MISC, ty_int_false, false, false); /* (hay, needle[, off]) -> int|false */
-    add("str_prefix_ci",    B_MISC, ty_bool,   false, false);  /* (s, prefix) -> bool */
-    add("str_int_range",    B_MISC, ty_int,    false, false);  /* (s, start, end) -> int */
-    add("str_trim_range",   B_MISC, ty_string, false, false);  /* (s, start, end) -> trimmed slice */
     add("password_hash",    B_STR1, ty_string, false, false);
     add("password_verify",  B_STR2, ty_bool,   false, false);
     add("random_bytes",     B_INT_INT, ty_string, false, false);
@@ -211,7 +190,7 @@ void builtins_init(void) {
     add("srand",         B_MISC,    ty_void,   false, false);
     add("mt_srand",      B_MISC,    ty_void,   false, false);
     add("random_int",    B_MISC,    ty_int,    false, false);
-    add("fgetc",         B_MISC,    ty_string, false, false);
+    add("fgetc",         B_MISC,    ty_mixed,  false, false);   /* string|false at EOF, PHP-style */
     add("abs",           B_ABS,     ty_mixed,  false, false);
     add("round",         B_MISC,    ty_mixed,  false, false);
     add("floor",         B_ABS,     ty_float,  false, false);
@@ -224,10 +203,10 @@ void builtins_init(void) {
     add("cos",           B_ABS,     ty_float,  false, false);
     add("tan",           B_ABS,     ty_float,  false, false);
     add("atan",          B_ABS,     ty_float,  false, false);
-    add("atan2",         B_ABS,     ty_float,  false, false);
+    add("atan2",         B_MISC,    ty_float,  false, false);
     add("asin",          B_ABS,     ty_float,  false, false);
     add("acos",          B_ABS,     ty_float,  false, false);
-    add("log",           B_ABS,     ty_float,  false, false);
+    add("log",           B_MISC,    ty_float,  false, false);   /* log($x[, $base]) */
     add("log2",          B_ABS,     ty_float,  false, false);
     add("log10",         B_ABS,     ty_float,  false, false);
     add("exp",           B_ABS,     ty_float,  false, false);
@@ -297,34 +276,13 @@ void builtins_init(void) {
     add("http_request",  B_MISC,    ty_mixed,  false, false);
     /* sockets — the transport layer for library code (lib/websocket.hphp) */
     add("stream_socket_server", B_MISC, ty_mixed,  false, false);
-    add("stream_socket_server_reuseport", B_MISC, ty_mixed, false, false);
     add("stream_socket_client", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept", B_MISC, ty_mixed,  false, false);
     add("stream_socket_accept2", B_MISC, ty_mixed, false, false);   /* (srv, timeoutMs): false on timeout */
-    add("accept_emfile",     B_ZERO,    ty_bool,   false, false);   /* last accept failed with EMFILE/ENFILE */
     add("stream_set_blocking",  B_MISC, ty_bool,   false, false);
-    add("stream_set_nodelay",   B_MISC, ty_bool,   false, false);
-    add("stream_set_socket_buffers", B_MISC, ty_bool, false, false); /* listener values are inherited by accepted TCP sockets on Linux */
     add("stream_ready",         B_MISC, type_array_of(ty_mixed), false, false);
-    add("stream_ready_into",    B_MISC, type_array_of(ty_mixed), false, false);
-    add("epoll_add",            B_MISC, ty_bool,   false, false);
-    add("epoll_del",            B_MISC, ty_bool,   false, false);
-    add("epoll_mod",            B_MISC, ty_bool,   false, false);
-    add("epoll_wait2",          B_MISC, ty_bool,   false, false);
-    add("epoll_wait_iarr2",     B_MISC, ty_bool,   false, false);
-    add("epoll_wait_into",      B_MISC, type_array_of(ty_mixed), false, false);
     add("stream_recv",          B_MISC, ty_string, false, false);
-    add("stream_recv_release",  B_MISC, ty_bool,   false, false);
     add("stream_send",          B_MISC, ty_int,    false, false);
-    add("stream_send2",         B_MISC, ty_int,    false, false);
-    add("stream_send_nb",       B_MISC, ty_int,    false, false);
-    add("stream_send2_nb",      B_MISC, ty_int,    false, false);
-    add("nofile_limit",         B_ZERO, ty_int,    false, false);
-    add("runtime_stats",        B_ZERO, ty_string, false, false);
-    add("runtime_diag_write",   B_STR1, ty_bool,   false, false);
-    add("uring_active",         B_ZERO, ty_bool,   false, false);
-    add("uring_direct",         B_ZERO, ty_bool,   false, false);
-    add("uring_direct_slots",   B_ZERO, ty_int,    false, false);
     add("stream_eof",           B_MISC, ty_bool,   false, false);
     add("stream_peer",          B_MISC, ty_string, false, false);
     add("stream_close",         B_MISC, ty_bool,   false, false);
@@ -451,361 +409,29 @@ void builtins_init(void) {
     add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
     add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
     add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
 
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
-
-    add("exec",          B_STR1,    ty_mixed,  false, false);   /* (cmd) -> last-line|string|false, PHP-style */
-    add("passthru",      B_STR1,    ty_void,   false, false);   /* (cmd) -> prints to stdout, returns void */
-    add("shell_exec",    B_STR1,    ty_mixed,  false, false);   /* (cmd) -> stdout|string|false, PHP-style */
+    /* ANSI color constants for print / println / input */
+    add("RESET",         B_MISC,    ty_int,    false, false);
+    add("BLACK",         B_MISC,    ty_int,    false, false);
+    add("RED",           B_MISC,    ty_int,    false, false);
+    add("GREEN",         B_MISC,    ty_int,    false, false);
+    add("YELLOW",        B_MISC,    ty_int,    false, false);
+    add("BLUE",          B_MISC,    ty_int,    false, false);
+    add("MAGENTA",       B_MISC,    ty_int,    false, false);
+    add("CYAN",          B_MISC,    ty_int,    false, false);
+    add("WHITE",         B_MISC,    ty_int,    false, false);
+    add("BRIGHT_BLACK", B_MISC,    ty_int,    false, false);
+    add("BRIGHT_RED",   B_MISC,    ty_int,    false, false);
+    add("BRIGHT_GREEN", B_MISC,    ty_int,    false, false);
+    add("BRIGHT_YELLOW",B_MISC,    ty_int,    false, false);
+    add("BRIGHT_BLUE",  B_MISC,    ty_int,    false, false);
+    add("BRIGHT_MAGENTA",B_MISC,   ty_int,    false, false);
+    add("BRIGHT_CYAN",  B_MISC,    ty_int,    false, false);
+    add("BRIGHT_WHITE", B_MISC,    ty_int,    false, false);
+
+    add("print",         B_PRINTF_COLOR, ty_void, false, true);   /* (string, int color?) -> void */
+    add("println",       B_PRINTLN_COLOR, ty_void, false, true);  /* (string, int color?) -> void */
+    add("input",         B_READLINE_COLOR, ty_string, false, true); /* (string prompt, int color?) -> string */
 
     add("proc_open",     B_MISC,    ty_mixed,  false, false);   /* CWD-aware equivalent of proc_* start */
     add("proc_get_status", B_MISC,  ty_mixed,  false, false);   /* (h) -> array */
@@ -882,90 +508,142 @@ void builtins_init(void) {
     add("ffi_call",      B_MISC,    ty_mixed,  true,  true);
     add("heap_dump",     B_MISC,    ty_string, true,  false);
 
-    /* generic SQLite binding */
-    add("scope_begin",          B_MISC, ty_bool,   false, false);
-    add("scope_end",            B_MISC, ty_bool,   false, false);
-    add("str_persist",          B_MISC, ty_string, false, false);
-    add("str_free",             B_MISC, ty_bool,   false, false);
-    add("live_bytes",           B_MISC, ty_int,    false, false);
-    add("live_allocs",          B_MISC, ty_int,    false, false);
-    add("arr_clear",            B_MISC, ty_bool,   false, false);
-    add("arr_free",             B_MISC, ty_bool,   false, false);
-    add("object_free",          B_MISC, ty_bool,   false, false);
-    add("bt_root",              B_MISC, ty_int,    false, false);
-    add("bt_open",              B_MISC, ty_int,    false, false);
-    add("bt_close",             B_MISC, ty_bool,   false, false);
-    add("bt_first",             B_MISC, ty_int,    false, false);
-    add("bt_last",              B_MISC, ty_int,    false, false);
-    add("bt_next",              B_MISC, ty_int,    false, false);
-    add("bt_prev",              B_MISC, ty_int,    false, false);
-    add("bt_seek",              B_MISC, ty_int,    false, false);
-    add("bt_rowid",             B_MISC, ty_int,    false, false);
-    add("bt_payload_ptr",       B_MISC, ty_int,    false, false);
-    add("bt_payload_size",      B_MISC, ty_int,    false, false);
-    add("bt_payload_pin",       B_MISC, ty_int,    false, false);
-    add("bt_page_release",      B_MISC, ty_bool,   false, false);
-    add("bt_cols",              B_MISC, ty_int,    false, false);
-    add("bt_col_off",           B_MISC, ty_int,    false, false);
-    add("bt_col_len",           B_MISC, ty_int,    false, false);
-    add("bt_col_int",           B_MISC, ty_int,    false, false);
-    add("bt_col_int_at",        B_MISC, ty_int,    false, false);
-    add("bt_read",              B_MISC, ty_int,    false, false);
-    add("bt_count_key",        B_MISC, ty_int,    false, false);
-    add("bt_count_range",      B_MISC, ty_int,    false, false);
-    add("bt_multi_seek",       B_MISC, ty_int,    false, false);
-    add("bt_tail",             B_MISC, ty_int,    false, false);
-    add("bt_multi_payloads",   B_MISC, ty_bool,   false, false);
-    add("bt_multi_keys",       B_MISC, ty_int,    false, false);
-    add("bt_multi_release",    B_MISC, ty_bool,   false, false);
-    add("iarr_new",            B_MISC, ty_int,    false, false);
-    add("iarr_new_uninit",     B_MISC, ty_int,    false, false);
-    add("iarr_release",        B_MISC, ty_bool,   false, false);
-    add("iarr_get",            B_MISC, ty_int,    false, false);
-    add("iarr_set",            B_MISC, ty_bool,   false, false);
-    add("iarr_get_fast",       B_MISC, ty_int,    false, false);
-    add("iarr_set_fast",       B_MISC, ty_bool,   false, false);
-    add("iarr_data_ptr",       B_MISC, ty_int,    false, false);
-    add("iarr_len",            B_MISC, ty_int,    false, false);
-    add("sb_new",               B_MISC, ty_int,    false, false);
-    add("sb_put",               B_MISC, ty_bool,   false, false);
-    add("sb_bytes",             B_MISC, ty_bool,   false, false);
-    add("sb_data_ptr",          B_MISC, ty_int,    false, false);
-    add("sb_discard",           B_MISC, ty_bool,   false, false);
-    add("sb_int",               B_MISC, ty_bool,   false, false);
-    add("sb_json",              B_MISC, ty_bool,   false, false);
-    add("sb_json_str",          B_MISC, ty_bool,   false, false);
-    add("str_from_bytes",       B_MISC, ty_string, false, false);
-    add("sb_reserve",           B_MISC, ty_bool,   false, false);
-    add("sb_len",               B_MISC, ty_int,    false, false);
-    add("sb_prepend",           B_MISC, ty_bool,   false, false);
-    add("sb_take",              B_MISC, ty_string, false, false);
-    add("stream_send_sb",       B_MISC, ty_int,    false, false);
-    add("int_digits",           B_MISC, ty_int,    false, false);
-    add("sqlite_open",          B_MISC, ty_int,    false, false);  /* (path) -> handle|0 */
-    add("sqlite_open_vfs",      B_MISC, ty_int,    false, false);  /* (path, vfs) -> handle|0 */
-    add("sqlite_bg_checkpoint_start", B_MISC, ty_bool, false, false); /* (db, path, frames, hold_ms) */
-    add("sqlite_bg_checkpoint_hold", B_MISC, ty_bool, false, false); /* (db) */
-    add("sqlite_bg_checkpoint_tick", B_MISC, ty_bool, false, false); /* (db), generic forced WAL catch-up */
-    add("sqlite_bg_checkpoint_active", B_MISC, ty_bool, false, false); /* (db) */
-    add("sqlite_close",         B_MISC, ty_bool,   false, false);
-    add("sqlite_exec",          B_MISC, ty_bool,   false, false);  /* (db, sql) */
-    add("sqlite_status",        B_MISC, ty_string, false, false);  /* (db) -> interval cache/timing counters */
-    add("sqlite_prepare",       B_MISC, ty_int,    false, false);  /* (db, sql) -> stmt|0 */
-    add("sqlite_finalize",      B_MISC, ty_bool,   false, false);
-    add("sqlite_bind_int",      B_MISC, ty_bool,   false, false);  /* (stmt, 1-based idx, value) */
-    add("sqlite_bind_text",     B_MISC, ty_bool,   false, false);
-    add("sqlite_step",          B_MISC, ty_int,    false, false);  /* 100 row, 101 done */
-    add("sqlite_reset",         B_MISC, ty_int,    false, false);
-    add("sqlite_clear_bindings",B_MISC, ty_bool,   false, false);
-    add("sqlite_column_text",   B_MISC, ty_string, false, false);
-    add("sqlite_column_int",    B_MISC, ty_int,    false, false);
-    add("sqlite_changes",       B_MISC, ty_int,    false, false);
-    add("sqlite_last_insert_rowid", B_MISC, ty_int, false, false);
-    add("sqlite_errmsg",        B_MISC, ty_string, false, false);
-    add("sqlite_extended_errcode", B_MISC, ty_int, false, false);
-    add("sqlite_is_lock_error", B_MISC, ty_bool,   false, false);
-    add("sqlite_busy_timeout",  B_MISC, ty_bool,   false, false);
+    /* ported with the challenge runtime: generic transport, SQLite,
+     * string builders and typed int arrays (hphp_uring.c,
+     * hphp_sqlite.c, hphp_std.c). Bounds-skipping and raw-pointer
+     * builtins carry the unsafe flag; enforcement comes later. */
+    add("accept_emfile",              B_MISC,  ty_bool, false, false);
+    add("arr_clear",                  B_MISC,  ty_bool, false, false);
+    add("arr_free",                   B_MISC,  ty_bool, true, false);
+    add("bt_close",                   B_MISC,  ty_bool, false, false);
+    add("bt_col_int",                 B_MISC,  ty_int, false, false);
+    add("bt_col_int_at",              B_MISC,  ty_int, false, false);
+    add("bt_col_len",                 B_MISC,  ty_int, true, false);
+    add("bt_col_off",                 B_MISC,  ty_int, true, false);
+    add("bt_cols",                    B_MISC,  ty_int, false, false);
+    add("bt_count_key",               B_MISC,  ty_int, false, false);
+    add("bt_count_range",             B_MISC,  ty_int, false, false);
+    add("bt_first",                   B_MISC,  ty_int, false, false);
+    add("bt_last",                    B_MISC,  ty_int, false, false);
+    add("bt_multi_keys",              B_MISC,  ty_int, false, false);
+    add("bt_multi_payloads",          B_MISC,  ty_bool, true, false);
+    add("bt_multi_release",           B_MISC,  ty_bool, true, false);
+    add("bt_multi_seek",              B_MISC,  ty_int, true, false);
+    add("bt_next",                    B_MISC,  ty_int, false, false);
+    add("bt_open",                    B_MISC,  ty_int, true, false);
+    add("bt_open_safe",               B_MISC,  ty_int, false, false);
+    add("bt_page_release",            B_MISC,  ty_bool, true, false);
+    add("bt_payload_pin",             B_MISC,  ty_int, true, false);
+    add("bt_payload_ptr",             B_MISC,  ty_int, true, false);
+    add("bt_payload_size",            B_MISC,  ty_int, false, false);
+    add("bt_prev",                    B_MISC,  ty_int, false, false);
+    add("bt_read",                    B_MISC,  ty_int, true, false);
+    add("bt_root",                    B_MISC,  ty_int, true, false);
+    add("bt_rowid",                   B_MISC,  ty_int, false, false);
+    add("bt_seek",                    B_MISC,  ty_int, false, false);
+    add("bt_tail",                    B_MISC,  ty_int, true, false);
+    add("epoll_add",                  B_MISC,  ty_int, false, false);
+    add("epoll_del",                  B_MISC,  ty_int, false, false);
+    add("epoll_mod",                  B_MISC,  ty_int, false, false);
+    add("epoll_wait2",                B_MISC,  ty_int, false, false);
+    add("epoll_wait_iarr2",           B_MISC,  ty_bool, true, false);
+    add("epoll_wait_iarr2_safe",      B_MISC,  ty_bool, false, false);
+    add("epoll_wait_into",            B_MISC,  ty_int, false, false);
+    add("http_request_bounds",        B_MISC,  ty_int, false, false);
+    add("iarr_data_ptr",              B_MISC,  ty_int, true, false);
+    add("iarr_get",                   B_MISC,  ty_int, false, false);
+    add("iarr_get_fast",              B_MISC,  ty_int, true, false);
+    add("iarr_len",                   B_MISC,  ty_int, false, false);
+    add("iarr_new",                   B_MISC,  ty_int, false, false);
+    add("iarr_new_uninit",            B_MISC,  ty_int, true, false);
+    add("iarr_release",               B_MISC,  ty_bool, true, false);
+    add("iarr_set",                   B_MISC,  ty_bool, false, false);
+    add("iarr_set_fast",              B_MISC,  ty_bool, true, false);
+    add("int_digits",                 B_MISC,  ty_int, false, false);
+    add("json_num_field",             B_MISC,  ty_int, false, false);
+    add("json_str_field",             B_MISC,  ty_string, false, false);
+    add("jwt_verifier_new",           B_MISC,  ty_string, false, false);
+    add("jwt_verify",                 B_MISC,  ty_string, false, false);
+    add("jwt_verify_prepared",        B_MISC,  ty_string, false, false);
+    add("live_allocs",                B_MISC,  ty_mixed, false, false);
+    add("live_bytes",                 B_MISC,  ty_mixed, false, false);
+    add("nofile_limit",               B_MISC,  ty_int, false, false);
+    add("object_free",                B_MISC,  ty_bool, true, false);
+    add("runtime_diag_write",         B_MISC,  ty_bool, false, false);
+    add("runtime_stats",              B_MISC,  ty_string, false, false);
+    add("sb_bytes",                   B_MISC,  ty_bool, true, false);
+    add("sb_data_ptr",                B_MISC,  ty_int, true, false);
+    add("sb_discard",                 B_MISC,  ty_bool, true, false);
+    add("sb_int",                     B_MISC,  ty_bool, false, false);
+    add("sb_json",                    B_MISC,  ty_int, false, false);
+    add("sb_json_str",                B_MISC,  ty_int, false, false);
+    add("sb_len",                     B_MISC,  ty_int, false, false);
+    add("sb_new",                     B_MISC,  ty_int, false, false);
+    add("sb_prepend",                 B_MISC,  ty_bool, false, false);
+    add("sb_put",                     B_MISC,  ty_bool, false, false);
+    add("sb_reserve",                 B_MISC,  ty_bool, false, false);
+    add("scalar_binop",               B_MISC,  ty_mixed, false, false);
+    add("scope_begin",                B_MISC,  ty_bool, false, false);
+    add("scope_end",                  B_MISC,  ty_bool, true, false);
+    add("sqlite_bg_checkpoint_active", B_MISC,  ty_mixed, false, false);
+    add("sqlite_bg_checkpoint_hold",  B_MISC,  ty_mixed, false, false);
+    add("sqlite_bg_checkpoint_start", B_MISC,  ty_mixed, false, false);
+    add("sqlite_bg_checkpoint_tick",  B_MISC,  ty_mixed, false, false);
+    add("sqlite_bind_int",            B_MISC,  ty_bool, false, false);
+    add("sqlite_bind_text",           B_MISC,  ty_bool, false, false);
+    add("sqlite_busy_timeout",        B_MISC,  ty_bool, false, false);
+    add("sqlite_changes",             B_MISC,  ty_int, false, false);
+    add("sqlite_clear_bindings",      B_MISC,  ty_bool, false, false);
+    add("sqlite_close",               B_MISC,  ty_mixed, false, false);
+    add("sqlite_column_int",          B_MISC,  ty_int, false, false);
+    add("sqlite_column_text",         B_MISC,  ty_string, false, false);
+    add("sqlite_errmsg",              B_MISC,  ty_mixed, false, false);
+    add("sqlite_exec",                B_MISC,  ty_bool, false, false);
+    add("sqlite_extended_errcode",    B_MISC,  ty_int, false, false);
+    add("sqlite_finalize",            B_MISC,  ty_bool, false, false);
+    add("sqlite_is_lock_error",       B_MISC,  ty_bool, false, false);
+    add("sqlite_last_insert_rowid",   B_MISC,  ty_int, false, false);
+    add("sqlite_open",                B_MISC,  ty_int, true, false);
+    add("sqlite_open_safe",           B_MISC,  ty_int, false, false);
+    add("sqlite_open_vfs",            B_MISC,  ty_int, true, false);
+    add("sqlite_prepare",             B_MISC,  ty_int, true, false);
+    add("sqlite_prepare_safe",        B_MISC,  ty_int, false, false);
+    add("sqlite_reset",               B_MISC,  ty_int, false, false);
+    add("sqlite_status",              B_MISC,  ty_string, false, false);
+    add("sqlite_step",                B_MISC,  ty_int, false, false);
+    add("str_at_eq",                  B_MISC,  ty_bool, false, false);
+    add("str_find_range",             B_MISC,  ty_int, false, false);
+    add("str_free",                   B_MISC,  ty_bool, true, false);
+    add("str_from_bytes",             B_MISC,  ty_string, true, false);
+    add("str_int_range",              B_MISC,  ty_int, false, false);
+    add("str_persist",                B_MISC,  ty_string, false, false);
+    add("str_pos_ci",                 B_MISC,  ty_mixed, false, false);
+    add("str_prefix_ci",              B_MISC,  ty_mixed, false, false);
+    add("str_to_int",                 B_MISC,  ty_int, false, false);
+    add("str_to_int_range",           B_MISC,  ty_int, false, false);
+    add("str_trim_range",             B_MISC,  ty_mixed, false, false);
+    add("stream_ready_into",          B_MISC,  ty_bool, true, false);
+    add("stream_recv_release",        B_MISC,  ty_int, false, false);
+    add("stream_send2",               B_MISC,  ty_int, false, false);
+    add("stream_send2_nb",            B_MISC,  ty_int, false, false);
+    add("stream_send_nb",             B_MISC,  ty_int, false, false);
+    add("stream_send_sb",             B_MISC,  ty_int, false, false);
+    add("stream_set_nodelay",         B_MISC,  ty_bool, false, false);
+    add("stream_set_socket_buffers",  B_MISC,  ty_bool, false, false);
+    add("stream_socket_server_reuseport", B_MISC,  ty_int, false, false);
+    add("uring_active",               B_MISC,  ty_bool, false, false);
+    add("uring_direct",               B_MISC,  ty_bool, false, false);
+    add("uring_direct_slots",         B_MISC,  ty_int, false, false);
+
+    /* raw-memory accessors for programs that used *($p + n) */
+    add("sb_take",                    B_MISC,  ty_string, true, false);
+    add("sb_take_safe",               B_MISC,  ty_string, false, false);
+    add("u8_at",                      B_MISC,  ty_int, true, false);
+    add("str_u8_at",                  B_MISC,  ty_int, false, false);
+    add("u8_set",                     B_MISC,  ty_int, true, false);
+    add("i64_at",                     B_MISC,  ty_int, true, false);
+    add("str_i64_at",                 B_MISC,  ty_int, false, false);
+    add("i64_set",                    B_MISC,  ty_int, true, false);
 }
 
 const Builtin *builtin_lookup(const char *name) {

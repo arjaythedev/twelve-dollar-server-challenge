@@ -4,96 +4,39 @@
 # folder.
 set -euo pipefail
 cd "$(dirname "$0")"
+HERE="$PWD"
+ROOT="$HERE/toolchain"
 
-CC="${CC:-gcc}"
-ROOT="$PWD/toolchain"
-BUILD="$PWD/build"
-# Match the optimized target strategy used by the leading native builds.
-# The compiler honors HPHP_OPT for generated code and runtime objects; an
-# explicit caller value remains available for portability/debug builds.
+# Optimisation for the generated server, its runtime and the link. The
+# compiler honours HPHP_OPT; a caller value still wins (portability/debug).
 export HPHP_OPT="${HPHP_OPT:--O3 -march=native -flto}"
 if [[ -n "${HPHP_PGO_GENERATE_DIR:-}" ]]; then
   mkdir -p "$HPHP_PGO_GENERATE_DIR"
   HPHP_OPT+=" -fprofile-generate=$HPHP_PGO_GENERATE_DIR -fprofile-update=single"
-  export HPHP_OPT
 elif [[ -n "${HPHP_PGO_DIR:-}" ]]; then
   HPHP_OPT+=" -fprofile-use=$HPHP_PGO_DIR -fprofile-correction -Wno-missing-profile -Wno-error=coverage-mismatch"
-  export HPHP_OPT
 fi
-CFLAGS=(-O2 -std=c11 -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable)
+export HPHP_OPT
 
-rm -rf "$BUILD"
-mkdir -p "$BUILD/obj" bin
-
-# 1. Embed the runtime sources and bundled stdlib into the compiler binary.
-#    The generated header is a build artifact, not checked in.
-"$CC" -O2 -std=c11 "$ROOT/scripts/genembed.c" -o "$BUILD/genembed"
-"$BUILD/genembed" "$ROOT/src/hphpc/runtime_embed.h" "$ROOT/src/hphpc/runtime"
-
-# 2. Build the compiler.
-for src in "$ROOT"/src/hphpc/*.c; do
-  obj="$BUILD/obj/$(basename "${src%.c}").o"
-  "$CC" "${CFLAGS[@]}" -I"$ROOT/src/hphpc" -c "$src" -o "$obj"
-done
-"$CC" -O2 "$BUILD"/obj/*.o -o "$BUILD/hphp" -lm -lpthread
-
-# 3. Build SQLite thread-safe so the generic in-process PASSIVE checkpoint
-#    worker can use its own connection. The request connection stays NOMUTEX
-#    and owned by the event-loop thread. Falls back to the system library if
-#    the download or build fails, so an offline box still produces a server.
-SQLITE_VER="${HPHP_SQLITE_VERSION:-3460100}"
-SQLITE_THREADSAFE="${HPHP_SQLITE_THREADSAFE:-2}"
-SQLITE_YEAR="${HPHP_SQLITE_YEAR:-2024}"
-SQLITE_SHA="${HPHP_SQLITE_SHA:-77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784}"
-SQLITE_EXTRA_DEFS=()
-# Use the low-overhead SQLite build settings used by the Rust leader without
-# changing SQL syntax or SQLite's default pragma behavior. Set
-# HPHP_SQLITE_DEFINES to replace this list for other configurations.
-if [[ ${HPHP_SQLITE_DEFINES+x} ]]; then
-  SQLITE_DEFS=()
-  read -r -a SQLITE_DEFS <<< "$HPHP_SQLITE_DEFINES"
-else
-  SQLITE_DEFS=(
-    SQLITE_DEFAULT_MEMSTATUS=0
-    SQLITE_OMIT_PROGRESS_CALLBACK
-    SQLITE_OMIT_SHARED_CACHE
-    SQLITE_OMIT_LOAD_EXTENSION
-    SQLITE_OMIT_AUTOINIT
-    SQLITE_OMIT_UTF16
-    SQLITE_OMIT_TRACE
-    SQLITE_OMIT_COMPLETE
-    SQLITE_OMIT_GET_TABLE
-    SQLITE_OMIT_TCL_VARIABLE
-    SQLITE_USE_ALLOCA
-    HAVE_FDATASYNC=1
-    HAVE_USLEEP=1
-  )
-fi
-for def in "${SQLITE_DEFS[@]}"; do
-  SQLITE_EXTRA_DEFS+=("-D$def")
-done
+# 1. SQLite 3.46.1, pinned by checksum. The compiler embeds the amalgamation
+#    (with toolchain/src/hp_btree.c appended for the B-tree cursor builtins)
+#    and compiles it thread-safe with the settings in toolchain/scripts/build.sh.
+SQLITE_VER=3460100
+SQLITE_SHA=77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784
 SQLITE_ZIP="sqlite-amalgamation-$SQLITE_VER.zip"
-SQLITE_URL="https://www.sqlite.org/$SQLITE_YEAR/$SQLITE_ZIP"
-SQLITE_DIR="$BUILD/sqlite"
-mkdir -p "$SQLITE_DIR"
-if command -v unzip >/dev/null 2>&1 \
-   && curl -fsSL -o "$BUILD/$SQLITE_ZIP" "$SQLITE_URL" 2>/dev/null \
-   && echo "$SQLITE_SHA  $BUILD/$SQLITE_ZIP" | sha256sum -c - >/dev/null 2>&1 \
-   && unzip -q -o "$BUILD/$SQLITE_ZIP" -d "$BUILD/sqlite-src" >/dev/null 2>&1 \
-   && cat "$BUILD/sqlite-src/sqlite-amalgamation-$SQLITE_VER/sqlite3.c" \
-          "$ROOT/src/hp_btree.c" > "$SQLITE_DIR/sqlite3_all.c" \
-   && "$CC" $HPHP_OPT -fno-strict-aliasing -std=c11 -DSQLITE_THREADSAFE="$SQLITE_THREADSAFE" \
-            "${SQLITE_EXTRA_DEFS[@]}" \
-            -c "$SQLITE_DIR/sqlite3_all.c" -o "$SQLITE_DIR/sqlite3.o"; then
-  gcc-ar rcs "$SQLITE_DIR/libsqlite3.a" "$SQLITE_DIR/sqlite3.o"
-  export CPATH="$BUILD/sqlite-src/sqlite-amalgamation-$SQLITE_VER${CPATH:+:$CPATH}"
-  export HPHP_SQLITE_LIB="$SQLITE_DIR/libsqlite3.a"
-  echo "sqlite: built $SQLITE_VER with THREADSAFE=$SQLITE_THREADSAFE"
-else
-  echo "sqlite: using the system library"
+SQLITE_DIR="$ROOT/third_party/sqlite"
+if [[ ! -f "$SQLITE_DIR/sqlite3.c" ]]; then
+  mkdir -p "$HERE/build" "$SQLITE_DIR"
+  curl -fsSL -o "$HERE/build/$SQLITE_ZIP" "https://www.sqlite.org/2024/$SQLITE_ZIP"
+  echo "$SQLITE_SHA  $HERE/build/$SQLITE_ZIP" | sha256sum -c - >/dev/null
+  unzip -q -o "$HERE/build/$SQLITE_ZIP" -d "$HERE/build/sqlite-src"
+  cp "$HERE/build/sqlite-src/sqlite-amalgamation-$SQLITE_VER/"sqlite3{.c,.h,ext.h} "$SQLITE_DIR/"
 fi
 
-# 4. Compile the challenge server.
-"$BUILD/hphp" build server.hphp -o bin/server
+# 2. The compiler (runtime, stdlib and SQLite embedded in the binary).
+(cd "$ROOT" && bash scripts/build.sh)
 
-echo "built: $PWD/bin/server"
+# 3. The server, built fresh (no object cache) with HPHP_OPT.
+mkdir -p bin
+HPHP_NO_CACHE=1 HPHP_WORK_DIR="$HERE/build/work" "$ROOT/hphp" build server.hphp -o bin/server
+echo "built: bin/server"

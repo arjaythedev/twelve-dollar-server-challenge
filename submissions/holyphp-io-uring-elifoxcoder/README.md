@@ -184,6 +184,35 @@ build. PGO data should be refreshed after substantial source changes.
 | `1569472` (io_uring backend + ring-scale fixes) | **145,000** | 14,093 | 91 % | 60 | 0 |
 | `d75dd29` (allocation-free request path) | box run requested | — | — | — | — |
 
+### Memory-model compiler and a 256-completion ring-0 wait (2026-11-21)
+
+Generic compiler/runtime changes since #490 (no challenge logic):
+`toolchain/` is now the HolyPHP compiler with its ownership/borrow memory
+model (borrow checking in `src/hphpc/borrow.c`); leaks in
+concatenation, string indexing and `arr_clear` are fixed, string literals are
+read through an inline per-site cache, and an assignment used as a statement
+no longer retains and releases its value. `server.hphp` and `start.sh` carry
+the #510–#515 defaults (feed tail walk, 1 ms group commit, 16 KiB receive
+buffers, checkpoint worker at nice 10).
+
+One launcher default changes: ring 0 waits for **256 completions or 1 ms**
+instead of 64 (`HPHP_BATCH_N`; 64 restores the previous wait), as the Rust
+leader does. Newer kernels cap the deferred task work one `io_uring_enter`
+runs in proportion to `min_complete`, so a small wait sees fewer receives per
+pass. The earlier 256 trial that hurt tails used a 4 ms cap; this one keeps
+1 ms.
+
+Local WSL, same binary, mirrored A/B/B/A at 220k users (the WSL replica is
+kernel-bound at ~19k req/s for every server, including the 310k Rust leader,
+so this only checks for regressions):
+
+| | req/s | user µs/req | sys µs/req | p99 ms |
+|---|---:|---:|---:|---:|
+| wait 64 | 19,147 / 19,360 | 5.22 / 5.17 | 37.10 / 36.65 | 22,730 / 19,239 |
+| wait 256 | 19,286 / 19,194 | 5.08 / 5.06 | 36.54 / 37.45 | 22,021 / 21,617 |
+
+42/42 Direct and 42/42 Classic pass from a clean build (`test/run.sh`).
+
 ### Event-loop round after the 260k box run (`dbe2947`)
 
 The box held 260,000 at 79 % CPU and 29 µs/request; 270,000 failed on the

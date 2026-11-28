@@ -17,6 +17,20 @@
 #include "parser.h"
 #include <ctype.h>
 
+/* A recursive-descent parser runs out of stack on deeply nested input
+ * (`((((…`, `!!!!…`, `1**1**…`, `{{{…`). One fuzzer input killed the process
+ * with a stack overflow before this limit existed; report a normal error
+ * instead. The deepest legal test file needs well under 100 levels. */
+#define MAX_PARSE_DEPTH 400
+
+static void parser_enter(Parser *p) {
+    if (++p->depth <= MAX_PARSE_DEPTH) return;
+    const Token *t = ts_peek(p->ts);
+    fatal("%s:%zu:%zu: nesting too deep (limit %d)",
+          t->file, t->line, t->col, MAX_PARSE_DEPTH);
+}
+static void parser_leave(Parser *p) { p->depth--; }
+
 static Expr *parse_expr(Parser *p);
 static Expr *parse_assign(Parser *p);
 static Expr *parse_ternary(Parser *p);
@@ -30,10 +44,12 @@ static Expr *parse_unary(Parser *p);
 static Expr *parse_postfix(Parser *p);
 static Expr *parse_primary(Parser *p);
 static Stmt *parse_stmt(Parser *p);
+static Expr *parse_call_args(Parser *p, PtrVec *args);
 static Type *parse_type(Parser *p);
 static AstFn *parse_fn_after_name(Parser *p, const Token *name, bool is_method, bool is_static);
 static void parse_class_body(Parser *p, AstClass *c);
 static Decl *parse_decl(Parser *p);
+static bool at_ident(Parser *p, const char *kw);
 
 const char *dup_text(const Token *t) {
     return xstrndup(t->text ? t->text : "", t->len);
@@ -164,6 +180,23 @@ Program *parse_program(const char *src, const char *filename) {
     skip_nl(p);
     while (!ts_check(p->ts, T_EOF)) {
         if (ts_check(p->ts, T_NEWLINE) || ts_check(p->ts, T_SEMI)) { ts_advance(p->ts); continue; }
+        if (at_ident(p, "declare")) {
+            Token directive = *ts_advance(p->ts);
+            ts_expect(p->ts, T_LPAREN, "'(' after declare");
+            const Token *key = ts_expect(p->ts, T_IDENT, "declare setting");
+            ts_expect(p->ts, T_ASSIGN, "'=' after declare setting");
+            const Token *value = ts_expect(p->ts, T_INT, "integer declare value");
+            ts_expect(p->ts, T_RPAREN, "')' after declare setting");
+            if (key->len == 21 && memcmp(key->text, "enforce_memory_safety", 21) == 0) {
+                if (value->ival != 0 && value->ival != 1)
+                    fatal("%s:%zu:%zu: enforce_memory_safety must be 0 or 1",
+                          directive.file, directive.line, directive.col);
+                p->enforce_memory_safety = value->ival == 1;
+                prog->enforce_memory_safety = p->enforce_memory_safety;
+            }
+            expect_nl_or_semi(p);
+            continue;
+        }
         if (ts_check(p->ts, T_KW_IMPORT)) {
             Token it = *ts_advance(p->ts);
             const Token *pth = ts_expect(p->ts, T_STR, "import path");
@@ -196,6 +229,22 @@ Expr *parse_embedded_expr(const char *src, const char *file) {
 static bool at_ident(Parser *p, const char *kw) {
     const Token *t = ts_peek(p->ts);
     return t->kind == T_IDENT && t->len == strlen(kw) && memcmp(t->text, kw, t->len) == 0;
+}
+
+/* A primitive type spelling for a C/PHP-style cast `(int)$x`. Keep this in
+ * step with the primitive table in parse_type(). */
+static bool cast_type_name(const Token *t) {
+    static const char *names[] = {
+        "int", "i8", "i16", "i32", "i64", "i128",
+        "u8", "u16", "u32", "u64", "usize", "isize",
+        "float", "f32", "f64", "double",
+        "bool", "string", "str", "array", "list", "mixed", "void", NULL
+    };
+    if (!t || t->kind != T_IDENT || !t->text) return false;
+    for (int i = 0; names[i]; i++)
+        if (t->len == strlen(names[i]) && memcmp(t->text, names[i], t->len) == 0)
+            return true;
+    return false;
 }
 /* contextual keyword: also accept the reserved keyword form (e.g. "extends"
  * lexed as T_KW_EXTENDS) so class headers read like PHP */
@@ -317,6 +366,7 @@ static AstFn *parse_fn_after_name(Parser *p, const Token *name, bool is_method, 
     fn->name_tok = *name;
     fn->is_method = is_method;
     fn->is_static = is_static;
+    fn->enforce_memory_safety = p->enforce_memory_safety;
     ts_expect(p->ts, T_LPAREN, "'(' after function name");
     while (!ts_check(p->ts, T_RPAREN) && !ts_check(p->ts, T_EOF)) {
         Param *pm = xcalloc(1, sizeof(Param));
@@ -357,6 +407,7 @@ static AstFn *parse_fn_after_name(Parser *p, const Token *name, bool is_method, 
     fn->ret_inferred = fn->ret == NULL;
     skip_nl(p);
     if (ts_match(p->ts, T_LBRACE)) {
+        fn->has_body = true;
         skip_nl(p);
         while (!ts_check(p->ts, T_RBRACE) && !ts_check(p->ts, T_EOF)) {
             if (ts_check(p->ts, T_NEWLINE) || ts_check(p->ts, T_SEMI)) { ts_advance(p->ts); continue; }
@@ -379,6 +430,7 @@ static StructField *parse_field(Parser *p, Vis vis, bool is_const) {
     ts_match(p->ts, T_KW_OWN);
     StructField *f = xcalloc(1, sizeof(StructField));
     f->vis = vis;
+    f->is_weak = ts_match(p->ts, T_KW_WEAK);
     f->is_mut = is_mut || is_const;
     f->is_static = is_static;
     /* accepted forms:  $name: Type  |  Type $name  |  $name = expr  */
@@ -428,11 +480,12 @@ static void parse_class_body(Parser *p, AstClass *c) {
     m->vis = vis;
     ptrvec_push(&c->methods, m);
         } else if (ts_check(p->ts, T_VAR) || ts_check(p->ts, T_KW_MUT) || ts_check(p->ts, T_KW_OWN) ||
+                   ts_check(p->ts, T_KW_WEAK) ||
                    ts_check(p->ts, T_INT) || ts_check(p->ts, T_IDENT) ||
                    /* a field may lead with its type, and a collection type
                     * starts with '[' -- the same form parameters accept */
                    ts_check(p->ts, T_LBRACKET)) {
-            StructField *f = parse_field(p, vis, is_const);
+            StructField *f = parse_field(p, vis, is_const || lead_static);
             ptrvec_push(&c->fields, f);
         } else if (lead_static || ts_check(p->ts, T_KW_STATIC) || is_const) {
             /* class constant / static field: `static $x = 1` or `const X = 1` */
@@ -457,7 +510,7 @@ static Type *parse_type_base(Parser *p) {
         return type_new(TY_NULL);
     }
     if (ts_match(p->ts, T_AMP)) {
-        bool mut = eat_ident(p, "mut");
+        bool mut = eat_ident_or_kw(p, "mut", T_KW_MUT);
         Type *el = parse_type(p);
         t = type_new(mut ? TY_MUTREF : TY_REF);
         t->elem = el;
@@ -491,7 +544,7 @@ static Type *parse_type_base(Parser *p) {
     (void)nm;
     static const struct { const char *n; TypeKind k; } prims[] = {
         {"int", TY_INT}, {"i8", TY_I8}, {"i16", TY_I16}, {"i32", TY_I32},
-        {"i64", TY_I64}, {"u8", TY_I8}, {"u16", TY_I16}, {"u32", TY_I32},
+        {"i64", TY_I64}, {"i128", TY_I128}, {"u8", TY_I8}, {"u16", TY_I16}, {"u32", TY_I32},
         {"u64", TY_I64}, {"usize", TY_I64}, {"isize", TY_I64},
         {"float", TY_FLOAT}, {"f32", TY_F32}, {"f64", TY_F64},
         {"double", TY_FLOAT},
@@ -510,12 +563,15 @@ static Type *parse_type_base(Parser *p) {
     for (int i = 0; prims[i].n; i++) {
         if (strcmp(prims[i].n, n) == 0) return type_new(prims[i].k);
     }
-    /* `callable` as a type name: any closure (signature not pinned) */
-    if (strcmp(n, "callable") == 0 && !ts_check(p->ts, T_LPAREN)) {
+    /* `thread_callable` is an erased-signature callback whose captures are
+     * verified at each assignment/call boundary before a worker uses it. */
+    if ((strcmp(n, "callable") == 0 || strcmp(n, "thread_callable") == 0) &&
+        !ts_check(p->ts, T_LPAREN)) {
         Type *ft = type_new(TY_FN);
         ft->fn.nparams = 0;
         ft->fn.variadic = true;   /* sema: any arity, unchecked args */
         ft->fn.ret = type_new(TY_MIXED);
+        ft->thread_safe_callback = strcmp(n, "thread_callable") == 0;
         return ft;
     }
     /* function type: fn(T1, T2) -> R — `callable(...)` spells the same */
@@ -686,7 +742,15 @@ static Stmt *parse_simple_stmt(Parser *p) {
     return s;
 }
 
+static Stmt *parse_stmt_inner(Parser *p);
 static Stmt *parse_stmt(Parser *p) {
+    parser_enter(p);
+    Stmt *s = parse_stmt_inner(p);
+    parser_leave(p);
+    return s;
+}
+
+static Stmt *parse_stmt_inner(Parser *p) {
     const Token *t0 = ts_peek(p->ts);
     switch (t0->kind) {
     case T_KW_LET: {
@@ -714,6 +778,21 @@ static Stmt *parse_stmt(Parser *p) {
     }
     case T_KW_PRINT: {
         ts_advance(p->ts);
+       /* `print(...)` with args is a function call, not a statement;
+          the statement form only takes a single expression. */
+       if (ts_check(p->ts, T_LPAREN)) {
+           Expr *callee = expr_new(EX_VAR, *t0);
+           callee->u.var.name = intern("print");
+           callee->u.var.bare_name = true;
+           Expr *call = expr_new(EX_CALL, *t0);
+           call->u.call.fn = callee;
+           parse_call_args(p, &call->u.call.args);
+           Stmt *s = stmt_new(ST_EXPR, *t0);
+           s->u.expr.expr = call;
+           s->u.expr.discard = true;
+           expect_nl_or_semi(p);
+           return s;
+       }
         Stmt *s = stmt_new(ST_PRINT, *t0);
         s->u.print.expr = parse_expr(p);
         expect_nl_or_semi(p);
@@ -972,7 +1051,12 @@ static Stmt *parse_stmt(Parser *p) {
 }
 
 /* ---- Expressions ---- */
-static Expr *parse_expr(Parser *p) { return parse_assign(p); }
+static Expr *parse_expr(Parser *p) {
+    parser_enter(p);
+    Expr *e = parse_assign(p);
+    parser_leave(p);
+    return e;
+}
 
 /* Tokens that can begin a type annotation. This is what tells a typed
  * declaration ("$x: int = 5") apart from a ternary branch
@@ -1131,7 +1215,7 @@ static Expr *parse_shift(Parser *p) { return parse_binop_level(p, 8); }
 static Expr *parse_additive(Parser *p) { return parse_binop_level(p, 9); }
 static Expr *parse_multiplicative(Parser *p) { return parse_binop_level(p, 10); }
 
-static Expr *parse_pow(Parser *p) {
+static Expr *parse_pow_inner(Parser *p) {
     Expr *base = parse_unary(p);
     if (ts_check(p->ts, T_POW)) {
         Token op = *ts_advance(p->ts);
@@ -1145,8 +1229,34 @@ static Expr *parse_pow(Parser *p) {
     return base;
 }
 
-static Expr *parse_unary(Parser *p) {
+static Expr *parse_pow(Parser *p) {
+    parser_enter(p);
+    Expr *e = parse_pow_inner(p);
+    parser_leave(p);
+    return e;
+}
+
+static Expr *parse_unary_inner(Parser *p) {
     const Token *t = ts_peek(p->ts);
+    /* PHP/C-style cast: `(int)$x`, `(i128)$n`, `(string)$v`. The parser's
+     * native form is `$x as int`; both produce the same EX_CAST. Only the
+     * primitive spellings are recognised, so a parenthesised identifier or
+     * `($x)` is untouched. */
+    if (t->kind == T_LPAREN) {
+        const Token *n1 = ts_peek2(p->ts), *n2 = ts_peek3(p->ts);
+        if (n1 && n1->kind == T_IDENT && n2 && n2->kind == T_RPAREN &&
+            cast_type_name(n1)) {
+            Token lp = *ts_advance(p->ts);          /* ( */
+            const Type *to = parse_type(p);
+            ts_expect(p->ts, T_RPAREN, "')' after cast type");
+            Expr *operand = parse_unary(p);
+            Expr *e = expr_new(EX_CAST, lp);
+            e->u.cast.to = to;
+            e->u.cast.operand = operand;
+            e->u.cast.ty_tok = *n1;
+            return e;
+        }
+    }
     if (t->kind == T_NOT || t->kind == T_MINUS || t->kind == T_PLUS || t->kind == T_TILDE) {
         Token op = *ts_advance(p->ts);
         Expr *operand = parse_unary(p);
@@ -1157,11 +1267,11 @@ static Expr *parse_unary(Parser *p) {
     }
     if (t->kind == T_AMP) {
         /* borrow or bitwise-and of unary: borrow if followed by $var/ident/&mut */
-        if (ts_peek2(p->ts)->kind == T_VAR || at_ident(p, "mut") ||
+        if (ts_peek2(p->ts)->kind == T_VAR || ts_peek2(p->ts)->kind == T_KW_MUT || at_ident(p, "mut") ||
             ts_peek2(p->ts)->kind == T_AMP) {
             Token amp = *ts_advance(p->ts);
             bool is_mut = false;
-            if (at_ident(p, "mut")) { ts_advance(p->ts); is_mut = true; }
+            if (eat_ident_or_kw(p, "mut", T_KW_MUT)) is_mut = true;
             Expr *operand = parse_unary(p);
             Expr *e = expr_new(is_mut ? EX_MUTBORROW : EX_BORROW, amp);
             e->u.borrow.operand = operand;
@@ -1176,6 +1286,13 @@ static Expr *parse_unary(Parser *p) {
         return e;
     }
     return parse_postfix(p);
+}
+
+static Expr *parse_unary(Parser *p) {
+    parser_enter(p);
+    Expr *e = parse_unary_inner(p);
+    parser_leave(p);
+    return e;
 }
 
 static Expr *parse_call_args(Parser *p, PtrVec *args) {
@@ -1377,16 +1494,23 @@ static Expr *parse_closure_after_fn(Parser *p) {
 
 /* '[' array literal; a bare comma ("[$a, , $c]") is an empty destructuring
  * slot, represented as a NULL entry in elems. */
-static Expr *parse_primary_lbracket(Parser *p) {
+/* `close` is T_RBRACKET for [..] and T_RPAREN for the PHP spelling array(..) */
+static Expr *parse_array_items(Parser *p, TokKind close) {
     const Token *t = ts_peek(p->ts);
     ts_advance(p->ts);
     Expr *e = expr_new(EX_ARRAY_LIT, *t);
     skip_nl(p);
-    while (!ts_check(p->ts, T_RBRACKET) && !ts_check(p->ts, T_EOF)) {
+    /* Collect the entries in order first: u.arr and u.map share storage (a
+     * union), so a literal that mixes plain values and `key => value` must
+     * end up entirely in one of them. */
+    PtrVec keys = {0}, vals = {0};     /* key NULL = positional entry */
+    bool any_key = false;
+    while (!ts_check(p->ts, close) && !ts_check(p->ts, T_EOF)) {
         skip_nl(p);
         if (ts_check(p->ts, T_COMMA)) {
             /* empty slot: list(,,$c) style skip position */
-            ptrvec_push(&e->u.arr.elems, NULL);
+            ptrvec_push(&keys, NULL);
+            ptrvec_push(&vals, NULL);
             ts_advance(p->ts);
             skip_nl(p);
             continue;
@@ -1394,17 +1518,44 @@ static Expr *parse_primary_lbracket(Parser *p) {
         Expr *k = parse_ternary(p);
         if (ts_match(p->ts, T_DOUBLEARROW)) {
             Expr *v = parse_ternary(p);
-            ptrvec_push(&e->u.map.keys, k);
-            ptrvec_push(&e->u.map.vals, v);
+            ptrvec_push(&keys, k);
+            ptrvec_push(&vals, v);
+            any_key = true;
         } else {
-            ptrvec_push(&e->u.arr.elems, k);
+            ptrvec_push(&keys, NULL);
+            ptrvec_push(&vals, k);
         }
         skip_nl(p);
         if (!ts_match(p->ts, T_COMMA)) break;
         skip_nl(p);
     }
-    ts_expect(p->ts, T_RBRACKET, "']' to close literal");
+    ts_expect(p->ts, close, close == T_RBRACKET ? "']' to close literal" : "')' to close array(...)");
     skip_nl(p);
+    if (!any_key) {
+        for (size_t i = 0; i < vals.len; i++) ptrvec_push(&e->u.arr.elems, vals.items[i]);
+    } else {
+        /* PHP: a plain value gets the next integer key, one past the
+         * largest integer key so far ([5 => "a", "b"] puts "b" at 6) */
+        long long next = 0;
+        for (size_t i = 0; i < vals.len; i++) {
+            Expr *k = keys.items[i];
+            Expr *v = vals.items[i];
+            if (!v) {
+                fatal("%s:%zu:%zu: an empty slot cannot appear in an array literal with keys",
+                      t->file, t->line, t->col);
+            }
+            if (!k) {
+                k = expr_new(EX_INT, v->tok);
+                k->u.i.ival = next++;
+            } else if (k->kind == EX_INT && !k->u.i.is_wide && k->u.i.ival >= next) {
+                next = k->u.i.ival + 1;
+            }
+            ptrvec_push(&e->u.map.keys, k);
+            ptrvec_push(&e->u.map.vals, v);
+        }
+    }
+    free(keys.items);
+    free(vals.items);
     return e;
 }
 
@@ -1415,6 +1566,8 @@ static Expr *parse_primary(Parser *p) {
         ts_advance(p->ts);
         Expr *e = expr_new(EX_INT, *t);
         e->u.i.ival = t->ival;
+        e->u.i.wide = t->ival128;
+        e->u.i.is_wide = t->ival_big;
         return e;
     }
     case T_FLOAT: {
@@ -1535,9 +1688,15 @@ static Expr *parse_primary(Parser *p) {
         return e;
     }
     case T_LBRACKET:
-        return parse_primary_lbracket(p);
+        return parse_array_items(p, T_RBRACKET);
     case T_IDENT: {
         /* function call, class name, or plain identifier */
+        /* PHP's long array syntax: array(1, "k" => 2) is the literal [1, "k" => 2] */
+        if (t->len == 5 && !strncmp(t->text, "array", 5) &&
+            ts_peek2(p->ts)->kind == T_LPAREN) {
+            ts_advance(p->ts);                       /* array; parse_array_items eats '(' */
+            return parse_array_items(p, T_RPAREN);
+        }
         const Token *nm = ts_advance(p->ts);
         const char *name = dup_text(nm);
         if (ts_check(p->ts, T_LPAREN)) {

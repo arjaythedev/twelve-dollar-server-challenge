@@ -43,8 +43,8 @@ final class Jwt(secret: String):
       val payload = Json.parse(pb, 0, pb.length) match
         case m: java.util.HashMap[?, ?] => m
         case _ => return Errors.invalidToken
+      // exp is required (SPEC.md): a token without one is rejected like an expired one
       payload.get("exp") match
-        case null =>
         case exp: java.lang.Double => if exp.doubleValue <= System.currentTimeMillis() / 1000.0 then return Errors.invalidToken
         case _ => return Errors.invalidToken
       payload.get("nbf") match

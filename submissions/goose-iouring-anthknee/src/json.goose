@@ -17,8 +17,6 @@ fn push_int(out: u8[>..]&, v: i64) {
     out.append(d[20 - n..]);
 }
 
-// The upper three bits distinguish controls from all other bytes, including UTF-8.
-// Goose's lane loop becomes a vector operation in native builds.
 inline fn json_mask<V>(s: const u8[:]) -> u32 {
     let v = simd_bytes::load<V>(s);
     var upper = v;
@@ -26,7 +24,6 @@ inline fn json_mask<V>(s: const u8[:]) -> u32 {
     return upper.eq(0).bit_or(v.eq('"')).bit_or(v.eq('\\')).to_bits();
 }
 
-// The length of s's prefix that needs no escaping.
 inline fn plain_prefix(s: const u8[:]) -> i64 {
     if s.len == 0 { return 0; }
     if s[0] < 32 || s[0] == '"' || s[0] == '\\' { return 0; }
@@ -37,7 +34,7 @@ inline fn plain_prefix(s: const u8[:]) -> i64 {
             if mask != 0 { return i + ctz(mask); }
             i += 32;
         }
-        // An overlapping final load stays inside the slice; its prefix was checked above.
+        // The final vector load overlaps bytes already checked.
         if i < s.len {
             let start = s.len - 32;
             let mask = json_mask<simd_bytes::U8x32>(s[start..]);
@@ -88,7 +85,6 @@ fn js_space(cp: i64) -> bool {
         cp == 0x2029 || cp == 0x202f || cp == 0x205f || cp == 0x3000 || cp == 0xfeff;
 }
 
-// One code point of well-formed UTF-8 at s[i]: (code point, bytes), or (0, 0) if malformed.
 fn utf8_at(s: const u8[:], i: i64) -> i64, i64 {
     let b = s[i];
     if b < 0x80 { return b, 1; }
@@ -110,8 +106,7 @@ fn utf8_at(s: const u8[:], i: i64) -> i64, i64 {
     return cp, n;
 }
 
-// The body trimmed (byte range) and its length in characters (code points, the unit of the
-// schema's CHECK); -1 characters if it is not well-formed UTF-8.
+// The bounds are byte offsets. The count is in Unicode code points, with -1 for invalid UTF-8.
 fn trim_count(s: const u8[:]) -> i64, i64, i64 {
     var ascii = true;
     for c in s { if c >= 0x80 { ascii = false; break; } }
@@ -143,9 +138,6 @@ fn trim_count(s: const u8[:]) -> i64, i64, i64 {
     if start < 0 { return 0, 0, 0; }
     return start, end, kept;
 }
-
-// ---------------------------------------------------------------------------------------------
-// JSON input: a validating reader over a whole document.
 
 fn ws(s: const u8[:], p: i64&) {
     while p < s.len {
@@ -184,8 +176,6 @@ fn valid_utf8(s: const u8[:]) -> bool {
     return true;
 }
 
-// The string at s[p] (which is '"'): its raw contents s[start..end], whether it has escapes,
-// and whether it is well formed (escapes, no raw control characters, UTF-8). p moves past it.
 fn read_string(s: const u8[:], p: i64&) -> i64, i64, bool, bool {
     let start = p + 1;
     var i = start;
@@ -196,7 +186,7 @@ fn read_string(s: const u8[:], p: i64&) -> i64, i64, bool, bool {
         if i >= s.len { return 0, 0, false, false; }
         let c = s[i];
         if c == '"' { break; }
-        if c != '\\' { return 0, 0, false, false; } // a raw control character
+        if c != '\\' { return 0, 0, false, false; }
         escd = true;
         if i + 1 >= s.len { return 0, 0, false, false; }
         let e = s[i + 1];
@@ -231,8 +221,6 @@ fn put_utf8(out: u8[>..]&, cp: i64) {
     }
 }
 
-// Decodes the escapes of a well-formed string's raw contents (read_string checked them).
-// A surrogate pair becomes one code point; a lone surrogate becomes U+FFFD.
 fn unescape(raw: const u8[:], out: u8[>..]&) {
     var i = 0;
     while i < raw.len {
@@ -265,7 +253,6 @@ fn lit(s: const u8[:], p: i64&, word: const u8[:]) -> bool {
     return true;
 }
 
-// A JSON number at s[p]: its value, and whether it is well formed. p moves past it.
 fn read_number(s: const u8[:], p: i64&) -> f64, bool {
     let start = p;
     var i = p;
@@ -293,13 +280,10 @@ fn read_number(s: const u8[:], p: i64&) -> f64, bool {
     return v, true;
 }
 
-// Skips one value at s[p] (after whitespace), validating it; nested containers are walked with
-// an explicit stack, so no input can recurse.
 fn skip_value(s: const u8[:], p: i64&) -> bool {
-    var stack: bool[512] = [false; 512]; // true: an object
+    var stack: bool[512] = [false; 512];
     var depth = 0;
     loop {
-        // A value is expected here.
         ws(s, p);
         if p >= s.len { return false; }
         let c = s[p];
@@ -339,7 +323,6 @@ fn skip_value(s: const u8[:], p: i64&) -> bool {
             if !ok { return false; }
         }
         if opened { continue; }
-        // After a value: close containers, or move to the next element.
         var more = false;
         while depth > 0 && !more {
             ws(s, p);
@@ -369,9 +352,7 @@ fn skip_value(s: const u8[:], p: i64&) -> bool {
     }
 }
 
-// Walks a whole JSON document: for each member of a top-level object F(key) is called with p at
-// the member's value, which F must consume. 1 an object, 0 valid JSON that is not an object, -1
-// invalid. Escaped member names are decoded (into kbuf) before F sees them.
+// The callback consumes each value. The result is 1 for an object, 0 for other JSON, or -1 on error.
 fn object_members<F>(s: const u8[:], p: i64&, kbuf: u8[>..]&) -> i32 {
     p = 0;
     ws(s, p);

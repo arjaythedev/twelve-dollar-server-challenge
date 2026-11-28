@@ -21,7 +21,6 @@ fn equal_ascii(bytes: const u8[:], text: const u8[:]) -> bool {
     return true;
 }
 
-// No I/O. Complete ranges refer only to this input. Incomplete input is not an error.
 fn parse(bytes: const u8[:]) -> model::Parse {
     let newline = find_any(bytes, NEWLINE);
     if newline < 0 {
@@ -50,7 +49,6 @@ fn parse(bytes: const u8[:]) -> model::Parse {
     var at = newline + 1;
     var length = 0;
     var has_length = false;
-    // Each iteration consumes at least one header byte, bounded by MAX_HEAD.
     while at <= model::MAX_HEAD {
         let relative = find_any(bytes[at..], NEWLINE);
         if relative < 0 {
@@ -96,7 +94,7 @@ fn parse(bytes: const u8[:]) -> model::Parse {
     return model::Parse.Invalid;
 }
 
-// Like IDs are deliberately not validated here: authentication has precedence.
+// On like requests, authentication errors take precedence over an invalid post ID.
 fn route(bytes: const u8[:], req: model::Request&) -> model::Route {
     let path = bytes[req.path.start..req.path.end];
     match req.method {

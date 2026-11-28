@@ -1,5 +1,4 @@
 #!/usr/bin/env bash
-# All fetched sources, generated C and binaries live in the one ignored folder.
 set -euo pipefail
 cd "$(dirname "$0")"
 mode=${1:-build}
@@ -22,8 +21,7 @@ if [[ $(uname -s) != Linux || $(uname -m) != x86_64 ]]; then
   echo 'The native server targets Ubuntu 24.04 x86_64. --emit-c works on other hosts.' >&2
   exit 1
 fi
-# GCC 13 rejects this pragma on redeclared inline C functions. The compiler
-# flag below applies the same float rule to the whole translation unit.
+# GCC 13 rejects this pragma on redeclared inline functions. The build sets the same flag below.
 sed -i '/^#pragma GCC optimize("fp-contract=off")$/d' .work/build/server.c
 
 fetch() {
@@ -57,8 +55,6 @@ common=(-std=gnu11 -O3 -march=x86-64-v3 -mtune=cascadelake -mprefer-vector-width
         -flto=1 -flto-partition=one -pthread -D_GNU_SOURCE -UNDEBUG -fno-plt -fno-semantic-interposition
         -I.work/build -I.work/deps -I.work/deps/liburing/src/include)
 warnings=(-Wall -Wextra -Werror)
-# Goose emits temporaries after eliminating their uses. Restrict these exceptions
-# to generated C; SQLite's amalgamation also contains unused helpers/parameters.
 generated_warnings=(-Wno-unused-function -Wno-unused-parameter -Wno-unused-variable -Wno-unused-but-set-variable)
 sqlite_warnings=(-Wno-unused-function -Wno-unused-parameter)
 sqlite_defs=(-DSQLITE_THREADSAFE=2 -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_DEFAULT_WAL_SYNCHRONOUS=1

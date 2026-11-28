@@ -1,6 +1,5 @@
 namespace model;
 
-// Shared domain values. No operating-system or database dependencies.
 struct ByteRange { start: i64, end: i64 }
 enum Method { Get, Post, Other }
 struct Request {
@@ -29,7 +28,6 @@ let MAX_RINGS: i64 = 16;
 let ANSWERS: i64 = 2048;
 let READS: i64 = 16384;
 let RX_BUFFERS: i64 = 1024;
-// These flags describe independent facts, not mutually exclusive lifecycle states.
 let CLOSE_AFTER: u8 = 1;
 let TOUCHED: u8 = 2;
 let ANSWERED: u8 = 4;

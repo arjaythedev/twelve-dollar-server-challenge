@@ -1,67 +1,49 @@
-# Goose, io_uring and SQLite
+# Goose with io_uring and SQLite
 
-Goose handles HTTP, JSON, HS256 authentication and SQLite record decoding. It manages connections, schedules requests, and controls database reads, commits and checkpoints. C calls io_uring and manages the SQLite handles. I kept the receive buffers in C because io_uring needs them longer than Goose can lend them.
+This Goose 2026.4 server lets clients read posts, publish posts and add likes. It serves HTTP directly on `0.0.0.0:80` on the challenge VM, without a web framework or Nginx. [API specification](../../SPEC.md)
 
-| Component | Version |
-| --- | --- |
-| Language | [Goose 2026.4](https://github.com/aardappel/goose/releases/tag/v2026.4), compiled to C |
-| Native compiler | Ubuntu 24.04 GCC 13 |
-| Framework | None. Direct HTTP/1.1 on `HOST:PORT`; no Nginx |
-| Network | [liburing 2.15](https://github.com/axboe/liburing/releases/tag/liburing-2.15) |
-| Database | SQLite 3.54.1 |
-| SQLite interface | C API and internal B-tree cursor functions |
-| JSON scanner | [goose-simd](https://github.com/sstadick/goose-simd/tree/bef8b31dfa4f0c87a8d0180c1e7fa6cbb1e435e6), fixed source commit |
+C adapters use liburing 2.15 for network I/O and SQLite 3.54.1 for storage. Goose verifies HS256 tokens on authenticated requests and scans JSON strings with [goose-simd](https://github.com/sstadick/goose-simd/tree/bef8b31dfa4f0c87a8d0180c1e7fa6cbb1e435e6).
 
 ## Build and run
 
-The server targets Ubuntu 24.04 on CPUs that support `x86-64-v3` and requires io_uring. The challenge runs it directly on `0.0.0.0:80`. For a local run, use a writable copy of the seeded database and start the server from the submission directory.
+Run from this directory on Ubuntu 24.04 with GCC 13 and an `x86-64-v3` CPU. For a local run, set `SQLITE_PATH` to a writable copy of `seed/feed.db`.
 
 ```sh
-sudo bash install.sh
-bash build.sh
-SQLITE_PATH=/absolute/path/feed.db JWT_SECRET=twelve-dollar-challenge \
-  HOST=127.0.0.1 PORT=3000 bash start.sh
+sudo ./install.sh
+./build.sh
+SQLITE_PATH=/path/to/feed-copy.db JWT_SECRET=twelve-dollar-challenge \
+  HOST=127.0.0.1 PORT=3000 ./start.sh
 ```
 
 ## Optimizations
 
-### Network and scheduling
+### Feed and post reads
 
-- Eight `SO_REUSEPORT` listeners use multishot accepts. Accepted sockets inherit `TCP_NODELAY` and occupy fixed-file slots in io_uring. As one ring fills, the event loop moves accepts to the next ring. It can use up to 16 rings with up to 65,535 slots each.
-- Each ring shares 1,024 receive buffers of 2 KiB across its connections. Multishot receives handle steady traffic. If a receive ends with data or runs out of buffers, bounded nonblocking reads drain the socket before the server rearms it.
-- Each ring uses `IORING_SETUP_SINGLE_ISSUER` and `IORING_SETUP_DEFER_TASKRUN`. The loop batches I/O submissions and buffer returns. It rotates the first ring it drains on each pass. It skips the blocking wait when ready requests, eligible held writes or recovery reads are queued.
-- Ready, held and recovery queues advance a head index so removing an entry usually takes no copying. Each pass allows 2,048 request attempts. Before the loop drains new completions, it spends up to 1,024 attempts on older ready requests and eligible held writes.
-- If the loop has spent its request budget and has replies pending, it commits and submits sends before the next recovery round. Recovery continues in the same pass.
+- The feed takes up to 20 posts from SQLite’s timestamp index. It fetches rows in ID order to keep nearby reads together, then returns the posts newest first.
+- Batched author lookups share users-table pages. A parent key can predict a row’s position. The server verifies the ID before copying just the username. Misses use binary search. Records that span pages or have long headers use the normal cursor. Goose reads short username fields directly and inlines its general column decoder.
+- Nearby posts share one scan of the likes index. A second cursor reads its highest post ID in the current transaction. Posts above that ID have no likes. The server counts supported entries directly on index pages and uses the normal cursor for other formats. [Feed reader](src/db.goose) · [SQLite adapter](native/sqlite.c)
 
-### Connection memory
+### Writes and checkpoints
 
-- A connection record occupies 29 bytes on Linux x86_64. Eight-byte queue handles identify a slot and its generation so the server can reject stale work when it reuses a slot. Idle connections need no dedicated application buffers.
-- C copies incoming bytes into a shared Goose buffer and returns the receive buffer to io_uring. A complete request that can run immediately needs no per-connection input allocation.
-- Queued input uses power-of-two native buffers starting at 512 bytes. Active and retained input buffers share a 6 MiB budget. For overflow, `alloc_copy` copies the bytes into an exact-length span in Goose’s `slice_pool<u8>`. The pool coalesces freed spans. A bit in the existing 32-bit input handle identifies the storage, so overflow adds no bytes to the connection record.
-- Input and response buffers use separate free lists and reuse exact sizes. Together the lists retain up to 1,024 buffers, each at most 32 KiB. The minimum response buffer size is 256 bytes. Before the first copy, the server selects the smallest power-of-two capacity that fits the HTTP header and body. The buffer stays valid until the final send completes.
-- Native buffer capacity and the Goose overflow pool’s backing storage share a 256 MiB limit. Between batches, a drop of at least 16 MiB from peak native buffer capacity triggers an attempt to release unused allocator pages. Attempts are at least five seconds apart. At startup, the server also tries to keep readable mappings of its executable resident with `mlock`.
+- Posts and likes share a 16 ms write window and reuse prepared statements. Reads can continue. Replies that depend on a write wait for commit.
+- SQLite uses WAL with `synchronous=NORMAL` and a 128 MiB page cache target. The file adapter combines adjacent WAL writes. The page cache skips scans that would remove nothing.
+- During a full checkpoint, reads continue and new writes pause. A low-priority worker groups up to 16 adjacent pages per write (64 KiB maximum). Lock contention switches it to individual writes. Below 65,536 WAL frames, the server asks a checkpoint still running after 250 ms to stop.
 
-### Parsing and authentication
+### Connections and memory
 
-- The SIMD scanner finds quotes, backslashes and control bytes in 16- or 32-byte spans. The JSON encoder copies runs of ordinary characters directly into a reusable output buffer. Parsing, JWT decoding and SQLite record decoding also reuse scratch buffers.
-- Each authenticated request verifies the token signature and expiry. HS256 reuses the signing key’s precomputed inner and outer SHA-256 states. Like requests validate the username in place. Feed and post lookups skip clock reads during dispatch.
+- Eight `SO_REUSEPORT` listeners enable `TCP_NODELAY`. Multishot accepts and receives reduce system calls. Each ring has fixed socket slots and 1,024 shared 2 KiB buffers. More rings open as slots fill.
+- The event loop batches I/O and buffer returns, rotates between rings and checks the others before waiting on the primary ring. Queues advance by index and older requests get time each pass. Nonblocking reads drain sockets when receive buffers run out. When the request budget runs out, committed replies go out before the next round of reads. [Event loop](src/transport.goose)
+- A connection record uses 29 bytes on Linux x86-64. Idle connections need no private request buffer. Queued input and replies reuse buffers by size. Input beyond the 6 MiB native pool uses exact-sized Goose slices within a combined 256 MiB budget. The server tries to keep its code in RAM and release unused heap pages after bursts. [Buffer pools](src/input_buffers.goose) · [Native I/O](native/io.h)
 
-### SQLite
+### Parsing and compilation
 
-- Feed and post lookups use SQLite B-tree cursors in the current transaction. Goose decodes the copied records. The feed walks the timestamp/ID index, fetches post rows in ascending ID order for locality, and returns them in feed order. Writes and the SQL feed fallback reuse prepared statements.
-- Nearby feed posts share one scan of the likes index. C counts supported entries directly in SQLite index leaf cells to avoid copying each record. For entries it cannot decode there, the server falls back to a cursor walk.
-- Requests in a batch share a transaction. The server holds their responses until commit, including reads that observed a write in the same batch. SQLite uses WAL with `synchronous=NORMAL`, the `unix-excl` VFS and a 48 MiB page-cache target on the main connection.
-- At 4,096 WAL frames, a worker runs a passive checkpoint so the event loop can keep serving reads. The worker requests nice +10. The loop briefly holds writes for the final checkpoint pass. At 65,536 frames it holds new writes until a fresh pass finishes copying the WAL.
-- A VFS adapter combines adjacent WAL frame headers and pages into fewer writes. A `PCACHE2` wrapper skips a truncation scan when the tracked page numbers show that it would remove nothing.
-
-### Compilation
-
-Goose’s `c_headers` exposes the native I/O adapters to the C compiler for inlining. GCC builds the generated C, adapters and SQLite with `-O3` and link-time optimization. The build targets `x86-64-v3`, tunes for Cascade Lake and prefers 256-bit vectors. Runtime assertions stay enabled.
+- SIMD finds JSON characters that need escaping so the encoder can copy plain text in blocks. Parsers reuse scratch buffers. Goose precomputes the signing key’s hash state and verifies each token’s signature and expiry. Like requests validate the username in place. Feed and post reads skip the clock lookup. [JSON](src/json.goose) · [JWT](src/jwt.goose)
+- Goose exposes the native I/O code for inlining. GCC builds the server and SQLite with `-O3` and link-time optimization for `x86-64-v3`, tuned for Cascade Lake. Runtime assertions stay enabled. [Build script](build.sh)
 
 ## Credits
 
-I adapted the JSON, JWT and SQLite record routines from [goose-iouring-ahmadsh2007 (#291)](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/291) and [sstadick’s changes](https://github.com/sstadick/twelve-dollar-server-challenge/pull/1), and based the native SQLite adapters and io_uring calls on #291 and [rust-iouring-kensac (#264)](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264).
+- The JSON, JWT and record codecs build on the original Goose submission and sstadick’s follow-up. [goose-iouring-ahmadsh2007 (#291)](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/291) · [sstadick’s changes](https://github.com/sstadick/twelve-dollar-server-challenge/pull/1)
+- The native SQLite and io_uring adapters build on the same Goose submission and Kensac’s Rust implementation. [rust-iouring-kensac (#264)](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/264)
+- The batched author lookup, WAL frame grouping and page-cache scan shortcut follow Pavly Halim’s implementation. The rowid shortcut follows Will Wang’s reader. [c-iouring-pavlyhalim (#245)](https://github.com/arjaythedev/twelve-dollar-server-challenge/pull/245) · [Will Wang’s reader](../c-uring-willwang/reader.c)
 
-## AI
-
-Done using GPT-6.1 Sol Max and GPT-6 Astra Extra High.
+Built with GPT-6.1 Sol Max and GPT-6 Astra Extra High.

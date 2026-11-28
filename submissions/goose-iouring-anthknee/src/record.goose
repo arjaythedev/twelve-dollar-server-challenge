@@ -21,11 +21,9 @@ fn serial_len(t: u64) -> i64 {
     return match t { 1 => 1, 2 => 2, 3 => 3, 4 => 4, 5 => 6, 6 => 8, 7 => 8, _ => 0 };
 }
 
-// Decodes the first n (at most 4) columns of the record at rec[s..e]: col_t the serial types,
-// col_s/col_e the byte ranges in rec. false if the record is shorter or malformed.
 struct Cols { t: u64[4], s: i64[4], e: i64[4] }
 
-fn columns(rec: const u8[:], s: i64, e: i64, n: i64, c: Cols&) -> bool {
+inline fn columns(rec: const u8[:], s: i64, e: i64, n: i64, c: Cols&) -> bool {
     assert(n >= 0);
     assert(n <= 4);
     if s < 0 || e < s || e > rec.len { return false; }
@@ -52,7 +50,6 @@ fn columns(rec: const u8[:], s: i64, e: i64, n: i64, c: Cols&) -> bool {
 
 fn is_text(t: u64) -> bool { return t >= 13 && (t & 1) == 1; }
 
-// The integer in column k (serial types 1-6, 8, 9). false for any other type.
 fn int_col(rec: const u8[:], c: Cols&, k: i64) -> i64, bool {
     let t = c.t[k];
     if t == 8 { return 0, true; }

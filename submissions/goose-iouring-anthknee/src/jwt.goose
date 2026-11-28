@@ -20,7 +20,6 @@ let H256: u32[8] = [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 
 
 fn rotr(x: u32, n: u32) -> u32 { return (x >> n) | (x << (32 - n)); }
 
-// One 64-byte block at blk[at..at + 64].
 fn compress(h: u32[8]&, blk: const u8[:], at: i64) {
     var w: u32[64] = [0; 64];
     for i in 16 {
@@ -50,7 +49,7 @@ fn compress(h: u32[8]&, blk: const u8[:], at: i64) {
     h[4] += e; h[5] += f; h[6] += g; h[7] += k;
 }
 
-// Finishes a hash whose state h has already absorbed `before` bytes (whole blocks), over msg.
+// before counts the bytes in complete blocks already absorbed into h.
 fn sha_finish(h: u32[8]&, msg: const u8[:], before: i64, out: u8[32]&) {
     var i = 0;
     while i + 64 <= msg.len { compress(h, msg, i); i += 64; }
@@ -91,7 +90,6 @@ fn key(secret: const u8[:]) -> Key {
     return result;
 }
 
-// HMAC-SHA256(key, msg) from the precomputed pad states.
 fn hmac(key: Key&, msg: const u8[:], out: u8[32]&) {
     var h = key.inner;
     var inner: u8[32] = [0; 32];
@@ -109,8 +107,7 @@ fn b64val(c: u8) -> i64 {
     return -1;
 }
 
-// Unpadded base64url, appended to out. Only the canonical spelling is accepted: the unused low
-// bits of the last character must be zero, so exactly one spelling of a signature verifies.
+// The unused bits of the last base64url character must be zero.
 fn b64url(s: const u8[:], out: u8[>..]&) -> bool {
     if s.len % 4 == 1 { return false; }
     var i = 0;
@@ -138,7 +135,6 @@ fn b64url(s: const u8[:], out: u8[>..]&) -> bool {
     return true;
 }
 
-// Scratch builders belong to the caller and retain storage only. No token is cached.
 fn verify(key: Key&, authorization: const u8[:], now: f64, want_name: bool,
           jwt_head: u8[>..]&, jwt_body: u8[>..]&, scratch: u8[>..]&,
           scratch2: u8[>..]&, username: u8[>..]&) -> model::Auth {
@@ -146,7 +142,6 @@ fn verify(key: Key&, authorization: const u8[:], now: f64, want_name: bool,
         return model::Auth.Missing;
     }
     let tok = authorization[7..];
-    // header.payload.signature
     var d1 = -1;
     var d2 = -1;
     var dots = 0;
@@ -166,7 +161,6 @@ fn verify(key: Key&, authorization: const u8[:], now: f64, want_name: bool,
     var diff: u8 = 0;
     for k in 32 { diff |= mac[k] ^ jwt_head[k]; }
     if diff != 0 { return model::Auth.Invalid; }
-    // The header must say HS256.
     jwt_head.clear();
     if !b64url(tok[..d1], jwt_head) { return model::Auth.Invalid; }
     var alg_ok = false;
@@ -193,7 +187,6 @@ fn verify(key: Key&, authorization: const u8[:], now: f64, want_name: bool,
         }
     };
     if hst != 1 || !alg_ok { return model::Auth.Invalid; }
-    // The payload: exp (required, in the future), then sub and username.
     jwt_body.clear();
     if !b64url(tok[d1 + 1..d2], jwt_body) { return model::Auth.Invalid; }
     let ps = jwt_body[..];

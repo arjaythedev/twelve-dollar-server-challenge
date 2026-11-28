@@ -1,6 +1,4 @@
-/* MIT. Linux and buffer adapters. Policy lives in transport.goose.
- * io_uring calls follow rust-iouring-kensac and goose-iouring-ahmadsh2007.
- * Included through c_headers, so the generated C can inline short adapters. */
+/* MIT. io_uring adapters based on rust-iouring-kensac and goose-iouring-ahmadsh2007. */
 #ifndef ANTHKNEE_IO_H
 #define ANTHKNEE_IO_H
 #include <arpa/inet.h>
@@ -54,13 +52,10 @@ static uint64_t io_box_memory, io_box_pool_count, io_box_pool_bytes, io_box_high
 static uint64_t io_input_memory;
 static uint64_t io_input_native_memory;
 static int64_t io_trim_at;
-/* Empty handles and retained allocations have separate lists. Pool heads and
- * idle boxes' length fields store the next handle plus one; zero ends a list. */
+/* Free-list links store the next handle plus one. Zero ends the list. */
 static int32_t io_pool[IO_BOX_CLASSES];
 static int32_t io_input_pool[IO_BOX_CLASSES];
 
-/* Goose's overflow pool and all native buffers share the capacity guard.
- * The pool reports its backing high-water length, including reusable holes. */
 static inline uint8_t io_input_reserve(int64_t capacity) {
   if (capacity < 0 || (uint64_t)capacity > IO_BOX_LIMIT ||
       io_box_memory + (uint64_t)capacity > IO_BOX_LIMIT) return false;
@@ -78,8 +73,6 @@ static inline void io_box_grew(void) {
   if (io_box_memory > io_box_highwater) io_box_highwater = io_box_memory;
 }
 
-/* A net capacity drop, not cumulative allocation churn, triggers reclamation.
- * Re-arm at the current capacity even when libc cannot release a whole page. */
 static inline uint8_t io_trim_due(int64_t now) {
   if (io_box_highwater - io_box_memory < IO_TRIM_DROP ||
       now - io_trim_at < IO_TRIM_INTERVAL_US) return false;
@@ -89,8 +82,6 @@ static inline uint8_t io_trim_due(int64_t now) {
 }
 static inline uint8_t io_heap_trim(void) { return malloc_trim(0) != 0; }
 
-/* Known-size payloads allocate their final capacity before the first copy.
- * malloc/realloc leave bytes uninitialized, as alloc_copy does for a Goose pool. */
 static inline int32_t io_box_new_from(int64_t needed, bool input) {
   if (needed < 0 || needed > IO_BOX_MAX) return -1;
   uint32_t capacity = input ? IO_INPUT_NATIVE_FIRST : IO_BOX_FIRST;
@@ -106,7 +97,6 @@ static inline int32_t io_box_new_from(int64_t needed, bool input) {
     box->length = 0;
     return handle;
   }
-  /* Retained input buffers still count against the native fast-path budget. */
   if (input && io_input_native_memory + capacity > IO_INPUT_NATIVE_LIMIT) return -1;
   int32_t handle;
   if (io_free_count) {
@@ -233,7 +223,7 @@ static inline int32_t io_ring_add(int32_t slots) {
   reg.ring_entries = IO_RX;
   rc = (int)syscall(__NR_io_uring_register, ring->queue.ring_fd, IORING_REGISTER_PBUF_RING, &reg, 1);
   if (rc < 0 && errno == EINVAL) {
-    /* Ubuntu's inverted reserved-word check, as handled by the scored Rust server. */
+    /* Some Ubuntu kernels require this reserved word to be 1. */
     reg.resv[0] = 1;
     rc = (int)syscall(__NR_io_uring_register, ring->queue.ring_fd, IORING_REGISTER_PBUF_RING, &reg, 1);
   }
@@ -253,7 +243,6 @@ fail:
 static inline struct io_uring_sqe *io_sqe(io_ring *ring) {
   struct io_uring_sqe *entry = io_uring_get_sqe(&ring->queue);
   if (entry) return entry;
-  /* One bounded retry. A persistent submission failure is reported to Goose. */
   int rc = io_uring_submit_and_get_events(&ring->queue);
   if (rc < 0) return NULL;
   return io_uring_get_sqe(&ring->queue);
@@ -320,6 +309,11 @@ static inline int32_t io_enter(int32_t ri, uint8_t wait) {
   io_ring *ring = io_rings[ri];
   int rc;
   if (wait) {
+    for (int i = 1; i < io_ring_count; i++) {
+      if (io_uring_cq_ready(&io_rings[i]->queue)) { wait = 0; break; }
+    }
+  }
+  if (wait) {
     struct __kernel_timespec timeout = {.tv_sec = 0, .tv_nsec = 1000000};
     struct io_uring_cqe *completion;
     rc = io_uring_submit_and_wait_timeout(&ring->queue, &completion, 256, &timeout, NULL);
@@ -340,7 +334,6 @@ static inline void io_reap(int32_t ri, gs_rref out) {
   struct io_uring_cqe *entry;
   unsigned head, count = 0;
   io_uring_for_each_cqe(&ring->queue, head, entry) {
-    /* Goose's packed Cqe is exactly the kernel record's 8+4+4 bytes. */
     uint8_t *p = (uint8_t *)out.stk->top;
     memcpy(p, &entry->user_data, 8); memcpy(p + 8, &entry->res, 4); memcpy(p + 12, &entry->flags, 4);
     out.stk->top += 16; out.hdr->len++; count++;
@@ -367,7 +360,6 @@ static inline void io_publish(void) {
   }
 }
 
-/* A stop request is checked only between completed batches. */
 volatile sig_atomic_t io_stopping;
 static inline uint8_t io_stop(void) { return io_stopping != 0; }
 static inline int32_t io_listen(sl_u8 host, int32_t port) {
@@ -401,7 +393,6 @@ static inline int32_t io_slots(void) {
   return (int32_t)(limit.rlim_max < 65535 ? limit.rlim_max : 65535);
 }
 static inline void io_lock_code(void) {
-  /* Best effort, process-local: keep executable pages resident near memory pressure. */
   char path[4096], line[8192];
   ssize_t length = readlink("/proc/self/exe", path, sizeof path - 1);
   if (length < 0) return;
@@ -411,7 +402,7 @@ static inline void io_lock_code(void) {
   while (fgets(line, sizeof line, maps)) {
     unsigned long start, end; char permissions[5];
     if (strstr(line, path) && sscanf(line, "%lx-%lx %4s", &start, &end, permissions) == 3 && permissions[0] == 'r')
-      (void)mlock((void *)start, end - start); /* Permission/limit failure is harmless. */
+      (void)mlock((void *)start, end - start);
   }
   fclose(maps);
 }

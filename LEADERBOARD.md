@@ -364,7 +364,11 @@ group commit; not merged: not above 270,000) held **266,000** (25,506 req/s, p95
 Its follow-up **#515** (`12aa203`, checkpoint worker at nice 10; not merged: not above 270,000) held **257,000**
 (24,730 req/s, p95 97.5 / p99 282.8 ms, 0 err, 77 % CPU, 28 µs/req, 727 MB, 2026-11-18); 270,000 passed the 2-minute
 probe but failed the 5-minute hold on p95/p99 (742 ms / 1.7 s, 82 % CPU), 280,000 failed the 2-minute probe on p95/p99
-(991 ms / 1.9 s) and 320,000 on p95/p99 (2.8 / 3.5 s).
+(991 ms / 1.9 s) and 320,000 on p95/p99 (2.8 / 3.5 s). Its follow-up **#541** (`6a20200`, memory-model compiler,
+SQLite binding split out, `HPHP_BATCH_N` 256; not merged: not above 270,000) held **209,000** (20,476 req/s, p95 17.1 /
+p99 328.3 ms, 0 err, 63 % CPU, 29 µs/req, 582 MB, 2026-11-28); 220,000 passed the 2-minute probe but failed the
+5-minute hold on p99 (5.8 s), 230,000 failed the 2-minute probe on p99 (2.5 s), 240,000 on p95/p99 (2.5 / 5.2 s) and
+320,000 on p95/p99 (5.3 / 6.7 s, 100 % CPU).
 Before that
 it was scored at **#447** at commit **`4c0adfb`** (**260,000**, 24,961 req/s, p95 154.1 / p99 658.8 ms, 79 % CPU, 29
 µs/req, 782 MB, 2026-11-16; per-ring receive-recovery FIFO, buffer reserve fix, pooled multi-seek result structs on

@@ -844,7 +844,10 @@ int dbx_writes_held(dbx *h) {
   if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
   long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);
   long long limit = CK_HOLD_NS;
-  if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) > 32768) limit *= 2;
+  /* 只有线程真的追不上（日志已经碰到兜底线）才把挂起上限翻倍。原来的判据是「超过 32,768 帧」，
+   * 而闸门本身现在就是 32,768——整个检查点过程里这个条件几乎恒真，等于把每次挂写都放宽到
+   * 800 ms。挂写时长直接就是写请求的排队时长，所以这条只能在极端情况下生效。 */
+  if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) > CK_FORCE_FRAMES) limit *= 2;
   if (mono_ns() - since > limit) {
     atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
     return 0;

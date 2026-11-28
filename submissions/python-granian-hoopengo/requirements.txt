@@ -1,0 +1,5 @@
+apsw==3.54.0.0
+click==8.5.0
+granian==2.8.4
+orjson==3.13.0
+uvloop==0.23.0

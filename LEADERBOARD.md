@@ -739,7 +739,10 @@ held, not merged: it didn't beat the merged row) scored **110,000** (10,812 req/
 CPU, 82 µs/req, 636 MB, 2026-11-10). CPU-bound: 115,000 and 120,000 failed the 2-minute probe on p95/p99 (627 / 1,041 ms
 and 591 / 1,221 ms at 97–98 % CPU, 0 errors). Its next commit `c0f58b9` (faster header parser) scored **115,000**
 (11,292 req/s, p95 165.2 / p99 539.9 ms, 0 err, 96 % CPU, 79 µs/req, 996 MB, 2026-11-10); still below the merged row,
-so not merged. 120,000 failed the 2-minute probe on p95/p99 (943 / 1,662 ms at 99 % CPU, 0 errors).
+so not merged. 120,000 failed the 2-minute probe on p95/p99 (943 / 1,662 ms at 99 % CPU, 0 errors). Its next commit
+`0bac7e0` (header parser that checks the first character and a fixed-offset colon) scored **110,000** (10,795 req/s, p95
+214.0 / p99 469.7 ms, 0 err, 95 % CPU, 82 µs/req, 654 MB, 2026-11-28); still below the merged row, so not merged. 115,000
+and 120,000 failed the 2-minute probe on p95/p99 (1,403 / 1,764 ms and 1,335 / 1,520 ms at 98–100 % CPU, 0 errors).
 
 ᴳ **goose-iouring-ahmadsh2007** stays on its merged #291 row. Its follow-up **#395** (`f963d02`, rings made at startup,
 ≤1,024 connections answered per pass, newest first for 15 s after a loop stall, 4 ms pass wait; held, not merged: it

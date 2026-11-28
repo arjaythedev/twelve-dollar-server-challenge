@@ -48,7 +48,6 @@ constexpr uint32_t kAcceptDepth = 512;
 // 230k 的 ramp 不会积压成 SYN 重传（1 秒/3 秒/7 秒）的原因；那种积压表现为「零错误但 p99
 // 高达数秒」。
 constexpr uint32_t kListeners = 8;
-constexpr size_t kHeldPerPass = 1024;
 constexpr unsigned kSqEntries = 8192;
 constexpr unsigned kCqEntries = 65536;
 constexpr size_t kBufSize = 2048;
@@ -141,7 +140,7 @@ class Worker {
   net::SlotTable& table() { return table_; }
   std::vector<uint32_t>& dirty() { return dirty_; }
   std::deque<uint32_t>& pending() { return pending_; }
-  std::deque<uint32_t>& held() { return held_; }
+  std::deque<std::pair<uint32_t, uint16_t>>& held() { return held_; }
   const int* listeners() const { return listeners_; }
   uint32_t* accepts() { return accepts_; }
   int& efd() { return efd_; }
@@ -164,7 +163,7 @@ class Worker {
   net::SlotTable table_;
   std::vector<uint32_t> dirty_;
   std::deque<uint32_t> pending_;
-  std::deque<uint32_t> held_;
+  std::deque<std::pair<uint32_t, uint16_t>> held_;
   int listeners_[kListeners] = {-1, -1, -1, -1, -1, -1, -1, -1};
   int efd_ = -1;
   uint32_t accepts_[kListeners] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -340,22 +339,23 @@ class Server {
     }
   }
 
-  // 回答被 WAL 闸门挂起的请求。一次性放行：被挂起的请求在这里无条件执行，所以它的延迟最多多一个
-  // pass，而不是再等一个新的 400 ms 窗口。kHeldPerPass 限制单个 pass 的工作量。
+  // 按本轮剩余答案额度恢复挂写请求。额度耗尽后留在原队列，下轮继续。
   void retry_held() {
-    size_t budget = kHeldPerPass;
-    for (uint32_t wi = 0; wi < workers_.size() && budget; wi++) {
+    for (size_t i = 0; i < workers_.size() && answers_left_; i++) {
+      const uint32_t wi = static_cast<uint32_t>((held_ring_ + i) % workers_.size());
       Worker& w = *workers_[wi];
-      size_t n = w.held().size();
-      while (n-- > 0 && budget) {
-        const uint32_t idx = w.held().front();
+      while (!w.held().empty() && answers_left_) {
+        const auto [idx, gen] = w.held().front();
         w.held().pop_front();
         net::Connection& c = w.table().at(idx);
-        if (!c.held) continue;
+        if (c.gen != gen || !c.held) continue;
         c.held = false;
         if (!c.open || c.closing) continue;
-        budget--;
         serve(w, wi, idx, nullptr, 0);
+      }
+      if (!answers_left_) {
+        held_ring_ = (wi + 1) % workers_.size();
+        break;
       }
     }
   }
@@ -375,7 +375,7 @@ class Server {
       const uint64_t p0 = now_ns();
       writes_ok_ = !app_->db.writes_held();
       if (!writes_ok_) held_gate++;
-      // 闸门可能在两个 pass 之间打开：它挂起的请求必须在这里重放，否则会一直等一个再也不会到来的关闭。
+      answers_left_ = answers_cap_;
       if (writes_ok_) retry_held();
       // 只在确实没事可做时才阻塞：每个 pass 无条件等 1 ms，正是把循环钉在 ~70% CPU 却永远清不掉
       // 积压的原因（kensac/mojo 在有工作时都用 min_complete 0 进入）。「有工作」指等待读的 FIFO 和
@@ -383,7 +383,7 @@ class Server {
       // 任何答过请求的 pass 都跳过等待、在完成队列为空时立刻返回：20k 连接时循环每秒跑 4,000 个 pass
       // 却只处理 2,000 个请求，一半是空转，而空转纯属系统调用和缓存开销。
       // rust-iouring-kensac #264 的 busy 标志就是 rq/ready。
-      bool busy = last_cqes >= 8 || !ready_.empty();
+      bool busy = answers_left_ != answers_cap_ || last_cqes >= 8 || !ready_.empty();
       if (!busy) {
         for (auto& wp : workers_) {
           if (!wp->pending().empty()) {
@@ -409,7 +409,6 @@ class Server {
         }
       }
       const uint64_t p1 = now_ns();
-      answers_left_ = answers_cap_;
       last_cqes = 0;
       for (size_t i = 0; i < workers_.size(); i++)
         last_cqes += drain(*workers_[i], static_cast<uint32_t>(i), kDrainBudget);
@@ -754,7 +753,7 @@ class Server {
   void defer(uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data, size_t n) {
     if (!c.part) c.part = std::make_unique<std::vector<uint8_t>>();
     c.part->insert(c.part->end(), data, data + n);
-    if (!c.ready_queued) {
+    if (!c.held && !c.ready_queued) {
       c.ready_queued = true;
       ready_.push_front(ReadyRef{wi, idx, c.gen, now_ns()});
     }
@@ -794,6 +793,10 @@ class Server {
   void serve(Worker& w, uint32_t wi, uint32_t idx, const uint8_t* data, size_t n) {
     net::Connection& c = w.table().at(idx);
     if (c.close_after) return;
+    if (c.held) {
+      if (n) defer(wi, idx, c, data, n);
+      return;
+    }
     std::vector<uint8_t> part;
     bool joined = false;
     if (c.part) {
@@ -831,7 +834,7 @@ class Server {
           // 所以也不发响应。
           if (!c.held) {
             c.held = true;
-            w.held().push_back(idx);
+            w.held().emplace_back(idx, c.gen);
           }
           break;
         }
@@ -1191,6 +1194,7 @@ class Server {
   uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
   unsigned cq_;
   uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
+  size_t held_ring_ = 0;
   uint32_t answers_left_ = 0;
   uint32_t answers_cap_ = kAnswersPerPass;
   uint32_t reads_budget_ = 0;

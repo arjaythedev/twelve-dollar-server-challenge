@@ -24,4 +24,5 @@ with tempfile.TemporaryDirectory(prefix='cpp-data-test-') as tmp:
  constants=chr(10).join(['enum { kCkBulk = 0, kCkUrgent = 1, kCkTail = 2 };','constexpr long long kCkBehindFrames = 32768;',''])
  test=test[:a]+constants+loop+chr(10)+kick+chr(10)+test[z:]
  (B/'dispatch.cpp').write_text(test); run(common+[B/'dispatch.cpp','-lpthread','-o',B/'dispatch']); env=os.environ.copy();env.pop('NO_CKPT',None);run([B/'dispatch'],env=env)
+ run(['python3', S/'tests/check_held.py'])
  print('ALL_DATA_AND_DISPATCH_TESTS_PASS',flush=True)

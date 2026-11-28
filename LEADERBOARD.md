@@ -135,7 +135,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 45 | java-iouring-davidhsv | #393 | Java (FFM, io_uring, SQLite B-tree reads) | **240,000** | 23,198 | 80.7 | 961.5 | 0.00 | 74 | 29 | 1,458 | 2026-11-11 |
 | 49 | c-iouring-meros | #199 | C (io_uring) | **238,000** | 22,796 | 417 | 750 | 0.00 | 78 | 31 | 1,567 | 2026-10-30 |
 | 49 | c-epoll-patrickryankenneth | #289 | C (io_uring, epoll fallback, SQLite B-tree reads) | **238,000** | 23,026 | 163.6 | 508.6 | 0.00 | 81 | 32 | 711 | 2026-11-08 |
-| 51 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
+| 51 | zig-iouring-unorig-username | #190 | Zig (io_uring) | **235,000** ᶾ | 22,785 | 34 | 160 | 0.00 | 80 | 32 | 1,019 | 2026-10-29 |
 | 51 | cider-iouring-pomilon-v4 | #249 | Cider (native x86-64, io_uring, SQLite B-tree reads) | **235,000** | 22,817 | 10.5 | 29 | 0.00 | 88 | 35 | 908 | 2026-11-01 |
 | 53 | c-uring-curvynes | #217 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,287 | 259 | 374 | 0.00 | 82 | 34 | 773 | 2026-10-30 |
 | 53 | c-iouring-moneebullah25 | #244 | C (io_uring, SQLite B-tree reads) | **230,000** | 22,289 | 51 | 470 | 0.00 | 67 | 28 | 828 | 2026-11-01 |
@@ -1597,6 +1597,12 @@ open-connection count nears the fd limit; not merged: it scored below the merged
 p95 182.5 / p99 469.7 ms, 0 err, 92 % CPU, 134 µs/req, 1,084 MB, 2026-11-20), 42/42 tests. CPU-bound before the fd
 limit: 68,000 and 70,000 failed the 2-minute probe on p95/p99 (370 ms / 1.45 s at 94 % CPU and 456 ms / 1.93 s at
 96 % CPU, 0 errors), 80,000 on p95/p99 (4.87 / 5.76 s at 98 % CPU).
+
+ᶾ **zig-iouring-unorig-username** stays on its merged #190 row. Its follow-up **#545** (`3b4ac89`, a Zig port of the
+same author's c-iouring-unorig-username design: SQLite B-tree reads, group commit, checkpoint worker; not merged: it
+scored below the merged row) held **220,000** (21,480 req/s, p95 14.6 / p99 81.5 ms, 0 err, 63 % CPU, 27 µs/req,
+1,155 MB, 2026-11-28), 42/42 tests: 230,000 failed the 2-minute probe on p95/p99 (108 ms / 2.65 s at 72 % CPU, 0
+errors) and 240,000 on p99 (2.09 s at 71 % CPU).
 
 ## Patches (ᵖ) and failures
 

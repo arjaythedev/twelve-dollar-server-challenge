@@ -1554,6 +1554,10 @@ p99 189.9 ms, 0 err, 87 % CPU, 39 µs/req, 658 MB, 2026-11-19), 42/42 tests: 220
 refused. Re-run at `e4b4d12` (`PRAGMA mmap_size=0`; not merged: it scored below the merged row): **219,000** (21,381
 req/s, p95 29.5 / p99 180.7 ms, 0 err, 86 % CPU, 37 µs/req, 1,065 MB, 2026-11-20), 42/42 tests: 230,000 failed the
 5-minute hold on p99 (1.58 s at 90 % CPU, 0 errors) and 240,000 the 2-minute probe on p95/p99 (596 ms / 1.53 s at 92 % CPU).
+Re-run at `b51ffb3` (profile-guided SQLite build recorded by `build.sh` on a scratch database; not merged: it scored below
+the merged row): **199,000** (19,560 req/s, p95 17.1 / p99 590.5 ms, 0 err, 78 % CPU, 37 µs/req, 659 MB, 2026-11-28), 42/42
+tests: 209,000 and 220,000 failed the 5-minute hold on p95/p99 (633 ms / 1.34 s at 83 % CPU; 261 ms / 1.15 s at 85 % CPU,
+0 errors) and 230,000 the 2-minute probe (p95/p99 3.24 / 8.33 s at 91 % CPU).
 
 ᵉ **go-iouring-DblD** stays on its merged #498 row. Its follow-up **#523** (`a0a8a72`, profile-guided build recorded by
 `build.sh` on a scratch database, a look ahead at connections, faster JSON writers; not merged: it scored below the merged

@@ -1625,6 +1625,10 @@ CPU, 0 errors) and 280,000 on p99 (2.31 s at 83 % CPU).
 page cache, a larger WAL checkpoint gate, a lower-priority checkpoint thread and `mlock` of its own code pages; not
 merged: it scored below the merged row) held **155,000** (15,257 req/s, p95 33.3 / p99 67.5 ms, 0 err, 49 % CPU,
 30 µs/req, 729 MB, 2026-11-28), 42/42 tests: 160,000 failed the 2-minute probe on p99 (2.99 s at 55 % CPU, 0 errors).
+Its second follow-up **#556** (`5d3b404`, build-time GCC PGO of feedbt.c/SQLite trained on a scratch database; not
+merged: it scored below the merged row) held **195,000** (19,179 req/s, p95 53.7 / p99 151.1 ms, 0 err, 62 % CPU,
+30 µs/req, 1,023 MB, 2026-11-28), 42/42 tests: 200,000 failed the 2-minute probe on p95/p99 (1.38 / 4.07 s at 72 %
+CPU, 0 errors) and 240,000 on connection refusals.
 
 ## Patches (ᵖ) and failures
 

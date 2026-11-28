@@ -1,0 +1,38 @@
+package handlers
+
+import "http"
+import "json"
+import "sqlite"
+
+pub func feed(request int) int {
+  let db *sqlite.DB, err error = openDB()
+  if err != nil {
+    return serverError(request)
+  }
+  let sql string = "SELECT p.id, p.body, p.created_at, u.username, (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20"
+  let stmt *sqlite.Stmt, perr error = sqlite.prepare(db, sql)
+  if perr != nil {
+    return serverError(request)
+  }
+  let doc *json.MutDoc = json.newDoc()
+  let root *json.MutVal = json.newObject(doc)
+  json.setRoot(doc, root)
+  let arr *json.MutVal = json.newArray(doc)
+  json.addVal(doc, root, "posts", arr)
+  for {
+    let has bool, serr error = sqlite.step(stmt)
+    if serr != nil {
+      let _ error = sqlite.finalize(stmt)
+      return serverError(request)
+    }
+    if !has {
+      break
+    }
+    let post *json.MutVal = json.newObject(doc)
+    let _ int = fillPost(doc, post, stmt)
+    json.appendVal(arr, post)
+  }
+  let _ error = sqlite.finalize(stmt)
+  http.json(request, 200, json.write(doc))
+  return 0
+}

@@ -1139,8 +1139,10 @@ class Server {
         for (uint32_t idx : w.dirty()) {
           net::Connection& c = w.table().at(idx);
           c.in_batch = false;
-          c.answered = false;
-          if (c.wrote_db) {
+          /* 这个连接要么本 pass 写了库、要么之前那批写还在等提交：它的 c.out 里排在被推迟的
+           * 写响应后面，现在把 c.out 交给内核就等于在提交之前回答了一个写请求。整条连接一起等。 */
+          if (c.wrote_db || c.commit_pending) {
+            /* answered 故意不清：提交失败时 flush_response 要拿它把这一批换成 500。 */
             if (c.open && !c.closing && !c.commit_pending) {
               c.commit_pending = true;
               pend_commit_.push_back(ReadyRef{w.index(), idx, c.gen, 0});

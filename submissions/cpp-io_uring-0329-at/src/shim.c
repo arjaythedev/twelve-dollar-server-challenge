@@ -26,6 +26,10 @@ struct dbx {
   int in_tx;
   int broken;
   _Atomic int wal_frames;
+  /* 只由 wal_cb 写的「SQLite 真正报出来的帧号」。wal_frames 会在检查点整体拷完之后被清零当作
+   * 闸门计数用，但 SQLite 的 mxFrame 并没有同时归零，所以差值必须对着这个影子算，否则每次清零
+   * 之后第一笔提交都会算出几万帧的假增量。 */
+  _Atomic int wal_frames_seen;
   _Atomic long long wal_frames_total;
   _Atomic int gate_held;
   _Atomic long long gate_since;
@@ -51,11 +55,11 @@ static int wal_cb(void *p, sqlite3 *db, const char *name, int frames) {
   (void)db;
   (void)name;
   struct dbx *h = (struct dbx *)p;
-  long long prev = atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
-  /* 帧数只在 checkpoint 时清零，所以差值就是这次提交新写进去的帧。诊断用。 */
-  if (frames > prev) {
-    atomic_fetch_add_explicit(&h->wal_frames_total, (long long)(frames - prev), memory_order_relaxed);
-  }
+  long long prev = atomic_load_explicit(&h->wal_frames_seen, memory_order_relaxed);
+  /* 差值就是这次提交新写进去的帧。帧号变小只有一种情况：日志在全部拷回之后从第 1 帧重新开始。 */
+  long long added = (frames > prev) ? (long long)(frames - prev) : (long long)frames;
+  atomic_fetch_add_explicit(&h->wal_frames_total, added, memory_order_relaxed);
+  atomic_store_explicit(&h->wal_frames_seen, frames, memory_order_relaxed);
   atomic_store_explicit(&h->wal_frames, frames, memory_order_relaxed);
   return SQLITE_OK;
 }

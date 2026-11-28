@@ -13,17 +13,15 @@ void td_close(void);
 int td_begin(void);
 int td_commit(void);
 void *td_cursor(int i);
-int td_seek(void *c, i64 id);
-int td_first(void *c);
-int td_next(void *c);
-const u8 *td_payload(void *c, u32 *len);
+int td_seek_payload(void *c, i64 id, const u8 **data, u32 *len);
+int td_feed_ids(void *c, i64 *ids, int limit);
 int td_count_likes(void *c, i64 lo, i64 hi, u32 *n);
 int td_insert_post(i64 uid, const char *body, int len, i64 *id, char *created, int *clen);
 int td_insert_like(i64 uid, i64 pid);
 int td_delete_like(i64 uid, i64 pid);
 int td_health(char *err, int n);
-int td_feed_sql_step(i64 *id, const u8 **body, int *blen, const u8 **ca, int *clen, const u8 **author, int *alen, i64 *likes);
-void td_feed_sql_reset(void);
+enum { TRAIN_USERS = 8192 };
+static i64 author_for_post(i64 post_id) { return 1 + (post_id * 137) % TRAIN_USERS; }
 
 static int init_scratch_db(const char *path) {
   sqlite3 *db = NULL;
@@ -32,6 +30,7 @@ static int init_scratch_db(const char *path) {
   }
   const char *ddl =
     "PRAGMA journal_mode = WAL;\n"
+    "PRAGMA synchronous = NORMAL;\n"
     "CREATE TABLE users (\n"
     "  id          INTEGER PRIMARY KEY,\n"
     "  username    TEXT NOT NULL UNIQUE,\n"
@@ -58,11 +57,11 @@ static int init_scratch_db(const char *path) {
     return -1;
   }
 
-  // Populate 50 users and 1,000 posts to exercise multi-page SQLite B-trees
+  // Populate authors and 3,000 posts across multiple interior and leaf B-tree pages
   sqlite3_exec(db, "BEGIN TRANSACTION;", NULL, NULL, NULL);
   sqlite3_stmt *st_u = NULL;
   sqlite3_prepare_v2(db, "INSERT INTO users (id, username) VALUES (?, ?);", -1, &st_u, NULL);
-  for (int u = 1; u <= 50; u++) {
+  for (int u = 1; u <= TRAIN_USERS; u++) {
     char uname[32]; snprintf(uname, sizeof(uname), "user_%d", u);
     sqlite3_bind_int64(st_u, 1, u);
     sqlite3_bind_text(st_u, 2, uname, -1, SQLITE_STATIC);
@@ -76,18 +75,23 @@ static int init_scratch_db(const char *path) {
   sqlite3_stmt *st_l = NULL;
   sqlite3_prepare_v2(db, "INSERT INTO likes (user_id, post_id) VALUES (?, ?);", -1, &st_l, NULL);
 
-  char body[256];
-  for (int p = 1; p <= 1000; p++) {
-    int uid = (p % 50) + 1;
-    snprintf(body, sizeof(body), "Synthetic PGO training post #%d payload exercising multi-page SQLite B-trees", p);
+  char body[512];
+  for (int p = 1; p <= 3000; p++) {
+    i64 uid = author_for_post(p);
+    int body_sz = 30 + ((p * 17) % 350);
+    memset(body, 'a' + (p % 26), body_sz);
+    body[body_sz] = '\0';
+
     sqlite3_bind_int64(st_p, 1, p);
     sqlite3_bind_int64(st_p, 2, uid);
-    sqlite3_bind_text(st_p, 3, body, -1, SQLITE_STATIC);
+    sqlite3_bind_text(st_p, 3, body, body_sz, SQLITE_STATIC);
     sqlite3_step(st_p);
     sqlite3_reset(st_p);
 
-    for (int l = 1; l <= (p % 5) + 1; l++) {
-      sqlite3_bind_int64(st_l, 1, l);
+    int num_likes = (p % 8) + 1;
+    for (int l = 1; l <= num_likes; l++) {
+      int like_uid = ((p + l) % 100) + 1;
+      sqlite3_bind_int64(st_l, 1, like_uid);
       sqlite3_bind_int64(st_l, 2, p);
       sqlite3_step(st_l);
       sqlite3_reset(st_l);
@@ -115,19 +119,9 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  for (int iter = 0; iter < 1000; iter++) {
+  // 3,000 training iterations exercising multi-page B-tree descents and cursor traversals
+  for (int iter = 0; iter < 3000; iter++) {
     td_health(err, sizeof(err));
-
-    td_feed_sql_reset();
-    i64 id, likes;
-    const u8 *b, *ca, *author;
-    int blen, clen, alen;
-    int count = 0;
-    while (td_feed_sql_step(&id, &b, &blen, &ca, &clen, &author, &alen, &likes) == 1) {
-      count++;
-      if (count >= 20) break;
-    }
-    td_feed_sql_reset();
 
     if (td_begin() == 0) {
       void *cp = td_cursor(0); // POSTS
@@ -135,36 +129,45 @@ int main(int argc, char **argv) {
       void *ci = td_cursor(2); // FEED_IDX
       void *cl = td_cursor(3); // LIKES_IDX
 
-      if (ci && td_first(ci) == 1) {
-        for (int k = 0; k < 20; k++) {
-          if (td_next(ci) != 1) break;
-        }
+      // Follow the same ordered rowid and table reads as a feed request.
+      i64 ids[20];
+      int rows = td_feed_ids(ci, ids, 20);
+      if (rows < 0) return 1;
+      i64 lo = INT64_MAX, hi = 0;
+      for (int k = 0; k < rows; k++) {
+        if (ids[k] < lo) lo = ids[k];
+        if (ids[k] > hi) hi = ids[k];
+        const u8 *data;
+        u32 len;
+        if (td_seek_payload(cp, ids[k], &data, &len) != 1 ||
+            td_seek_payload(cu, author_for_post(ids[k]), &data, &len) != 1) return 1;
+      }
+      if (rows > 0 && hi - lo <= 512) {
+        u32 counts[513] = {0};
+        if (td_count_likes(cl, lo, hi, counts) != 0) return 1;
       }
 
-      i64 target_id = (iter * 37) % 1000 + 1;
-      if (cp) {
-        td_seek(cp, target_id);
-        u32 len = 0;
-        td_payload(cp, &len);
-      }
-      if (cu) {
-        i64 uid = (target_id % 50) + 1;
-        td_seek(cu, uid);
-        u32 len = 0;
-        td_payload(cu, &len);
-      }
+      // 2. Multi-page point seeks across 3,000 posts
+      i64 target_id = (iter * 73) % 3000 + 1;
+      const u8 *data;
+      u32 len;
+      if (td_seek_payload(cp, target_id, &data, &len) != 1 ||
+          td_seek_payload(cu, author_for_post(target_id), &data, &len) != 1) return 1;
       if (cl) {
         u32 c = 0;
         td_count_likes(cl, target_id, target_id, &c);
       }
 
-      i64 new_id = 0;
-      char cr[64];
-      int cr_len = 0;
-      td_insert_post(1, "pgo training body", 17, &new_id, cr, &cr_len);
-      if (new_id > 0) {
-        td_insert_like(1, new_id);
-        td_delete_like(1, new_id);
+      // 3. Write path profiling: insert post, like, unlike
+      if ((iter % 10) == 0) {
+        i64 new_id = 0;
+        char cr[64];
+        int cr_len = 0;
+        td_insert_post(author_for_post(3001 + iter / 10), "Comprehensive PGO training post payload", 39, &new_id, cr, &cr_len);
+        if (new_id > 0) {
+          td_insert_like(1, new_id);
+          td_delete_like(1, new_id);
+        }
       }
       td_commit();
     }

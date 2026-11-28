@@ -35,18 +35,11 @@ pub fn madviseHuge(mem: []const u8) void {
     _ = linux.madvise(@constCast(@ptrCast(mem.ptr)), mem.len, linux.MADV.HUGEPAGE);
 }
 
-pub fn lockMemory() void {
-    var ml: linux.rlimit = .{ .cur = std.math.maxInt(usize), .max = std.math.maxInt(usize) };
-    const rc_rl = linux.setrlimit(.MEMLOCK, &ml);
-    if (rc_rl != 0) {
-        std.log.warn("setrlimit(MEMLOCK, unlimited) returned {d}; proceeding with existing limit", .{rc_rl});
-    }
-    const rc_mlock = linux.syscall1(.mlockall, 3); // MCL_CURRENT (1) | MCL_FUTURE (2)
-    if (rc_mlock != 0) {
-        std.log.warn("mlockall(MCL_CURRENT | MCL_FUTURE) returned {d}; running without locked memory", .{rc_mlock});
-    } else {
-        std.log.info("mlockall successfully locked pre-allocated memory into RAM", .{});
-    }
+/// Fault one byte per base page during startup.  Call this only for fixed
+/// reactor mappings; large response slabs deliberately remain demand-paged.
+pub fn prefault(mem: []u8) void {
+    var off: usize = 0;
+    while (off < mem.len) : (off += 4096) mem[off] = 0;
 }
 
 pub fn unshareFiles() void {

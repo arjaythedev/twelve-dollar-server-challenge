@@ -439,7 +439,7 @@ class Server {
       const uint64_t p3 = now_ns();
       commit_and_flush();
       const uint64_t p4 = now_ns();
-      /* 检查点状态机：WAL 过 4,096 帧先做不挂写的大块拷贝，只剩尾段时才挂写并由普通优先级
+      /* 检查点状态机：WAL 过闸门帧数先做不挂写的大块拷贝，只剩尾段时才挂写并由普通优先级
        * 线程拷完（见 shim.c 的 CK_* 状态机）。 */
       app_->db.ck_kick();
       if (!writes_ok_) writes_ok_ = !app_->db.writes_held();
@@ -743,14 +743,13 @@ class Server {
    * 上就是「p99 3.54 s 但 0 错误」。objc-uring-delneg #326 论证得更细：回复晚于请求 40 ms 就要
    * 多一个 bare ACK，约每请求 +20% CPU，而多出来的 CPU 又让 backlog 更难清掉。
    *
-   * 所以 backlog 里最新优先（LIFO），只给等太久的请求留出口：等超过 8 s 的请求开始按最老优先
-   * 回答（每 pass 取一个最老的），这样既不让多数人久等，也不让任何人被饿死。连接内部的请求
-   * 顺序不变（同一连接的数据在它自己的 part 缓冲里，一次 serve 按序处理）。 */
+   * 所以 backlog 里最新优先（LIFO），只给等太久的请求留出口：等过 8 s 的请求拿走一半的答案
+   * 额度、等过 16 s 的全拿走（见 run_ready），既不让多数人久等，也不让任何人被饿死。连接内部
+   * 的请求顺序不变（同一连接的数据在它自己的 part 缓冲里，一次 serve 按序处理）。 */
   static constexpr uint64_t kAgedAfterNs = 8000000000ULL;
 
   // 把收到的字节留在连接上，本 pass 不回答。
-  void defer(Worker& w, uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data,
-             size_t n) {
+  void defer(uint32_t wi, uint32_t idx, net::Connection& c, const uint8_t* data, size_t n) {
     if (!c.part) c.part = std::make_unique<std::vector<uint8_t>>();
     c.part->insert(c.part->end(), data, data + n);
     if (!c.ready_queued) {
@@ -916,7 +915,7 @@ class Server {
             if (has) {
               c.last_active = now_sec_;
               if (answers_left_ == 0) [[unlikely]] {
-                defer(w, wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
+                defer(wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
               } else {
                 serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
               }
@@ -954,7 +953,7 @@ class Server {
             }
             c.last_active = now_sec_;
             if (answers_left_ == 0) {
-              defer(w, wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
+              defer(wi, idx, c, w.bufs().data(bid), static_cast<size_t>(res));
             } else {
               serve(w, wi, idx, w.bufs().data(bid), static_cast<size_t>(res));
             }
@@ -1026,16 +1025,16 @@ class Server {
           break;
         }
         case kEvEvfd: {
-        const uint32_t wi = static_cast<uint32_t>((u >> 48) & 0xFF);
-        if (!(flags & IORING_CQE_F_MORE) && wi < workers_.size()) {
-          io_uring_sqe* sqe = workers_[0]->ring().sqe(1);
-          if (sqe) {
-            io_uring_prep_poll_multishot(sqe, workers_[wi]->efd(), POLLIN);
-            sqe->user_data = ev(kEvEvfd, wi, 0, 0);
+          const uint32_t sw = static_cast<uint32_t>((u >> 48) & 0xFF);
+          if (!(flags & IORING_CQE_F_MORE) && sw < workers_.size()) {
+            io_uring_sqe* sqe = workers_[0]->ring().sqe(1);
+            if (sqe) {
+              io_uring_prep_poll_multishot(sqe, workers_[sw]->efd(), POLLIN);
+              sqe->user_data = ev(kEvEvfd, sw, 0, 0);
+            }
           }
+          break;
         }
-        break;
-      }
       case kEvClose: {
           net::Connection& c = w.table().at(idx);
           if (c.gen == gen && c.open) {
@@ -1188,6 +1187,7 @@ class Server {
   app::Pool pool_;
   uint32_t slots_;
   uint32_t slot_cap_ = 0;   /* slots the ring actually registered; may be below slots_ */
+  unsigned cq_;
   uint32_t max_rings_ = 1;  /* kTargetConns / slots, capped */
   uint32_t answers_left_ = 0;
   uint32_t answers_cap_ = kAnswersPerPass;
@@ -1202,7 +1202,6 @@ class Server {
     std::vector<ReadyRef> pend_commit_;
   bool zc_ok_ = true; /* 内核支持零拷贝发送；-EINVAL 后永久关闭 */
   std::deque<ReadyRef> ready_;
-  unsigned cq_;
   const char* host_ = nullptr;
   uint16_t port_ = 0;
   uint64_t responded_ = 0;

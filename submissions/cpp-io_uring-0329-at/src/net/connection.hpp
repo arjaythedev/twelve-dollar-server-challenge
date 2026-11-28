@@ -49,8 +49,6 @@ struct Connection {
   /* 不完整请求的暂存；唯一所有者。刻意不用 pmr 池：池会持有不归还的空闲块，
    * 270k 连接时实测比 std::vector + malloc_trim 还高 117 MB。 */
   std::unique_ptr<std::vector<uint8_t>> part;
-
-  bool live() const { return open && !closing; }
 };
 
 class SlotTable {

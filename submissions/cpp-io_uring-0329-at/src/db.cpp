@@ -140,12 +140,17 @@ bool Db::open(const char* path, std::string& err) {
 
 Db::Db(Db&& other) noexcept
     : h_(other.h_),
+      ck_(std::move(other.ck_)),
       rows_(std::move(other.rows_)),
+      like_counts_(std::move(other.like_counts_)),
+      like_base_(other.like_base_),
+      like_counts_ok_(other.like_counts_ok_),
+      like_counts_off_(other.like_counts_off_),
       text_buf_(other.text_buf_),
       text_len_(other.text_len_),
-      order_(std::move(other.order_)),
-      ck_(std::move(other.ck_)) {
+      order_(std::move(other.order_)) {
   other.h_ = nullptr;
+  other.like_counts_ok_ = false;
 }
 
 Db::~Db() {
@@ -183,8 +188,6 @@ bool Db::commit() {
 }
 
 long long Db::wal_frames_total() const { return dbx_wal_frames_total(h_); }
-
-void Db::tick() {}
 
 void Db::ck_kick() {
   /* 状态是原子的，但「检查条件 → 进入等待」必须和状态的修改用同一把锁，否则会丢唤醒：

@@ -40,7 +40,6 @@ class Db {
   bool open(const char* path, std::string& err);
 
   bool commit();
-  void tick();
   [[nodiscard]] long long wal_frames_total() const;
   /* like 计数缓存是否生效（STATS 行）。false 表示退回逐次扫描，功能正确但更慢。 */
   [[nodiscard]] bool like_cache_on() const { return like_counts_ok_; }

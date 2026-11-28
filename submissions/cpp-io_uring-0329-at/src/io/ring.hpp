@@ -61,7 +61,6 @@ class BufRing {
 
   const uint8_t* data(uint16_t bid) const { return mem_ + static_cast<size_t>(bid) * size_; }
   uint16_t count() const { return count_; }
-  size_t buf_size() const { return size_; }
 
  private:
   bool register_ring(int fd) {
@@ -165,9 +164,6 @@ class Ring {
     }
     if (defer_) io_uring_get_events(&ring_);
   }
-
-  // 内核已经投递的 CQE，直接从共享内存读取，不发系统调用。
-  unsigned ready_cqes() { return io_uring_cq_ready(&ring_); }
 
   int wait(unsigned min_complete, unsigned ns) {
     enters(0)++;

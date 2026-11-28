@@ -181,8 +181,8 @@ void error(ByteBuf& out, int status, const char* msg) {
   finish(out, b);
 }
 
-App::App(Db&& db, const uint8_t* secret, size_t secret_len)
-    : db(std::move(db)), jwt_(secret, secret_len), started_(std::chrono::steady_clock::now()) {
+App::App(Db&& dbase, const uint8_t* secret, size_t secret_len)
+    : db(std::move(dbase)), jwt_(secret, secret_len), started_(std::chrono::steady_clock::now()) {
   body_.reserve(2048);
 }
 

@@ -448,7 +448,6 @@ struct wcache {
   unsigned n_parked;  /* pages currently renamed to lock_page */
 };
 static sqlite3_pcache_methods2 pcache_base;
-static uint64_t pcache_scans, pcache_scans_skipped;
 
 static int wc_init(void *arg) { (void)arg; return pcache_base.xInit(pcache_base.pArg); }
 static void wc_shutdown(void *arg) { (void)arg; pcache_base.xShutdown(pcache_base.pArg); }
@@ -485,11 +484,7 @@ static void wc_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned old_ke
 }
 static void wc_truncate(sqlite3_pcache *p, unsigned limit) {
   struct wcache *w = (struct wcache *)p;
-  pcache_scans++;
-  if (w->n_parked == 0 && w->max_key < limit) {
-    pcache_scans_skipped++;
-    return;
-  }
+  if (w->n_parked == 0 && w->max_key < limit) return;
   pcache_base.xTruncate(w->base, limit);
   if (limit > 0 && w->max_key >= limit) w->max_key = limit - 1;
   if (w->lock_page >= limit) w->n_parked = 0;
@@ -719,7 +714,7 @@ int dbx_commit(dbx *h) {
  * 300k/320k 的探针正是「0 错误、p99 4.45 s」的形状。
  *
  * 现在分两段（c-iouring-jowinjestine #404/#486 与 rust-iouring-kensac #264 都是这个结构）：
- *   1. BULK：日志到 4,096 帧时**不挂写**，nice 19 的线程连着做 PASSIVE，每次拷的是
+ *   1. BULK：日志到闸门帧数（见下一条注释）时**不挂写**，nice 19 的线程连着做 PASSIVE，每次拷的是
  *      「上一次 pass 之后又写进来的帧」，直到落后不超过 64 帧；
  *   2. TAIL：这时才挂写（读照常），由**普通优先级**的线程把剩下的几十帧拷完，几毫秒就结束；
  *      全部拷完之后下一次写让日志从第 1 帧重新开始。
@@ -729,9 +724,9 @@ int dbx_commit(dbx *h) {
 /* 闸门默认 32,768 帧（128 MiB）而不是 4,096：本地实测写只有 2,141 帧/s，评测机 285k 时约
  * 4,000 帧/s，4,096 帧的闸门等于每 1–2 秒就做一次 checkpoint，而每次进入 TAIL 都要挂写
  * （上限 400 ms）——每秒一次的 400 ms 写挂起正是评测机 likes p99 4.9 s 的来源。
- * 32,768 帧把频率降到 8–12 秒一次，峰值日志 128 MiB；本地 30 s 混合负载上，闸门
- * 4,096 → 32,768 让吞吐 +6.4%（13,060 → 13,895 req/s）、p99 从 301 ms 降到 232 ms。
- * CK_GATE 可覆盖，便于在评测机上 A/B。 */
+ * 32,768 帧把频率降到 8–12 秒一次，峰值日志 128 MiB。这个值是按上面的机制算出来的，不是本地
+ * 测出来的：本机 30 s 混合负载上 4,096 → 32,768 好 6.4%，跑 60 s 却是 −1.1%，噪声盖过了差别
+ * （本机的 k6 自己就是瓶颈，闸门很少被触发）。CK_GATE 可覆盖，便于在评测机上 A/B。 */
 static int ck_gate_frames(void) {
   static int cached = -1;
   if (cached < 0) {
@@ -855,17 +850,8 @@ int dbx_writes_held(dbx *h) {
   return 1;
 }
 
-void dbx_pcache_stats(unsigned long long *scans, unsigned long long *skipped) {
-  if (scans) *scans = pcache_scans;
-  if (skipped) *skipped = pcache_scans_skipped;
-}
-
 long long dbx_wal_frames_total(dbx *h) {
   return atomic_load_explicit(&h->wal_frames_total, memory_order_relaxed);
-}
-
-int dbx_wal_frames(dbx *h) {
-  return atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
 }
 
 /* The author lookups go through the users table cursor: one TableMoveto per id.  A batched

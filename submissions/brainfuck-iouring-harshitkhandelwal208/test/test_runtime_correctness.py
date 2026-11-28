@@ -10,7 +10,10 @@ Validates:
 6. Malformed requests and clean connection closure.
 """
 
+from contextlib import closing
+import http.client
 import socket
+import sqlite3
 import time
 import subprocess
 import os
@@ -247,6 +250,43 @@ def run_tests():
         failures = [res for res in client_results if res != "OK"]
         assert len(failures) == 0, f"{len(failures)} simultaneous clients failed: {failures[:5]}"
         print(f"PASS (all {num_clients} concurrent requests succeeded)")
+
+        print("  [Test 8] Repeat like releases the write transaction...", end=" ", flush=True)
+        with closing(http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)) as conn:
+            for attempt in range(2):
+                conn.request("POST", "/posts/1/like", headers={"Authorization": f"Bearer {token}"})
+                response = conn.getresponse()
+                like = json.loads(response.read())
+                assert response.status in (200, 201) and like["liked"]
+                if attempt:
+                    assert response.status == 200 and like["already_liked"]
+        # A second SQLite connection can write immediately after the no-op.
+        with closing(sqlite3.connect(DB_PATH, timeout=0.5)) as db, db:
+            db.execute("BEGIN IMMEDIATE")
+        print("PASS")
+
+        print("  [Test 9] Feed larger than a response slab...", end=" ", flush=True)
+        body = "🌻" * 500
+        author = 'Elaine "Ellie"'
+        with closing(sqlite3.connect(DB_PATH, timeout=5)) as db, db:
+            user = db.execute("INSERT INTO users(username) VALUES (?)", (author,)).lastrowid
+            db.executemany("INSERT INTO posts(user_id, body, created_at) VALUES (?, ?, ?)",
+                           [(user, body, "2099-01-01T00:00:00.000Z")] * 20)
+        with closing(http.client.HTTPConnection("127.0.0.1", PORT, timeout=5)) as conn:
+            conn.request("GET", "/feed")
+            response = conn.getresponse()
+            payload = response.read()
+            assert response.status == 200 and len(payload) > 16384
+            posts = json.loads(payload)["posts"]
+            assert len(posts) == 20
+            assert all(post["body"] == body and post["author"] == author for post in posts)
+            conn.request("GET", f"/posts/{posts[0]['id']}")
+            response = conn.getresponse()
+            assert response.status == 200 and json.loads(response.read())["post"] == posts[0]
+            conn.request("GET", "/health")
+            response = conn.getresponse()
+            assert response.status == 200 and json.loads(response.read())["db"] == "ok"
+        print("PASS")
 
         print("\nAll HTTP runtime correctness tests PASSED!")
         return True

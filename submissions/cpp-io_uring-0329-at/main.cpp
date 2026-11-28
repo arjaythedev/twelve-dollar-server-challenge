@@ -80,9 +80,9 @@ constexpr size_t kPublishEvery = 256;
  * 20k 连接的 p99 从 64 时的 227 ms 降到 87.6 ms。 */
 constexpr uint32_t kAnswersPerPass = 256;
 /* 组提交窗口。我们每个 pass 都提交（285k 时约 2,600 次/秒），而每次只带 0.2 个写请求，
- * 于是 85% 的提交是空的，而每写一条 like 要动 4–7 个页——WAL 帧率被推到约 22,500 帧/秒
- * （90 MB/s），4,096 帧的闸门每 180 ms 就关一次，写请求反复被挂起 250 ms，评测机上就是
- * likes p99 4.9 s。把 20 ms 内的写攒成一次提交，帧数降一个数量级（同一批帖子的页码被复用）。 */
+ * 于是 85% 的提交是空的；每写一条 like 要动 3 个页（likes 表叶子、user_id 自动索引、
+ * likes_post_id_idx），提交越碎，同一批页就越被反复重写，WAL 帧率越高。合并成 20 ms 一次
+ * 之后本地实测帧率 −34%（2,141 → 1,415 帧/秒）、COMMIT −88%（348 → 42 次/秒）。 */
 constexpr uint64_t kCommitWindowNs = 20000000ULL;
 constexpr uint32_t kIdleSeconds = 90;
 

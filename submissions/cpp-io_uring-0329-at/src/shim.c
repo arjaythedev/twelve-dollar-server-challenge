@@ -721,18 +721,25 @@ int dbx_commit(dbx *h) {
  * 挂写的时间从「整个 16 MiB 的拷贝」缩到「尾段」，而尾段线程和主循环同优先级，不会被
  * nice 19 拖成几百毫秒。超过 65,536 帧（256 MiB）属于线程追不上的情况，循环自己拷一次兜底。
  */
-/* 闸门默认 32,768 帧（128 MiB）而不是 4,096：本地实测写只有 2,141 帧/s，评测机 285k 时约
- * 4,000 帧/s，4,096 帧的闸门等于每 1–2 秒就做一次 checkpoint，而每次进入 TAIL 都要挂写
- * （上限 400 ms）——每秒一次的 400 ms 写挂起正是评测机 likes p99 4.9 s 的来源。
- * 32,768 帧把频率降到 8–12 秒一次，峰值日志 128 MiB。这个值是按上面的机制算出来的，不是本地
- * 测出来的：本机 30 s 混合负载上 4,096 → 32,768 好 6.4%，跑 60 s 却是 −1.1%，噪声盖过了差别
- * （本机的 k6 自己就是瓶颈，闸门很少被触发）。CK_GATE 可覆盖，便于在评测机上 A/B。 */
+/* 闸门默认 16,384 帧（64 MiB）。三条依据：
+ *   1. TAIL 只拷几十帧（见上面的状态机），单次挂写是几毫秒量级；真正影响写延迟的是**每轮要拷
+ *      多少**和**两轮隔多久**。每轮拷贝的总体积与闸门大小无关，但**突发体积与闸门成正比**——
+ *      128 MiB 一轮会撞上内核的脏页限流，把本该只有几十帧的 TAIL 拖到接近 400 ms 上限。
+ *   2. 16,384 帧在评测机约 2,000–4,000 帧/s 下是每 4–8 秒一轮，每轮 64 MiB 摊开是 8–16 MB/s
+ *      的持续回写，既不密集也不粗暴。
+ *   3. 榜单上把检查点做得最细的两家都在这个量级：c-iouring-jowinjestine 16,384、
+ *      fsharp-uring-delneg 16,000；rust-iouring-kensac 用 4,096（16 MiB）。16,384 也正好是
+ *      CK_FORCE_FRAMES（65,536，线程追不上时的兜底线）的四分之一。
+ * 这个值是按机制推的，不是本地测出来的：本机的 k6 自己就是瓶颈，`gated` 恒为 0，从来没真的挂
+ * 过写（30 s 上 4,096 → 32,768 好 6.4%，60 s 却是 −1.1%，方向都不一致）。真正的判据是评测机
+ * STATS 里的 `gated=a/b`：若 a/b 接近 1，说明每轮都撞上 400 ms 上限，那要修的是 TAIL 本身，
+ * 而不是继续抬闸门。CK_GATE 可覆盖，便于在评测机上 A/B。 */
 static int ck_gate_frames(void) {
   static int cached = -1;
   if (cached < 0) {
     const char *e = getenv("CK_GATE");
     int v = e ? atoi(e) : 0;
-    cached = (v >= 256) ? v : 32768;
+    cached = (v >= 256) ? v : 16384;
   }
   return cached;
 }
@@ -833,15 +840,15 @@ void dbx_ck_run(dbx *h, int tail) {
   atomic_store_explicit(&h->ck_state, CK_BULK_DONE, memory_order_release);
 }
 
-/* 非阻塞：写被挂起时返回真。读照常。hold 上限 400 ms，日志超过 32,768 帧（128 MiB）时
- * 放宽到 800 ms——一次性拷完的概率更大，免得同一次积压被反复 hold。 */
+/* 非阻塞：写被挂起时返回真。读照常。hold 上限 400 ms，只有日志碰到 65,536 帧的兜底线时
+ * 才放宽到 800 ms——那种情况说明线程已经追不上，拷完的概率更大，免得同一次积压被反复 hold。 */
 int dbx_writes_held(dbx *h) {
   if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
   long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);
   long long limit = CK_HOLD_NS;
   /* 只有线程真的追不上（日志已经碰到兜底线）才把挂起上限翻倍。原来的判据是「超过 32,768 帧」，
-   * 而闸门本身现在就是 32,768——整个检查点过程里这个条件几乎恒真，等于把每次挂写都放宽到
-   * 800 ms。挂写时长直接就是写请求的排队时长，所以这条只能在极端情况下生效。 */
+   * 而闸门当时就是 32,768——整个检查点过程里这个条件几乎恒真，等于把每次挂写都放宽到 800 ms。
+   * 挂写时长直接就是写请求的排队时长，所以这条只能在极端情况下生效。 */
   if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) > CK_FORCE_FRAMES) limit *= 2;
   if (mono_ns() - since > limit) {
     atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);

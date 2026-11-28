@@ -43,6 +43,8 @@ class Db {
   [[nodiscard]] long long wal_frames_total() const;
   /* like 计数缓存是否生效（STATS 行）。false 表示退回逐次扫描，功能正确但更慢。 */
   [[nodiscard]] bool like_cache_on() const { return like_counts_ok_; }
+  /* 作者名缓存是否生效（STATS 行）。 */
+  [[nodiscard]] bool author_cache_on() const { return authors_ok_; }
   /* 每个 pass 调一次：推进检查点状态机，需要线程干活时唤醒它。 */
   void ck_kick();
   bool writes_held() const;
@@ -72,6 +74,10 @@ class Db {
    * 越慢（20 个 post 的 id 跨度里所有的 like 行都要解码一遍）。 */
   bool rebuild_like_counts();
   [[nodiscard]] unsigned likes_of(int64_t id) const;
+  /* 作者名同理：feed 的每一行都要一条 users 记录，而用户名永远不会变（没有接口改它），
+   * 所以启动时把整张 users 表读进内存，之后每个 slot 只是一次数组查表，不再寻址加解记录。 */
+  bool rebuild_authors();
+  [[nodiscard]] bool author_name(int64_t id, const uint8_t*& p, uint32_t& n) const;
   void text_put(const uint8_t* p, size_t n);
   bool author(int64_t user_id, ByteBuf& out);
   int64_t count_likes(int64_t id);
@@ -87,6 +93,12 @@ class Db {
   int64_t like_base_ = 0;
   bool like_counts_ok_ = false;
   bool like_counts_off_ = false; /* 直方图超上限：永久退回逐次扫描 */
+  /* users.id 连续，所以名字按下标存：author_names_ 是一块字符池，两个数组给出偏移与长度。 */
+  std::vector<uint32_t> author_off_;
+  std::vector<uint32_t> author_len_;
+  std::vector<uint8_t> author_names_;
+  bool authors_ok_ = false;
+  bool authors_off_ = false;
   std::array<uint8_t, 16384> text_buf_{};
   size_t text_len_ = 0;
   std::vector<uint32_t> order_;

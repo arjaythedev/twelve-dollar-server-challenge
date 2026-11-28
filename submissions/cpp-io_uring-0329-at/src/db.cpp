@@ -170,6 +170,10 @@ Db::Db(Db&& other) noexcept
       order_(std::move(other.order_)) {
   other.h_ = nullptr;
   other.like_counts_ok_ = false;
+  other.author_off_ = std::move(other.author_off_);
+  other.author_len_ = std::move(other.author_len_);
+  other.author_names_ = std::move(other.author_names_);
+  other.authors_ok_ = false;
 }
 
 Db::~Db() {
@@ -194,6 +198,13 @@ void Db::begin() {
     /* 组数超过上限（或 cell 格式不认识）：永久退回逐次扫描，不再重试。 */
     like_counts_off_ = true;
   }
+  if (!authors_ok_ && !authors_off_) {
+    /* NO_AUTHORS=1 关掉缓存，用来在本机做 A/B（缓存本身只是把 users 表读进内存）。 */
+    if (std::getenv("NO_AUTHORS"))
+      authors_off_ = true;
+    else if (!rebuild_authors())
+      authors_off_ = true;
+  }
 }
 
 unsigned long long g_commits = 0;
@@ -207,6 +218,7 @@ bool Db::commit() {
 }
 
 long long Db::wal_frames_total() const { return dbx_wal_frames_total(h_); }
+
 
 void Db::ck_kick() {
   /* 状态是原子的，但「检查条件 → 进入等待」必须和状态的修改用同一把锁，否则会丢唤醒：
@@ -240,6 +252,13 @@ int64_t Db::count_likes(int64_t id) {
 }
 
 bool Db::author(int64_t user_id, ByteBuf& out) {
+  if (authors_ok_) {
+    const uint8_t* name = nullptr;
+    uint32_t n = 0;
+    if (!author_name(user_id, name, n)) return false;
+    json::escape_into(out, name, n);
+    return true;
+  }
   int r = dbx_seek(h_, DBX_USERS, user_id);
   if (r == 0) return false;
   if (r != 1) throw DbError{};
@@ -299,6 +318,45 @@ void Db::feed(ByteBuf& out) {
    * 那会输出 body/author 为空、like_count 为 0 的坏数据；按 SPEC「其它情况 500」处理。 */
   if (!feed_rows()) throw DbError{};
   feed_json(out);
+}
+
+bool Db::rebuild_authors() {
+  author_off_.clear();
+  author_len_.clear();
+  author_names_.clear();
+  author_names_.reserve(1u << 21);
+  int r = dbx_first(h_, DBX_USERS);
+  if (r < 0) return false;
+  while (r == 1) {
+    const long long id = dbx_key(h_, DBX_USERS);
+    if (id < 0 || id > (1 << 22)) return false;
+    uint32_t plen = 0;
+    const uint8_t* p = payload(h_, DBX_USERS, plen);
+    Col c[2];
+    columns(p, plen, c);
+    uint32_t n = 0;
+    const uint8_t* name = text_of(c[1], n);
+    const size_t idx = static_cast<size_t>(id);
+    if (author_off_.size() <= idx) {
+      author_off_.resize(idx + 1, 0);
+      author_len_.resize(idx + 1, 0);
+    }
+    author_off_[idx] = static_cast<uint32_t>(author_names_.size());
+    author_len_[idx] = n;
+    author_names_.insert(author_names_.end(), name, name + n);
+    r = dbx_next(h_, DBX_USERS);
+  }
+  if (r < 0) return false;
+  authors_ok_ = true;
+  return true;
+}
+
+bool Db::author_name(int64_t id, const uint8_t*& p, uint32_t& n) const {
+  if (id < 0 || static_cast<size_t>(id) >= author_off_.size()) return false;
+  n = author_len_[static_cast<size_t>(id)];
+  if (n == 0) return false;
+  p = author_names_.data() + author_off_[static_cast<size_t>(id)];
+  return true;
 }
 
 bool Db::feed_rows() {
@@ -392,25 +450,40 @@ bool Db::feed_rows() {
 
   if (!rows_.empty()) {
     const size_t n = rows_.size();
-    std::array<long long, kFeedLen> uids{};
-    std::array<unsigned, kFeedLen> ulens{};
-    std::array<unsigned char, kFeedLen * 256> ubuf{};
-    std::array<uint32_t, kFeedLen> uorder{};
-    for (size_t k = 0; k < n; k++) uorder[k] = static_cast<uint32_t>(k);
-    std::sort(uorder.begin(), uorder.begin() + static_cast<ptrdiff_t>(n),
-              [&](uint32_t a, uint32_t b) { return rows_[order_[a]].user_id < rows_[order_[b]].user_id; });
-    for (size_t k = 0; k < n; k++) uids[k] = rows_[order_[uorder[k]]].user_id;
-    if (dbx_users_seek_many(h_, uids.data(), static_cast<int>(n), ubuf.data(), ulens.data()) != 0) throw DbError{};
-    for (size_t k = 0; k < n; k++) {
-      Row& row = rows_[order_[uorder[k]]];
-      if (ulens[k] == 0) return false;
-      Col c[2];
-      columns(ubuf.data() + k * 256, ulens[k], c);
-      uint32_t alen = 0;
-      const uint8_t* name = text_of(c[1], alen);
-      row.author_off = static_cast<uint32_t>(text_len_);
-      row.author_len = alen;
-      text_put(name, alen);
+    if (authors_ok_) {
+      for (size_t k = 0; k < n; k++) {
+        Row& row = rows_[order_[k]];
+        const uint8_t* name = nullptr;
+        uint32_t alen = 0;
+        if (!author_name(row.user_id, name, alen)) return false;
+        row.author_off = static_cast<uint32_t>(text_len_);
+        row.author_len = alen;
+        text_put(name, alen);
+      }
+    } else {
+      std::array<long long, kFeedLen> uids{};
+      std::array<unsigned, kFeedLen> ulens{};
+      std::array<unsigned char, kFeedLen * 256> ubuf{};
+      std::array<uint32_t, kFeedLen> uorder{};
+      for (size_t k = 0; k < n; k++) uorder[k] = static_cast<uint32_t>(k);
+      std::sort(uorder.begin(), uorder.begin() + static_cast<ptrdiff_t>(n),
+                [&](uint32_t a, uint32_t b) {
+                  return rows_[order_[a]].user_id < rows_[order_[b]].user_id;
+                });
+      for (size_t k = 0; k < n; k++) uids[k] = rows_[order_[uorder[k]]].user_id;
+      if (dbx_users_seek_many(h_, uids.data(), static_cast<int>(n), ubuf.data(), ulens.data()) != 0)
+        throw DbError{};
+      for (size_t k = 0; k < n; k++) {
+        Row& row = rows_[order_[uorder[k]]];
+        if (ulens[k] == 0) return false;
+        Col c[2];
+        columns(ubuf.data() + k * 256, ulens[k], c);
+        uint32_t alen = 0;
+        const uint8_t* name = text_of(c[1], alen);
+        row.author_off = static_cast<uint32_t>(text_len_);
+        row.author_len = alen;
+        text_put(name, alen);
+      }
     }
   }
 

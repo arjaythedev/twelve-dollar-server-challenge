@@ -1277,7 +1277,10 @@ row stays at `656946e`. #526 at `883b902` (per-slot author cursors, bound `creat
 held **285,000** (27,141 req/s, p95 38.3 / p99 328.3 ms, 0 errors, 76 % CPU, 25 µs/req, 1,329 MB, 2026-11-20); 300,000
 passed the 2-minute probe but failed the 5-minute hold on p99 (1.23 s, 0 errors), 310,000 failed the 2-minute probe on
 p99 (4.63 s, 0 errors) and 320,000 on p99 3.58 s with 0.004 % timeouts. Below the merged 290,000, so #526 isn't merged
-and the row stays at `656946e`.
+and the row stays at `656946e`. #526 at `2c7f2b2` (accept depth fixed at 512 per ring, `posix_fadvise` on its own WAL
+after a full checkpoint) held **280,000** (26,680 req/s, p95 86.5 / p99 503.6 ms, 0 errors, 77 % CPU, 26 µs/req, 671 MB,
+2026-11-28); 290,000 failed the 2-minute probe on p99 (8.58 s, 0 errors), 300,000 on p99 11.9 s and 320,000 on p99
+11.8 s with 0.218 % timeouts. Below the merged 290,000, so #526 isn't merged and the row stays at `656946e`.
 
 ⁱ **Swift io_uring #314 is scored at `952fd62`**, which spills connections to extra rings when a ring's
 direct-descriptor table nears full: 257,000 held at 76 % CPU (28 µs/req, 675 MB, 0 err); 270,000 passed the 2-minute

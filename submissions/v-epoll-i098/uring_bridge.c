@@ -17,18 +17,21 @@
 
 #define RINGS 8
 #define SLOTS 65535
-#define BUFFERS 1024
-#define BUFFER_SIZE 2048
-#define ACCEPT_DEPTH 64
+#define BUFFERS 4096 /* per ring; 256 ran dry when the loop fell behind (12 M ENOBUFS re-arms in 2 min at 200k) */
+#define BUFFER_SIZE 512 /* most requests fit; a small buffer drains more sockets per MB than a 2 KB one */
+#define ACCEPT_DEPTH 512 /* 64 per ring let the accept queues fill (32k) during a 5k conn/s ramp */
+#define REQUESTS_PER_PASS 512 /* requests handed to V per pass; other completions are not capped */
+#define HELD_MAX_MS 800 /* a held request this old goes before fresh completions */
 #define SQ_SIZE 2048
 #define CQ_SIZE 8192
-#define BATCH_NS 200000 /* Bound completion coalescing before one SQLite transaction. */
+#define TASKRUN_ROUNDS 64 /* 64 enters of up to 20 items: about 1,280 completions per ring per pass */
+#define BATCH_NS 4000000 /* Bound completion coalescing before one SQLite transaction. */
 #define PENDING_LIMIT (1u << 20) /* Input held while the application is busy; more closes the client. */
 #define TD_CANCEL (UINT64_MAX - 1)
-/* Output of at most OUT_BLOCK bytes lives in a pooled block of that size; larger output is
- * allocated at its exact size. So output_len alone tells which kind a buffer is. */
-#define OUT_BLOCK 8192
-#define POOLED_BLOCKS 1024
+#define QUICKACK_MS 20 /* half the 40 ms minimum delayed-ACK timeout (TCP_ATO_MIN) */
+#define OUTPUT_BLOCK 6144 /* a feed reply (about 5.2 KB) fits; glibc's tcache stops at 1 KB */
+#define OUTPUT_POOL 256 /* spare blocks kept per ring: at most 12 MiB over all rings */
+static const int td_zero = 0;
 
 enum { FREE, ACCEPT, RECV, SEND, CLOSE, APPLICATION };
 
@@ -39,9 +42,10 @@ struct td_client {
     unsigned char *output, *pending;
     unsigned output_len, sent, pending_len;
     unsigned generation;
+    uint32_t recv_ms; /* ring clock when the current request reached the application */
     int next;
     unsigned char operation, queued, busy, close_after, notify_drain;
-    unsigned char armed, cancelling, eof;
+    unsigned char armed, cancelling, eof, pooled;
 };
 
 struct td_ring {
@@ -50,17 +54,19 @@ struct td_ring {
     unsigned char *memory;
     struct td_client *clients;
     int *free_slots;
-    unsigned char *blocks[POOLED_BLOCKS];
-    int free_count, accepting, block_count;
+    unsigned char **pool; /* spare OUTPUT_BLOCK output buffers */
+    int pool_count;
+    int free_count, accepting;
     int ready_head, ready_tail, retry_head, retry_tail, deliver_head, deliver_tail;
-    uint64_t retry_at, accept_at;
+    uint64_t retry_at, accept_at, now;
 };
 
 struct td_net {
     struct td_ring rings[RINGS];
     struct pollfd polls[RINGS + 1]; /* [RINGS] is the checkpoint eventfd */
     int wake; /* every ring signals this eventfd when work for the loop arrives */
-    int listener, cursor, checkpoint_waiting;
+    int listeners[RINGS], cursor, checkpoint_waiting;
+    uint64_t batch_at; /* CLOCK_MONOTONIC ns when td_net_next last returned events */
 };
 
 _Static_assert(TD_CAPACITY == RINGS * SLOTS, "capacity mismatch");
@@ -113,19 +119,12 @@ static void td_recycle(struct td_ring *r, int buffer)
     io_uring_buf_ring_advance(r->buffers, 1);
 }
 
-static unsigned char *td_block(struct td_ring *r)
-{
-    unsigned char *block = r->block_count ? r->blocks[--r->block_count] : malloc(OUT_BLOCK);
-    if (!block) td_fail("allocate committed output", ENOMEM);
-    return block;
-}
-
 static void td_drop_output(struct td_ring *r, struct td_client *c)
 {
-    if (c->output && c->output_len <= OUT_BLOCK && r->block_count < POOLED_BLOCKS)
-        r->blocks[r->block_count++] = c->output;
+    if (c->pooled && r->pool_count < OUTPUT_POOL) r->pool[r->pool_count++] = c->output;
     else free(c->output);
     c->output = NULL;
+    c->pooled = 0;
     c->output_len = c->sent = 0;
 }
 
@@ -137,6 +136,7 @@ static void td_want_input(struct td_ring *r, int slot)
     if (c->pending_len) {
         c->operation = RECV;
         c->queued = 1;
+        c->recv_ms = (uint32_t)r->now; /* held input ages from here, for td_deliver and QUICKACK */
         c->next = -1;
         if (r->deliver_tail < 0) r->deliver_head = slot;
         else r->clients[r->deliver_tail].next = slot;
@@ -155,6 +155,7 @@ static void td_prep_cancel(struct io_uring_sqe *sqe, int slot)
 
 static void td_schedule(struct td_ring *r, uint64_t now)
 {
+    r->now = now;
     if (r->retry_head >= 0 && now >= r->retry_at) {
         if (r->ready_tail < 0) r->ready_head = r->retry_head;
         else r->clients[r->ready_tail].next = r->retry_head;
@@ -162,7 +163,8 @@ static void td_schedule(struct td_ring *r, uint64_t now)
         r->retry_head = r->retry_tail = -1;
     }
     while (r->free_count && r->accepting < ACCEPT_DEPTH && now >= r->accept_at) {
-        int slot = r->free_slots[--r->free_count];
+        --r->free_count;
+        int slot = r->free_slots[r->free_count] ^ r->free_count;
         struct td_client *c = &r->clients[slot];
         assert(c->operation == FREE && !c->busy && !c->queued && !c->output && !c->pending && !c->armed);
         c->eof = 0; /* a receive cancelled by the last close can end after that close */
@@ -186,10 +188,13 @@ static void td_submit(struct td_net *net, struct td_ring *r)
         int slot = r->ready_head;
         struct td_client *c = &r->clients[slot];
         /* A close cancels the armed receive first; the hard link runs the close if nothing matched. */
-        unsigned need = c->operation == CLOSE && c->armed ? 2 : 1;
+        /* A reply within the delayed-ACK timeout keeps the socket in pingpong mode by itself
+         * (tcp_event_data_sent), so only a slow reply needs the TCP_QUICKACK 0 command. */
+        unsigned rearm = c->operation == SEND && (uint32_t)r->now - c->recv_ms >= QUICKACK_MS;
+        unsigned need = (c->operation == CLOSE && c->armed) || rearm ? 2 : 1;
         if (io_uring_sq_space_left(&r->ring) < need) break;
         struct io_uring_sqe *sqe = io_uring_get_sqe(&r->ring);
-        if (need == 2) {
+        if (c->operation == CLOSE && need == 2) {
             td_prep_cancel(sqe, slot);
             sqe->flags |= IOSQE_IO_HARDLINK;
             sqe = io_uring_get_sqe(&r->ring);
@@ -201,7 +206,7 @@ static void td_submit(struct td_net *net, struct td_ring *r)
         switch (c->operation) {
         case ACCEPT:
             /* The slot stays reserved until the matching close CQE is consumed. */
-            io_uring_prep_accept_direct(sqe, net->listener, NULL, NULL, 0, slot);
+            io_uring_prep_accept_direct(sqe, net->listeners[r - net->rings], NULL, NULL, 0, slot);
             break;
         case RECV:
             io_uring_prep_recv_multishot(sqe, slot, NULL, 0, 0);
@@ -212,6 +217,16 @@ static void td_submit(struct td_net *net, struct td_ring *r)
             break;
         case SEND:
             assert(c->sent < c->output_len);
+            if (rearm) {
+                /* TCP_QUICKACK 0 puts the socket back in delayed-ACK (pingpong) mode, which the
+                 * delayed-ACK timer ends; then the next request would get its own ACK packet
+                 * instead of riding on the reply. Errors (kernels before 6.7) are ignored. */
+                io_uring_prep_cmd_sock(sqe, SOCKET_URING_OP_SETSOCKOPT, slot, IPPROTO_TCP,
+                                       TCP_QUICKACK, (void *)&td_zero, sizeof(td_zero));
+                sqe->flags |= IOSQE_FIXED_FILE | IOSQE_CQE_SKIP_SUCCESS;
+                sqe->user_data = TD_CANCEL;
+                sqe = io_uring_get_sqe(&r->ring);
+            }
             io_uring_prep_send(sqe, slot, c->output + c->sent,
                                c->output_len - c->sent, MSG_NOSIGNAL);
             sqe->flags |= IOSQE_FIXED_FILE;
@@ -229,8 +244,11 @@ static void td_submit(struct td_net *net, struct td_ring *r)
         td_fail("submit", rc);
     if (*r->ring.sq.kdropped) td_fail("dropped SQE", EOVERFLOW);
     /* DEFER_TASKRUN posts completions only inside io_uring_enter; the kernel raises
-     * IORING_SQ_TASKRUN when work waits, and IORING_SQ_CQ_OVERFLOW when the CQ spilled. */
-    if (*r->ring.sq.kflags & (IORING_SQ_CQ_OVERFLOW | IORING_SQ_TASKRUN)) {
+     * IORING_SQ_TASKRUN when work waits, and IORING_SQ_CQ_OVERFLOW when the CQ spilled.
+     * Since Linux 6.13 one enter without a wait runs at most 20 deferred items, so drain
+     * until the flag clears; the bound keeps one busy ring from starving the others. */
+    for (int round = 0; round < TASKRUN_ROUNDS &&
+                        (*r->ring.sq.kflags & (IORING_SQ_CQ_OVERFLOW | IORING_SQ_TASKRUN)); ++round) {
         rc = io_uring_get_events(&r->ring);
         if (rc < 0 && rc != -EINTR && rc != -EBUSY) td_fail("flush deferred work", rc);
     }
@@ -245,13 +263,27 @@ struct td_net *td_net_new(int listener, int checkpoint)
         td_fail("Linux 6.1 or newer is required", ENOTSUP);
     struct td_net *net = calloc(1, sizeof(*net));
     if (!net) td_fail("allocate network state", ENOMEM);
-    net->listener = listener;
     net->wake = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
     if (net->wake < 0) td_fail("wake eventfd", errno);
+    /* One SO_REUSEPORT listener per ring: the kernel spreads SYNs over 8 accept queues. */
+    struct sockaddr_storage address;
+    socklen_t address_len = sizeof(address);
+    if (getsockname(listener, (struct sockaddr *)&address, &address_len)) td_fail("listener address", errno);
+    close(listener);
     int one = 1;
-    /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
-    if (setsockopt(listener, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
-        td_fail("listener TCP_NODELAY", errno);
+    for (int i = 0; i < RINGS; ++i) {
+        int fd = socket(address.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (fd < 0) td_fail("listener socket", errno);
+        if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) ||
+            setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)))
+            td_fail("listener SO_REUSEPORT", errno);
+        /* Accepted sockets inherit TCP_NODELAY without entering the process file table. */
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one)))
+            td_fail("listener TCP_NODELAY", errno);
+        if (bind(fd, (struct sockaddr *)&address, address_len) || listen(fd, 65535))
+            td_fail("listener bind", errno);
+        net->listeners[i] = fd;
+    }
     for (int i = 0; i < RINGS; ++i) {
         struct td_ring *r = &net->rings[i];
         r->ready_head = r->ready_tail = r->retry_head = r->retry_tail = -1;
@@ -270,9 +302,12 @@ struct td_net *td_net_new(int listener, int checkpoint)
         if (!r->buffers) td_fail("register buffer ring", rc);
         r->memory = malloc(BUFFERS * BUFFER_SIZE);
         r->clients = calloc(SLOTS, sizeof(*r->clients));
-        r->free_slots = malloc(SLOTS * sizeof(*r->free_slots));
-        if (!r->memory || !r->clients || !r->free_slots) td_fail("allocate ring state", ENOMEM);
-        for (int slot = 0; slot < SLOTS; ++slot) r->free_slots[r->free_count++] = slot;
+        /* Entry i holds slot ^ i, so the zeroed calloc pages already read as slots 0..SLOTS-1
+         * and only the stack depth in use is ever touched. */
+        r->free_slots = calloc(SLOTS, sizeof(*r->free_slots));
+        r->pool = malloc(OUTPUT_POOL * sizeof(*r->pool));
+        if (!r->memory || !r->clients || !r->free_slots || !r->pool) td_fail("allocate ring state", ENOMEM);
+        r->free_count = SLOTS;
         for (int b = 0; b < BUFFERS; ++b)
             io_uring_buf_ring_add(r->buffers, r->memory + b * BUFFER_SIZE,
                                  BUFFER_SIZE, b, BUFFERS - 1, b);
@@ -285,8 +320,10 @@ struct td_net *td_net_new(int listener, int checkpoint)
     return net;
 }
 
+/* defer: the batch is full, so a request for a waiting client is copied to held input and its
+ * buffer recycled at once; the client is delivered on the next pass. */
 static int td_received(struct td_ring *r, int ring_index, int slot, const struct io_uring_cqe *cqe,
-                       int buffer, struct td_event *event)
+                       int buffer, struct td_event *event, int defer)
 {
     struct td_client *c = &r->clients[slot];
     int result = cqe->res;
@@ -295,12 +332,23 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
     if (result > 0) {
         if (buffer < 0 || buffer >= BUFFERS || result > BUFFER_SIZE)
             td_fail("invalid receive buffer", EOVERFLOW);
-        if (waiting) {
+        if (waiting && !defer) {
             c->operation = APPLICATION;
+            c->recv_ms = (uint32_t)r->now;
             *event = (struct td_event){ .kind = 2, .id = ring_index * SLOTS + slot,
                                         .data = r->memory + buffer * BUFFER_SIZE,
                                         .len = result, .buffer = buffer };
             return 1;
+        }
+        if (waiting) {
+            assert(!c->pending_len);
+            c->pending = malloc(result);
+            if (!c->pending) td_fail("allocate held input", ENOMEM);
+            memcpy(c->pending, r->memory + buffer * BUFFER_SIZE, result);
+            c->pending_len = result;
+            td_recycle(r, buffer);
+            td_want_input(r, slot);
+            return 0;
         }
         if (c->operation != CLOSE && c->operation != FREE && !c->eof) {
             if (c->pending_len + result > PENDING_LIMIT) c->eof = 1;
@@ -324,7 +372,13 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
     }
     if (buffer >= 0) td_recycle(r, buffer);
     int transient = result == -ENOBUFS || result == -EAGAIN || result == -EINTR || result == -ENOMEM;
-    if (result != -ECANCELED && !transient) c->eof = 1; /* end of stream or a failed socket */
+    if (result != -ECANCELED && !transient) {
+        c->eof = 1;
+        if (result < 0 && c->operation == APPLICATION) {
+            *event = (struct td_event){ .kind = 6, .id = ring_index * SLOTS + slot, .buffer = -1 };
+            return 1;
+        }
+    }
     if (!waiting || c->armed) return 0;
     if (c->eof) td_enqueue(r, slot, CLOSE);
     else if (transient) td_retry(r, slot);
@@ -333,7 +387,7 @@ static int td_received(struct td_ring *r, int ring_index, int slot, const struct
 }
 
 static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_cqe *cqe,
-                       struct td_event *event)
+                       struct td_event *event, int defer)
 {
     int slot = (cqe->user_data >> 8) & 0xffff;
     int operation = cqe->user_data & 0xff;
@@ -346,7 +400,7 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
         if (buffer >= 0) td_recycle(r, buffer);
         return 0;
     }
-    if (operation == RECV) return td_received(r, ring_index, slot, cqe, buffer, event);
+    if (operation == RECV) return td_received(r, ring_index, slot, cqe, buffer, event, defer);
     assert(c->busy && c->operation == operation);
     c->busy = 0;
     int result = cqe->res;
@@ -355,7 +409,8 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
         --r->accepting;
         if (result < 0) {
             c->operation = FREE;
-            r->free_slots[r->free_count++] = slot;
+            r->free_slots[r->free_count] = slot ^ r->free_count;
+            r->free_count++;
             if (result == -ENFILE || result == -EMFILE || result == -ENOBUFS || result == -ENOMEM ||
                 result == -EAGAIN || result == -ENETDOWN || result == -ENONET ||
                 result == -EHOSTDOWN || result == -EHOSTUNREACH || result == -ENETUNREACH ||
@@ -384,7 +439,8 @@ static int td_complete(struct td_ring *r, int ring_index, const struct io_uring_
         c->pending_len = c->close_after = 0;
         c->armed = c->cancelling = c->eof = 0;
         c->operation = FREE;
-        r->free_slots[r->free_count++] = slot;
+        r->free_slots[r->free_count] = slot ^ r->free_count;
+        r->free_count++;
         event->kind = 3;
         return 1;
     }
@@ -426,11 +482,33 @@ static void td_sleep(struct td_net *net, const struct timespec *timeout)
     }
 }
 
+/* td_deliver hands held requests to V, oldest first, while the head is at least min_age ms old. */
+static int td_deliver(struct td_ring *r, int i, struct td_event *events, int count, int capacity,
+                      int *requests, int quota, uint32_t min_age)
+{
+    while (r->deliver_head >= 0 && *requests < quota && count < capacity) {
+        int slot = r->deliver_head;
+        struct td_client *c = &r->clients[slot];
+        if ((uint32_t)r->now - c->recv_ms < min_age) break;
+        r->deliver_head = c->next;
+        if (r->deliver_head < 0) r->deliver_tail = -1;
+        c->queued = 0;
+        c->operation = APPLICATION;
+        /* buffer -2: td_net_release frees the held input */
+        ++*requests;
+        events[count++] = (struct td_event){ .kind = 2, .id = i * SLOTS + slot, .data = c->pending,
+                                             .len = (int)c->pending_len, .buffer = -2 };
+        c->pending = NULL;
+        c->pending_len = 0;
+    }
+    return count;
+}
+
 int td_net_next(struct td_net *net, struct td_event *events, int capacity, int timeout_ms)
 {
     assert(capacity > 0);
     uint64_t deadline = timeout_ms < 0 ? UINT64_MAX : td_now() + timeout_ms;
-    int count = 0;
+    int count = 0, requests = 0;
     uint64_t flush_at = 0;
     for (;;) {
         uint64_t now = td_now();
@@ -441,33 +519,33 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             struct td_ring *r = &net->rings[i];
             td_schedule(r, now);
             td_submit(net, r);
-            while (r->deliver_head >= 0 && count < capacity) {
-                int slot = r->deliver_head;
-                struct td_client *c = &r->clients[slot];
-                r->deliver_head = c->next;
-                if (r->deliver_head < 0) r->deliver_tail = -1;
-                c->queued = 0;
-                c->operation = APPLICATION;
-                /* buffer -2: td_net_release frees the held input */
-                events[count++] = (struct td_event){ .kind = 2, .id = i * SLOTS + slot, .data = c->pending,
-                                                     .len = (int)c->pending_len, .buffer = -2 };
-                c->pending = NULL;
-                c->pending_len = 0;
-            }
+            /* Only requests are budgeted: accepts, sends and closes are cheap for V, and leaving
+             * them in the CQ lets the accept queues and socket buffers fill. Held requests already
+             * missed the 40 ms delayed-ACK timer, so fresh completions go first and get their ACK
+             * on the reply; only held requests older than HELD_MAX_MS go before them. */
+            int quota = requests + REQUESTS_PER_PASS / RINGS;
+            count = td_deliver(r, i, events, count, capacity, &requests, quota, HELD_MAX_MS);
             struct io_uring_cqe *cqe;
             unsigned head, consumed = 0;
             io_uring_for_each_cqe(&r->ring, head, cqe) {
-                if (count == capacity || consumed == CQ_SIZE) break;
+                if (consumed == CQ_SIZE || count == capacity) break;
+                /* Past the quota a request is held, so the buffer ring and the kernel socket
+                 * queues drain while the application catches up. */
+                int defer = requests >= quota;
                 if (cqe->user_data == TD_CANCEL) {
                     /* -ENOENT or -EALREADY: the receive already ended or is ending. */
                 } else if (cqe->user_data == UINT64_MAX) {
                     if (cqe->res < 0 || !(cqe->res & POLLIN))
                         td_fail("checkpoint completion", cqe->res < 0 ? cqe->res : EIO);
                     events[count++] = (struct td_event){ .kind = 5, .id = -1, .buffer = -1 };
-                } else count += td_complete(r, i, cqe, &events[count]);
+                } else if (td_complete(r, i, cqe, &events[count], defer)) {
+                    requests += events[count].kind == 2;
+                    ++count;
+                }
                 ++consumed;
             }
             io_uring_cq_advance(&r->ring, consumed);
+            count = td_deliver(r, i, events, count, capacity, &requests, quota, 0);
             internal |= consumed != 0;
             pending |= r->ready_head >= 0 || io_uring_sq_ready(&r->ring) != 0;
             if (r->retry_head >= 0 && r->retry_at < wake) wake = r->retry_at;
@@ -479,10 +557,16 @@ int td_net_next(struct td_net *net, struct td_event *events, int capacity, int t
             struct timespec clock;
             if (clock_gettime(CLOCK_MONOTONIC, &clock)) td_fail("batch clock", errno);
             uint64_t nanos = (uint64_t)clock.tv_sec * 1000000000 + clock.tv_nsec;
-            if (!flush_at) flush_at = nanos + BATCH_NS;
-            if (count == capacity || nanos >= flush_at || td_now() >= deadline) return count;
+            /* The window runs from the last return, so time the application spent on that batch
+             * counts: a saturated loop never sleeps, and no batch period is shorter than BATCH_NS. */
+            if (!flush_at) flush_at = net->batch_at + BATCH_NS;
+            if (count == capacity || requests >= REQUESTS_PER_PASS || nanos >= flush_at || td_now() >= deadline) {
+                net->batch_at = nanos;
+                return count;
+            }
             struct timespec pause = { .tv_nsec = (long)(flush_at - nanos) };
-            td_sleep(net, &pause);
+            /* Collect until the batch deadline instead of waking for each completion. */
+            if (nanosleep(&pause, NULL) && errno != EINTR) td_fail("batch sleep", errno);
             continue;
         }
         now = td_now();
@@ -511,20 +595,21 @@ void td_net_send(struct td_net *net, int id, const unsigned char *data, int len)
     assert(c->operation == APPLICATION && !c->busy && !c->queued && c->sent == 0);
     if ((unsigned)len > UINT_MAX - c->output_len) td_fail("output size", EOVERFLOW);
     unsigned size = c->output_len + len;
-    if (size <= OUT_BLOCK) {
-        if (!c->output) c->output = td_block(r);
-    } else if (c->output_len > OUT_BLOCK) {
-        unsigned char *output = realloc(c->output, size);
+    if (!c->output && size <= OUTPUT_BLOCK) {
+        c->output = r->pool_count ? r->pool[--r->pool_count] : malloc(OUTPUT_BLOCK);
+        if (!c->output) td_fail("allocate committed output", ENOMEM);
+        c->pooled = 1;
+    } else if (!c->pooled || size > OUTPUT_BLOCK) {
+        /* A delayed batch can release thousands of short replies; retain only their actual bytes. */
+        unsigned char *output = c->pooled ? malloc(size) : realloc(c->output, size);
         if (!output) td_fail("allocate committed output", ENOMEM);
+        if (c->pooled) {
+            memcpy(output, c->output, c->output_len);
+            if (r->pool_count < OUTPUT_POOL) r->pool[r->pool_count++] = c->output;
+            else free(c->output);
+            c->pooled = 0;
+        }
         c->output = output;
-    } else {
-        unsigned char *output = malloc(size);
-        if (!output) td_fail("allocate committed output", ENOMEM);
-        if (c->output) memcpy(output, c->output, c->output_len);
-        unsigned kept = c->output_len;
-        td_drop_output(r, c);
-        c->output = output;
-        c->output_len = kept;
     }
     memcpy(c->output + c->output_len, data, len);
     c->output_len = size;

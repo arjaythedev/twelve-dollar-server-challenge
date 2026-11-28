@@ -79,8 +79,8 @@ static int rec_parse(BtCursor *c, int n, Rec *r) {
   return 1;
 }
 
-static td_feed OUT;
-const td_feed *td_feed_out(void) { return &OUT; }
+/* row_out.h writes JSON; the amalgamation's own build flags already target the host CPU. */
+#include "row_out.h"
 
 /* Counts likes per post_id in [lo, hi] into cnt[post_id - lo]. Returns 0 on success. */
 static int likes_range(Btree *bt, i64 lo, i64 hi, i64 *cnt) {
@@ -107,21 +107,79 @@ static int likes_range(Btree *bt, i64 lo, i64 hi, i64 *cnt) {
   return bad;
 }
 
-/* Copies the post under `posts` and its author into o and the arena. Returns 0 when the row
-** does not fit the fast path (overflow pages, odd created_at, arena full). */
-static int emit_row(BtCursor *posts, BtCursor *users, td_feed_row *o, unsigned char **ap, unsigned char *aend) {
+/* Key of cell idx on a table b-tree page (the rowid of a leaf cell, the divider of an interior one). */
+static inline i64 cell_key(MemPage *pg, int idx) {
+  u8 *c = findCellPastPtr(pg, idx);
+  if (pg->intKeyLeaf) while (0x80 <= *(c++)) {}
+  return sqlite3VarintValue(c);
+}
+
+/* sqlite3BtreeTableMoveto with a different probe order. Ids grow densely, so the first probe on
+** each page interpolates between its first and last key and, when it misses, the search gallops
+** towards the key before it falls back to bisection. Result and cursor state are the same. */
+static int table_moveto(BtCursor *cur, i64 key, int *res) {
+  int rc = moveToRoot(cur);
+  if (rc) { if (rc == SQLITE_EMPTY) { *res = -1; return SQLITE_OK; } return rc; }
+  for (;;) {
+    MemPage *pg = cur->pPage;
+    int lo = 0, hi = pg->nCell - 1, idx, step = 1, c;
+    i64 first = cell_key(pg, 0), last = cell_key(pg, hi);
+    if (key <= first) idx = 0;
+    else if (key >= last) idx = hi;
+    else idx = (int)(((unsigned long long)(key - first) * (unsigned)hi) / (unsigned long long)(last - first));
+    for (int moved_lo = 0, moved_hi = 0;;) {
+      i64 k = cell_key(pg, idx);
+      if (k < key) {
+        lo = idx + 1; moved_lo = 1;
+        if (lo > hi) { c = -1; break; }
+        if (moved_hi) idx = (lo + hi) >> 1;
+        else { idx = lo + step - 1; step <<= 1; if (idx > hi) idx = hi; }
+      } else if (k > key) {
+        hi = idx - 1; moved_hi = 1;
+        if (lo > hi) { c = 1; break; }
+        if (moved_lo) idx = (lo + hi) >> 1;
+        else { idx = hi - step + 1; step <<= 1; if (idx < lo) idx = lo; }
+      } else {
+        cur->ix = (u16)idx;
+        if (pg->leaf) {
+          cur->curFlags |= BTCF_ValidNKey;
+          cur->info.nKey = k;
+          cur->info.nSize = 0;
+          *res = 0;
+          return SQLITE_OK;
+        }
+        lo = idx;
+        goto child;
+      }
+    }
+    if (pg->leaf) {
+      cur->ix = (u16)idx;
+      cur->info.nSize = 0;
+      *res = c;
+      return SQLITE_OK;
+    }
+child:
+    {
+      Pgno child = lo >= pg->nCell ? get4byte(&pg->aData[pg->hdrOffset + 8]) : get4byte(findCell(pg, lo));
+      cur->ix = (u16)lo;
+      if ((rc = moveToChild(cur, child))) return rc;
+    }
+  }
+}
+
+/* Writes the post under `posts` with its author as one JSON row at d, straight from the pages.
+** Returns the end, or NULL when the row does not fit the fast path (overflow pages, odd
+** created_at, not enough room before dend). */
+static unsigned char *put_row(BtCursor *posts, BtCursor *users, i64 id, i64 likes, unsigned char *d, unsigned char *dend) {
   Rec r, u;
   int res;
-  unsigned char *p = *ap;
   if (!rec_parse(posts, 4, &r) || r.len[3] != 24) return 0;        /* user_id, body, created_at */
-  if (sqlite3BtreeTableMoveto(users, r.val[1], 0, &res) || res != 0) return 0;
+  if (table_moveto(users, r.val[1], &res) || res != 0) return 0;
   if (!rec_parse(users, 2, &u)) return 0;                          /* username */
-  if (p + r.len[2] + 24 + u.len[1] > aend) return 0;
-  o->body = p; o->body_len = r.len[2]; memcpy(p, r.col[2], r.len[2]); p += r.len[2];
-  o->created = p; memcpy(p, r.col[3], 24); p += 24;
-  o->user = p; o->user_len = u.len[1]; memcpy(p, u.col[1], u.len[1]); p += u.len[1];
-  *ap = p;
-  return 1;
+  if ((r.len[2] + u.len[1]) * 6 + 160 > dend - d) return 0;       /* worst case, see td_put_row */
+  td_feed_row o = { id, likes, (unsigned char *)r.col[2], (unsigned char *)r.col[3], (unsigned char *)u.col[1],
+                    r.len[2], u.len[1] };
+  return td_put_row(d, &o);
 }
 
 static int open_post_cursors(Btree *bt) {
@@ -133,18 +191,17 @@ static int open_post_cursors(Btree *bt) {
   return 1;
 }
 
-/* Reads the newest 20 posts (created_at DESC, id DESC) with author and like count.
-** Returns the row count, or -1 when the caller must use the SQL path. */
-int td_feed_read(int span) {
+/* Writes the newest 20 posts (created_at DESC, id DESC) with author and like count as
+** comma-separated JSON rows at d. Returns the end, or NULL when the caller must use the SQL path. */
+unsigned char *td_feed_read(int span, unsigned char *d, unsigned char *dend) {
   Btree *bt = F.db->aDb[0].pBt;
-  int n = 0, res, rc, ok = 0;
+  int n = 0, res, rc;
   i64 ids[20], lo, hi, cnt[256];
-  unsigned char *ap = OUT.arena, *aend = OUT.arena + sizeof OUT.arena;
   BtCursor *top = F.cur[0], *posts = F.cur[1], *users = F.cur[2];
 
-  if (span > 256 || sqlite3BtreeBeginTrans(bt, 0, 0)) return -1;
+  if (span > 256 || sqlite3BtreeBeginTrans(bt, 0, 0)) return 0;
   sqlite3BtreeCursorZero(top);
-  if (sqlite3BtreeCursor(bt, F.top_root, 0, F.top_ki, top)) return -1;
+  if (sqlite3BtreeCursor(bt, F.top_root, 0, F.top_ki, top)) return 0;
   rc = sqlite3BtreeFirst(top, &res);
   while (rc == SQLITE_OK && !res && n < 20) {
     Rec r;
@@ -155,41 +212,36 @@ int td_feed_read(int span) {
   if (rc != SQLITE_OK && rc != SQLITE_DONE) n = 0;
 top_done:
   sqlite3BtreeCloseCursor(top);
-  if (n == 0) return -1;
+  if (n == 0) return 0;
   lo = hi = ids[0];
   for (int k = 1; k < n; k++) { if (ids[k] < lo) lo = ids[k]; if (ids[k] > hi) hi = ids[k]; }
-  if (hi - lo >= span) return -1;
+  if (hi - lo >= span) return 0;
   memset(cnt, 0, sizeof(i64) * (hi - lo + 1));
-  if (likes_range(bt, lo, hi, cnt)) return -1;
-  if (!open_post_cursors(bt)) return -1;
-  for (int k = 0; k < n; k++) {
+  if (likes_range(bt, lo, hi, cnt)) return 0;
+  if (!open_post_cursors(bt)) return 0;
+  for (int k = 0; k < n && d; k++) {
     if (!(k > 0 && ids[k] == ids[k - 1] - 1 && sqlite3BtreePrevious(posts, 0) == SQLITE_OK
           && sqlite3BtreeIntegerKey(posts) == ids[k])) {
-      if (sqlite3BtreeTableMoveto(posts, ids[k], 0, &res) || res != 0) goto done;
+      if (table_moveto(posts, ids[k], &res) || res != 0) { d = 0; break; }
     }
-    if (!emit_row(posts, users, &OUT.row[k], &ap, aend)) goto done;
-    OUT.row[k].id = ids[k]; OUT.row[k].likes = cnt[ids[k] - lo];
+    if (k > 0) *d++ = ',';
+    d = put_row(posts, users, ids[k], cnt[ids[k] - lo], d, dend);
   }
-  ok = 1;
-done:
   sqlite3BtreeCloseCursor(users);
   sqlite3BtreeCloseCursor(posts);
-  return ok ? n : -1;
+  return d;
 }
 
-/* Reads one post by id into OUT.row[0]. Returns 1, or 0 when the SQL path must answer
-** (unknown id, or a row the fast path does not cover). */
-int td_post_read(long long id) {
+/* Writes one post by id as a JSON row at d. Returns the end, or NULL when the SQL path must
+** answer (unknown id, or a row the fast path does not cover). */
+unsigned char *td_post_read(long long id, unsigned char *d, unsigned char *dend) {
   Btree *bt = F.db->aDb[0].pBt;
-  int res, ok = 0;
+  int res;
   i64 cnt[1] = {0};
-  unsigned char *ap = OUT.arena;
-  if (sqlite3BtreeBeginTrans(bt, 0, 0) || !open_post_cursors(bt)) return 0;
-  if (!sqlite3BtreeTableMoveto(F.cur[1], id, 0, &res) && res == 0
-      && emit_row(F.cur[1], F.cur[2], &OUT.row[0], &ap, OUT.arena + sizeof OUT.arena)) ok = 1;
+  if (sqlite3BtreeBeginTrans(bt, 0, 0) || likes_range(bt, id, id, cnt) || !open_post_cursors(bt)) return 0;
+  if (table_moveto(F.cur[1], id, &res) || res != 0) d = 0;
+  else d = put_row(F.cur[1], F.cur[2], id, cnt[0], d, dend);
   sqlite3BtreeCloseCursor(F.cur[2]);
   sqlite3BtreeCloseCursor(F.cur[1]);
-  if (!ok || likes_range(bt, id, id, cnt)) return 0;
-  OUT.row[0].id = id; OUT.row[0].likes = cnt[0];
-  return 1;
+  return d;
 }

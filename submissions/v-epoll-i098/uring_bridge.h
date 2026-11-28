@@ -5,7 +5,7 @@
 
 struct td_net;
 struct td_event {
-    int kind; /* 1: accepted, 2: input, 3: closed, 4: output drained, 5: checkpoint */
+    int kind; /* 1: accepted, 2: input, 3: closed, 4: output drained, 5: checkpoint, 6: reset */
     int id;
     unsigned char *data;
     int len;
@@ -13,6 +13,7 @@ struct td_event {
 };
 
 struct td_net *td_net_new(int listener, int checkpoint);
+/* A reset event retains its slot until the caller calls td_net_abort. */
 int td_net_next(struct td_net *, struct td_event *, int capacity, int timeout_ms);
 void td_net_release(struct td_net *, const struct td_event *);
 void td_net_send(struct td_net *, int id, const unsigned char *, int len);

@@ -37,7 +37,7 @@
 
 **listen。** 端口上固定 **8 个共享的 `SO_REUSEPORT` listener**（与 ring 数无关），每个有自己的 accept 队列（`somaxconn` 4,096），ramp 期合计约 32k 个待建连接；每个 ring 对每个 listener 保持 **64** 个单发 accept 在途（每 ring 固定 512，**不按 ring 数稀释**——ring 数正是随连接数增长的，300k 时约 10 个，按总数除下去每 listener 会从 51 掉到 32，再多就撞上 `per<16` 的下限而停投）`full()` 的阈值也随之放宽到 `open + 512`，ring 顶端的 1,536 个槽位不再被提前判掉（310k/320k 正卡在这个边界）。ring 满时只停止投递 accept，不关闭共享 listener；**等 open 回落到「两个 margin」以下再恢复**（`open + 2*kAcceptDepth < slots`，kensac #264 的恢复条件）——早先只有停、没有恢复，一次短暂的表满就会永久拒绝新连接（270k/280k 的 connection refused）。
 
-**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed **从 `posts` 表尾倒着走 20 行**（`sqlite3BtreeLast` 定位最后一个 cell，再 `sqlite3BtreePrevious` 连续 20 次）：一次记录解码就拿到 `id`（rowid）、`user_id`、`body`、`created_at`，不必先扫 `posts_created_at_id_idx` 解 20 条 `(created_at, id)`、再按 id 回表 20 次。这条路径依赖一个启动时校验的不变量——`ORDER BY created_at DESC, id DESC` 与 `id DESC` 完全同序（seed 库 500,000 行实测 0 处不一致）：校验时比对索引前 20 个 id 与表尾 20 个 rowid，且新帖的 `created_at` 一旦严格小于已见过的最大值（时钟倒退）就永久退回索引路径。gprof 的每请求调用次数：`varint` 160 → **100**、`getCellInfo` 60 → **40**、`columns<3>` 40 → **0**（换成每请求 20 次 `columns<4>`）、`dbx_record` 40 → **20**、`sqlite3BtreeTableMoveto` 21 → **0**、`btreeParseCellPtrIndex` 20 → **0**，合计 742 → **471（−36 %）**；本机 2000 VUs 只打 /feed 的 CPU A/B（两轮交替、`NO_TABLE=1` 走旧路径对照）**50.56/54.03 → 47.90/47.32 µs（−5.3 % / −12.4 %）**。退回索引路径时用的是「20 个 id 跨度 < 512 就一次 seek 加顺序扫描」（阈值与 rust-iouring-kensac #264 的 512 对齐）；like 计数在**进程内**维护：第一次 `begin()` 时借游标做一次全表直方图（`dbx_likes_range` 只解首尾两个 cell 取最小/最大 post_id，`dbx_likes_fill` 顺序走一遍 `likes_post_id_idx` 把每组的行数记进 `std::vector<unsigned>`；seed 库 383,858 组 / 2,016,005 行，500,000 项约 2 MiB 常驻），之后 `INSERT` 新 like 时同步自增，`GET /feed` 的 20 个计数是 20 次数组读。原来的做法是沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），20 个 id 之间的每个 cell 都要解一遍，gprof 里占 **8.75 %**——那段扫描（`dbx_likes_many`）保留为直方图失败时的退路；作者名同样进了进程内缓存：第一次 `begin()` 时把整张 `users` 表顺序走一遍（50,000 行，名字存进一块字符池、两个 `std::vector<uint32_t>` 给偏移和长度，约 1 MiB），之后每个 slot 只是一次数组查表，不再逐个 `sqlite3BtreeTableMoveto` 加解记录——gprof 的调用次数表里这一步是每个 feed 请求 20 次 `columns<2>`、`varint` 220 → 160、`getCellInfo` 80 → 60，每请求 CPU 从 11.67/9.86 µs 降到 10.46/9.01 µs（两轮交替，`NO_AUTHORS=1` 关掉缓存做对照）。用户名没有接口能改，所以这份缓存不会失效；建不起来时退回下面的批量 seek。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 64 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。`wal_cb` 报出来的帧号有一个独立的影子计数：`wal_frames` 兼作闸门计数、检查点拷完就被清零，而 SQLite 的 `mxFrame` 不会跟着归零，直接对着它算差值会在每次清零之后把几万帧算成新写入（STATS 里出现过 `walframes=369497/s`，相当于 1.5 GB/s，明显不可能）。
+**数据层。** `dbx_*` 直接走 SQLite 的 B-tree 游标：feed **从 `posts` 表尾倒着走 20 行**（`sqlite3BtreeLast` 定位最后一个 cell，再 `sqlite3BtreePrevious` 连续 20 次）：一次记录解码就拿到 `id`（rowid）、`user_id`、`body`、`created_at`，不必先扫 `posts_created_at_id_idx` 解 20 条 `(created_at, id)`、再按 id 回表 20 次。这条路径依赖一个启动时校验的不变量——`ORDER BY created_at DESC, id DESC` 与 `id DESC` 完全同序（seed 库 500,000 行实测 0 处不一致）：校验时比对索引前 20 个 id 与表尾 20 个 rowid，且新帖的 `created_at` 一旦严格小于已见过的最大值（时钟倒退）就永久退回索引路径。gprof 的每请求调用次数：`varint` 160 → **100**、`getCellInfo` 60 → **40**、`columns<3>` 40 → **0**（换成每请求 20 次 `columns<4>`）、`dbx_record` 40 → **20**、`sqlite3BtreeTableMoveto` 21 → **0**、`btreeParseCellPtrIndex` 20 → **0**，合计 742 → **471（−36 %）**；本机 2000 VUs 只打 /feed 的 CPU A/B（两轮交替、`NO_TABLE=1` 走旧路径对照）**50.56/54.03 → 47.90/47.32 µs（−5.3 % / −12.4 %）**。退回索引路径时用的是「20 个 id 跨度 < 512 就一次 seek 加顺序扫描」（阈值与 rust-iouring-kensac #264 的 512 对齐）；like 计数在**进程内**维护：第一次 `begin()` 时借游标做一次全表直方图（`dbx_likes_range` 只解首尾两个 cell 取最小/最大 post_id，`dbx_likes_fill` 顺序走一遍 `likes_post_id_idx` 把每组的行数记进 `std::vector<unsigned>`；seed 库 383,858 组 / 2,016,005 行，500,000 项约 2 MiB 常驻），之后 `INSERT` 新 like 时同步自增，`GET /feed` 的 20 个计数和 `GET /posts/:id` 的单个计数都直接读数组；单帖不再额外 seek 后逐赞扫描。原来的做法是沿 `likes_post_id_idx` **在游标持有的页上直接解 cell**（`findCell` + 一字节长度/小整数头部检查），20 个 id 之间的每个 cell 都要解一遍，gprof 里占 **8.75 %**——那段扫描（`dbx_likes_many`）保留为直方图失败时的退路；作者名同样进了进程内缓存：第一次 `begin()` 时把整张 `users` 表顺序走一遍（50,000 行，名字在建缓存时完成 JSON 转义，存进一块字符池、两个 `std::vector<uint32_t>` 给偏移和长度，约 1 MiB），之后直接写出预转义名字，不再重复扫描用户名或先复制到 feed 临时文本区；每个 slot 只是一次数组查表，不再逐个 `sqlite3BtreeTableMoveto` 加解记录——gprof 的调用次数表里这一步是每个 feed 请求 20 次 `columns<2>`、`varint` 220 → 160、`getCellInfo` 80 → 60，每请求 CPU 从 11.67/9.86 µs 降到 10.46/9.01 µs（两轮交替，`NO_AUTHORS=1` 关掉缓存做对照）。用户名没有接口能改，所以这份缓存不会失效；建不起来时退回下面的批量 seek。这条页级扫描与 rust-iouring-kensac #264 的 `td_count_likes` 同形：页由游标持有，不获取也不释放页面；格式超出假设的 cell 返回 1，调用方退回「每个 post 一次 seek」。checkpoint 在独立的低优先级线程上、用自己的连接做 PASSIVE checkpoint，事件循环不等 fsync。SQLite 以 `THREADSAFE=2` 编译，页缓存 64 MiB，`mmap_size=0`，并套一层 `SQLITE_CONFIG_PCACHE2` shim 跳过 pcache1 的整表扫描。`wal_cb` 报出来的帧号有一个独立的影子计数：`wal_frames` 兼作闸门计数、检查点拷完就被清零，而 SQLite 的 `mxFrame` 不会跟着归零，直接对着它算差值会在每次清零之后把几万帧算成新写入（STATS 里出现过 `walframes=369497/s`，相当于 1.5 GB/s，明显不可能）。
 
 **JWT 的 SHA-256 压缩调用 libcrypto。** `SHA256_Transform` 是 libcrypto 导出的符号，且只读写 `ctx->h`——而 `h` 是 `SHA256_CTX` 的第一个成员，所以把自己的 8 字状态直接传进去即可，增量哈希和 HMAC 的结构一行都不用改，OpenSSL 的 CPU 派发会自己挑 AVX2/AVX-512/SHA-NI 路径（fsharp-uring-delneg #437 同样是走 OpenSSL 的 SHA-256）。用 `dlopen("libcrypto.so.3")` 在第一次 `Sha256::create()` 时解析，所以**编译期不需要 libssl-dev、二进制也不链接 libcrypto**；解析不到就退回本文件的标量实现，行为一致。本地实测 JWT 验证 2.03 → 1.55 µs。
 
@@ -53,24 +53,24 @@
 
 `GET /feed` 和 `GET /posts/:id` 在 pass 的 SQLite 事务内，读 B-tree 游标（`src/shim.c` `#include` 未修改的 amalgamation）。C++ 侧解码 record 字节并直接写 JSON：没有字节码引擎，没有 `sqlite3_column_*` 调用，也没有经过 SQLite value 的拷贝。
 
-- **Feed：** 从 `posts_created_at_id_idx` 的第一条开始遍历。索引是 `(created_at DESC, id DESC)`，正好是 `ORDER BY created_at DESC, id DESC`，record 里已经带着 `created_at` 和 `id`。然后按 id 升序在 `posts` 里查找这 20 篇，连续 id 落在同一个 leaf 的下一个 cell（`TableMoveto` 的快速路径）。接下来是作者——直接查进程内的 `users` 名字缓存。like 计数直接读进程内的直方图（见「数据层」），不再为每个请求重扫索引。
+- **Feed：** 默认从 `posts` 表尾倒着读 20 行；启动校验失败、时间回退或 `NO_TABLE=1` 时退回 `(created_at DESC, id DESC)` 索引加回表。作者从预 JSON 转义的名字缓存直接写出，like 计数从直方图读取；缓存构建失败时保留游标回退路径。
 - **实时读取：** 每个请求在被服务时从 SQLite 读它的行（规则 5）。只复用预编译语句、游标、KeyInfo 和四个根页号（启动时从 `sqlite_schema` 读取）。`unix-excl` VFS 阻止其他进程打开文件。
-- **写入走 SQL：** post 用 `INSERT … RETURNING id, created_at`，like 用 `INSERT … ON CONFLICT DO NOTHING`；只有 `sqlite3_changes` 区分新 like 和重复 like。like 处理器检查 post 是否存在是一次 `posts` 上的 B-tree seek。
+- **写入走 SQL：** post 显式绑定 `created_at` 并用 `sqlite3_last_insert_rowid` 取 id，like 用 `INSERT … ON CONFLICT DO NOTHING`；`sqlite3_changes` 区分新 like 和重复 like。like 处理器检查 post 是否存在仍是一次 `posts` B-tree seek。
 
 ## 持久化与批处理
 
 - WAL + `synchronous=NORMAL`，通过 `unix-excl` VFS 打开；WAL 索引在进程内共享，没有 `-shm` 文件。WAL 文件上再套一层写合并 shim：帧头和页连续写时先攒进缓冲，commit 帧的页到达时一次 `pwrite` 落地（写序不变，commit 帧在 COMMIT 返回前已在内核里）。本地 A/B 里它没量出差别（本实现已按 pass 组提交，每请求 WAL 写只有 ~0.2 次，合并的理论收益约 0.6%），保留是因为它已被 #245 在基准机上量到 0.24 → 0.095 pwrite/请求。
-- 每个事件循环 pass 是一个 SQLite 事务：读共享快照。**COMMIT 返回之前，看见写入的响应不会交给内核。** commit 失败时这些响应都变成 500。
+- 读共享当前 SQLite 事务的快照；事务可以跨越多个事件循环 pass。**COMMIT 返回前，同连接中排在未提交写响应之后的响应也一起等待。** commit 失败时待提交响应替换成 500。
 - **写窗口（组提交）。** COMMIT 不是每 pass 一次，而是**最多每 20 ms 一次**（`kCommitWindowNs`，`COMMIT_WINDOW_MS=` 可覆盖，0 = 关掉退回每 pass 提交）。窗口没到点时，本 pass 的写连接连同还没发的响应一起挂进 `pend_commit_`（带 `gen` 防槽位复用），读连接照常答；窗口到点才 COMMIT 一次，把攒下的写响应一起放出。理由：285k 时约 2,100 写/秒、每个写只沾 0.2 个请求，按 pass 提交会让**绝大多数提交是空的**，而每个非空提交要动 4–7 页——本地 `NO_CKPT=1` 直接量到 WAL 帧率 **2,141/秒**（8.4 MB/s），闸门因此每 1–2 秒关一次，每次关都挂写。本地 A/B（800 VUs、`bench/mixedonly.js` 无 think time、同一二进制只改 `COMMIT_WINDOW_MS`）：COMMIT 348 → **42 次/秒（−88%）**、WAL 帧 2,141 → **1,415/秒（−34%）**、吞吐 13,799 → **14,351 req/s（+4%）**。响应顺序不受影响：响应是追加进 `c.out` 的，推迟只会让同一连接后来的响应排在它后面。
 - Auto-checkpoint 关掉。检查点是**两段式**的（`src/shim.c` 的 `CK_*` 状态机，结构照 c-iouring-jowinjestine #404/#486 与 rust-iouring-kensac #264）：
-  1. **BULK**：WAL 到 **16,384 帧（64 MiB）**时**不挂写**，nice 19 的线程连着做 `PASSIVE`，每次拷的是「上一次 pass 之后又写进来的帧」，直到落后不超过 **64 帧**；
-  2. **TAIL**：这时才挂写（写请求留在连接上，读照常答），由**普通优先级**的线程把剩下的几十帧拷完，几毫秒结束；全部拷完之后下一次写让日志从第 1 帧重新开始，文件就停在那里——不需要 `TRUNCATE`，也不需要 `RESTART`。
-  旧做法是「WAL 一过 4,096 帧就挂写，再由同一个 nice 19 线程把整段 16 MB 以上的积压拷完」，一次 hold 就是几百毫秒——而基准机上 300k/320k 的探针正是「0 错误、p99 4.45 s」的形状：写请求被一次次数百毫秒地挂起，k6 的 VU 是串行的，同连接的后续请求跟着一起等。现在**挂写的时间从「整个 16 MB 的拷贝」缩到「尾段」**，而尾段线程和主循环同优先级，不会被 nice 19 拖长。local hold 上限 **400 ms**（只有日志碰到 65,536 帧的兜底线才放宽到 800 ms——判据原来写的是「超过 32,768 帧」，而闸门当时就是 32,768，等于每次挂写都放宽到 800 ms）；超过 **65,536 帧**属于线程追不上的情况，事件循环自己拷一次兜底。**闸门阈值从 4,096 帧抬到 16,384 帧（`CK_GATE=` 可覆盖）**：4,096 在评测机约 2,000–4,000 帧/秒下等于每 1–2 秒进一次 TAIL，轮次太密；16,384 摊到每 4–8 秒一轮，WAL 峰值 64 MiB，仍是 65,536 帧兜底线的四分之一。中间试过 32,768（128 MiB）：每轮拷贝的总体积与闸门无关，但**突发体积与闸门成正比**，128 MiB 一轮会撞上内核脏页限流、把本该几十帧的 TAIL 拖到接近 400 ms 上限，所以退回到榜单上检查点做得最细的两家所在的量级（c-iouring-jowinjestine 16,384、fsharp-uring-delneg 16,000）。这一条**本地测不出差别**（本地 `gated` 恒为 0，从没挂过写：30 s 跑 32,768 好 6.4 %、60 s 跑反而差 1.1 %，方向都不一致），是按机制推的，不是本地实测结论。**拷之前给整段日志做 `readahead`、以及拷完之后 `fadvise(DONTNEED)` 丢掉 WAL 的页缓存，这两个都试过并在本地成对 A/B 里被否掉**：日志帧本来就在页缓存里，readahead 白走一遍 16 MB 范围把吞吐从 9.9k 压到 8.9k；DONTNEED 让下一次检查点重新从磁盘读，尾段反而变长（16 MB 的页缓存对 2 GB 的机器也不值得省）。本地 8,000 VUs 混合负载（7 % 写）：COMMIT 占总循环时间从 38–58 % 降到 **4–8 %**，单次 COMMIT 最大值从 20–74 ms 降到 **1–11 ms**，`gated` 从 276/472 掉到 **0/946**（写再也不需要挂起）。**大块拷贝线程的优先级跟着日志长度走**（c-iouring-jowinjestine #404 的做法）：平时 nice 19，日志过 32,768 帧（2 倍闸门）提到 nice 10。单 vCPU 上 nice 19 与 nice 0 的时间片权重是 15 : 1024，忙起来它只拿到约 1% 的 CPU，一轮 64 MiB 的拷贝要拖几十秒，日志一路涨到 65,536 帧的兜底线，最后变成事件循环自己同步拷一次——那一刀才是 p99 上看得见的；nice 10 的权重是 110，约 7 倍 CPU。这一条**不是**照抄 fsharp-uring-delneg #437 的「hold 期间 `usleep` 200 µs」：他们的 hold 期间跑着的是那个被饿死的线程，让出 CPU 才有用；我们的 hold（TAIL）跑在 nice 0 的线程上，本来就能抢到时间片，真正被饿死的是大块线程，所以修的是它的优先级而不是主循环的让出。
+  1. **BULK**：WAL 到 **16,384 帧（64 MiB）**时不挂写，后台线程做 `PASSIVE`；每阶段最多 8 轮，落后不超过 64 帧、没有进展或出错均可结束，因此 `BULK_DONE` 不保证只剩 64 帧。
+  2. **TAIL**：BULK 未报告当时快照已拷完时挂写，交给继承事件循环优先级的线程继续 `PASSIVE`。耗时受实际积压和 I/O 影响，不能保证几毫秒；拷完后由下一次写自然重启 WAL，不强制 TRUNCATE/RESTART。
+  **固定优先级分派，而非在线提权。** 原实现尝试同一线程从 nice 19 改到 10，但普通容器缺少 `CAP_SYS_NICE` 且 `RLIMIT_NICE=0`，实测返回 `EACCES`，旧代码没有检查返回值。现在从主线程分别创建固定 nice 19 的 bulk、固定 nice 10 的 urgent、继承主线程优先级的 tail；仅在派发新 BULK 阶段时，影子 WAL 帧数达到 32,768 才选择 urgent，不中途切换正在运行的阶段。每个线程启动时报告实际 nice 值与失败原因。三者共用的 `SQLITE_OPEN_NOMUTEX` checkpoint 连接由 mutex/pending/running 保证单一所有者，包含 C 层发布 DONE 到函数真正返回之间的间隙。hold 上限通常 400 ms，影子帧数超过 65,536 时为 800 ms；65,536 只在 `CK_IDLE` 分支触发主循环同步 PASSIVE 尝试，不是所有状态的硬上限，也不保证一次拷完。16,384 是当前保留的折中阈值，不宣称已在基准机证明最优。旧文关于 128 MiB 必然触发脏页限流、TAIL 同优先级就不会拖长的说法缺少测量支持，予以撤回。
 - 事件循环的等待是有条件的：只要还有待发的读、待写的响应或上一 pass 收到的完成，就 `min_complete=0` 直接 `enter`，**不睡那 1 ms**；只有在完全没事干时才等（1 ms）。这一条是 220k 时 29% CPU 空转的来源。
 - 空闲连接清扫按时间切片（每 50 ms 扫一个 ring 的 1/32），不在 pass 里整表扫 6 M 个槽位——一次整扫在 1 vCPU 上是 25–70 ms，正好是 p99 悬崖。
 - **page cache 外面套一层 `SQLITE_CONFIG_PCACHE2` shim**（来自 #245）：`pcache1` 记住"曾经持有过的最大页号"且从不调低，而 B-tree split 会把一页临时改名到 lock-byte 页号再改回来，于是此后**每次 COMMIT** 的 `xTruncate` 都以为文件尾之外可能有页、把整个 hash 表扫一遍（#245 量到 ~350 µs、~30 次/秒）。shim 记录进入缓存的最大 key（停在 lock-byte 页号的页单独计数），确定不可能有越界页时直接跳过扫描。本地饱和 `/feed`：50.0 → **44.5 µs/请求（−11 %）**。
 - **页缓存 64 MB**（`cache_size=-65536`）：feed 的工作集只是 `users` 表加最新的 `posts` 页，但 `GET /posts/:id` 是在 500,000 篇里随机命中，16 MB 装不下这个量级。从 16 MB 抬到 64 MB 是与「每 pass 64 个答案 + listener 关掉 `TCP_QUICKACK`」一起作为 280,000 那次保持的改动合进去的，没有单独 A/B 过；64 MB 在 2 GB 的机器上仍然给内核 socket 内存留了位置（每连接约 3.4 KB 内核缓冲，300k 连接约 1 GB）。
-- No `mmap`: reads go through SQLite's page cache (16 MB).
+- No `mmap`: reads go through SQLite's 64 MiB page cache.
 
 ## 连接
 
@@ -127,8 +127,26 @@ SQLite 选项（全部在 `xmake.lua` 中）：`THREADSAFE=2`、`DEFAULT_MEMSTAT
 - `bench/load.js` 在 **8,000 VUs**（30 s 爬坡，45 s 保持）：**0.00 % 失败请求**，p95 3.17 ms，p99 3.92 ms。
 - 10 万条 keep-alive 长连接、每 3 秒一次 `GET /feed`（约 30k req/s）：**0 错误、0 断连**。
 - 单核无思考时间循环 `GET /feed`（1,024 连接）：约 35k req/s；`perf` 显示约一半 CPU 在内核 TCP/io_uring 路径。
-- **混合负载 A/B**（`bench/load.js` 的请求比例、去掉 think time，8,000 VUs × 40 s，服务器钉在 0 号核、k6 用 1–7 号核；两次交替测，数字是同一次机器状态下的对照）：改动前 6.8k req/s、p95 1.78 s、COMMIT 占循环 38–58 %、单次 COMMIT 最大 20–74 ms；改动后 **9.0k req/s、p95 1.47 s、COMMIT 占 4–8 %、最大 1–11 ms**，`enobufs=0`（接收缓冲不再耗尽）、`gated=0`（写从未被挂起）。这台容器的磁盘和宿主机是共享的，绝对值不可与基准机比较，只能同机对照。
-- `STATS=1` 会每秒打印一次分项：`pass/s`、`enobufs`、`gated`、wait/drain/read/commit 各自占比与 **COMMIT 最大值/超 5 ms 次数**，以及 `commits/s`、`walframes/s`（影子帧计数）、`likecache`、`authcache`（两个进程内缓存是否生效）。
+- **混合负载 A/B**（`bench/load.js` 的请求比例、去掉 think time，8,000 VUs × 40 s，服务器钉在 0 号核、k6 用 1–7 号核；两次交替测，数字是同一次机器状态下的对照）：改动前 6.8k req/s、p95 1.78 s、COMMIT 占循环 38–58 %、单次 COMMIT 最大 20–74 ms；改动后 **9.0k req/s、p95 1.47 s、COMMIT 占 4–8 %、最大 1–11 ms**，`enobufs=0`（接收缓冲不再耗尽）、`gated=0`（仅表示统计的轮首没有观察到 held，不能证明从未挂写）。这台容器的磁盘和宿主机是共享的，绝对值不可与基准机比较，只能同机对照。
+- `STATS=1` 会每秒打印一次分项：`pass/s`、`enobufs`、`gated`、wait/drain/read/commit 各自占比与 **COMMIT 最大值/超 5 ms 次数**，以及 `commits/s`、`walframes/s`（影子帧计数）、`likecache`、`authcache`（两个进程内缓存是否生效）。 `gated=a/b` 是轮首观察到 held 的 pass 数/总 pass 数，不是 hold 次数、超时率或时间占比。
+
+
+### 数据层回归与本轮测量
+
+运行 `python3 tests/run.py`（需先 `bash build.sh` 下载 SQLite；使用仓库根目录的 seed）。测试在临时目录复制数据库，不改 seed：
+
+- 全量对账 500,000 个 like 计数桶、383,858 组、2,016,005 行，与 SQLite `GROUP BY post_id` **零差异**。修复了旧 `dbx_likes_fill` 跳过索引内部节点条目及子树的漏计；不能只验证 feed 最新 20 行。
+- SQLite 差分覆盖 2,000 个随机单帖、控制字符/UTF-8 名字、缓存与索引回退、写入前后提交、重复 like、低于初始计数范围的新 like、Db move 和空 feed。修复作者缓存 move 的自移动与空索引路径访问 `order_[0]`。
+- 从真实源码抽取 CkState、worker 与 dispatcher 后，用 stub 强制 DONE 提前发布，验证 nice 19/10/继承值、100 次重复 kick 不重复派发、最大同时执行数 1、正常退出。此测试验证调度与所有权，不验证 SSD 吞吐。
+
+数据层微基准对比 `1194cc8` 与本轮实现：三版本共用修复后的 shim、相同编译选项，固定伪随机 id、预热 10,000 次、每 256 次读提交，使用 `CLOCK_THREAD_CPUTIME_ID`。每端点每版本 1,000,000 次，四轮正反交替，中位数：
+
+| 数据层操作 | 原实现 | 仅单帖计数复用 | 完整实现 |
+|---|---:|---:|---:|
+| 单帖 | 6.314 µs | 4.253 µs | 4.021 µs |
+| Feed | 2.687 µs | 2.698 µs | 2.638 µs |
+
+单帖完整实现减少约 **36.3% 数据层 CPU**，四轮均同方向；Feed 完整实现既有变快也有变慢，**不宣称它有可确认的性能收益**。预转义从结构上消除了每个缓存命中 feed 的 20 次用户名转义与临时复制，但这些微基准不包含网络、JWT、io_uring 或初始化，不能换算成整体吞吐增益或排行榜分数。
 
 ## 运行
 

@@ -5,6 +5,8 @@
 #include <bit>
 #include <atomic>
 #include <chrono>
+#include <cerrno>
+#include <cstdio>
 #include <condition_variable>
 #include <cstring>
 #include <mutex>
@@ -20,44 +22,40 @@ namespace app {
 
 namespace {
 
-// 检查点线程跑在 nice 19：单 vCPU 上，与主循环同优先级的 pass 会占满整个时间片，
-// 这种抢占直接体现在 p95 上（c-iouring-public #158 实测：nice 0 时 3 次 hold 有 2 次
-// 失败，nice 19 时 3 次全过）。
-/* 单调时钟，纳秒。用于给 hold 期间的检查点循环设时间上限。 */
+// Roles are fixed for each worker's lifetime: no unprivileged nice restoration.
+// Dispatch samples WAL once per complete dbx_ck_run stage, not during a pass.
+enum { kCkBulk = 0, kCkUrgent = 1, kCkTail = 2 };
+constexpr long long kCkBehindFrames = 32768;
 
-void checkpoint_loop(dbx* h, CkState* st, bool tail) {
-  /* NO_CKPT=1：诊断用，关掉 checkpoint 后 WAL 帧数单调增长，
-   * wal_cb 的差值才能精确反映「提交时写了多少帧」。别在正式提交里用。 */
+void checkpoint_loop(dbx* h, CkState* st, int role) {
   if (std::getenv("NO_CKPT")) return;
-  /* 大块拷贝线程平时跑 nice 19（见上面的说明），**只在日志明显落后时提到 nice 10**
-   * （c-iouring-jowinjestine #404 同样在他家的 bulk 线程上按日志长度换 nice）。
-   * 单 vCPU 上 nice 19 与 nice 0 的时间片权重是 15 : 1024，忙起来这个线程只拿到约 1% 的
-   * CPU：一轮 64 MiB 的拷贝要拖几十秒，日志一路涨到 65,536 帧的兜底线，最后变成事件循环
-   * 自己同步拷一次——那一刀才是 p99 上看得见的。nice 10 的权重是 110，拿到约 7 倍的 CPU。
-   * 注意这**不是**照抄 delneg 的「hold 期间 usleep 200 µs」：他们的 hold 期间跑着的是那个
-   * 被饿死的线程，所以让出 CPU 有用；我们的 hold（TAIL）跑在 nice 0 的线程上，本来就能抢到
-   * 时间片，真正被饿死的是这里的大块线程。 */
-  constexpr int kNiceIdle = 19;
-  constexpr int kNiceBehind = 10;
-  constexpr long long kBehindFrames = 32768; /* 2 倍闸门 */
-  int nice = kNiceIdle;
-  if (!tail) setpriority(PRIO_PROCESS, 0, nice);
+  const int requested = role == kCkBulk ? 19 : role == kCkUrgent ? 10 : 0;
+  // Tail inherits the event-loop priority. Do not try to restore it to zero.
+  if (role != kCkTail && setpriority(PRIO_PROCESS, 0, requested) != 0) {
+    const int e = errno;
+    std::fprintf(stderr, "checkpoint role=%d setpriority(%d) failed: %s (%d)\n",
+                 role, requested, std::strerror(e), e);
+  }
+  errno = 0;
+  const int actual = getpriority(PRIO_PROCESS, 0);
+  const int e = errno;
+  if (e != 0) {
+    std::fprintf(stderr, "checkpoint role=%d getpriority failed: %s (%d)\n",
+                 role, std::strerror(e), e);
+  } else {
+    std::fprintf(stderr, "checkpoint role=%d requested_nice=%d actual_nice=%d\n",
+                 role, requested, actual);
+  }
   std::unique_lock<std::mutex> lk(st->mu);
   while (!st->stop.load()) {
-    st->cv.wait(lk, [&] { return st->stop.load() || dbx_ck_wants(h, tail); });
+    st->cv.wait(lk, [&] { return st->stop.load() || st->pending == role; });
     if (st->stop.load()) break;
-    if (!tail) {
-      const int want = dbx_wal_frames_now(h) >= kBehindFrames ? kNiceBehind : kNiceIdle;
-      if (want != nice) {
-        setpriority(PRIO_PROCESS, 0, want);
-        nice = want;
-      }
-    }
+    st->pending = -1;
+    st->running = true;
     lk.unlock();
-    /* 一次唤醒做一次：「大块」线程连着做几次 PASSIVE 直到落后不超过 64 帧；「尾段」线程
-     * 只拷最后几十帧。状态由主循环的 dbx_ck_kick 推进。 */
-    dbx_ck_run(h, tail);
+    dbx_ck_run(h, role == kCkTail);
     lk.lock();
+    st->running = false;
   }
 }
 
@@ -152,8 +150,9 @@ bool Db::open(const char* path, std::string& err) {
   order_.reserve(kFeedLen);
   ck_ = std::make_unique<CkState>();
   dbx* h = h_;
-  ck_->th_bulk = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st, false); });
-  ck_->th_tail = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st, true); });
+  ck_->th_bulk = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st, kCkBulk); });
+  ck_->th_urgent = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st, kCkUrgent); });
+  ck_->th_tail = std::thread([h, st = ck_.get()] { checkpoint_loop(h, st, kCkTail); });
   return true;
 }
 
@@ -170,9 +169,11 @@ Db::Db(Db&& other) noexcept
       order_(std::move(other.order_)) {
   other.h_ = nullptr;
   other.like_counts_ok_ = false;
-  other.author_off_ = std::move(other.author_off_);
-  other.author_len_ = std::move(other.author_len_);
-  other.author_names_ = std::move(other.author_names_);
+  author_off_ = std::move(other.author_off_);
+  author_len_ = std::move(other.author_len_);
+  author_names_ = std::move(other.author_names_);
+  authors_ok_ = other.authors_ok_;
+  authors_off_ = other.authors_off_;
   other.authors_ok_ = false;
   other.feed_table_ok_ = false;
   other.feed_table_checked_ = true;
@@ -180,9 +181,13 @@ Db::Db(Db&& other) noexcept
 
 Db::~Db() {
   if (ck_) {
-    ck_->stop.store(true);
+    {
+      std::lock_guard<std::mutex> lk(ck_->mu);
+      ck_->stop.store(true);
+    }
     ck_->cv.notify_all();
     if (ck_->th_bulk.joinable()) ck_->th_bulk.join();
+    if (ck_->th_urgent.joinable()) ck_->th_urgent.join();
     if (ck_->th_tail.joinable()) ck_->th_tail.join();
   }
   if (h_) dbx_close(h_);
@@ -197,7 +202,7 @@ void Db::text_put(const uint8_t* p, size_t n) {
 void Db::begin() {
   if (dbx_begin(h_) != 0) throw DbError{};
   if (!like_counts_ok_ && !like_counts_off_ && !rebuild_like_counts()) {
-    /* 组数超过上限（或 cell 格式不认识）：永久退回逐次扫描，不再重试。 */
+    /* 范围超出上限（或 cell 格式不认识）：永久退回逐次扫描，不再重试。 */
     like_counts_off_ = true;
   }
   if (!feed_table_checked_) {
@@ -227,11 +232,17 @@ long long Db::wal_frames_total() const { return dbx_wal_frames_total(h_); }
 
 
 void Db::ck_kick() {
-  /* 状态是原子的，但「检查条件 → 进入等待」必须和状态的修改用同一把锁，否则会丢唤醒：
-   * 线程刚判完「没活」、还没睡下去时主循环把状态改成 CK_BULK 并 notify，通知就丢了，
-   * 于是一次挂写要等到 hold 上限（400 ms）才松开。锁的开销是每 pass 一次 unlock/lock。 */
   std::lock_guard<std::mutex> lk(ck_->mu);
-  if (dbx_ck_kick(h_)) ck_->cv.notify_all();
+  // Keep the shared SQLITE_OPEN_NOMUTEX checkpoint connection single-owner,
+  // including the gap between publishing *_DONE and returning from ck_run.
+  if (ck_->running || ck_->pending != -1) return;
+  if (!dbx_ck_kick(h_)) return;
+  if (dbx_ck_wants(h_, true)) {
+    ck_->pending = kCkTail;
+  } else if (dbx_ck_wants(h_, false)) {
+    ck_->pending = dbx_wal_frames_now(h_) >= kCkBehindFrames ? kCkUrgent : kCkBulk;
+  }
+  if (ck_->pending != -1) ck_->cv.notify_all();
 }
 
 bool Db::writes_held() const { return dbx_writes_held(h_) != 0; }
@@ -252,6 +263,7 @@ bool Db::health(std::string& err) {
 }
 
 int64_t Db::count_likes(int64_t id) {
+  if (like_counts_ok_) return static_cast<int64_t>(likes_of(id));
   long long n = dbx_likes(h_, id);
   if (n < 0) throw DbError{};
   return n;
@@ -262,7 +274,7 @@ bool Db::author(int64_t user_id, ByteBuf& out) {
     const uint8_t* name = nullptr;
     uint32_t n = 0;
     if (!author_name(user_id, name, n)) return false;
-    json::escape_into(out, name, n);
+    buf_append(out, name, n);  // cache contains JSON string contents, without quotes
     return true;
   }
   int r = dbx_seek(h_, DBX_USERS, user_id);
@@ -331,6 +343,7 @@ bool Db::rebuild_authors() {
   author_len_.clear();
   author_names_.clear();
   author_names_.reserve(1u << 21);
+  std::vector<uint8_t> escaped;
   int r = dbx_first(h_, DBX_USERS);
   if (r < 0) return false;
   while (r == 1) {
@@ -347,9 +360,13 @@ bool Db::rebuild_authors() {
       author_off_.resize(idx + 1, 0);
       author_len_.resize(idx + 1, 0);
     }
+    escaped.resize(json::esc_bound(n) + 1);
+    json::Cur cur{escaped.data(), escaped.data() + escaped.size()};
+    cur.esc(name, n);
+    const size_t len = static_cast<size_t>(cur.p - escaped.data());
     author_off_[idx] = static_cast<uint32_t>(author_names_.size());
-    author_len_[idx] = n;
-    author_names_.insert(author_names_.end(), name, name + n);
+    author_len_[idx] = static_cast<uint32_t>(len);
+    author_names_.insert(author_names_.end(), escaped.data(), escaped.data() + len);
     r = dbx_next(h_, DBX_USERS);
   }
   if (r < 0) return false;
@@ -460,7 +477,7 @@ bool Db::feed_rows() {
     });
   }
 
-  if (!feed_table_ok_) {
+  if (!feed_table_ok_ && !rows_.empty()) {
     const long long lo = rows_[order_[0]].id;
     const long long hi = rows_[order_.back()].id;
     const long long span = hi - lo;
@@ -520,9 +537,9 @@ bool Db::feed_rows() {
         const uint8_t* name = nullptr;
         uint32_t alen = 0;
         if (!author_name(row.user_id, name, alen)) return false;
-        row.author_off = static_cast<uint32_t>(text_len_);
+        // Cache storage is immutable while serializing the response: no staging copy.
+        row.author_off = author_off_[static_cast<size_t>(row.user_id)];
         row.author_len = alen;
-        text_put(name, alen);
       }
     } else {
       std::array<long long, kFeedLen> uids{};
@@ -624,8 +641,11 @@ void Db::feed_json(ByteBuf& out) {
   constexpr size_t kRowLiteral =
       sizeof(",{\"id\":,\"body\":\"\",\"created_at\":\"\",\"author\":\"\",\"like_count\":}") - 1;
   constexpr size_t kRow = kRowLiteral + 2 * json::INT_BOUND;
+  size_t author_bytes = 0;
+  if (authors_ok_)
+    for (const Row& row : rows_) author_bytes += row.author_len;
   const size_t bound = (sizeof("{\"posts\":[]}") - 1) + rows_.size() * kRow +
-                       json::esc_bound(text_len_);
+                       json::esc_bound(text_len_) + author_bytes;
   const uint8_t* text = text_buf_.data();
   json::fill(out, bound, [&](json::Cur& c) {
     c.lit("{\"posts\":[");
@@ -639,7 +659,10 @@ void Db::feed_json(ByteBuf& out) {
       c.lit("\",\"created_at\":\"");
       c.raw(text + row.created_off, row.created_len);
       c.lit("\",\"author\":\"");
-      c.esc(text + row.author_off, row.author_len);
+      if (authors_ok_)
+        c.raw(author_names_.data() + row.author_off, row.author_len);
+      else
+        c.esc(text + row.author_off, row.author_len);
       c.lit("\",\"like_count\":");
       c.int_(row.likes);
       c.byte('}');
@@ -674,6 +697,9 @@ bool Db::insert_like(int64_t user_id, int64_t post_id) {
   begin();
   int r = dbx_insert_like(h_, user_id, post_id);
   if (r == 1) {
+    // A sparse initial likes table may start above an existing post id.
+    // Rebuild on next begin() instead of silently losing that new like.
+    if (like_counts_ok_ && post_id < like_base_) like_counts_ok_ = false;
     if (like_counts_ok_ && post_id >= like_base_) {
       const size_t idx = static_cast<size_t>(post_id - like_base_);
       if (idx >= like_counts_.size()) like_counts_.resize(idx + 64, 0);

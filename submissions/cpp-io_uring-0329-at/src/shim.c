@@ -1105,15 +1105,16 @@ int dbx_likes_fill(dbx *h, long long lo, unsigned *counts, size_t n) {
   BtCursor *c = h->cur[DBX_LIKES_IDX];
   for (;;) {
     MemPage *pg = c->pPage;
-    int i = c->ix, last = pg->nCell;
-    if (pg->leaf) {
-      for (; i < last; i++) {
-        long long v;
-        if (like_cell_id(pg, i, &v)) return -1;
-        long long d = v - lo;
-        if (d < 0 || (size_t)d >= n) return -1;
-        counts[d]++;
-      }
+    /* Index interior cells are real entries, unlike table separator keys.
+     * Count exactly the current interior entry, then let Next descend its
+     * following child. Jumping to nCell-1 would skip both keys and subtrees. */
+    int i = c->ix, last = pg->leaf ? pg->nCell : i + 1;
+    for (; i < last; i++) {
+      long long v;
+      if (like_cell_id(pg, i, &v)) return -1;
+      long long d = v - lo;
+      if (d < 0 || (size_t)d >= n) return -1;
+      counts[d]++;
     }
     c->ix = (u16)(last - 1);
     int rc = sqlite3BtreeNext(c, 0);

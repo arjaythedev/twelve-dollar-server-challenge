@@ -20,7 +20,11 @@ struct CkState {
   std::mutex mu;
   std::condition_variable cv;
   std::atomic<bool> stop{false};
+  // Protected by mu; exactly one worker may own the checkpoint connection.
+  int pending = -1;
+  bool running = false;
   std::thread th_bulk; /* 大块拷贝，nice 19 */
+  std::thread th_urgent; /* 新一轮积压较高时使用，固定 nice 10 */
   std::thread th_tail; /* 尾段拷贝，普通优先级 */
 };
 
@@ -98,7 +102,7 @@ class Db {
   int64_t like_base_ = 0;
   bool like_counts_ok_ = false;
   bool like_counts_off_ = false; /* 直方图超上限：永久退回逐次扫描 */
-  /* users.id 连续，所以名字按下标存：author_names_ 是一块字符池，两个数组给出偏移与长度。 */
+  /* users.id 连续，author_names_ 存已 JSON 转义、不带引号的名字；偏移和长度直接用于写出。 */
   std::vector<uint32_t> author_off_;
   std::vector<uint32_t> author_len_;
   std::vector<uint8_t> author_names_;

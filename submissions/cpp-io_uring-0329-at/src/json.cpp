@@ -387,29 +387,37 @@ inline uint64_t word_needs_escape(uint64_t w) {
   return (ctl | q | b) & kHigh;
 }
 
+/* 掩码只在这里算一次：上面按指针读、下面按向量读，两个写出器各自决定要不要把向量落盘。 */
 #if defined(__SSE2__)
 
-inline uint32_t esc_mask16(const uint8_t* src) {
-  __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
+inline uint32_t esc_mask_vec(__m128i v) {
   __m128i ctl = _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v);
   __m128i q = _mm_cmpeq_epi8(v, _mm_set1_epi8('"'));
   __m128i b = _mm_cmpeq_epi8(v, _mm_set1_epi8('\\'));
   return static_cast<uint32_t>(_mm_movemask_epi8(_mm_or_si128(ctl, _mm_or_si128(q, b))));
 }
+
+inline uint32_t esc_mask16(const uint8_t* src) {
+  return esc_mask_vec(_mm_loadu_si128(reinterpret_cast<const __m128i*>(src)));
+}
 #endif
 
 #if defined(__AVX2__)
 
-inline uint32_t esc_mask32(const uint8_t* src) {
-  __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
+inline uint32_t esc_mask_vec(__m256i v) {
   __m256i ctl = _mm256_cmpeq_epi8(_mm256_min_epu8(v, _mm256_set1_epi8(0x1f)), v);
   __m256i q = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('"'));
   __m256i b = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('\\'));
   return static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(ctl, _mm256_or_si256(q, b))));
 }
+
+inline uint32_t esc_mask32(const uint8_t* src) {
+  return esc_mask_vec(_mm256_loadu_si256(reinterpret_cast<const __m256i*>(src)));
+}
 #endif
 
-void escape_slow(ByteBuf& out, const uint8_t* s, size_t n) {  size_t start = 0;
+void escape_slow(ByteBuf& out, const uint8_t* s, size_t n) {
+  size_t start = 0;
   for (size_t i = 0; i < n; i++) {
     uint8_t c = s[i];
     if (!kEsc.t[c]) continue;
@@ -436,7 +444,6 @@ void escape_slow(ByteBuf& out, const uint8_t* s, size_t n) {  size_t start = 0;
 }
 
 void escape_into(ByteBuf& out, const uint8_t* s, size_t n) {
-
   size_t i = 0;
   bool clean = true;
 #if defined(__AVX2__)
@@ -470,7 +477,15 @@ void escape_into(ByteBuf& out, const uint8_t* s, size_t n) {
       i += 8;
     }
   }
-  if (clean) {
+  if (clean && n >= 8) {
+    /* 尾部不足 8 字节，用它前面重叠的那 8 字节一起判定——[i,n) 一定落在 [n-8,n) 里，
+     * 而 [0,i) 已经查过了，重复检查无害。原来这里逐字节查表，用户名只有 15 字节，
+     * AVX2/SSE2 都跳过、8 字节循环只走一次，剩下的 7 个字节要走 7 次表查找。 */
+    uint64_t w;
+    std::memcpy(&w, s + n - 8, 8);
+    if (word_needs_escape(w) != 0) clean = false;
+  }
+  if (clean && n < 8) {
     for (size_t j = i; j < n; j++) {
       if (kEsc.t[s[j]]) {
         clean = false;
@@ -575,10 +590,7 @@ void Cur::int_(int64_t v) {
 inline uint32_t store_check16(const uint8_t* src, uint8_t* dst) {
   __m128i v = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src));
   _mm_storeu_si128(reinterpret_cast<__m128i*>(dst), v);
-  __m128i ctl = _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(0x1f)), v);
-  __m128i q = _mm_cmpeq_epi8(v, _mm_set1_epi8('"'));
-  __m128i b = _mm_cmpeq_epi8(v, _mm_set1_epi8('\\'));
-  return static_cast<uint32_t>(_mm_movemask_epi8(_mm_or_si128(ctl, _mm_or_si128(q, b))));
+  return esc_mask_vec(v);
 }
 #endif
 
@@ -587,10 +599,7 @@ inline uint32_t store_check16(const uint8_t* src, uint8_t* dst) {
 inline uint32_t store_check32(const uint8_t* src, uint8_t* dst) {
   __m256i v = _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src));
   _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst), v);
-  __m256i ctl = _mm256_cmpeq_epi8(_mm256_min_epu8(v, _mm256_set1_epi8(0x1f)), v);
-  __m256i q = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('"'));
-  __m256i b = _mm256_cmpeq_epi8(v, _mm256_set1_epi8('\\'));
-  return static_cast<uint32_t>(_mm256_movemask_epi8(_mm256_or_si256(ctl, _mm256_or_si256(q, b))));
+  return esc_mask_vec(v);
 }
 #endif
 

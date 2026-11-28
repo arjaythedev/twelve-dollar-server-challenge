@@ -17,10 +17,27 @@ int dbx_begin(dbx *h);
 int dbx_commit(dbx *h);
 int dbx_health(dbx *h, char *err, int n);
 int dbx_users_seek_many(dbx *h, const long long *ids, int n, unsigned char *buf, unsigned *lens);
-int dbx_checkpoint(dbx *h, int *copied);
+int dbx_ck_kick(dbx *h);
+int dbx_ck_wants(dbx *h, int tail);
+void dbx_ck_run(dbx *h, int tail);
 int dbx_writes_held(dbx *h);
-int dbx_wal_frames(dbx *h);
-void dbx_pcache_stats(unsigned long long *scans, unsigned long long *skipped);
+
+typedef struct dbx_checkpoint_stats {
+  int state; /* 0 idle, 1 bulk, 2 bulk done, 3 tail, 4 tail done */
+  int wal_frames; /* Scheduler estimate, reset after full backfill. */
+  int held;
+  uint64_t force_calls, force_max_ns;
+  uint64_t tail_incomplete; /* TAIL returned an error or only partially backfilled. */
+  uint64_t hold_timeouts; /* Gate actually opened due to an expired deadline. */
+} dbx_checkpoint_stats;
+dbx_checkpoint_stats dbx_ck_stats(dbx *h); /* Event-loop snapshot. */
+/* 当前 WAL 里的帧数（兼作闸门计数，检查点拷完会被清零）。 */
+long long dbx_wal_frames_now(dbx *h);
+long long dbx_wal_frames_total(dbx *h);
+/* like 索引的 post_id 范围：返回 1 有行、0 空表、-1 失败。 */
+int dbx_likes_range(dbx *h, long long *lo, long long *hi);
+/* 把 counts[post_id - lo] 填成该 post 的 like 行数。返回 0 成功、-1 失败。 */
+int dbx_likes_fill(dbx *h, long long lo, unsigned *counts, size_t n);
 
 int dbx_first(dbx *h, int c);
 int dbx_seek(dbx *h, int c, long long rowid);
@@ -28,6 +45,8 @@ long long dbx_key(dbx *h, int c);
 int dbx_seek_ge_table(dbx *h, int c, long long key);
 int dbx_seek_ge(dbx *h, int c, long long key);
 int dbx_next(dbx *h, int c);
+int dbx_last(dbx *h, int c);
+int dbx_prev(dbx *h, int c);
 const unsigned char *dbx_record(dbx *h, int c, unsigned *len);
 
 long long dbx_likes(dbx *h, long long post_id);

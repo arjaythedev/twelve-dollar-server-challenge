@@ -61,7 +61,6 @@ class BufRing {
 
   const uint8_t* data(uint16_t bid) const { return mem_ + static_cast<size_t>(bid) * size_; }
   uint16_t count() const { return count_; }
-  size_t buf_size() const { return size_; }
 
  private:
   bool register_ring(int fd) {
@@ -111,6 +110,7 @@ class Ring {
       return false;
     }
     ready_ = true;
+    defer_ = defer;
     rc = io_uring_register_files_sparse(&ring_, slots);
     if (rc < 0) {
       *err = static_cast<unsigned>(-rc);
@@ -153,8 +153,17 @@ class Ring {
     }
   }
 
-  // 内核已经投递的 CQE，直接从共享内存读取，不发系统调用。
-  unsigned ready_cqes() { return io_uring_cq_ready(&ring_); }
+  /* 提交 SQ 里攒下的 SQE 并把内核刚投递的完成收进来，但不等任何事：一个 pass 内要
+   * 「发读→收读」来回走几轮时用（kensac #264 的 read_rounds）。DEFER_TASKRUN 的 ring 必须
+   * 用 GETEVENTS 进一次内核，task work 才会被执行；不 defer 的 ring 的完成由内核直接写在
+   * 共享的 CQ 上，只 submit 就够。 */
+  void submit_nowait() {
+    if (io_uring_sq_ready(&ring_) > 0) {
+      enters(2)++;
+      io_uring_submit(&ring_);
+    }
+    if (defer_) io_uring_get_events(&ring_);
+  }
 
   int wait(unsigned min_complete, unsigned ns) {
     enters(0)++;
@@ -172,6 +181,7 @@ class Ring {
  private:
   io_uring ring_{};
   bool ready_ = false;
+  bool defer_ = false;
 };
 
 }  // namespace io

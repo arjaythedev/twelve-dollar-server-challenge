@@ -2,6 +2,8 @@
 #include "sqlite3.c"
 
 #include <stdatomic.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
 #include <string.h>
@@ -12,6 +14,11 @@ struct dbx {
   sqlite3 *ckdb;
   Btree *bt;
   BtCursor *cur[4];
+  /* 作者查找每个槽位一个专属游标（fsharp-uring-delneg #437 的做法）。所有用户的 feed 读的是
+   * 同一批最近 20 个帖子及其作者，于是同一个 pass 里第 2 个请求调用 TableMoveto 时，游标已经
+   * 停在那一行，sqlite3BtreeTableMoveto 直接走 info.nKey==intKey 的快路径返回，不再从根下降。
+   * 50 万个请求/5 分钟里绝大多数都吃到这个路径。 */
+  BtCursor *acur[32];
   Pgno root[4];
   KeyInfo *ki_feed;
   KeyInfo *ki_likes;
@@ -19,8 +26,18 @@ struct dbx {
   int in_tx;
   int broken;
   _Atomic int wal_frames;
+  /* 只由 wal_cb 写的「SQLite 真正报出来的帧号」。wal_frames 会在检查点整体拷完之后被清零当作
+   * 闸门计数用，但 SQLite 的 mxFrame 并没有同时归零，所以差值必须对着这个影子算，否则每次清零
+   * 之后第一笔提交都会算出几万帧的假增量。 */
+  _Atomic int wal_frames_seen;
+  _Atomic long long wal_frames_total;
   _Atomic int gate_held;
   _Atomic long long gate_since;
+  /* 检查点状态机（见 dbx_ck_kick）：CK_IDLE → CK_BULK → CK_BULK_DONE → CK_TAIL → CK_TAIL_DONE。 */
+  _Atomic int ck_state;
+  _Atomic int ck_full;
+  uint64_t ck_force_calls, ck_force_max_ns, ck_hold_timeouts; /* Event-loop owned. */
+  _Atomic uint64_t ck_tail_incomplete;
   unsigned char *rec;
   unsigned rec_cap;
 };
@@ -40,13 +57,12 @@ static int wal_cb(void *p, sqlite3 *db, const char *name, int frames) {
   (void)db;
   (void)name;
   struct dbx *h = (struct dbx *)p;
+  long long prev = atomic_load_explicit(&h->wal_frames_seen, memory_order_relaxed);
+  /* 差值就是这次提交新写进去的帧。帧号变小只有一种情况：日志在全部拷回之后从第 1 帧重新开始。 */
+  long long added = (frames > prev) ? (long long)(frames - prev) : (long long)frames;
+  atomic_fetch_add_explicit(&h->wal_frames_total, added, memory_order_relaxed);
+  atomic_store_explicit(&h->wal_frames_seen, frames, memory_order_relaxed);
   atomic_store_explicit(&h->wal_frames, frames, memory_order_relaxed);
-  /* 闸门 4,096 帧（16 MiB）：日志小一半，一次 hold 内拷完的概率大得多。基准机 3000 写/秒、
-   * 每 pass 组提交后约 7,000 帧/秒，8,192 帧的闸门 1.2 秒就满一次，检查点来不及就被迫再关。 */
-  if (frames >= 4096 && !atomic_load_explicit(&h->gate_held, memory_order_relaxed)) {
-    atomic_store_explicit(&h->gate_since, mono_ns(), memory_order_relaxed);
-    atomic_store_explicit(&h->gate_held, 1, memory_order_relaxed);
-  }
   return SQLITE_OK;
 }
 
@@ -175,6 +191,7 @@ static void shim_log(const char *fmt, ...) {
 static void close_cursors(struct dbx *h) {
   if (!h->in_tx) return;
   for (int i = 0; i < 4; i++) sqlite3BtreeCloseCursor(h->cur[i]);
+  for (int i = 0; i < 32; i++) sqlite3BtreeCloseCursor(h->acur[i]);
   h->in_tx = 0;
 }
 
@@ -197,6 +214,7 @@ void dbx_close(dbx *h) {
   if (h->ki_feed) sqlite3KeyInfoUnref(h->ki_feed);
   if (h->ki_likes) sqlite3KeyInfoUnref(h->ki_likes);
   for (int i = 0; i < 4; i++) sqlite3_free(h->cur[i]);
+  for (int i = 0; i < 32; i++) sqlite3_free(h->acur[i]);
   if (h->rec) sqlite3_free(h->rec);
   if (h->ckdb) sqlite3_close(h->ckdb);
   sqlite3_close(h->db);
@@ -432,7 +450,6 @@ struct wcache {
   unsigned n_parked;  /* pages currently renamed to lock_page */
 };
 static sqlite3_pcache_methods2 pcache_base;
-static uint64_t pcache_scans, pcache_scans_skipped;
 
 static int wc_init(void *arg) { (void)arg; return pcache_base.xInit(pcache_base.pArg); }
 static void wc_shutdown(void *arg) { (void)arg; pcache_base.xShutdown(pcache_base.pArg); }
@@ -469,11 +486,7 @@ static void wc_rekey(sqlite3_pcache *p, sqlite3_pcache_page *pg, unsigned old_ke
 }
 static void wc_truncate(sqlite3_pcache *p, unsigned limit) {
   struct wcache *w = (struct wcache *)p;
-  pcache_scans++;
-  if (w->n_parked == 0 && w->max_key < limit) {
-    pcache_scans_skipped++;
-    return;
-  }
+  if (w->n_parked == 0 && w->max_key < limit) return;
   pcache_base.xTruncate(w->base, limit);
   if (limit > 0 && w->max_key >= limit) w->max_key = limit - 1;
   if (w->lock_page >= limit) w->n_parked = 0;
@@ -529,7 +542,7 @@ dbx *dbx_open(const char *path, char *err, int n) {
 
   static const char *pragmas[] = {
       "PRAGMA journal_mode = WAL", "PRAGMA synchronous = NORMAL",
-      "PRAGMA temp_store = MEMORY", "PRAGMA cache_size = -16384",
+      "PRAGMA temp_store = MEMORY", "PRAGMA cache_size = -65536",
       "PRAGMA mmap_size = 0", "PRAGMA wal_autocheckpoint = 0",
       "SELECT count(*) FROM sqlite_schema",
   };
@@ -585,8 +598,11 @@ dbx *dbx_open(const char *path, char *err, int n) {
   h->st_begin = prep(h->db, "BEGIN");
   h->st_commit = prep(h->db, "COMMIT");
   h->st_rollback = prep(h->db, "ROLLBACK");
+  /* 显式绑定 created_at，不再让 SQLite 求值列默认值里的 strftime()，也不再走 RETURNING：
+   * 每插入一条都要跑一遍 strftime 求值加一次 RETURNING 取值（fsharp-uring-delneg #437 同样
+   * 自己算时间戳并用 sqlite3_last_insert_rowid 拿 id）。 */
   h->st_post = prep(h->db,
-                    "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at");
+                    "INSERT INTO posts (user_id, body, created_at) VALUES (?1, ?2, ?3)");
   h->st_like = prep(h->db,
                     "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT DO NOTHING");
   h->st_health = prep(h->db, "SELECT 1");
@@ -608,6 +624,14 @@ dbx *dbx_open(const char *path, char *err, int n) {
     h->cur[i] = (BtCursor *)sqlite3_malloc(sqlite3BtreeCursorSize());
     if (!h->cur[i]) {
       fail(h->db, err, n, "cursor");
+      dbx_close(h);
+      return 0;
+    }
+  }
+  for (int i = 0; i < 32; i++) {
+    h->acur[i] = (BtCursor *)sqlite3_malloc(sqlite3BtreeCursorSize());
+    if (!h->acur[i]) {
+      fail(h->db, err, n, "author cursor");
       dbx_close(h);
       return 0;
     }
@@ -638,6 +662,15 @@ int dbx_begin(dbx *h) {
     KeyInfo *ki = (i == DBX_FEED_IDX) ? h->ki_feed : (i == DBX_LIKES_IDX ? h->ki_likes : 0);
     if (sqlite3BtreeCursor(h->bt, h->root[i], 0, ki, h->cur[i]) != SQLITE_OK) {
       for (int j = 0; j < i; j++) sqlite3BtreeCloseCursor(h->cur[j]);
+      step_reset(h->st_rollback);
+      return -1;
+    }
+  }
+  for (int i = 0; i < 32; i++) {
+    sqlite3BtreeCursorZero(h->acur[i]);
+    if (sqlite3BtreeCursor(h->bt, h->root[DBX_USERS], 0, 0, h->acur[i]) != SQLITE_OK) {
+      for (int j = 0; j < 4; j++) sqlite3BtreeCloseCursor(h->cur[j]);
+      for (int j = 0; j < i; j++) sqlite3BtreeCloseCursor(h->acur[j]);
       step_reset(h->st_rollback);
       return -1;
     }
@@ -677,45 +710,182 @@ int dbx_commit(dbx *h) {
   return 0;
 }
 
-/* PASSIVE: copies frames to the database without ever waiting for readers, so this can run on a
- * thread next to the loop.  When every frame is copied the gate opens and the next write restarts
- * the log at frame 1, which is what keeps the file bounded (no truncate needed).
- * Returns 0 when the log is fully copied, 1 when more remains, -1 on error; `copied` receives the
- * number of frames copied so far, so the caller can stop when a pass makes no progress. */
-int dbx_checkpoint(dbx *h, int *copied) {
-  int nlog = 0, ndone = 0;
-  int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, &nlog, &ndone);
-  if (copied) *copied = ndone;
+/* ---- checkpoint state machine ---------------------------------------------------------
+ * 旧做法：WAL 一过 4,096 帧（16 MiB）就在 WAL 钩子里挂写，然后由同一个 nice 19 的线程把
+ * 整段积压拷回主库，闸门要等「全部帧都拷完」才松开——一次 hold 就是几百毫秒，而基准机上
+ * 300k/320k 的探针正是「0 错误、p99 4.45 s」的形状。
+ *
+ * 现在分两段（c-iouring-jowinjestine #404/#486 与 rust-iouring-kensac #264 都是这个结构）：
+ *   1. BULK：日志到闸门帧数（见下一条注释）时**不挂写**，nice 19 的线程连着做 PASSIVE，每次拷的是
+ *      「上一次 pass 之后又写进来的帧」，直到落后不超过 64 帧；
+ *   2. TAIL：这时才挂写（读照常），由**普通优先级**的线程把剩下的几十帧拷完，几毫秒就结束；
+ *      全部拷完之后下一次写让日志从第 1 帧重新开始。
+ * 挂写的时间从「整个 16 MiB 的拷贝」缩到「尾段」，而尾段线程和主循环同优先级，不会被
+ * nice 19 拖成几百毫秒。超过 65,536 帧（256 MiB）属于线程追不上的情况，循环自己拷一次兜底。
+ */
+/* 闸门默认 16,384 帧（64 MiB）。三条依据：
+ *   1. TAIL 只拷几十帧（见上面的状态机），单次挂写是几毫秒量级；真正影响写延迟的是**每轮要拷
+ *      多少**和**两轮隔多久**。每轮拷贝的总体积与闸门大小无关，但**突发体积与闸门成正比**——
+ *      128 MiB 一轮会撞上内核的脏页限流，把本该只有几十帧的 TAIL 拖到接近 400 ms 上限。
+ *   2. 16,384 帧在评测机约 2,000–4,000 帧/s 下是每 4–8 秒一轮，每轮 64 MiB 摊开是 8–16 MB/s
+ *      的持续回写，既不密集也不粗暴。
+ *   3. 榜单上把检查点做得最细的两家都在这个量级：c-iouring-jowinjestine 16,384、
+ *      fsharp-uring-delneg 16,000；rust-iouring-kensac 用 4,096（16 MiB）。16,384 也正好是
+ *      CK_FORCE_FRAMES（65,536，线程追不上时的兜底线）的四分之一。
+ * 这个值是按机制推的，不是本地测出来的：本机的 k6 自己就是瓶颈，`gated` 恒为 0，从来没真的挂
+ * 过写（30 s 上 4,096 → 32,768 好 6.4%，60 s 却是 −1.1%，方向都不一致）。真正的判据是评测机
+ * STATS 里的 `gated=a/b`：若 a/b 接近 1，说明每轮都撞上 400 ms 上限，那要修的是 TAIL 本身，
+ * 而不是继续抬闸门。CK_GATE 可覆盖，便于在评测机上 A/B。 */
+static int ck_gate_frames(void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *e = getenv("CK_GATE");
+    int v = e ? atoi(e) : 0;
+    cached = (v >= 256) ? v : 16384;
+  }
+  return cached;
+}
+#define CK_FORCE_FRAMES 65536
+#define CK_TAIL_FRAMES 64
+#define CK_HOLD_NS 400000000LL
+enum { CK_IDLE = 0, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
+
+/* 一次 PASSIVE：能拷多少拷多少，从不等读者。返回 0 = 全部拷完，1 = 还有，-1 = 出错。 */
+static int ck_pass(struct dbx *h, int *nlog, int *ndone) {
+  *nlog = -1;
+  *ndone = -1;
+  int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, nlog, ndone);
   if (rc != SQLITE_OK) {
     shim_log("checkpoint failed: %s (%d)", sqlite3_errmsg(h->ckdb), rc);
     return -1;
   }
-  int done = (nlog == 0 || ndone >= nlog);
-  if (done && atomic_load_explicit(&h->wal_frames, memory_order_relaxed) <= nlog)
-    atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
-  return done ? 0 : 1;
+  /* SQLite uses negative counts when the WAL result is unavailable. */
+  if (*nlog < 0 || *ndone < 0) return -1;
+  return *ndone >= *nlog ? 0 : 1;
 }
 
-/* 非阻塞：WAL 超过闸门且检查点线程还没追平时返回真。写被挂起、读照常；hold 最多 250 ms，
- * 与 rust-iouring-kensac #264 一致——太短会让同一次积压被反复 hold（一次拷不完就重来），
- * 太短也正是 220k 那次 p99 4.28 s 的形状：写请求等了几轮 hold。 */
+/* 拷之前对整段日志做 readahead 试过一版（c-iouring-jowinjestine #404 的做法）：本地成对 A/B
+ * 里它让吞吐从 9.9k 掉到 8.9k——日志的帧本来就在页缓存里，readahead 走一遍 16 MB 的范围只是
+ * 白白占掉主循环的时间，所以去掉。 */
+
+/* 由事件循环每个 pass 调一次。返回非 0 表示状态刚刚切到「有活干」，要唤醒检查点线程。 */
+int dbx_ck_kick(dbx *h) {
+  int st = atomic_load_explicit(&h->ck_state, memory_order_acquire);
+  switch (st) {
+    case CK_IDLE: {
+      int frames = atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
+      if (frames >= CK_FORCE_FRAMES) {
+        /* 兜底：线程追不上（读者一直挡着帧，或者磁盘太慢），循环自己拷一次，别让日志无限长。 */
+        int nlog = 0, ndone = 0;
+        long long started = mono_ns();
+        int r = ck_pass(h, &nlog, &ndone);
+        uint64_t elapsed = (uint64_t)(mono_ns() - started);
+        ++h->ck_force_calls;
+        if (elapsed > h->ck_force_max_ns) h->ck_force_max_ns = elapsed;
+        if (r == 0) atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
+        return 0;
+      }
+      if (frames >= ck_gate_frames()) {
+        atomic_store_explicit(&h->ck_state, CK_BULK, memory_order_release);
+        return 1;
+      }
+      break;
+    }
+    case CK_BULK_DONE:
+      if (atomic_load_explicit(&h->ck_full, memory_order_relaxed)) {
+        atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
+        atomic_store_explicit(&h->ck_state, CK_IDLE, memory_order_release);
+        break;
+      }
+      /* 大块已经拷完：从这里开始挂写，只让线程拷剩下的尾段。 */
+      atomic_store_explicit(&h->gate_since, mono_ns(), memory_order_relaxed);
+      atomic_store_explicit(&h->gate_held, 1, memory_order_relaxed);
+      atomic_store_explicit(&h->ck_state, CK_TAIL, memory_order_release);
+      return 1;
+    case CK_TAIL_DONE:
+      if (atomic_load_explicit(&h->ck_full, memory_order_relaxed)) {
+        atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
+      }
+      atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+      atomic_store_explicit(&h->ck_state, CK_IDLE, memory_order_release);
+      break;
+    default:
+      break;
+  }
+  return 0;
+}
+
+/* 线程侧：这一阶段有活干吗。 */
+int dbx_ck_wants(dbx *h, int tail) {
+  int st = atomic_load_explicit(&h->ck_state, memory_order_acquire);
+  return st == (tail ? CK_TAIL : CK_BULK);
+}
+
+/* 线程侧：做这一阶段的拷贝，然后把状态推到 *_DONE（由循环接手推进）。 */
+void dbx_ck_run(dbx *h, int tail) {
+  int nlog = 0, ndone = 0;
+  if (tail) {
+    int r = ck_pass(h, &nlog, &ndone);
+    if (r != 0) atomic_fetch_add_explicit(&h->ck_tail_incomplete, 1, memory_order_relaxed);
+    atomic_store_explicit(&h->ck_full, r == 0, memory_order_relaxed);
+    atomic_store_explicit(&h->ck_state, CK_TAIL_DONE, memory_order_release);
+    return;
+  }
+  int full = 0;
+  int last = -1;
+  for (int i = 0; i < 8; i++) {
+    int r = ck_pass(h, &nlog, &ndone);
+    if (r < 0) break;
+    if (r == 0) {
+      full = 1;
+      break;
+    }
+    if (nlog - ndone <= CK_TAIL_FRAMES) break;
+    if (ndone == last) break; /* 这一轮没有进展（读者挡住），留给尾段 */
+    last = ndone;
+    usleep(200);
+  }
+  atomic_store_explicit(&h->ck_full, full, memory_order_relaxed);
+  atomic_store_explicit(&h->ck_state, CK_BULK_DONE, memory_order_release);
+}
+
+/* 非阻塞：写被挂起时返回真。读照常。hold 上限 400 ms，只有日志碰到 65,536 帧的兜底线时
+ * 才放宽到 800 ms——那种情况说明线程已经追不上，拷完的概率更大，免得同一次积压被反复 hold。 */
+/* 当前 WAL 的帧数。检查点线程用它判断自己是不是已经落后到需要提优先级。 */
+long long dbx_wal_frames_now(dbx *h) {
+  return atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
+}
+
 int dbx_writes_held(dbx *h) {
   if (!atomic_load_explicit(&h->gate_held, memory_order_relaxed)) return 0;
   long long since = atomic_load_explicit(&h->gate_since, memory_order_relaxed);
-  if (mono_ns() - since > 250000000LL) {
+  long long limit = CK_HOLD_NS;
+  /* 只有线程真的追不上（日志已经碰到兜底线）才把挂起上限翻倍。原来的判据是「超过 32,768 帧」，
+   * 而闸门当时就是 32,768——整个检查点过程里这个条件几乎恒真，等于把每次挂写都放宽到 800 ms。
+   * 挂写时长直接就是写请求的排队时长，所以这条只能在极端情况下生效。 */
+  if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) > CK_FORCE_FRAMES) limit *= 2;
+  if (mono_ns() - since > limit) {
     atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+    ++h->ck_hold_timeouts;
     return 0;
   }
   return 1;
 }
 
-void dbx_pcache_stats(unsigned long long *scans, unsigned long long *skipped) {
-  if (scans) *scans = pcache_scans;
-  if (skipped) *skipped = pcache_scans_skipped;
+dbx_checkpoint_stats dbx_ck_stats(dbx *h) {
+  return (dbx_checkpoint_stats){
+    .state = atomic_load_explicit(&h->ck_state, memory_order_acquire),
+    .wal_frames = atomic_load_explicit(&h->wal_frames, memory_order_relaxed),
+    .held = atomic_load_explicit(&h->gate_held, memory_order_relaxed),
+    .force_calls = h->ck_force_calls,
+    .force_max_ns = h->ck_force_max_ns,
+    .tail_incomplete = atomic_load_explicit(&h->ck_tail_incomplete, memory_order_relaxed),
+    .hold_timeouts = h->ck_hold_timeouts,
+  };
 }
 
-int dbx_wal_frames(dbx *h) {
-  return atomic_load_explicit(&h->wal_frames, memory_order_relaxed);
+long long dbx_wal_frames_total(dbx *h) {
+  return atomic_load_explicit(&h->wal_frames_total, memory_order_relaxed);
 }
 
 /* The author lookups go through the users table cursor: one TableMoveto per id.  A batched
@@ -725,10 +895,10 @@ int dbx_wal_frames(dbx *h) {
  * "B-tree cursor reads are fine" ruling; this version only uses the cursor API. */
 int dbx_users_seek_many(dbx *h, const long long *ids, int n, unsigned char *buf, unsigned *lens) {
   if (n <= 0 || n > 32) return -1;
-  BtCursor *c = h->cur[DBX_USERS];
   for (int i = 0; i < n; i++) {
     lens[i] = 0;
     int res = 0;
+    BtCursor *c = h->acur[i];
     if (sqlite3BtreeTableMoveto(c, (i64)ids[i], 0, &res) != SQLITE_OK) return -1;
     if (res != 0 || sqlite3BtreeEof(c)) continue;
     u32 total = sqlite3BtreePayloadSize(c);
@@ -760,6 +930,18 @@ int dbx_first(dbx *h, int c) {
   int empty = 1;
   if (sqlite3BtreeFirst(h->cur[c], &empty) != SQLITE_OK) return -1;
   return empty ? 0 : 1;
+}
+
+int dbx_last(dbx *h, int c) {
+  int empty = 1;
+  if (sqlite3BtreeLast(h->cur[c], &empty) != SQLITE_OK) return -1;
+  return empty ? 0 : 1;
+}
+
+int dbx_prev(dbx *h, int c) {
+  int rc = sqlite3BtreePrevious(h->cur[c], 0);
+  if (rc == SQLITE_OK) return 1;
+  return rc == SQLITE_DONE ? 0 : -1;
 }
 
 int dbx_next(dbx *h, int c) {
@@ -866,6 +1048,32 @@ long long dbx_likes(dbx *h, long long post_id) {
  * to a seek per post.
  *
  * Returns 0 on success, 1 when the caller must fall back, -1 on a SQLite error. */
+/* 解一个 like 索引 cell 的第一列（post_id）。返回 0 成功，1 表示这个 cell 不符合
+ * 「单字节长度 + 两列小整数」的假设（调用方随即退回逐行 seek）。 */
+static int like_cell_id(MemPage *pg, int i, long long *out) {
+  const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
+  unsigned len = cell[0];
+  const unsigned char *p = cell + 1;
+  if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 1;
+  unsigned hdr = p[0], t = p[1];
+  if (hdr > len || hdr < 2 || t >= 0x80) return 1;
+  long long v;
+  if (t >= 1 && t <= 6) {
+    static const unsigned char sz[7] = {0, 1, 2, 3, 4, 6, 8};
+    unsigned k = sz[t];
+    if (hdr + k > len) return 1;
+    const unsigned char *q = p + hdr;
+    v = (signed char)q[0];
+    for (unsigned b = 1; b < k; b++) v = v << 8 | q[b];
+  } else if (t == 8 || t == 9) {
+    v = (long long)t - 8;
+  } else {
+    return 1;
+  }
+  *out = v;
+  return 0;
+}
+
 int dbx_likes_many(dbx *h, const long long *ids, int n, unsigned *counts) {
   if (n <= 0) return 0;
   memset(counts, 0, sizeof(unsigned) * (size_t)n);
@@ -878,29 +1086,57 @@ int dbx_likes_many(dbx *h, const long long *ids, int n, unsigned *counts) {
     MemPage *pg = c->pPage;
     int i = c->ix, last = pg->leaf ? pg->nCell : i + 1; /* interior: just this entry */
     for (; i < last; i++) {
-      const unsigned char *cell = findCell(pg, i) + pg->childPtrSize;
-      unsigned len = cell[0];
-      const unsigned char *p = cell + 1;
-      if (len >= 0x80 || len < 3 || p + len > pg->aDataEnd) return 1;
-      unsigned hdr = p[0], t = p[1];
-      if (hdr >= len || hdr < 2 || t >= 0x80) return 1;
       long long v;
-      if (t >= 1 && t <= 6) {
-        static const unsigned char sz[7] = {0, 1, 2, 3, 4, 6, 8};
-        unsigned k = sz[t];
-        if (hdr + k > len) return 1;
-        const unsigned char *q = p + hdr;
-        v = (signed char)q[0];
-        for (unsigned b = 1; b < k; b++) v = v << 8 | q[b];
-      } else if (t == 8 || t == 9) {
-        v = (long long)t - 8;
-      } else {
-        return 1;
-      }
+      if (like_cell_id(pg, i, &v)) return 1;
       if (v > hi) return 0;
       while (j < n && ids[j] < v) j++;
       if (j == n) return 0;
       if (ids[j] == v) counts[j]++;
+    }
+    c->ix = (u16)(last - 1);
+    int rc = sqlite3BtreeNext(c, 0);
+    if (rc == SQLITE_DONE) return 0;
+    if (rc != SQLITE_OK) return -1;
+  }
+}
+
+/* like 索引里最小 / 最大的 post_id（索引按 post_id 递增，所以首尾各解一个 cell 就够）。
+ * 返回 1 有行、0 空表、-1 失败。 */
+int dbx_likes_range(dbx *h, long long *lo, long long *hi) {
+  BtCursor *c = h->cur[DBX_LIKES_IDX];
+  int r = dbx_first(h, DBX_LIKES_IDX);
+  if (r < 0) return -1;
+  if (r == 0) return 0;
+  /* 根页常常是内部页，cell 是「子页号 + 键 + rowid」，不是我们要解的那张格式。 */
+  while (!c->pPage->leaf) {
+    if (sqlite3BtreeNext(c, 0) != SQLITE_OK) return -1;
+  }
+  if (like_cell_id(c->pPage, c->ix, lo)) return -1;
+  int empty = 1;
+  if (sqlite3BtreeLast(c, &empty) != SQLITE_OK) return -1;
+  if (empty) return 0;
+  if (like_cell_id(c->pPage, c->ix, hi)) return -1;
+  return 1;
+}
+
+/* 把整张 like 索引的直方图填进 counts（下标 = post_id - lo，长度 n）。一次顺序遍历，
+ * 不解分组、不留临时数组。返回 0 成功，-1 失败（cell 格式不认识或 post_id 越界）。 */
+int dbx_likes_fill(dbx *h, long long lo, unsigned *counts, size_t n) {
+  int r = dbx_first(h, DBX_LIKES_IDX);
+  if (r <= 0) return r < 0 ? -1 : 0;
+  BtCursor *c = h->cur[DBX_LIKES_IDX];
+  for (;;) {
+    MemPage *pg = c->pPage;
+    /* Index interior cells are real entries, unlike table separator keys.
+     * Count exactly the current interior entry, then let Next descend its
+     * following child. Jumping to nCell-1 would skip both keys and subtrees. */
+    int i = c->ix, last = pg->leaf ? pg->nCell : i + 1;
+    for (; i < last; i++) {
+      long long v;
+      if (like_cell_id(pg, i, &v)) return -1;
+      long long d = v - lo;
+      if (d < 0 || (size_t)d >= n) return -1;
+      counts[d]++;
     }
     c->ix = (u16)(last - 1);
     int rc = sqlite3BtreeNext(c, 0);
@@ -916,29 +1152,36 @@ static void check_tx(struct dbx *h) {
   }
 }
 
+/* 与列默认值同格式：strftime('%Y-%m-%dT%H:%M:%fZ','now') → YYYY-MM-DDTHH:MM:SS.SSSZ */
+static int format_now(char *out) {
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+  struct tm tmv;
+  gmtime_r(&ts.tv_sec, &tmv);
+  int n = snprintf(out, 32, "%04d-%02d-%02dT%02d:%02d:%02d.%03ldZ", tmv.tm_year + 1900,
+                   tmv.tm_mon + 1, tmv.tm_mday, tmv.tm_hour, tmv.tm_min, tmv.tm_sec,
+                   ts.tv_nsec / 1000000L);
+  return n;
+}
+
 int dbx_insert_post(dbx *h, long long uid, const char *body, int len, long long *id, char *created,
                     int *clen) {
+  *clen = format_now(created);
+  if (*clen <= 0 || *clen > 31) return -1;
   sqlite3_bind_int64(h->st_post, 1, uid);
   sqlite3_bind_text(h->st_post, 2, body, len, SQLITE_STATIC);
+  sqlite3_bind_text(h->st_post, 3, created, *clen, SQLITE_STATIC);
   int rc = sqlite3_step(h->st_post);
-  if (rc != SQLITE_ROW) {
+  if (rc != SQLITE_DONE) {
     sqlite3_reset(h->st_post);
+    sqlite3_clear_bindings(h->st_post);
     check_tx(h);
     return -1;
   }
-  *id = sqlite3_column_int64(h->st_post, 0);
-  int n = sqlite3_column_bytes(h->st_post, 1);
-  const unsigned char *t = sqlite3_column_text(h->st_post, 1);
-  if (!t || n > 63) {
-    sqlite3_reset(h->st_post);
-    return -1;
-  }
-  memcpy(created, t, (size_t)n);
-  *clen = n;
-  rc = sqlite3_step(h->st_post);
+  *id = sqlite3_last_insert_rowid(h->db);
   sqlite3_reset(h->st_post);
   sqlite3_clear_bindings(h->st_post);
-  return rc == SQLITE_DONE ? 0 : -1;
+  return 0;
 }
 
 int dbx_insert_like(dbx *h, long long uid, long long pid) {

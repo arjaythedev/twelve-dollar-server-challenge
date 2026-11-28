@@ -157,7 +157,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 69 | csharp-epoll-gichamba | #174 | C# (Native AOT, io_uring) | **210,000** | 20,411 | 277 | 853 | 0.00 | 76 | 35 | 632 | 2026-10-29 |
 | 69 | c-epoll-unorig-username | #183 | C (epoll) | **210,000** | 20,425 | 300 | 713 | 0.00 | 95 | 43 | 808 | 2026-10-29 |
 | 69 | cider-iouring-pomilon-v2 | #225 | Cider (native x86-64, io_uring) | **210,000** | 20,404 | 348 | 504 | 0.00 | 86 | 39 | 611 | 2026-10-31 |
-| 69 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
+| 69 | kotlin-trikeshed-jnorthrup | #298 | Kotlin (Kotlin/Native, io_uring, SQLite B-tree reads) | **210,000** ᵚ | 20,566 | 61.7 | 207.7 | 0.00 | 69 | 31 | 579 | 2026-11-04 |
 | 74 | csharp-iouring-jit-gichamba | #175 | C# (JIT, io_uring) | **209,000** | 20,265 | 366 | 735 | 0.00 | 84 | 38 | 633 | 2026-10-31 |
 | 75 | go-iouring-quananh2503 | #327 | Go (io_uring, cgo SQLite B-tree reads) | **208,000** | 20,388 | 15.2 | 165.2 | 0.00 | 91 | 41 | 1,118 | 2026-11-06 |
 | 76 | zig-epoll-unorig-username | #189 | Zig (epoll) | **200,000** | 19,661 | 54 | 154 | 0.00 | 94 | 44 | 1,155 | 2026-10-29 |
@@ -1619,6 +1619,11 @@ writes during FULL checkpoints, batched author lookups and a second likes-index 
 merged: it scored below the merged row) held **250,000** (24,111 req/s, p95 37.5 / p99 596.4 ms, 0 err, 70 % CPU,
 26 µs/req, 1,132 MB, 2026-11-28), 42/42 tests: 260,000 failed the 2-minute probe on p95/p99 (144 ms / 2.40 s at 72 %
 CPU, 0 errors) and 280,000 on p99 (2.31 s at 83 % CPU).
+
+ᵚ **kotlin-trikeshed-jnorthrup** stays on its merged #298 row. Its follow-up **#554** (`1c3383b`, mmap off, a 48 MiB
+page cache, a larger WAL checkpoint gate, a lower-priority checkpoint thread and `mlock` of its own code pages; not
+merged: it scored below the merged row) held **155,000** (15,257 req/s, p95 33.3 / p99 67.5 ms, 0 err, 49 % CPU,
+30 µs/req, 729 MB, 2026-11-28), 42/42 tests: 160,000 failed the 2-minute probe on p99 (2.99 s at 55 % CPU, 0 errors).
 
 ## Patches (ᵖ) and failures
 

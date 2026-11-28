@@ -122,7 +122,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 35 | v-epoll-i098 | #191 | V (io_uring, SQLite B-tree reads) | **257,000** ᵂ | 24,766 | 13.5 | 29 | 0.00 | 74 | 27 | 732 | 2026-10-30 |
 | 35 | c-iouring-oix7 | #296 | C (io_uring, SQLite B-tree reads) | **257,000** | 24,654 | 239 | 796 | 0.00 | 76 | 28 | 905 | 2026-11-04 |
 | 35 | swift-iouring-c2p-cmd | #314 | Swift (io_uring, SQLite B-tree reads) | **257,000** ⁱ | 24,737 | 55.9 | 163.6 | 0.00 | 76 | 28 | 675 | 2026-11-05 |
-| 38 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
+| 38 | asm-iouring-unorig-username | #206 | x86-64 asm (io_uring) | **250,000** ᶽ | 24,053 | 141 | 397 | 0.00 | 91 | 34 | 1,486 | 2026-10-30 |
 | 38 | ada-native-visseranalytics | #237 | Ada (GNAT, io_uring) | **250,000** | 24,119 | 84 | 286 | 0.00 | 77 | 29 | 1,169 | 2026-11-01 |
 | 38 | c-rawuring-thehimalayanleo | #269 | C (io_uring, SQLite B-tree reads) | **250,000** | 24,014 | 220 | 359 | 0.00 | 79 | 30 | 970 | 2026-11-02 |
 | 38 | rust-iouring-not-my-segfault | #401 | Rust (io_uring, SQLite B-tree reads) | **250,000** | 24,071 | 138.1 | 678.7 | 0.00 | 79 | 30 | 1,297 | 2026-11-12 |
@@ -1603,6 +1603,12 @@ same author's c-iouring-unorig-username design: SQLite B-tree reads, group commi
 scored below the merged row) held **220,000** (21,480 req/s, p95 14.6 / p99 81.5 ms, 0 err, 63 % CPU, 27 µs/req,
 1,155 MB, 2026-11-28), 42/42 tests: 230,000 failed the 2-minute probe on p95/p99 (108 ms / 2.65 s at 72 % CPU, 0
 errors) and 240,000 on p99 (2.09 s at 71 % CPU).
+
+ᶽ **asm-iouring-unorig-username** stays on its merged #206 row. Its follow-up **#546** (`db3a2d9`, a fix for a slot
+leaked on every close plus a port of the same author's c-iouring-unorig-username design: SQLite B-tree reads, group
+commit, checkpoint thread; not merged: it scored below the merged row) held **240,000** (23,212 req/s, p95 33.6 / p99
+189.9 ms, 0 err, 72 % CPU, 28 µs/req, 624 MB, 2026-11-28), 42/42 tests: 250,000 failed the 2-minute probe on p99
+(1.43 s at 77 % CPU, 0 errors) and 260,000 on p95/p99 (2.40 / 8.41 s at 87 % CPU).
 
 ## Patches (ᵖ) and failures
 

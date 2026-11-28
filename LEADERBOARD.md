@@ -1467,6 +1467,10 @@ p99 312.3 ms, 0 errors, 1,436 MB; 310k failed the 2-minute probe on p99 1.52 s, 
 requests wait, `CKDEFER` 500 ms / `CKDEFERMAX` 4, the old end's share from 20 s) held **270,000** at 69 % CPU (25,886
 req/s, p95 18.9 / p99 53.7 ms, 0 errors, 1,124 MB; 280k failed the 2-minute probe on p99 4.63 s, 320k on p99 3.80 s),
 below #437's 310,000, so #427 is not merged.
+#516's newest head (`6b0997f`, 2026-11-28: `de65c58` with PASSIVE checkpoint passes put off while requests wait,
+`CKDEFER` 500 ms / `CKDEFERMAX` 4) held **257,000** at 64 % CPU (24,758 req/s, p95 17.1 / p99 42.7 ms, 0 errors,
+1,195 MB; 270k failed the 5-minute hold on p99 1.63 s, 280k the 2-minute probe on p99 2.01 s, 320k on p99 3.40 s),
+below #437's 310,000, so #516 is not merged.
 
 ᴶ **saad-web-jakobsaadbye** is scored at its follow-up PR **#389** (`a46a663`, merged 2026-11-10: Saad compiler pinned
 to `4e4439f`, LLVM build at `-O3`): 100,000 held at 93 % CPU, 0 errors; 105,000 passed the 2-minute probe but failed

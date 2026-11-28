@@ -328,6 +328,44 @@ alternating runs:
 
 About 55 µs per request against 66 on kali, where the load generator shares the VM and inflates sys time.
 
+## S19. Memory pressure: page cache instead of mmap, code locked, a larger WAL gate (kali, 2026-11-26)
+
+Scored build #298 (`2c14bfed`) held 210,000 on the box. Four changes, all inside the process, none touching a kernel
+parameter or another process (rule 11):
+
+1. `mmap_size=0` and `cache_size` 48 MiB (was 1 GiB mmap, 16 MiB): reads hit SQLite's own page cache. The likes
+   primary-key index is 29.5 MB in the seed, so the hot set fits.
+2. `feed_lock_code()` locks the executable's read-only mappings and then the shared libraries' executable ones, while
+   `RLIMIT_MEMLOCK` has room (systemd gives a service 8 MB), so reclaim cannot take code pages back and stall the loop.
+3. `FEEDBT_WAL_GATE` 1,000 to 8,192 frames: fewer waits for the checkpointer.
+4. The checkpoint thread runs at nice 10 (`setpriority` on its own thread id).
+
+Method: kali (i7-6820HK under WSL2; slower than the box: 56 us per request against 31), the server alone on CPU 1
+in a systemd unit with CPUQuota 100%, MemoryMax 2G, no swap, LimitNOFILE 65535; this folder's load generator on CPUs
+2-7 from 16 loopback source addresses; 60 s ramp, 2 minute hold, 42/42 checks first, alternating builds, 100 s between
+runs. Builds: `2c14bfed` (base), the same with change 1 only (cache), and all four (all). 0 failed requests in every run.
+
+| users | build | hold req/s | p50 / p95 / p99 (ms) | server CPU, user + sys | cgroup peak |
+|---|---|---|---|---|---|
+| 128,000 | base | 13,535 | 4.0 / 40.4 / 77.8 | 15 + 58% | 829 MB |
+| 128,000 | cache | 13,525 | 3.8 / 39.9 / 77.8 | 15 + 58% | 814 MB |
+| 128,000 | all | 13,535 | 3.4 / 36.4 / 69.6 | 15 + 58% | 844 MB |
+| 160,000 | base | 16,908 | 11.5 / 57.9 / 96.3 | 19 + 70% | 943 MB |
+| 160,000 | cache | 16,898 | 10.9 / 57.3 / 96.3 | 18 + 70% | 962 MB |
+| 160,000 | all | 16,912 | 7.6 / 46.1 / 75.8 | 19 + 71% | 1,018 MB |
+| 180,000 | base | 18,965 | 34.3 / 107.5 / 161.8 | 20 + 76% | 1,048 MB |
+| 180,000 | all | 19,001 | 19.5 / 86.0 / 155.6 | 20 + 76% | 1,061 MB |
+| 190,000 | base | 19,529; 19,606 | 107.5 / 925.7 / 1,130.5; 106.5 / 819.2 / 1,007.6 (fail, twice) | 21 + 80% | 1,086-1,092 MB |
+| 190,000 | all | 19,973; 19,984 | 45.6 / 172.0 / 278.5; 45.1 / 157.7 / 335.9 (pass, twice) | 20 + 79% | 1,153-1,167 MB |
+| 200,000 | base | 19,744 | 120.8 / 2,588.7 / 2,719.7 (fail) | 21 + 80% | 1,122 MB |
+| 200,000 | all | 20,461 | 106.5 / 1,196.0 / 1,441.8 (fail) | 22 + 84% | 1,162 MB |
+
+A 5-minute hold of `all` at 190,000 (60 s ramp): 6,812,367 requests, 0 failed, 19,993 req/s, p50 / p95 / p99
+44.5 / 145.4 / 225.3 ms, server CPU 22 + 80%, cgroup peak 1,186 MB. Change 1 alone does not move the limit (cache
+equals base at 128k and 160k); the gain comes from changes 2-4 with it, and the runs here do not separate them.
+Server CPU per request is unchanged, so the box's limit moves only as far as the stalls it removes. Not measured on the
+box, and kali's limit (between 190,000 and 200,000 for `all`, between 180,000 and 190,000 for base) is not the box's.
+
 ## Next steps, in order of measured size
 
 1. Done: B-tree cursor reads in C for feed and post (098ccd1, feed 40 to 23 µs), and a held read transaction per wake (4dc083f, feed 21 µs, post 10 µs).
@@ -344,6 +382,7 @@ About 55 µs per request against 66 on kali, where the load generator shares the
 
 ## State
 
+- S19 (memory pressure, branch `memory-pressure-a1`) is in the second follow-up PR on top of #298's `2c14bfed`.
 - Challenge repo: #128 merged upstream at 2fb010a (scored 175,000). S18 (ae41a19 reads off the commit window,
   954c594 batch waits) and the KN-only build (1b524df) are in the follow-up PR from branch `reads-off-commit-window`.
   TrikeShed pin 20280e867. Push guard on; pushes go to the fork's explicit URL.

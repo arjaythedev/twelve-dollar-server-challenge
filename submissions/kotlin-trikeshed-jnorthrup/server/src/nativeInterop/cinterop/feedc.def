@@ -18,6 +18,7 @@ linkerOpts = -lm
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/eventfd.h>
@@ -86,6 +87,37 @@ static int feed_listen(const char *host, int port) {
   if (inet_pton(AF_INET, host, &a.sin_addr) != 1) a.sin_addr.s_addr = htonl(INADDR_ANY);
   if (bind(fd, (struct sockaddr *)&a, sizeof a) < 0 || listen(fd, 4096) < 0) { int e = errno; close(fd); return -e; }
   return fd;
+}
+
+/*
+ * Locks the program's code in memory, so reclaim cannot take code pages back and stall the loop on disk reads: the
+ * executable's read-only mappings first, then the shared libraries' executable ones, while RLIMIT_MEMLOCK has room
+ * (systemd gives a service 8 MB). Returns the bytes locked.
+ */
+static long feed_lock_code(void) {
+  struct rlimit rl;
+  if (getrlimit(RLIMIT_MEMLOCK, &rl) != 0) return 0;
+  unsigned long room = rl.rlim_cur, locked = 0;
+  static char exe[4096], line[8192], path[4096];
+  char perms[8];
+  ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+  if (n <= 0) return 0;
+  exe[n] = 0;
+  for (int pass = 0; pass < 2; pass++) {
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) break;
+    while (fgets(line, sizeof line, f)) {
+      unsigned long lo, hi;
+      path[0] = 0;
+      if (sscanf(line, "%lx-%lx %7s %*s %*s %*s %4095s", &lo, &hi, perms, path) < 4 || path[0] != '/') continue;
+      int own = strcmp(path, exe) == 0;
+      if (pass == 0 ? !(own && perms[0] == 'r' && perms[1] != 'w') : (own || perms[2] != 'x')) continue;
+      if (hi - lo > room - locked) continue;
+      if (mlock((void *)lo, hi - lo) == 0) locked += hi - lo;
+    }
+    fclose(f);
+  }
+  return (long)locked;
 }
 
 static void feed_arm_efd(unsigned i) {

@@ -587,7 +587,10 @@ on p99 (1.95 s at 80 % CPU, 0 errors). Its merged #340 code (`a0443a9`) held **1
 pages, 4 ms batch window, smaller socket buffers; held, not merged: it didn't beat the merged row) scored **240,000**
 (23,181 req/s, p95 103.5 / p99 735.0 ms, 0 err, 77 % CPU, 30 µs/req, 686 MB, 2026-11-07). 250,000 failed the 2-minute
 probe on p99 (9.96 s at 83 % CPU, 0 errors); 260,000 / 280,000 / 320,000 collapsed on refused connections (58 % / 21 % /
-74 % errors).
+74 % errors). Re-run at `37d7790` (transport tuning: per-ring SO_REUSEPORT listeners, output-block pool, request
+budget per pass) scored **244,000** (23,593 req/s, p95 23.7 / p99 706.3 ms, 0 err, 69 % CPU, 27 µs/req, 679 MB,
+2026-11-28); 270,000 passed the 2-minute probe but 270,000 and 257,000 failed the 5-minute hold on p95/p99 (780 / 1,695
+ms and 837 / 1,432 ms, 0 errors). Still below the merged row: not merged.
 
 ᶿ **go-iouring-trungdlp** is scored at its follow-up PR **#343** (`39efd02`, merged: PCACHE2 page-cache wrapper,
 per-request C JSON, build flags, 1 ms batch window); 280,000 failed the 2-minute probe on p99 (2.73 s at 86 % CPU,

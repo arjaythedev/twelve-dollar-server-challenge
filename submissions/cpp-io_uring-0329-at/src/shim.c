@@ -36,6 +36,8 @@ struct dbx {
   /* 检查点状态机（见 dbx_ck_kick）：CK_IDLE → CK_BULK → CK_BULK_DONE → CK_TAIL → CK_TAIL_DONE。 */
   _Atomic int ck_state;
   _Atomic int ck_full;
+  uint64_t ck_force_calls, ck_force_max_ns, ck_hold_timeouts; /* Event-loop owned. */
+  _Atomic uint64_t ck_tail_incomplete;
   unsigned char *rec;
   unsigned rec_cap;
 };
@@ -750,14 +752,16 @@ enum { CK_IDLE = 0, CK_BULK, CK_BULK_DONE, CK_TAIL, CK_TAIL_DONE };
 
 /* 一次 PASSIVE：能拷多少拷多少，从不等读者。返回 0 = 全部拷完，1 = 还有，-1 = 出错。 */
 static int ck_pass(struct dbx *h, int *nlog, int *ndone) {
-  *nlog = 0;
-  *ndone = 0;
+  *nlog = -1;
+  *ndone = -1;
   int rc = sqlite3_wal_checkpoint_v2(h->ckdb, "main", SQLITE_CHECKPOINT_PASSIVE, nlog, ndone);
   if (rc != SQLITE_OK) {
     shim_log("checkpoint failed: %s (%d)", sqlite3_errmsg(h->ckdb), rc);
     return -1;
   }
-  return (*nlog == 0 || *ndone >= *nlog) ? 0 : 1;
+  /* SQLite uses negative counts when the WAL result is unavailable. */
+  if (*nlog < 0 || *ndone < 0) return -1;
+  return *ndone >= *nlog ? 0 : 1;
 }
 
 /* 拷之前对整段日志做 readahead 试过一版（c-iouring-jowinjestine #404 的做法）：本地成对 A/B
@@ -773,8 +777,12 @@ int dbx_ck_kick(dbx *h) {
       if (frames >= CK_FORCE_FRAMES) {
         /* 兜底：线程追不上（读者一直挡着帧，或者磁盘太慢），循环自己拷一次，别让日志无限长。 */
         int nlog = 0, ndone = 0;
-        ck_pass(h, &nlog, &ndone);
-        if (nlog == 0 || ndone >= nlog) atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
+        long long started = mono_ns();
+        int r = ck_pass(h, &nlog, &ndone);
+        uint64_t elapsed = (uint64_t)(mono_ns() - started);
+        ++h->ck_force_calls;
+        if (elapsed > h->ck_force_max_ns) h->ck_force_max_ns = elapsed;
+        if (r == 0) atomic_store_explicit(&h->wal_frames, 0, memory_order_relaxed);
         return 0;
       }
       if (frames >= ck_gate_frames()) {
@@ -818,6 +826,7 @@ void dbx_ck_run(dbx *h, int tail) {
   int nlog = 0, ndone = 0;
   if (tail) {
     int r = ck_pass(h, &nlog, &ndone);
+    if (r != 0) atomic_fetch_add_explicit(&h->ck_tail_incomplete, 1, memory_order_relaxed);
     atomic_store_explicit(&h->ck_full, r == 0, memory_order_relaxed);
     atomic_store_explicit(&h->ck_state, CK_TAIL_DONE, memory_order_release);
     return;
@@ -857,9 +866,22 @@ int dbx_writes_held(dbx *h) {
   if (atomic_load_explicit(&h->wal_frames, memory_order_relaxed) > CK_FORCE_FRAMES) limit *= 2;
   if (mono_ns() - since > limit) {
     atomic_store_explicit(&h->gate_held, 0, memory_order_relaxed);
+    ++h->ck_hold_timeouts;
     return 0;
   }
   return 1;
+}
+
+dbx_checkpoint_stats dbx_ck_stats(dbx *h) {
+  return (dbx_checkpoint_stats){
+    .state = atomic_load_explicit(&h->ck_state, memory_order_acquire),
+    .wal_frames = atomic_load_explicit(&h->wal_frames, memory_order_relaxed),
+    .held = atomic_load_explicit(&h->gate_held, memory_order_relaxed),
+    .force_calls = h->ck_force_calls,
+    .force_max_ns = h->ck_force_max_ns,
+    .tail_incomplete = atomic_load_explicit(&h->ck_tail_incomplete, memory_order_relaxed),
+    .hold_timeouts = h->ck_hold_timeouts,
+  };
 }
 
 long long dbx_wal_frames_total(dbx *h) {

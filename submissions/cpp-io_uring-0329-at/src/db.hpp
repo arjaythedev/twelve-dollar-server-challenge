@@ -12,7 +12,7 @@
 
 #include "buf.hpp"
 
-struct dbx;
+#include "shim.h"
 
 namespace app {
 
@@ -45,6 +45,7 @@ class Db {
 
   bool commit();
   [[nodiscard]] long long wal_frames_total() const;
+  [[nodiscard]] dbx_checkpoint_stats checkpoint_stats() const;
   /* like 计数缓存是否生效（STATS 行）。false 表示退回逐次扫描，功能正确但更慢。 */
   [[nodiscard]] bool like_cache_on() const { return like_counts_ok_; }
   /* 作者名缓存是否生效（STATS 行）。 */

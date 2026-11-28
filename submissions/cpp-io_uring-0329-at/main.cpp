@@ -177,9 +177,9 @@ class Server {
  public:
   Server(app::App* app, uint32_t slots, unsigned cq, uint32_t max_rings)
       : app_(app), slots_(slots), cq_(cq), max_rings_(max_rings) {
-    /* ZC=0 关掉零拷贝发送，用来在评测机上做 A/B。 */
+    /* 普通 send 默认；本地积压对照的内核成本更低。ZC=1 保留实机 A/B。 */
     const char* zc = std::getenv("ZC");
-    if (zc && zc[0] == '0') zc_ok_ = false;
+    if (zc && zc[0] == '1') zc_ok_ = true;
     /* ANSWERS 覆盖每 pass 的答案上限：310,000 那次保持用的是 2,048（kensac #264 的数），
      * 本地 20k 连接的 A/B 又支持 256，留一个旋钮在评测机上复测，默认保持 256。 */
     if (const char* a = std::getenv("ANSWERS")) {
@@ -516,6 +516,16 @@ class Server {
                  static_cast<int>(app_->db.like_cache_on()),
                  static_cast<int>(app_->db.author_cache_on()),
                  static_cast<int>(app_->db.feed_from_table()));
+          const uint64_t oldest_ready_ns = ready_.empty() ? 0 : p5 - ready_.back().ts;
+          size_t held_count = 0;
+          for (const auto& wp : workers_) held_count += wp->held().size();
+          errlog("queue: ready={} oldest_ms={:.1f} held={} pending_commit={}",
+                 ready_.size(), oldest_ready_ns / 1e6, held_count, pend_commit_.size());
+          const auto ck = app_->db.checkpoint_stats();
+          errlog("checkpoint: state={} frames={} held={} force={} force_max_ms={:.1f} "
+                 "tail_incomplete={} hold_timeouts={}",
+                 ck.state, ck.wal_frames, ck.held, ck.force_calls, ck.force_max_ns / 1e6,
+                 ck.tail_incomplete, ck.hold_timeouts);
           enter_base_[0] = io::Ring::enters(0);
           enter_base_[1] = io::Ring::enters(1);
           enter_base_[2] = io::Ring::enters(2);
@@ -1205,7 +1215,7 @@ class Server {
     /* 等提交的写响应。带 gen：推迟期间连接可能被关闭、槽位被新连接复用，
      * 只按 (worker, slot) 找回来就会把旧响应发给别人。 */
     std::vector<ReadyRef> pend_commit_;
-  bool zc_ok_ = true; /* 内核支持零拷贝发送；-EINVAL 后永久关闭 */
+  bool zc_ok_ = false; /* ZC=1 显式启用；-EINVAL 后永久关闭 */
   std::deque<ReadyRef> ready_;
   const char* host_ = nullptr;
   uint16_t port_ = 0;

@@ -21,6 +21,16 @@ int dbx_ck_kick(dbx *h);
 int dbx_ck_wants(dbx *h, int tail);
 void dbx_ck_run(dbx *h, int tail);
 int dbx_writes_held(dbx *h);
+
+typedef struct dbx_checkpoint_stats {
+  int state; /* 0 idle, 1 bulk, 2 bulk done, 3 tail, 4 tail done */
+  int wal_frames; /* Scheduler estimate, reset after full backfill. */
+  int held;
+  uint64_t force_calls, force_max_ns;
+  uint64_t tail_incomplete; /* TAIL returned an error or only partially backfilled. */
+  uint64_t hold_timeouts; /* Gate actually opened due to an expired deadline. */
+} dbx_checkpoint_stats;
+dbx_checkpoint_stats dbx_ck_stats(dbx *h); /* Event-loop snapshot. */
 /* 当前 WAL 里的帧数（兼作闸门计数，检查点拷完会被清零）。 */
 long long dbx_wal_frames_now(dbx *h);
 long long dbx_wal_frames_total(dbx *h);

@@ -231,6 +231,7 @@ bool Db::commit() {
 }
 
 long long Db::wal_frames_total() const { return dbx_wal_frames_total(h_); }
+dbx_checkpoint_stats Db::checkpoint_stats() const { return dbx_ck_stats(h_); }
 
 
 void Db::ck_kick() {

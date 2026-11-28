@@ -2,13 +2,19 @@
  * transaction. Compiled in the same translation unit as the unmodified amalgamation. Every page
  * comes through SQLite's pager, WAL and page cache; only the bytecode interpreter is skipped,
  * because both queries are known ahead of time. Anything unexpected returns -1 and the caller
- * runs the reference SQL instead. Nothing read here outlives the request. */
+ * runs the reference SQL instead. Nothing read here outlives the request; references to the
+ * pages of users a batch has read are kept until its cursors close (struct bt). */
 #ifndef BTREE_H
 #define BTREE_H
 
 #define FEED_N 20
 #define LIKES_SPAN 512 /* count likes with one index walk when the feed's ids lie within this span */
 static const int opt_tail = 1, opt_batch = 1; /* the two read-path variants (both measured; see README) */
+#ifndef BT_HOLD
+#define BT_HOLD 1
+#endif
+static const int opt_hold = BT_HOLD; /* pages of users stay referenced until the batch's cursors close */
+#define BT_HELD 1024 /* slots, by page number */
 static inline int cell_pid_rowid(MemPage *pg, int i, i64 *pid, i64 *rowid);
 
 enum { CUR_POSTS = 0, CUR_USERS, CUR_FEED_IDX, CUR_LIKES_IDX, NCUR };
@@ -22,6 +28,13 @@ struct bt {
   int ok;   /* the schema matches; plans are enabled */
   uint8_t *spill;
   uint32_t spill_cap;
+  /* Pages of users read since bt_open, one reference each, released in bt_close (before the
+   * transaction ends), the way an open cursor keeps the page it is on. users is not written by
+   * any statement here. A look-up that lands on one of them takes it from this table instead
+   * of asking the pager again; its row is read from the page as always. */
+  MemPage *held[BT_HELD];
+  u16 held_slot[BT_HELD];
+  int nheld;
 };
 
 static Pgno bt_rootpage(sqlite3 *c, const char *name) {
@@ -99,6 +112,12 @@ static int bt_open(struct bt *b) {
   return 0;
 }
 static void bt_close(struct bt *b) {
+  for (int i = 0; i < b->nheld; i++) {
+    MemPage **slot = &b->held[b->held_slot[i]];
+    if (*slot) releasePageNotNull(*slot);
+    *slot = NULL;
+  }
+  b->nheld = 0;
   if (!b->open) return;
   for (int i = 0; i < NCUR; i++) sqlite3BtreeCloseCursor(b->cur[i]);
   b->open = 0;
@@ -337,14 +356,19 @@ static int bt_count_likes_tail(struct bt *b, i64 lo, i64 hi, uint32_t *n) {
  * The same descent as sqlite3BtreeTableMoveto, through the same pager calls (getAndInitPage,
  * findCell, releasePage), for up to FEED_N keys together: every key's child page is chosen on
  * one level before any page of the next level is fetched, and a page shared by several keys is
- * fetched and bounded once. Inside a page the search starts where a straight line through the
- * page's first and last rowids puts the key (rowids are dense), so it takes 2-3 probes instead of
- * a binary search's 7-9, each on its own cache line. (The idea is from c-iouring-pavlyhalim #245.)
+ * fetched once. Inside a page the search starts where a straight line through the page's first
+ * and last rowids puts the key (rowids are dense), so it takes 2-3 probes instead of a binary
+ * search's 7-9, each on its own cache line. (The idea is from c-iouring-pavlyhalim #245.) In a
+ * leaf one cell is tried before that: the parent's key before the leaf is known from choosing
+ * the leaf, every rowid in the leaf is larger, and when they run on without a gap the row is in
+ * cell (rowid - that key - 1). The cell that holds the rowid is the row whatever the others
+ * hold, so nothing is assumed; when it holds something else the page is searched.
  * Anything not in the expected form returns -1 with no pages held, and the caller uses the
  * cursor instead. The hits hold references to the leaf pages the names point into. */
 struct bt_hit {
   MemPage *pg;
   int ix;
+  int own; /* the hit holds a reference of its own (else the page is in bt.held) */
 };
 static inline i64 bt_cell_key(MemPage *pg, int i) {
   const u8 *c = findCellPastPtr(pg, i);
@@ -360,16 +384,29 @@ static inline i64 bt_cell_key(MemPage *pg, int i) {
 }
 struct bt_pageinfo {
   MemPage *pg;
-  i64 k0, kn;
+  Pgno pgno;
+  int kept;     /* the reference belongs to bt.held */
+  int bounds;   /* k0, kn and scale are set (they are read when a search first needs them) */
+  i64 k0, kn;   /* the page's first and last key */
+  double scale; /* cells per key: (nCell - 1) / (kn - k0) */
 };
 /* the first cell whose key is >= k (nCell if none) */
-static int bt_lower_bound(const struct bt_pageinfo *pi, i64 k) {
+static int bt_lower_bound(struct bt_pageinfo *pi, i64 k) {
   MemPage *pg = pi->pg;
   int n = pg->nCell;
+  if (!pi->bounds) {
+    pi->k0 = bt_cell_key(pg, 0);
+    pi->kn = bt_cell_key(pg, n - 1);
+    pi->scale = pi->kn > pi->k0 ? (double)(n - 1) / ((double)pi->kn - (double)pi->k0) : 0.0;
+    pi->bounds = 1;
+  }
   if (k <= pi->k0) return 0;
   if (k > pi->kn) return n;
   int lo = 1, hi = n - 1; /* the answer is in [lo, hi]: key(lo-1) < k <= key(hi) */
-  int g = lo + (int)((k - pi->k0) * (i64)(n - 1) / (pi->kn - pi->k0));
+  /* the key's place on the line, rounded up (one multiplication; the division is once a page) */
+  double x = ((double)k - (double)pi->k0) * pi->scale;
+  int g = (int)x;
+  if ((double)g < x - 1e-6) g++;
   if (g < lo) g = lo;
   if (g > hi) g = hi;
   for (int probe = 0; lo < hi; probe++) {
@@ -384,32 +421,52 @@ static int bt_lower_bound(const struct bt_pageinfo *pi, i64 k) {
 }
 static void bt_release_hits(struct bt_hit *h, int n) {
   for (int i = 0; i < n; i++)
-    if (h[i].pg) releasePageNotNull(h[i].pg);
+    if (h[i].pg && h[i].own) releasePageNotNull(h[i].pg);
 }
 static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct bt_hit *hit) {
   BtShared *bs = b->bt->pBt;
   struct bt_pageinfo pages[FEED_N];
   int page_of[FEED_N]; /* each key's page on this level */
   Pgno next[FEED_N];
+  i64 below[FEED_N]; /* the parent's key before each key's page: every key in the page is larger */
+  u8 has_below[FEED_N];
+  int hold = opt_hold && root == b->root[CUR_USERS];
   if (n < 1 || n > FEED_N) return -1;
-  for (int i = 0; i < n; i++) next[i] = root;
+  for (int i = 0; i < n; i++) {
+    next[i] = root;
+    has_below[i] = 0;
+  }
   for (int depth = 0;; depth++) {
     int np = 0, leaf = -1;
     for (int i = 0; i < n; i++) {
       int p = 0;
-      while (p < np && pages[p].pg->pgno != next[i]) p++;
+      while (p < np && pages[p].pgno != next[i]) p++;
       if (p == np) {
-        MemPage *pg;
-        if (getAndInitPage(bs, next[i], &pg, PAGER_GET_READONLY) != SQLITE_OK) pg = NULL;
+        MemPage *pg = NULL;
+        int kept = 0;
+        if (hold) {
+          unsigned si = next[i] & (BT_HELD - 1);
+          if (b->held[si] && b->held[si]->pgno == next[i]) {
+            pg = b->held[si];
+            kept = 1;
+          } else if (!b->held[si] && getAndInitPage(bs, next[i], &pg, PAGER_GET_READONLY) == SQLITE_OK) {
+            b->held[si] = pg; /* the table's reference from here on */
+            b->held_slot[b->nheld++] = (u16)si;
+            kept = 1;
+          }
+        }
+        if (!pg && getAndInitPage(bs, next[i], &pg, PAGER_GET_READONLY) != SQLITE_OK) pg = NULL;
         if (!pg || !pg->intKey || pg->nCell == 0 || pg->nOverflow || depth >= BTCURSOR_MAX_DEPTH || (leaf >= 0 && pg->leaf != leaf)) {
-          if (pg) releasePageNotNull(pg);
-          for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
+          if (pg && !kept) releasePageNotNull(pg);
+          for (int k = 0; k < np; k++)
+            if (!pages[k].kept) releasePageNotNull(pages[k].pg);
           return -1;
         }
         leaf = pg->leaf;
         pages[np].pg = pg;
-        pages[np].k0 = bt_cell_key(pg, 0);
-        pages[np].kn = bt_cell_key(pg, pg->nCell - 1);
+        pages[np].pgno = next[i];
+        pages[np].kept = kept;
+        pages[np].bounds = 0;
         np++;
       }
       page_of[i] = p;
@@ -417,24 +474,43 @@ static int bt_seek_many(struct bt *b, Pgno root, const i64 *key, int n, struct b
     if (leaf) {
       for (int i = 0; i < n; i++) {
         struct bt_pageinfo *pi = &pages[page_of[i]];
-        int ix = bt_lower_bound(pi, key[i]);
-        if (ix < pi->pg->nCell && bt_cell_key(pi->pg, ix) == key[i]) {
-          hit[i].pg = pi->pg;
+        MemPage *pg = pi->pg;
+        int ix = -1;
+        /* Where the key is if the leaf's rowids run on without a gap from the parent's key before
+         * it: one cell to read, and it is the cell the row is in. Keys are unique and ordered, so
+         * the cell holding the key is the answer whatever the other cells hold. */
+        if (has_below[i] && key[i] > below[i]) {
+          u64 d = (u64)key[i] - (u64)below[i] - 1;
+          if (d < (u64)pg->nCell && bt_cell_key(pg, (int)d) == key[i]) ix = (int)d;
+        }
+        if (ix < 0) { /* a gap, or no parent key (the tree's first leaf): search the page */
+          int lb = bt_lower_bound(pi, key[i]);
+          if (lb < pg->nCell && bt_cell_key(pg, lb) == key[i]) ix = lb;
+        }
+        hit[i].pg = NULL;
+        if (ix >= 0) {
+          hit[i].pg = pg;
           hit[i].ix = ix;
-          sqlite3PagerRef(pi->pg->pDbPage);
-        } else {
-          hit[i].pg = NULL;
+          hit[i].own = !pi->kept;
+          if (hit[i].own) sqlite3PagerRef(pg->pDbPage);
         }
       }
-      for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
+      for (int k = 0; k < np; k++)
+        if (!pages[k].kept) releasePageNotNull(pages[k].pg);
       return 0;
     }
     for (int i = 0; i < n; i++) {
       struct bt_pageinfo *pi = &pages[page_of[i]];
+      MemPage *pg = pi->pg;
       int lw = bt_lower_bound(pi, key[i]); /* key <= cell key: that cell's left child */
-      next[i] = lw >= pi->pg->nCell ? get4byte(&pi->pg->aData[pi->pg->hdrOffset + 8]) : get4byte(findCell(pi->pg, lw));
+      next[i] = lw >= pg->nCell ? get4byte(&pg->aData[pg->hdrOffset + 8]) : get4byte(findCell(pg, lw));
+      if (lw > 0) { /* (lw == 0: the child's lower bound is this page's own) */
+        below[i] = bt_cell_key(pg, lw - 1);
+        has_below[i] = 1;
+      }
     }
-    for (int k = 0; k < np; k++) releasePageNotNull(pages[k].pg);
+    for (int k = 0; k < np; k++)
+      if (!pages[k].kept) releasePageNotNull(pages[k].pg);
   }
 }
 /* usernames for n user ids: 0 with every name found (release the hits after use), 1 if one is
@@ -602,8 +678,44 @@ static int bt_feed(struct bt *b, struct ob *o) {
   return 0;
 }
 
+/* GET /posts/:id with the same descent as the feed's authors, for the post and then its author:
+ * 1 written, 0 no such post, -1 the cursors answer instead (a record that spills to overflow
+ * pages, a page not in the expected form, an absent author). */
+static int bt_post_direct(struct bt *b, struct ob *o, i64 id) {
+  struct bt_hit ph, uh;
+  if (bt_seek_many(b, b->root[CUR_POSTS], &id, 1, &ph)) return -1;
+  if (!ph.pg) return 0;
+  CellInfo info;
+  ph.pg->xParseCell(ph.pg, findCell(ph.pg, ph.ix), &info);
+  struct col c[4];
+  uint32_t likes;
+  int rc = -1;
+  if (info.nLocal == info.nPayload && !rec_cols(info.pPayload, info.nPayload, 4, c) && col_is_int(&c[1]) && col_is_text(&c[2]) &&
+      col_is_text(&c[3]) && bt_count_likes(b, id, id, &likes) == 0) {
+    i64 uid = col_int(&c[1]);
+    const u8 *name;
+    u32 name_n;
+    if (bt_user_names(b, &uid, 1, &uh, &name, &name_n) == 0) {
+      ob_lit(o, "{\"post\":");
+      ob_post_obj(o, id, c[2].p, col_len(&c[2]), c[3].p, col_len(&c[3]), name, name_n, likes);
+      ob_char(o, '}');
+      bt_release_hits(&uh, 1);
+      rc = 1;
+    }
+  }
+  bt_release_hits(&ph, 1);
+  return rc;
+}
+
 /* GET /posts/:id. 1 ok (written), 0 absent, -1 error. */
 static int bt_post(struct bt *b, struct ob *o, i64 id) {
+  if (opt_batch) {
+    size_t mark = o->n;
+    int r = bt_post_direct(b, o, id);
+    if (r >= 0 && !o->err) return r;
+    o->n = mark;
+    o->err = 0;
+  }
   int rc = cur_seek(b->cur[CUR_POSTS], id);
   if (rc) return rc < 0 ? -1 : 0;
   uint32_t likes;

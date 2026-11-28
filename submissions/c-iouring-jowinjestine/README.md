@@ -80,8 +80,11 @@ mostly idle sockets under `LimitNOFILE=65535`.
 
 ## A batch
 
-1. Every completion is handled. Requests are answered straight into the arena, up to 16,384 a
-   batch, after the requests earlier batches left waiting; a connection gets at most one request per batch (pipelined bytes wait for the send).
+1. Every completion is handled. Requests are answered straight into the arena: what arrived
+   since the last batch first, as much of it as can be answered within the kernel's 40 ms, then,
+   up to 8 ms of work in all, the requests earlier batches left waiting, oldest first (see
+   "Newest first" at the end); a connection gets at most one request per batch (pipelined bytes
+   wait for the send).
 2. All of the batch's reads and writes run in one SQLite transaction, begun lazily by the first of
    them (`BEGIN`, then the read transaction and four B-tree cursors). Reads see the batch's earlier
    writes.
@@ -110,18 +113,21 @@ mostly idle sockets under `LimitNOFILE=65535`.
     cursor step back; their pages get an extra reference while the other cursors move), the 20
     authors are looked up in one descent of `users` through the same pager calls as
     `sqlite3BtreeTableMoveto` (every key's child page chosen before the next level is fetched, a
-    page shared by several keys fetched once, and inside a page the search starting where a
-    straight line through its first and last rowids puts the key, since rowids are dense: 2-3
-    probes instead of 7-9; the idea is from c-iouring-pavlyhalim #245), and every post object is
-    written from the pages: no row is copied anywhere else.
-  - **Post:** the row by rowid, its author, its likes, the same way. Likes check that the post
-    exists with a seek too.
+    page shared by several keys fetched once; in a leaf the row is first looked for in the one
+    cell it is in when the leaf's rowids run on without a gap from the parent's key before the
+    leaf, and otherwise the page is searched from where a straight line through its first and
+    last rowids puts the key: 2-3 probes instead of 7-9; the batched descent and the straight
+    line are from c-iouring-pavlyhalim #245, the first cell is described in the last section),
+    and every post object is written from the pages: no row is copied anywhere else.
+  - **Post:** the row and then its author with that descent (one key each), its likes with a
+    seek of `likes_post_id_idx`. Likes check that the post exists with a seek too.
   - **Nothing is assumed and nothing is kept.** The stored layout is checked against the schema
     the decoders were written for at startup, and anything unexpected during a read (a record on
     overflow pages, a cell not in the expected form, an index entry without its row, a post whose
     author row is gone) makes that request run the reference SQL instead. Only prepared statements,
     cursors, KeyInfo objects and the four root page numbers (schema metadata read at open) are
-    reused between requests; every request reads its rows from SQLite while it is served.
+    reused between requests, and within one batch the references to the pages of `users` it has
+    read (last section); every request reads its rows from SQLite while it is served.
 - Writes are prepared SQL: `INSERT … RETURNING id, created_at` for posts (`created_at` is the
   column default, sent as stored) and `INSERT … ON CONFLICT (user_id, post_id) DO NOTHING` for
   likes, `sqlite3_changes` telling 201 from 200.
@@ -231,7 +237,10 @@ test suite's error paths through it with `src/train.c` over 48 keep-alive connec
 the final binary with the profile. The instrumented build counts with `-fprofile-update=prefer-atomic`:
 the checkpoint thread runs SQLite during training too, and racing counters once left a profile the
 optimized build rejected. `PGO=0 bash build.sh` skips that. No 512-bit vectors: on Cascade
-Lake one would lower the core's clock for a while after each use.
+Lake one would lower the core's clock for a while after each use. `SELFCHECK=1 bash build.sh`
+makes a test build in which every answer of the B-tree read path is followed by the reference
+SQL on the same snapshot and the two are compared byte for byte (differences and a running count
+go to stderr); the submission's build does not have it.
 
 ## Rules
 
@@ -242,8 +251,10 @@ cursors through SQLite's pager; writes use SQL.
 pages while it is served. Kept between batches: prepared statements, cursors, root page numbers and
 column layout (schema metadata, read at open), and the HMAC key schedule.
 6. WAL + `synchronous=NORMAL`; group commit; each response waits for its batch's commit.
-7. Nothing detects the load test: every route works for any request, and the server never sheds
-load, never closes a healthy connection and never looks at who is asking.
+7. Nothing detects the load test: every route works for any request, every request that is read
+is answered, and the server never closes a healthy connection and never looks at who is asking.
+The one limit is the box's memory: `KEEP_LIMIT` connections are kept alive at once, and a user
+past that is served on one connection per request (see the last section).
 8–9. Direct on `0.0.0.0:80`. Direct descriptors need no file descriptors beyond the listeners.
 10. Built from source on the box; SQLite 3.54.1 pinned by SHA-256; the PGO profile is produced
 during the build, nothing is committed but source.
@@ -407,3 +418,436 @@ seed and PGO binary, preferably from a separate k6 host, and collect
 p95/p99, errors, CPU/request, RAM, `enobufs`, retransmissions and TCP
 memory. A smaller receive window may hurt throughput, so **do not enable
 without an A/B win**. No performance claim until the official benchmark.
+
+## Short kernel calls (follow-up to #486)
+
+Two switches, both on: **`SUBMIT_CHUNK=128`** (a ring submits its queued operations at most 128 per
+`io_uring_enter`) and **`ENTER_EVERY=128`** (a long pass enters every ring each 128 answers). Both are
+there for one property of the box: its kernel is `PREEMPT_VOLUNTARY` ("Dynamic Preempt: voluntary"),
+so a system call runs until it decides to stop, and on one vCPU everything else waits for it,
+including ksoftirqd, which refills the NIC's 1,024-slot receive ring.
+
+What that did at 300k, measured second by second on a box like the benchmark one (below):
+
+- A batch's replies went to the kernel in one call per ring, and with `DEFER_TASKRUN` a ring's
+  receives only run inside `io_uring_enter`, all of them in one call on 6.8. After any hiccup (the
+  last seconds of the ramp, a checkpoint) those calls grew: the gap between two batches, normally
+  ~6 ms, went to 77 ms, then 411 ms with 11,203 completions in one batch, and in #486's 5-minute
+  runs up to 3.0-3.2 s.
+- Meanwhile the receive ring overflowed on the host side, invisible to the guest, and clients lost
+  packets: up to 109,000 retransmission timeouts per run on the load host (200 ms, 400, 800...).
+- Requests that arrived during a long pass stayed in their sockets, each a 4 KB page against
+  `tcp_mem`; past ~30,000 of them TCP went into memory pressure, and its queue pruning took the
+  whole CPU for 5-10 s (the box stopped answering, even the 1-second sampler skipped seconds), with
+  a 190,000-request backlog behind it.
+- Every request answered more than 40 ms late also costs a delayed ACK from the kernel (20-38k per
+  second during a stall, ~10 us each), which keeps the CPU saturated: the stall feeds itself.
+
+With both switches the same hiccups stay hiccups: no call runs long and receives leave the
+sockets every 128 answers. What is left is plain overload at the end of the ramp (~5,000 new
+connections a second on top of the requests): a queue that drains as soon as the ramp ends,
+without the freezes.
+
+| 300k users, 60 s ramp + 5 min + 30 s down, p95 / p99 / max over the whole run | runs | p95 | p99 | max |
+|---|---:|---|---|---|
+| #486 (`5b6bfd3`) | 3 | 2.6-4.1 s | 6.6-7.6 s | 10.4-17.0 s |
+| `ENTER_EVERY=128` only | 1 | 2.2 s | 3.4 s | 4.0 s |
+| **both (this PR)** | 4 | 0.57-1.48 s | 0.99-2.65 s | 1.3-3.8 s |
+
+The box: a Synteq 1 vCPU / 2 GB VPS like the benchmark one (Xeon Platinum 8260, Ubuntu 24.04,
+kernel 6.8.0-117, 1,967 MB, no swap, no firewall), the app started by systemd as `deploy` with
+`LimitNOFILE=65535` on a fresh copy of the seed for every run. The load came from a separate 4-vCPU
+box in the same datacenter (0.18 ms) running a C port of `bench/load.js` (one keep-alive connection
+per user, the same think times and request mix) over six address pairs. This box is harsher than
+the benchmark box: #486 held 300,000 there but fails it here every time, so the absolute numbers
+are not a prediction, only the difference is. Both switches can be turned off (`=0`).
+
+Things measured on the way that did not help and are not in this PR: answering this batch's
+arrivals before an existing backlog (fewer stalled seconds, but the backlog's own requests waited
+up to 20 s), smaller pieces (`SUBMIT_CHUNK=32`, `ENTER_EVERY=64`), no 64 MB log read-ahead, 16 MB
+checkpoint cycles, no periodic page drop or writeback kicks, a lower-priority event loop (nice 5/10).
+
+## Newest first (follow-up to #486)
+
+One change of order: **a pass answers what arrived since the last pass first, and the backlog
+with what is left** (`FRESH_FIRST`, on). It was the other way round, oldest first. Two rules make
+it exact: a pass takes the arrivals that can still be answered within the kernel's 40 ms, however
+many that is, and the backlog waits while arrivals are still being sent to it. Three small things
+go with it: a reply that is sent late puts its socket back into delayed-ACK mode
+(`DELACK_RESTORE`, on), the listeners start in that mode (`QUICKACK_OFF`, on, as in
+fsharp-uring-delneg #437), and the number of connections kept alive is limited by the box's memory
+(`KEEP_LIMIT`, with `CONN_LIMIT` behind it). No request is dropped: every one that is read is answered.
+
+Why the order matters here. Linux acknowledges a request with its response if the response
+leaves within 40 ms. If it does not, the delayed-ACK timer sends an ACK of its own and takes the
+socket out of delayed-ACK ("pingpong") mode, so that connection's *next* request, seconds later,
+is acknowledged on arrival with another packet of its own. A late reply therefore costs up to two
+packets more than a reply in time, kernel work of the order of the reply itself. Oldest first,
+one pause of the loop (a preemption, a disk wait, the last seconds of the ramp) makes every
+request behind it late, each late request costs those packets, and above ~80 % of the CPU that
+is more than the spare capacity: the queue stops draining, and latency settles at 1-2 s, where
+the slowed-down clients finally send less. The failed runs on a box like the benchmark one (the
+one of the section above) all looked like that: a failed 280k run sent 4.1
+million segments that carried no data, a clean 300k run 1.6 million, and second by second the
+server sent more packets than it received for as long as the queue lasted and for ten seconds
+after it (the second ACKs).
+
+Newest first, a pause costs the requests that were waiting when it ended, and no others:
+
+- A pass is sized by that deadline, not by a count. The loop measures what an answer costs it (a
+  pass and its enter, per answer: 25-30 µs at 300k users). A pass's n arrivals are spread over
+  the time since the last pass, its `age`; the newest k of them all leave within `DEADLINE_MS`
+  (32, the 40 ms with a margin) if `age * k / n + k * cost` fits in it. That many are answered
+  now, all of them if it holds for n. An arrival stays in its receive buffer on its ring's
+  "fresh" list until the pass has seen every ring; the ones that cannot make it move to the
+  backlog in arrival order, from each ring in proportion. (The first version of this PR took 384
+  a pass whatever they cost, `ANSWERS_PER_PASS=384`: a pass that started 3 ms late sent the tail
+  of its arrivals to the backlog though they could still have been answered in time.)
+- The backlog is answered oldest first with what the arrivals leave of a pass of `PASS_MS` (8 ms
+  of work: half of what the deadline would allow, so that a pass that starts late still answers
+  its arrivals in time), and only once no arrival has gone to it for `BACKLOG_QUIET_MS` (30).
+  While arrivals do not fit their passes, a request answered from the backlog sends an arrival
+  there in its place, in that pass or the next: the backlog is no shorter, one more request is
+  late, and one more delayed ACK is paid. (The first version gave the backlog 24 answers of
+  every pass: in the last seconds of the ramp at 320k, 92,000 requests went through a backlog
+  that never held more than 36,000.) A lasting overload cannot starve it: once its oldest
+  request has waited `BACKLOG_AGE_MS` (20 s) it gets `FRESH_RESERVE` (24) answers of every pass,
+  and half of every pass after twice that, so nothing comes near a client's timeout.
+- Backlog replies, writes released from a checkpoint hold, and everything a pass answers after
+  the loop was away for more than `LATE_MS` (20) get one more operation behind their send:
+  `setsockopt(TCP_QUICKACK, 0)` through `IORING_OP_URING_CMD` (a direct descriptor has no file
+  descriptor to call it on), which puts the socket back into delayed-ACK mode. Its next request
+  is then acknowledged by its response again.
+- `TCP_QUICKACK` off on the listeners does the same for a connection's first request: one packet
+  less per new connection, ~5,000 a second at the end of the ramp.
+- With passes this short nothing needs reaping or entering mid-pass: `ENTER_EVERY` is off in
+  this mode (`SUBMIT_CHUNK=128` stays).
+- A waiting request keeps a 128-byte buffer, not 512 (a GET is ~100 bytes): with every
+  connection waiting, that was 170 MB the box does not have (see the limits below).
+
+This is the "adaptive LIFO" of overloaded request queues (Maurer, *Fail at Scale*, ACM Queue
+2015), with the kernel's delayed-ACK timer as the deadline.
+
+Measured on that box with the first version (`1ac444a`: 384 answers a pass, 24 of them for the
+backlog), whole-run percentiles like k6's thresholds:
+
+| 300k users, 60 s ramp + 4 min; the server process stopped (SIGSTOP) for 150 ms at 150 s and for 300 ms at 220 s | p95 | p99 | 10-second windows after the 300 ms pause (p95) |
+|---|---|---|---|
+| #505 (`29cfa02`, oldest first) | 221.5 ms | 732.8 ms | 678 ms, 1,008 ms, 189 ms, 325 ms, then normal; again 332 ms 80 s later |
+| first version | 10.8 ms | 33.4 ms | 21 ms, 163 ms, 15 ms, then normal |
+
+The pause leaves ~15,000 requests waiting; here they are answered within 2 s and nobody else
+waits, there every request of the next 40 s waited behind them. The end of the ramp, a pause of
+its own kind, went from p95 198-329 ms for 20 s to 17 ms.
+
+| 320k users, 60 s ramp + 5 min + 30 s down | p95 | p99 | max | failed |
+|---|---|---|---|---|
+| #505 | 3.7 s | 5.5 s | | 0 |
+| first version | 17.5 ms | 404.5 ms | 5.7 s | 0 |
+
+That run is the first 320k one this entry has passed on that box. What is left in it is the last
+ten seconds of the ramp, where the new connections (~5,300 a second) and the requests together
+need more than the CPU: the backlog reaches 36,000 there, requests wait up to 5.7 s, and the hold
+is clean. Those seconds are what the two rules above (passes sized by the deadline, a backlog
+that waits) are for: they cost 92,000 late requests where 36,000 would have paid the same debt,
+and a 2-minute probe at 320k has room for ~57,000 requests over 1 s before its p99 fails.
+
+That box was down from the 340k run below until Nov 22, so the two rules were measured on a KVM
+guest on my PC: the benchmark box's kernel (6.8.0-117) and memory (1,967 MB), one vCPU capped at a
+share of a host core (68 % puts 320k users at ~85 % of it), load from the host over a tap device,
+a fresh boot before every run, the versions interleaved. "First version" is the first commit's
+behaviour (`ANSWERS_PER_PASS=384 BACKLOG_AGE_MS=0 BACKLOG_QUIET_MS=0`). All runs are 320k users,
+60 s ramp + 2 min + 30 s down, the shape of a probe.
+
+Nothing injected; what goes wrong is the end of the ramp and the guest's own hiccups:
+
+| cap | | p95 | p99 | requests over 1 s | sent to the backlog | delayed ACKs |
+|---|---|---|---|---|---|---|
+| 68 % | first version | 20.3 / 22.3 / 10.7 ms | 746 / 370 / 19 ms | 37,824 / 41,541 / 0 | 129,687 / 167,812 / 18,586 | 162,788 / 188,465 / 59,205 |
+| 68 % | **this PR** | 10.7 / 11.2 ms | 20.4 / 21.0 ms | 0 / 0 | 1,555 / 1,449 | 52,263 / 52,199 |
+| 64 % | first version | 19.3 / 14.3 ms | 206 / 29 ms | 11,701 / 0 | 115,383 / 44,615 | 145,035 / 68,188 |
+| 64 % | **this PR**, `PASS_MS=16` | 16.5 / 16.7 ms | 39 / 38 ms | 0 / 0 | 17,835 / 17,678 | 76,359 / 81,799 |
+
+An overload made on purpose 35 s into the hold (the cap drops from 68 %):
+
+| the cap drops to | | p99 | requests over 1 s | sent to the backlog | |
+|---|---|---|---|---|---|
+| 50 % for 10 s | first version, four runs | 2.5-4.6 s | 118,165-234,363 | 181,855-318,629 | all fail |
+| 50 % for 10 s | **this PR**, two runs | 236 / 514 ms | 52,418 / 55,541 | 59,939 / 59,756 | both pass |
+| 54 % for 6 s | first version, two runs | 225 / 692 ms | 59 / 30,567 | 104,171 / 129,805 | both pass |
+| 54 % for 6 s | **this PR**, `PASS_MS=16`, two runs | 39 / 40 ms | 6,348 / 2,168 | 28,296 / 24,395 | both pass |
+
+The first version turns a small backlog over fast enough to keep most of it under a second, at
+the price of four times as many late requests; past a certain depth that stops working and the
+late requests are all it has to show. This PR pays the debt once.
+
+And an overload that lasts, 320k at a cap of 46 %, a quarter more than the guest can serve, for
+the whole run (`PASS_MS=16`): no request failed or timed out with either version. The first
+version answered 24 % of the requests after more than 1 s (longest wait 15.9 s), this one 16 %
+(22.1 s), with 60,000-80,000 requests waiting at any moment and ~200 MB of page cache left
+throughout.
+
+Not every run went well. The guest has pauses of its own, 0.5-2 s in which the server gets no
+CPU, in some runs and not in others; they are why single runs differ so much. In two runs of this
+PR (one of them the third of the 68 % rows above, which is why that row has two numbers) such a
+pause left more requests unread than the guest's memory holds, and the kernel ended the server
+(the collapse described below). The first version met pauses as long in other
+runs and came through: two cases in thirteen runs against none in fifteen. In both of those runs
+the guest was losing a fifth of its time to the host (3-8 % in the other runs), so I take them
+for the host's doing, but I cannot prove it, and say it for that reason.
+
+**The limits.** The test box at 340k, with the first version and no limit, stopped answering on
+the network 200 s into the run and had to be restarted (its kernel log of that boot ends with the
+OOM killer ending the server). The guest shows why. A connection costs the kernel 4.13 KB (the
+TCP socket, its inode, dentry and file, the armed receive), so 340,000 are 1.4 GB on 1,967 MB,
+and what is left is ~100 MB free and ~150 MB of page cache. That is enough for a quiet run (340k at a reduced
+request rate held for four minutes) and not for a burst. A request that arrives while the server
+is not running waits in its socket and pins ~3.5 KB there (its slice of one of the network
+driver's 32 KB receive pages), so at 320k the box has room for about two seconds' worth of
+requests, and at 340k for one. Past that the kernel's OOM killer ends the server; if packets
+keep coming it ends every other process next and then gives up ("Kernel panic - not syncing:
+System is deadlocked on memory"), which from outside is a box that no longer answers. The end of
+a run is such a burst too, every connection closing at once with an unread FIN in each: on the
+guest the server was killed there, after the measurement, in every run at 330k and above before
+this commit, in some at 320k, and in none at 310k. The test box went down a second time that
+way, at the end of a 270k run on a day it was running a third slower than usual (page allocation
+failures in interrupt context, then nothing); my load generator has closed its connections over
+the 30 s of the ramp-down since then, so the runs on that box below say nothing about that
+moment.
+
+No server setting changes what a connection or an unread request costs the kernel; what the
+server can decide is how many connections it holds. There are two limits.
+
+**`KEEP_LIMIT`**, (MemTotal - 630 MB) / 4.25 KB, 322,000 on that box: the most connections kept
+alive at once. A user who arrives when that many are open is still served, on a *brief
+connection*: it is accepted on a ring of its own, its one request is answered with
+`Connection: close`, and the close is linked behind the reply's send, so the FIN leaves with the
+reply and the client dials again for its next request. The connection holds its 4 KB for a few
+milliseconds instead of for the run, and the box's memory stays where 322,000 connections put
+it however many users there are. The price is a handshake and a close for every request of the
+users past the limit. Below the limit nothing changes, and the brief ring is not entered. (The
+count is looked at once a pass, so the connections one pass accepts are all kept: 8 and 40 past
+the limit in the two runs below, and after a pause of the loop whatever the listen queues held,
+at most up to `CONN_LIMIT`.)
+
+- The brief ring uses ordinary descriptors, not direct ones. On this kernel (6.8) a direct
+  descriptor that is closed is released only when every request submitted before its close has
+  ended, and on the other rings each connection's multishot receive is such a request. A
+  connection closed there keeps its memory until the receives of the connections accepted before
+  its close have ended, which under a steady load is the end of the run. Measured on the guest
+  with the previous commit, 20,000 users on kept connections beside 20,000 who ask for
+  `Connection: close` with every request (2,100 closes a second): TCP sockets in use stayed at
+  20,000 while sockets allocated went from 20,000 to 202,000 in 110 s and free memory from
+  1,104 MB to 155 MB; all of it came back when the kept connections closed. An ordinary
+  descriptor is released with its last reference, and a connection whose one read has completed
+  has none left but the descriptor table's.
+- A brief connection that waits holds a whole socket, a kept connection's waiting request 128
+  bytes. So a pass answers the brief ring's arrivals first, the listen queues are 256 entries
+  each while the newcomers are brief (a connection in a listen queue is a socket with its
+  request in it), and one that has not sent a whole request after `BRIEF_WAIT_MS` (5 s) is
+  closed.
+
+**`CONN_LIMIT`**, (MemTotal - 600 MB) / 4.25 KB, 329,000 on that box: the most connections of
+both kinds. It is reached only if brief connections pile up unanswered, 7,000 of them. Then the
+listen queues go down to one entry: the kernel drops the SYNs, those users wait in `connect()`,
+and a connection that still gets through is answered `503` and closed. (Refusing every one of
+them with a 503 was tried and taken out: accepting a connection to refuse it costs what
+accepting it to serve it costs, at the moment the box has least to spare.) Until this commit
+that was the only limit: the users past 329,000 waited in `connect()` until the load
+generator's timeout, like the users over 65,535 of the entries in the leaderboard's footnote on
+the descriptor limit, and the box held 329,000 connections' worth of memory, which the guest did
+not always survive (below).
+
+Checked on the test box with `KEEP_LIMIT=50 CONN_LIMIT=90` and 120 clients: the first 50 keep
+their connections and go on being answered on them; the other 70 are answered on one connection
+per request, 280 of 280 (health, feed and post), each reply with `Connection: close` and the EOF
+behind it; a request that comes in two pieces is answered; a brief connection that sends nothing
+is closed after `BRIEF_WAIT_MS`; with 40 brief connections open and silent the next ones get
+503; the server has the same number of descriptors before and after.
+
+**Measured on the test box**, which is back and at its old speed. This commit, load from the
+generator box as before, 60 s ramp + 2 min + 30 s down unless said otherwise, whole-run
+percentiles:
+
+| users | p95 | p99 | failed | brief connections | open at once (sampled every 10 s) | server's CPU | least free memory |
+|---|---|---|---|---|---|---|---|
+| 320k, five runs | 22-53 ms | 818 ms, 6.3 s, 540 ms, 3.8 s, 4.5 s | 0 | 0 | 0 | 55-59 % | 84-99 MB |
+| 320k, 5 min hold, two runs | 22.2 / 18.8 ms | 237 / 61 ms | 0 | 0 | 0 | 55 / 57 % | 85 / 86 MB |
+| 330k | 35.0 ms | 3.46 s | 0.002 % | 100,376 | 17 | 62 % | 87 MB |
+| 340k | 32.4 ms | 2.63 s | 0.005 % | 235,055 | 44 | 67 % | 84 MB |
+
+The 2-minute runs at 320k differ mostly in one place, the last ten seconds of the ramp, where the new
+connections (5,300 a second) and the requests together need more CPU than there is: that leaves
+39,000 to 180,000 requests over 1 s, a 2-minute run has room for 57,000 (two of the five pass)
+and a 5-minute run for 117,000 (both pass, with 42,000 and 20,000). What that moment costs is
+mostly kernel work per packet, which grows with the number of connections: in a profile at
+330k, looking up the connection of each arriving packet (`__inet_lookup_established`, a hash
+table of 16,384 chains for 330,000 sockets) is 16.6 % of all the CPU the box has.
+
+At 330k and 340k every user is served and the box's memory is where it is at 320k. The failures
+are my load generator's, not the server's (it gives each user a fixed source port, and 135 and
+320 dials found theirs still in TIME_WAIT on the generator). A request on a brief connection
+costs between two and a half and three times one on a kept connection: at 340k, 1,700 of them a
+second took 5 % of the CPU more than the same requests on kept connections would have.
+
+The 330k and 340k runs fail on p99 all the same, and the brief connections are not why. At
+82-86 % of the CPU this box has an episode every 20-40 s in which packet processing takes the
+CPU for a few seconds (the storms the newest-first order is for: each now costs the requests that
+arrive during it, 20,000-50,000 over 1 s, and no others), and a 2-minute run has room for one. At
+320k, 76-79 % of the CPU, there is the one at the end of the ramp. So on this box the limit is not what
+decides a run above 320k; what `KEEP_LIMIT` changes is that such a run is safe to make.
+
+**What the previous commit did above its limit**, on the guest. At 330k (cap 68 %), twice: the
+kernel ended the server both times when the load generator closed every connection at the end
+of the run, 329,000 unread FINs at once (at 320k, the same day and cap, that moment left 41-103 MB
+free, four times of four). At 340k, three times (cap 66-68 %): once it ran to its end, with the
+10,000 users over the limit waiting in `connect()` and 0.72 % of the requests failed; twice the kernel ended the
+server during the hold (2 s before its end, and 25 s into it), and then every other process, and
+the guest was gone. With `KEEP_LIMIT` the server holds 7,000 connections fewer than that, as many
+as in the 320k runs this box has been through many times.
+
+**What neither limit does.** At 400k and 640k (rehearsed with the previous commit on the guest,
+five times) there are twice the users the box can serve: packet processing takes the CPU, the
+server gets none for seconds at a time, memory runs out as described above, and the kernel ended
+the server every time; in three of the five (400k once, 640k twice) it then ended everything else
+and panicked. Brief connections do not change that: so many of them pile up unanswered that
+`CONN_LIMIT` is reached, and from there it is the same. (I could not rehearse these again with
+this commit: the guest runs on my PC, which was in use.) A server that held few enough
+connections to live through that, ~240,000 on this memory, could not hold 320,000 in the probe
+before it. So if 320k passes on the benchmark box, the probes far above it may take the box down,
+with this server or any other that holds that many connections.
+
+As in the section above, the test box and the guest are harsher than the benchmark box and the
+numbers are a comparison, not a prediction. `FRESH_FIRST=0` restores the old order (with
+`ANSWERS_PER_PASS=2048` and `ENTER_EVERY=128`); `ANSWERS_PER_PASS=384 BACKLOG_AGE_MS=0
+BACKLOG_QUIET_MS=0` is the first version of this PR; `DELACK_RESTORE=0`, `QUICKACK_OFF=0`,
+`KEEP_LIMIT=0` (every connection is kept, up to `CONN_LIMIT`) and `CONN_LIMIT=0` turn off the
+others.
+
+## Rows by rowid: one cell first (follow-up to #486)
+
+A profile on the test box (kernel 6.8, six seconds of the hold of a 320,000-user run) put a
+fifth of the CPU time in use in this server's own code and four fifths in the kernel. (Profiling
+at that load is not repeatable: the profiler's start cost three seconds of CPU, the box fell
+behind and the run did not survive it. The other profiles here are from 200,000 users.) Of the
+server's fifth, the largest single piece was the look-up of a feed's 20 authors: each is a row
+of `users` on a different leaf, and in each leaf the search read the first and the last rowid,
+divided, and probed two or three cells, every one a first touch of that page. This commit
+changes how the row is found, not what is read:
+
+- While the descent chooses a key's child page it reads the parent's key before that child, and
+  every rowid in the child is larger. In a leaf whose rowids run on without a gap from that key,
+  the row with rowid `k` is in cell `k - that key - 1`. That cell is read first, and if it holds
+  `k` it is the row: keys are unique and ordered, so the cell that holds the key is the answer
+  whatever the other cells hold. One cell read instead of five or six. If it holds something else
+  (a gap in the rowids, the tree's first leaf, a root that is a leaf), the page is searched as
+  before.
+- A page's first and last rowid are read only when a search needs them, and the straight line
+  through them costs one division per page (in `double`) instead of a 64-bit division per key and
+  level.
+- `GET /posts/:id` finds the post and then its author with this descent, one key each, instead
+  of two `sqlite3BtreeTableMoveto` calls. A record that spills to overflow pages, or anything
+  else not in the expected form, is read with the cursor as before.
+
+Every page still comes from SQLite's pager (`getAndInitPage`, `releasePage`) inside the batch's
+transaction, and nothing is kept between requests.
+
+**Checked** with a test build (`SELFCHECK=1 bash build.sh`) in which every answer of the B-tree
+path is followed by the reference SQL on the same snapshot and the two are compared byte for
+byte: 786,000 answers under 100,000 users, with their posts and likes going in (so with leaves
+filling and splitting), none different, no fallbacks. And the 42 tests.
+
+**Measured** on the test box at 200,000 users, where it is half busy and has no stalls, so the
+number is steady from run to run: 40 s ramp + 90 s + 30 s down, runs alternating between the
+previous commit and this one; the server process's user CPU (from its cgroup) divided by the
+requests.
+
+| | user CPU per request |
+|---|---|
+| previous commit | 5.54, 5.44, 5.67 µs |
+| this commit | 4.91, 4.85, 4.92, 4.83, 4.83, 4.74, 4.93, 4.80, 5.03 µs |
+
+That is 0.6 µs a request, 11 % of this server's user time. At 320,000 users (34,000 requests a
+second) it is about 2 % of the box's CPU: small, but the 2-minute runs at 320k are decided in
+the seconds at the end of the ramp where the box has none to spare (the section above).
+
+**At 320k**, eight 2-minute runs of each commit on the test box (60 s ramp + 2 min + 30 s
+down, as in the table of the section above). The first five runs of the commit before are from
+the day before; its last three and all eight of this commit are from one evening, the last five
+of this commit alternating with them. Nothing failed in any of them and the least free memory
+was 66-99 MB. A run passes with fewer than about 57,000 requests over 1 s:
+
+| | p99 of each run | pass | requests over 1 s, per run | mean |
+|---|---|---|---|---|
+| commit before | 818 ms, 6.3 s, 540 ms, 3.8 s, 4.5 s, 114 ms, 9.1 s, 371 ms | 4 of 8 | 54k, 181k, 39k, 76k, 108k, 2k, 141k, 42k | 80k |
+| this commit | 4.1 s, 40 ms, 628 ms, 2.2 s, 223 ms, 621 ms, 1.7 s, 108 ms | 5 of 8 | 77k, 11k, 46k, 61k, 45k, 49k, 88k, 31k | 51k |
+
+p95 is 14-27 ms with this commit and 18-53 ms before. Every run of both still has its stall at
+the end of the ramp, and how deep it goes varies more from run to run than between the two
+commits, so this is one pass more in eight and fewer late requests on average, not a different
+picture. The server's user CPU in these runs is 4.6-4.9 µs a request with this commit and
+5.2-5.4 µs in the three runs of the commit before that evening.
+
+Three more things were tried on top and left out because they did not measure faster: the
+feed's 20 rows through the same descent instead of cursor steps (5.00, 4.94 µs); prefetch hints
+for each author's chain of loads (the page cache's hash slot, the page's headers, the cell)
+before the pager is called for any of them (4.90, 4.93 µs: `users` has 20,000 rows on about 300
+leaves, which the processor's caches hold, so there was little waiting to overlap); and
+SQLite's `biasRight` argument for the feed's first row (4.79, 4.86 µs, no difference).
+
+The same profile says where the rest goes at 320k, for anyone working on this box: finding the
+connection of each arriving packet (`__inet_lookup_established`) 14-17 % of the CPU in use, zeroing
+the pages that packets are received into and sent from (`clear_page_erms`, the kernel's
+`init_on_alloc`) 4.5 %, the AppArmor hooks on every send and receive about 3 %. The server
+receives 2.4 packets per request: the request, and 1.4 bare ACKs, because a feed response is
+three segments and the load generator's kernel acknowledges it twice. None of that is the
+server's to change.
+
+## A batch keeps its references to the pages of `users` (follow-up to #486)
+
+After the commit above, what was left of the author look-ups was mostly the pager: for each of a
+feed's 20 leaves a hash look-up, taking the page off the cache's list of unreferenced pages, and
+putting it back when the request is done. A batch asks for the same pages again and again: at
+320,000 users a batch has about 190 feeds, so 3,800 author look-ups, on the 300 leaves that hold
+the 20,000 users of the load test.
+
+A page of `users` that a batch has read now keeps one reference until the batch's cursors close,
+which is before its transaction ends: what an open cursor does with the page it is on. The
+references are in a table by page number (1,024 slots), and a look-up that arrives at a page in
+the table takes it from there instead of asking the pager again. The row is read from the page
+for every request, as before. No row, key or position is remembered, only that this page of
+SQLite's cache is already referenced in this transaction, and the table is empty again when the
+batch commits.
+
+Only `users`, because no statement here writes it: the two `INSERT`s write `posts`, `likes` and
+their indexes, so a page of `users` is not changed, freed or moved while it is referenced. (A
+changed page would be read as changed, since the table holds SQLite's own page object; but a
+write can free a page, and SQLite refuses to reuse a freed page that is still referenced, so
+pages of tables that are written are fetched and released per request as before.) A page whose
+slot is taken by another page is fetched and released as before too.
+
+**Checked** as above: the `SELFCHECK=1` build, 786,000 answers under 100,000 users with writes
+going in, none different from the reference SQL, no fallbacks; the 42 tests; no SQLite error in
+any of the runs below.
+
+**Measured** on the test box, on one evening (60 s ramp + 2 min + 30 s down at 320k). The runs
+of this commit alternated with runs of the commit above: both of its runs at 200k and the last
+four of its twelve at 320k.
+
+| | commit above | this commit |
+|---|---|---|
+| 200,000 users, user CPU per request | 4.94, 4.81 µs | 4.69, 4.72 µs |
+| 320,000 users, user CPU per request | 4.63-4.92 µs (12 runs) | 4.44-4.50 µs (7 runs) |
+| 320k, runs that pass | 7 of 12 | 6 of 7 |
+| 320k, p99 of each run | the eight above, then 6.4 s, 39 ms, 3.7 s, 56 ms | 61 ms, 224 ms, 53 ms, 51 ms, 230 ms, 112 ms, 1.16 s |
+| 320k, requests over 1 s per run | 77k, 11k, 46k, 61k, 45k, 49k, 88k, 31k, 116k, 0, 91k, 20k: mean 53k | 0, 14k, 14k, 10k, 46k, 22k, 64k: mean 24k |
+| 320k, p95 | 14-28 ms | 16-23 ms |
+
+and one 5-minute hold at 320k with this commit: p95 18.2 ms, p99 168 ms, nothing failed, least
+free memory 96 MB.
+
+The saving is 0.17 µs a request at 200k and 0.26 µs at 320k, where the batches are larger and
+more look-ups arrive at a page the batch already has; it is largest in the seconds when the
+server is behind and a batch holds thousands of requests, which is when it matters. That may be
+why the stall at the end of the ramp is shallower in most of these runs. Seven runs are few, the
+stall is still there in every one, and the one failure shows it can still go the other way.

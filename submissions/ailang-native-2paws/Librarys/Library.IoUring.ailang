@@ -1,0 +1,946 @@
+// Library.IoUring.ailang — raw io_uring for AILang
+//
+// Minimal io_uring via syscalls 425/426/427 + mmap. No liburing, no C.
+// RDMEM_IO / WRMEM_IO (volatile) only for what the kernel reads or writes while we run: the
+// SQ/CQ head and tail (Rd32/Wr32) and the provided-buffer ring tail. SQE and CQE contents
+// and buffer entries use plain accesses; they are ordered by those IO accesses.
+//
+// Designed for single-threaded network servers:
+//   IORING_SETUP_SINGLE_ISSUER | IORING_SETUP_DEFER_TASKRUN
+//
+// Copyright (c) 2026 Sean Collins, 2 Paws Machine and Engineering.
+// Released under the MIT License.
+
+// ---- Syscall numbers ----
+FixedPool.IoUringSys {
+    "SETUP": Initialize=425
+    "ENTER": Initialize=426
+    "REGISTER": Initialize=427
+    "MMAP": Initialize=9
+}
+
+// ---- io_uring_setup flags ----
+FixedPool.IoUringSetup {
+    "SQPOLL": Initialize=2
+    "SQ_AFF": Initialize=4
+    "CQSIZE": Initialize=8
+    "SINGLE_ISSUER": Initialize=4096
+    "DEFER_TASKRUN": Initialize=8192
+}
+
+// ---- io_uring_enter flags ----
+FixedPool.IoUringEnter {
+    "GETEVENTS": Initialize=1
+    "SQ_WAKEUP": Initialize=2
+    "SQ_WAIT": Initialize=4
+    "EXT_ARG": Initialize=8
+}
+
+// ---- io_uring opcodes (SQE) ----
+FixedPool.IoUringOp {
+    "NOP": Initialize=0
+    "READV": Initialize=1
+    "WRITEV": Initialize=2
+    "FSYNC": Initialize=3
+    "READ_FIXED": Initialize=4
+    "WRITE_FIXED": Initialize=5
+    "POLL_ADD": Initialize=6
+    "POLL_REMOVE": Initialize=7
+    "TIMEOUT": Initialize=11
+    "TIMEOUT_REMOVE": Initialize=12
+    "ACCEPT": Initialize=13
+    "CANCEL": Initialize=14
+    "LINK_TIMEOUT": Initialize=15
+    "CONNECT": Initialize=16
+    "CLOSE": Initialize=19
+    "SEND": Initialize=26
+    "RECV": Initialize=27
+    "SHUTDOWN": Initialize=36
+    "SOCKET": Initialize=45
+    "SEND_ZC": Initialize=53
+    "RECV_MULTI": Initialize=58
+}
+
+// ---- SQE flags ----
+FixedPool.IoUringSqe {
+    "FIXED_FILE": Initialize=1
+    "IO_DRAIN": Initialize=2
+    "IO_LINK": Initialize=4
+    "IO_HARDLINK": Initialize=8
+    "ASYNC": Initialize=16
+    "BUFFER_SELECT": Initialize=32
+    "CQE_SKIP_SUCCESS": Initialize=64
+}
+
+// ---- CQE flags ----
+FixedPool.IoUringCqe {
+    "F_BUFFER": Initialize=1
+    "F_MORE": Initialize=2
+    "F_NOTIF": Initialize=8
+}
+
+// ---- IOSQE_* for accept multishot ----
+FixedPool.IoUringAccept {
+    "MULTISHOT": Initialize=1
+    "RECV_MULTISHOT": Initialize=2
+    "FILE_INDEX_ALLOC": Initialize=4294967295
+    "RSRC_SPARSE": Initialize=1
+    "STATE_SIZE": Initialize=128
+}
+
+// ---- Register opcodes ----
+FixedPool.IoUringReg {
+    "REGISTER_BUFFERS": Initialize=0
+    "UNREGISTER_BUFFERS": Initialize=1
+    "REGISTER_FILES": Initialize=2
+    "UNREGISTER_FILES": Initialize=3
+    "REGISTER_FILES_UPDATE": Initialize=6
+    "REGISTER_FILES2": Initialize=13
+    "REGISTER_PBUF_RING": Initialize=22
+    "UNREGISTER_PBUF_RING": Initialize=23
+}
+
+// ---- mmap offsets for io_uring ----
+FixedPool.IoUringMmap {
+    "SQ_OFF": Initialize=0
+    "CQ_OFF": Initialize=0x8000000
+    "SQES_OFF": Initialize=0x10000000
+    "PROT_RW": Initialize=3
+    "MAP_SHARED": Initialize=1
+    "MAP_POPULATE": Initialize=32768
+}
+
+// ---- io_uring_params offsets (120 bytes total) ----
+// struct io_uring_params {
+//   u32 sq_entries;         // 0
+//   u32 cq_entries;         // 4
+//   u32 flags;              // 8
+//   u32 sq_thread_cpu;      // 12
+//   u32 sq_thread_idle;     // 16
+//   u32 features;           // 20
+//   u32 wq_fd;              // 24
+//   u32 resv[3];            // 28
+//   struct io_sqring_offsets sq_off;  // 40 (40 bytes)
+//   struct io_cqring_offsets cq_off;  // 80 (40 bytes)
+// };
+FixedPool.IoUringParamsOff {
+    "SQ_ENTRIES": Initialize=0
+    "CQ_ENTRIES": Initialize=4
+    "FLAGS": Initialize=8
+    "FEATURES": Initialize=20
+    "SQ_OFF": Initialize=40
+    "CQ_OFF": Initialize=80
+    "SIZE": Initialize=120
+}
+
+// ---- sq_ring_offsets (from params+40) ----
+// struct io_sqring_offsets {
+//   u32 head;       // 0
+//   u32 tail;       // 4
+//   u32 ring_mask;  // 8
+//   u32 ring_entries; // 12
+//   u32 flags;      // 16
+//   u32 dropped;    // 20
+//   u32 array;      // 24
+//   u32 resv1;      // 28
+//   u64 user_addr;  // 32  (not used in classic mmap path)
+// };
+FixedPool.SqOff {
+    "HEAD": Initialize=0
+    "TAIL": Initialize=4
+    "RING_MASK": Initialize=8
+    "RING_ENTRIES": Initialize=12
+    "FLAGS": Initialize=16
+    "DROPPED": Initialize=20
+    "ARRAY": Initialize=24
+}
+
+// ---- cq_ring_offsets (from params+80) ----
+// struct io_cqring_offsets {
+//   u32 head;       // 0
+//   u32 tail;       // 4
+//   u32 ring_mask;  // 8
+//   u32 ring_entries; // 12
+//   u32 overflow;   // 16
+//   u32 cqes;       // 20
+//   u32 flags;      // 24
+//   u32 resv1;      // 28
+//   u64 user_addr;  // 32
+// };
+FixedPool.CqOff {
+    "HEAD": Initialize=0
+    "TAIL": Initialize=4
+    "RING_MASK": Initialize=8
+    "RING_ENTRIES": Initialize=12
+    "OVERFLOW": Initialize=16
+    "CQES": Initialize=20
+    "FLAGS": Initialize=24
+}
+
+// ---- SQE layout (64 bytes) ----
+FixedPool.SqeOff {
+    "OPCODE": Initialize=0
+    "FLAGS": Initialize=1
+    "IOPRIO": Initialize=2
+    "FD": Initialize=4
+    "OFF": Initialize=8
+    "ADDR": Initialize=16
+    "LEN": Initialize=24
+    "RW_FLAGS": Initialize=28
+    "USER_DATA": Initialize=32
+    "BUF_INDEX": Initialize=40
+    "PERSONALITY": Initialize=42
+    "SPLICE_FD_IN": Initialize=44
+    "ADDR3": Initialize=48
+    "SIZE": Initialize=64
+}
+
+// ---- CQE layout (16 bytes) ----
+FixedPool.CqeOff {
+    "USER_DATA": Initialize=0
+    "RES": Initialize=8
+    "FLAGS": Initialize=12
+    "SIZE": Initialize=16
+}
+
+// ---- Ring state (one per io_uring instance) ----
+FixedPool.IoUring {
+    "ring_fd": Initialize=-1, CanChange=True
+    "sq_ring": Initialize=0, CanChange=True
+    "cq_ring": Initialize=0, CanChange=True
+    "sqes": Initialize=0, CanChange=True
+    "sq_mask": Initialize=0, CanChange=True
+    "cq_mask": Initialize=0, CanChange=True
+    "sq_head_off": Initialize=0, CanChange=True
+    "sq_tail_off": Initialize=0, CanChange=True
+    "sq_array_off": Initialize=0, CanChange=True
+    "cq_head_off": Initialize=0, CanChange=True
+    "cq_tail_off": Initialize=0, CanChange=True
+    "cq_cqes_off": Initialize=0, CanChange=True
+    "sq_entries": Initialize=0, CanChange=True
+    "cq_entries": Initialize=0, CanChange=True
+    "params": Initialize=0, CanChange=True
+    "setup_flags": Initialize=4096, CanChange=True
+}
+
+
+// ---- Helper: read u32 from io_uring shared memory ----
+Function.IoUring.Rd32 {
+    Input: base: Address
+    Input: off: Integer
+    Output: Integer
+    Body: { ReturnValue(RDMEM_IO_32(base, off)) }
+}
+
+// ---- Helper: write u32 to io_uring shared memory ----
+Function.IoUring.Wr32 {
+    Input: base: Address
+    Input: off: Integer
+    Input: val: Integer
+    Body: { WRMEM_IO_32(base, off, val) }
+}
+
+// ---- Helper: read u32 from normal (params) memory ----
+Function.IoUring.RdParam32 {
+    Input: base: Address
+    Input: off: Integer
+    Output: Integer
+    Body: { ReturnValue(RDMEM_32(Add(base, off))) }
+}
+
+// ---- Helper: write u32 to normal memory ----
+Function.IoUring.WrParam32 {
+    Input: base: Address
+    Input: off: Integer
+    Input: val: Integer
+    Body: { WRMEM_32(Add(base, off), val) }
+}
+
+
+// ============================================================
+// Setup: create ring, mmap SQ/CQ/SQEs
+// ============================================================
+
+Function.IoUring.Setup {
+    Input: entries: Integer
+    Output: Integer
+    Body: {
+        params = Allocate(IoUringParamsOff.SIZE)
+        // Zero the params struct
+        i = 0
+        WhileLoop LessThan(i, IoUringParamsOff.SIZE) {
+            WRMEM_8(params, i, 0)
+            i = Add(i, 1)
+        }
+        IoUring.params = params
+
+        // SINGLE_ISSUER by default. DEFER_TASKRUN is opt-in: it runs completion work only
+        // inside io_uring_enter, which starved a desktop's WiFi softirqs under load.
+        flags = IoUring.setup_flags
+        IoUring.WrParam32(params, IoUringParamsOff.FLAGS, flags)
+
+        // syscall: io_uring_setup(entries, params)
+        fd = SystemCall(IoUringSys.SETUP, entries, params)
+        IfCondition LessThan(fd, 0) ThenBlock: {
+            Deallocate(params, IoUringParamsOff.SIZE)
+            ReturnValue(fd)
+        }
+        IoUring.ring_fd = fd
+
+        // Read back ring sizes
+        sq_entries = IoUring.RdParam32(params, IoUringParamsOff.SQ_ENTRIES)
+        cq_entries = IoUring.RdParam32(params, IoUringParamsOff.CQ_ENTRIES)
+        IoUring.sq_entries = sq_entries
+        IoUring.cq_entries = cq_entries
+
+        // Read SQ ring offsets from params (these are byte offsets within the mmap'd ring)
+        sq_base = Add(params, IoUringParamsOff.SQ_OFF)
+        sq_head_off = IoUring.RdParam32(sq_base, SqOff.HEAD)
+        sq_tail_off = IoUring.RdParam32(sq_base, SqOff.TAIL)
+        sq_mask_off = IoUring.RdParam32(sq_base, SqOff.RING_MASK)
+        sq_array_off = IoUring.RdParam32(sq_base, SqOff.ARRAY)
+        IoUring.sq_head_off = sq_head_off
+        IoUring.sq_tail_off = sq_tail_off
+        IoUring.sq_array_off = sq_array_off
+
+        // Read CQ ring offsets from params
+        cq_base = Add(params, IoUringParamsOff.CQ_OFF)
+        cq_head_off = IoUring.RdParam32(cq_base, CqOff.HEAD)
+        cq_tail_off = IoUring.RdParam32(cq_base, CqOff.TAIL)
+        cq_mask_off = IoUring.RdParam32(cq_base, CqOff.RING_MASK)
+        cq_cqes_off = IoUring.RdParam32(cq_base, CqOff.CQES)
+        IoUring.cq_head_off = cq_head_off
+        IoUring.cq_tail_off = cq_tail_off
+        IoUring.cq_cqes_off = cq_cqes_off
+
+        // mmap SQ ring
+        sq_ring_sz = Add(sq_array_off, Multiply(sq_entries, 4))
+        prot = IoUringMmap.PROT_RW
+        mflags = BitwiseOr(IoUringMmap.MAP_SHARED, IoUringMmap.MAP_POPULATE)
+        sq_ring = SystemCall(IoUringSys.MMAP, 0, sq_ring_sz, prot, mflags, fd, IoUringMmap.SQ_OFF)
+        IfCondition LessThan(sq_ring, 0) ThenBlock: { ReturnValue(-2) }
+        IoUring.sq_ring = sq_ring
+
+        // mmap SQE array
+        sqes_sz = Multiply(sq_entries, SqeOff.SIZE)
+        sqes = SystemCall(IoUringSys.MMAP, 0, sqes_sz, prot, mflags, fd, IoUringMmap.SQES_OFF)
+        IfCondition LessThan(sqes, 0) ThenBlock: { ReturnValue(-3) }
+        IoUring.sqes = sqes
+
+        // mmap CQ ring
+        cq_ring_sz = Add(cq_cqes_off, Multiply(cq_entries, CqeOff.SIZE))
+        cq_ring = SystemCall(IoUringSys.MMAP, 0, cq_ring_sz, prot, mflags, fd, IoUringMmap.CQ_OFF)
+        IfCondition LessThan(cq_ring, 0) ThenBlock: { ReturnValue(-4) }
+        IoUring.cq_ring = cq_ring
+
+        // RDMEM_64 the actual mask values from the mapped rings
+        IoUring.sq_mask = IoUring.Rd32(sq_ring, sq_mask_off)
+        IoUring.cq_mask = IoUring.Rd32(cq_ring, cq_mask_off)
+
+        ReturnValue(fd)
+    }
+}
+
+
+// ============================================================
+// SQE helpers: get next slot, fill fields, advance tail
+// ============================================================
+
+// Get the next available SQE slot. Returns SQE address or 0 if full.
+// Get the next SQE slot, zeroed. A full SQ is submitted first, so this never fails
+// while the kernel accepts submissions.
+Function.IoUring.GetSqe {
+    Output: Address
+    Body: {
+        tail = IoUring.Rd32(IoUring.sq_ring, IoUring.sq_tail_off)
+        head = IoUring.Rd32(IoUring.sq_ring, IoUring.sq_head_off)
+        IfCondition GreaterEqual(Subtract(tail, head), IoUring.sq_entries) ThenBlock: {
+            IoUring.Enter(Subtract(tail, head), 0, 0)
+            head = IoUring.Rd32(IoUring.sq_ring, IoUring.sq_head_off)
+            IfCondition GreaterEqual(Subtract(tail, head), IoUring.sq_entries) ThenBlock: { ReturnValue(0) }
+        }
+        idx = BitwiseAnd(tail, IoUring.sq_mask)
+        sqe = Add(IoUring.sqes, Multiply(idx, SqeOff.SIZE))
+        WRMEM_64(Add(sqe, 0), 0)
+        WRMEM_64(Add(sqe, 8), 0)
+        WRMEM_64(Add(sqe, 16), 0)
+        WRMEM_64(Add(sqe, 24), 0)
+        WRMEM_64(Add(sqe, 32), 0)
+        WRMEM_64(Add(sqe, 40), 0)
+        WRMEM_64(Add(sqe, 48), 0)
+        WRMEM_64(Add(sqe, 56), 0)
+        WRMEM_32(Add(IoUring.sq_ring, Add(IoUring.sq_array_off, Multiply(idx, 4))), idx)
+        ReturnValue(sqe)
+    }
+}
+
+// Advance the SQ tail by 1 (call after filling the SQE)
+Function.IoUring.SubmitAdvance {
+    Body: {
+        tail = IoUring.Rd32(IoUring.sq_ring, IoUring.sq_tail_off)
+        IoUring.Wr32(IoUring.sq_ring, IoUring.sq_tail_off, Add(tail, 1))
+    }
+}
+
+// Fill common SQE fields
+Function.IoUring.SqeSetOp {
+    Input: sqe: Address
+    Input: opcode: Integer
+    Input: fd: Integer
+    Body: {
+        WRMEM_8(sqe, SqeOff.OPCODE, opcode)
+        WRMEM_32(Add(sqe, SqeOff.FD), BitwiseAnd(fd, 4294967295))
+    }
+}
+
+Function.IoUring.SqeSetFlags {
+    Input: sqe: Address
+    Input: flags: Integer
+    Body: { WRMEM_8(sqe, SqeOff.FLAGS, flags) }
+}
+
+Function.IoUring.SqeSetAddr {
+    Input: sqe: Address
+    Input: addr: Integer
+    Body: { WRMEM_64(Add(sqe, SqeOff.ADDR), addr) }
+}
+
+Function.IoUring.SqeSetLen {
+    Input: sqe: Address
+    Input: len: Integer
+    Body: { WRMEM_32(Add(sqe, SqeOff.LEN), len) }
+}
+
+Function.IoUring.SqeSetUserData {
+    Input: sqe: Address
+    Input: data: Integer
+    Body: { WRMEM_64(Add(sqe, SqeOff.USER_DATA), data) }
+}
+
+Function.IoUring.SqeSetRwFlags {
+    Input: sqe: Address
+    Input: flags: Integer
+    Body: { WRMEM_32(Add(sqe, SqeOff.RW_FLAGS), flags) }
+}
+
+Function.IoUring.SqeSetBufGroup {
+    Input: sqe: Address
+    Input: group: Integer
+    Body: { WRMEM_16(Add(sqe, SqeOff.BUF_INDEX), group) }
+}
+
+// file_index (u32 at 44): accept/socket target slot, or close's slot + 1
+Function.IoUring.SqeSetFileIndex {
+    Input: sqe: Address
+    Input: v: Integer
+    Body: { WRMEM_32(Add(sqe, SqeOff.SPLICE_FD_IN), v) }
+}
+
+
+// ============================================================
+// Enter: flush SQ, wait for CQ completions
+// ============================================================
+
+// Submit queued SQEs and optionally wait for completions.
+// to_submit: number of new SQEs queued
+// min_complete: block until this many CQEs arrive (0 = don't block)
+// flags: IoUringEnter flags (GETEVENTS to block)
+Function.IoUring.Enter {
+    Input: to_submit: Integer
+    Input: min_complete: Integer
+    Input: flags: Integer
+    Output: Integer
+    Body: {
+        r = SystemCall(IoUringSys.ENTER, IoUring.ring_fd, to_submit, min_complete, flags, 0, 0)
+        ReturnValue(r)
+    }
+}
+
+// Convenience: submit all pending and wait for at least 1 completion
+Function.IoUring.SubmitAndWait {
+    Input: to_submit: Integer
+    Output: Integer
+    Body: {
+        r = IoUring.Enter(to_submit, 1, IoUringEnter.GETEVENTS)
+        ReturnValue(r)
+    }
+}
+
+// Convenience: submit without waiting
+Function.IoUring.Submit {
+    Input: to_submit: Integer
+    Output: Integer
+    Body: {
+        r = IoUring.Enter(to_submit, 0, 0)
+        ReturnValue(r)
+    }
+}
+
+// SQEs queued since the kernel last consumed the SQ
+Function.IoUring.SqPending {
+    Output: Integer
+    Body: {
+        ReturnValue(Subtract(IoUring.Rd32(IoUring.sq_ring, IoUring.sq_tail_off), IoUring.Rd32(IoUring.sq_ring, IoUring.sq_head_off)))
+    }
+}
+
+// Submit and wait for min_complete CQEs or usec microseconds (IORING_ENTER_EXT_ARG).
+// arg is 48 scratch bytes owned by the caller.
+Function.IoUring.EnterWait {
+    Input: to_submit: Integer
+    Input: min_complete: Integer
+    Input: usec: Integer
+    Input: arg: Address
+    Output: Integer
+    Body: {
+        ts = Add(arg, 24)
+        WRMEM_64(ts, Divide(usec, 1000000))
+        WRMEM_64(Add(ts, 8), Multiply(Modulo(usec, 1000000), 1000))
+        WRMEM_64(arg, 0)
+        WRMEM_64(Add(arg, 8), 0)
+        WRMEM_64(Add(arg, 16), ts)
+        flags = BitwiseOr(IoUringEnter.GETEVENTS, IoUringEnter.EXT_ARG)
+        ReturnValue(SystemCall(IoUringSys.ENTER, IoUring.ring_fd, to_submit, min_complete, flags, arg, 24))
+    }
+}
+
+// Copy the current ring's state out to, or in from, a STATE_SIZE block, so one
+// thread can drive several rings through the same helpers
+Function.IoUring.Save {
+    Input: blk: Address
+    Body: {
+        WRMEM_64(blk, IoUring.ring_fd)
+        WRMEM_64(Add(blk, 8), IoUring.sq_ring)
+        WRMEM_64(Add(blk, 16), IoUring.cq_ring)
+        WRMEM_64(Add(blk, 24), IoUring.sqes)
+        WRMEM_64(Add(blk, 32), IoUring.sq_mask)
+        WRMEM_64(Add(blk, 40), IoUring.cq_mask)
+        WRMEM_64(Add(blk, 48), IoUring.sq_head_off)
+        WRMEM_64(Add(blk, 56), IoUring.sq_tail_off)
+        WRMEM_64(Add(blk, 64), IoUring.sq_array_off)
+        WRMEM_64(Add(blk, 72), IoUring.cq_head_off)
+        WRMEM_64(Add(blk, 80), IoUring.cq_tail_off)
+        WRMEM_64(Add(blk, 88), IoUring.cq_cqes_off)
+        WRMEM_64(Add(blk, 96), IoUring.sq_entries)
+        WRMEM_64(Add(blk, 104), IoUring.cq_entries)
+        WRMEM_64(Add(blk, 112), IoUring.params)
+    }
+}
+Function.IoUring.Load {
+    Input: blk: Address
+    Body: {
+        IoUring.ring_fd = RDMEM_64(blk)
+        IoUring.sq_ring = RDMEM_64(Add(blk, 8))
+        IoUring.cq_ring = RDMEM_64(Add(blk, 16))
+        IoUring.sqes = RDMEM_64(Add(blk, 24))
+        IoUring.sq_mask = RDMEM_64(Add(blk, 32))
+        IoUring.cq_mask = RDMEM_64(Add(blk, 40))
+        IoUring.sq_head_off = RDMEM_64(Add(blk, 48))
+        IoUring.sq_tail_off = RDMEM_64(Add(blk, 56))
+        IoUring.sq_array_off = RDMEM_64(Add(blk, 64))
+        IoUring.cq_head_off = RDMEM_64(Add(blk, 72))
+        IoUring.cq_tail_off = RDMEM_64(Add(blk, 80))
+        IoUring.cq_cqes_off = RDMEM_64(Add(blk, 88))
+        IoUring.sq_entries = RDMEM_64(Add(blk, 96))
+        IoUring.cq_entries = RDMEM_64(Add(blk, 104))
+        IoUring.params = RDMEM_64(Add(blk, 112))
+    }
+}
+
+
+// ============================================================
+// CQE helpers: peek, read fields, advance head
+// ============================================================
+
+// Return the number of CQEs ready to consume
+Function.IoUring.CqReady {
+    Output: Integer
+    Body: {
+        tail = IoUring.Rd32(IoUring.cq_ring, IoUring.cq_tail_off)
+        head = IoUring.Rd32(IoUring.cq_ring, IoUring.cq_head_off)
+        ReturnValue(Subtract(tail, head))
+    }
+}
+
+// Get the address of the next CQE (does not advance head). Returns 0 if empty.
+Function.IoUring.PeekCqe {
+    Output: Address
+    Body: {
+        tail = IoUring.Rd32(IoUring.cq_ring, IoUring.cq_tail_off)
+        head = IoUring.Rd32(IoUring.cq_ring, IoUring.cq_head_off)
+        IfCondition EqualTo(head, tail) ThenBlock: { ReturnValue(0) }
+        idx = BitwiseAnd(head, IoUring.cq_mask)
+        cqe = Add(Add(IoUring.cq_ring, IoUring.cq_cqes_off), Multiply(idx, CqeOff.SIZE))
+        ReturnValue(cqe)
+    }
+}
+
+// Read user_data from a CQE (u64)
+Function.IoUring.CqeUserData {
+    Input: cqe: Address
+    Output: Integer
+    Body: { ReturnValue(RDMEM_64(Add(cqe, CqeOff.USER_DATA))) }
+}
+
+// Read res from a CQE (s32 — the syscall return value)
+// res is a signed s32: a negative errno on failure
+Function.IoUring.CqeRes {
+    Input: cqe: Address
+    Output: Integer
+    Body: { ReturnValue(RDMEM_S32(Add(cqe, CqeOff.RES))) }
+}
+
+// Read flags from a CQE (u32)
+Function.IoUring.CqeFlags {
+    Input: cqe: Address
+    Output: Integer
+    Body: { ReturnValue(RDMEM_32(Add(cqe, CqeOff.FLAGS))) }
+}
+
+// Advance the CQ head by 1 (call after processing a CQE)
+Function.IoUring.CqAdvance {
+    Body: {
+        head = IoUring.Rd32(IoUring.cq_ring, IoUring.cq_head_off)
+        IoUring.Wr32(IoUring.cq_ring, IoUring.cq_head_off, Add(head, 1))
+    }
+}
+
+// Advance the CQ head by n (batch consumption)
+Function.IoUring.CqAdvanceN {
+    Input: n: Integer
+    Body: {
+        head = IoUring.Rd32(IoUring.cq_ring, IoUring.cq_head_off)
+        IoUring.Wr32(IoUring.cq_ring, IoUring.cq_head_off, Add(head, n))
+    }
+}
+
+
+// ============================================================
+// Register: file table, provided buffers
+// ============================================================
+
+// Register a fixed file table of `nr` slots (all initialized to -1)
+Function.IoUring.RegisterFiles {
+    Input: fds: Address
+    Input: nr: Integer
+    Output: Integer
+    Body: {
+        r = SystemCall(IoUringSys.REGISTER, IoUring.ring_fd, IoUringReg.REGISTER_FILES, fds, nr)
+        ReturnValue(r)
+    }
+}
+
+// An empty (sparse) file table of nr slots for direct descriptors; nr may not
+// exceed RLIMIT_NOFILE
+Function.IoUring.RegisterFilesSparse {
+    Input: nr: Integer
+    Output: Integer
+    Body: {
+        reg = Allocate(32)
+        WRMEM_32(reg, nr)
+        WRMEM_32(Add(reg, 4), IoUringAccept.RSRC_SPARSE)
+        WRMEM_64(Add(reg, 8), 0)
+        WRMEM_64(Add(reg, 16), 0)
+        WRMEM_64(Add(reg, 24), 0)
+        r = SystemCall(IoUringSys.REGISTER, IoUring.ring_fd, IoUringReg.REGISTER_FILES2, reg, 32)
+        Deallocate(reg, 32)
+        ReturnValue(r)
+    }
+}
+
+// Register a provided buffer ring
+// buf_ring: address of the buffer ring (page-aligned, mmap'd)
+// ring_entries: number of entries
+// bgid: buffer group ID
+Function.IoUring.RegisterPbufRing {
+    Input: buf_ring: Address
+    Input: ring_entries: Integer
+    Input: bgid: Integer
+    Output: Integer
+    Body: {
+        // struct io_uring_buf_reg { ring_addr(u64), ring_entries(u32), bgid(u16), pad, resv }
+        reg = Allocate(40)
+        j = 0
+        WhileLoop LessThan(j, 40) {
+            WRMEM_8(reg, j, 0)
+            j = Add(j, 1)
+        }
+        // ring_addr at offset 0 (u64)
+        p = reg
+        WRMEM_8(p, 0, BitwiseAnd(buf_ring, 255))
+        WRMEM_8(p, 1, BitwiseAnd(RightShift(buf_ring, 8), 255))
+        WRMEM_8(p, 2, BitwiseAnd(RightShift(buf_ring, 16), 255))
+        WRMEM_8(p, 3, BitwiseAnd(RightShift(buf_ring, 24), 255))
+        WRMEM_8(p, 4, BitwiseAnd(RightShift(buf_ring, 32), 255))
+        WRMEM_8(p, 5, BitwiseAnd(RightShift(buf_ring, 40), 255))
+        WRMEM_8(p, 6, BitwiseAnd(RightShift(buf_ring, 48), 255))
+        WRMEM_8(p, 7, BitwiseAnd(RightShift(buf_ring, 56), 255))
+        // ring_entries at offset 8 (u32)
+        IoUring.WrParam32(reg, 8, ring_entries)
+        // bgid at offset 12 (u16)
+        WRMEM_8(reg, 12, BitwiseAnd(bgid, 255))
+        WRMEM_8(reg, 13, BitwiseAnd(RightShift(bgid, 8), 255))
+
+        r = SystemCall(IoUringSys.REGISTER, IoUring.ring_fd, IoUringReg.REGISTER_PBUF_RING, reg, 1)
+        Deallocate(reg, 40)
+        ReturnValue(r)
+    }
+}
+
+
+// ============================================================
+// High-level SQE builders for network operations
+// ============================================================
+
+// Queue an accept (single-shot). user_data identifies the completion.
+Function.IoUring.PrepAccept {
+    Input: listen_fd: Integer
+    Input: user_data: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.ACCEPT, listen_fd)
+        IoUring.SqeSetAddr(sqe, 0)
+        IoUring.SqeSetLen(sqe, 0)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Queue a multishot accept. CQE_F_MORE means more accepts coming.
+Function.IoUring.PrepAcceptMulti {
+    Input: listen_fd: Integer
+    Input: user_data: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.ACCEPT, listen_fd)
+        IoUring.SqeSetAddr(sqe, 0)
+        IoUring.SqeSetLen(sqe, 0)
+        // ioprio = IORING_ACCEPT_MULTISHOT
+        WRMEM_16(Add(sqe, SqeOff.IOPRIO), IoUringAccept.MULTISHOT)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Queue a recv into a user buffer
+Function.IoUring.PrepRecv {
+    Input: fd: Integer
+    Input: buf: Address
+    Input: len: Integer
+    Input: user_data: Integer
+    Input: sflags: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
+        IoUring.SqeSetFlags(sqe, sflags)
+        IoUring.SqeSetAddr(sqe, buf)
+        IoUring.SqeSetLen(sqe, len)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Queue a recv using provided buffer ring (buffer_select)
+Function.IoUring.PrepRecvBuf {
+    Input: fd: Integer
+    Input: len: Integer
+    Input: bgid: Integer
+    Input: user_data: Integer
+    Input: sflags: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
+        IoUring.SqeSetLen(sqe, len)
+        IoUring.SqeSetFlags(sqe, BitwiseOr(IoUringSqe.BUFFER_SELECT, sflags))
+        IoUring.SqeSetBufGroup(sqe, bgid)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// A receive that stays armed: each arrival takes a provided buffer and posts a CQE
+// with CQE_F_MORE; a CQE without it means the receive has ended
+Function.IoUring.PrepRecvMulti {
+    Input: fd: Integer
+    Input: bgid: Integer
+    Input: user_data: Integer
+    Input: sflags: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.RECV, fd)
+        WRMEM_16(Add(sqe, SqeOff.IOPRIO), IoUringAccept.RECV_MULTISHOT)
+        IoUring.SqeSetFlags(sqe, BitwiseOr(IoUringSqe.BUFFER_SELECT, sflags))
+        IoUring.SqeSetBufGroup(sqe, bgid)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Queue a send
+Function.IoUring.PrepSend {
+    Input: fd: Integer
+    Input: buf: Address
+    Input: len: Integer
+    Input: user_data: Integer
+    Input: sflags: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.SEND, fd)
+        IoUring.SqeSetFlags(sqe, sflags)
+        IoUring.SqeSetAddr(sqe, buf)
+        IoUring.SqeSetLen(sqe, len)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Accept into a kernel-chosen slot of the ring's file table (a direct descriptor);
+// the CQE's res is the slot. A multishot accept keeps going while CQE_F_MORE is set.
+Function.IoUring.PrepAcceptDirect {
+    Input: listen_fd: Integer
+    Input: user_data: Integer
+    Input: multishot: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.ACCEPT, listen_fd)
+        IoUring.SqeSetFileIndex(sqe, IoUringAccept.FILE_INDEX_ALLOC)
+        IfCondition EqualTo(multishot, 1) ThenBlock: { WRMEM_16(Add(sqe, SqeOff.IOPRIO), IoUringAccept.MULTISHOT) }
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Shut a direct descriptor down, which ends any receive on it, then free its slot.
+// Both are hard-linked and post a CQE only on failure.
+Function.IoUring.PrepShutdownClose {
+    Input: slot: Integer
+    Input: user_data: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.SHUTDOWN, slot)
+        IoUring.SqeSetFlags(sqe, BitwiseOr(BitwiseOr(IoUringSqe.FIXED_FILE, IoUringSqe.IO_HARDLINK), IoUringSqe.CQE_SKIP_SUCCESS))
+        IoUring.SqeSetLen(sqe, 2)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        sqe2 = IoUring.GetSqe()
+        IfCondition EqualTo(sqe2, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe2, IoUringOp.CLOSE, 0)
+        IoUring.SqeSetFlags(sqe2, IoUringSqe.CQE_SKIP_SUCCESS)
+        IoUring.SqeSetFileIndex(sqe2, Add(slot, 1))
+        IoUring.SqeSetUserData(sqe2, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Queue a close
+Function.IoUring.PrepClose {
+    Input: fd: Integer
+    Input: user_data: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.CLOSE, fd)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+// Queue a cancel for a user_data
+Function.IoUring.PrepCancel {
+    Input: target_data: Integer
+    Input: user_data: Integer
+    Output: Integer
+    Body: {
+        sqe = IoUring.GetSqe()
+        IfCondition EqualTo(sqe, 0) ThenBlock: { ReturnValue(-1) }
+        IoUring.SqeSetOp(sqe, IoUringOp.CANCEL, -1)
+        IoUring.SqeSetAddr(sqe, target_data)
+        IoUring.SqeSetUserData(sqe, user_data)
+        IoUring.SubmitAdvance()
+        ReturnValue(0)
+    }
+}
+
+
+// ============================================================
+// Provided buffer ring helpers
+// ============================================================
+
+// Provided buffer ring entry layout (16 bytes):
+//   u64 addr
+//   u32 len
+//   u16 bid
+//   u16 resv
+FixedPool.PBufOff {
+    "ADDR": Initialize=0
+    "LEN": Initialize=8
+    "BID": Initialize=12
+    "RESV": Initialize=14
+    "SIZE": Initialize=16
+}
+
+// struct io_uring_buf_ring: the u16 tail overlays bufs[0].resv, so entries start at 0
+FixedPool.PBufRingOff {
+    "TAIL": Initialize=14
+    "BUFS": Initialize=0
+}
+
+// Add a buffer to a provided buffer ring
+// ring: the mapped buffer ring region
+// buf_addr: the buffer's address
+// buf_len: buffer size
+// bid: buffer ID
+// mask: ring_entries - 1
+Function.IoUring.PBufRingAdd {
+    Input: ring: Address
+    Input: buf_addr: Address
+    Input: buf_len: Integer
+    Input: bid: Integer
+    Input: mask: Integer
+    Body: {
+        tail = RDMEM_16(Add(ring, PBufRingOff.TAIL))
+        entry = Add(Add(ring, PBufRingOff.BUFS), Multiply(BitwiseAnd(tail, mask), PBufOff.SIZE))
+        // Plain stores for the entry; the tail is an IO store, so it stays after them, and one
+        // 16-bit store, so it never tears. Only this process writes the tail.
+        WRMEM_64(Add(entry, PBufOff.ADDR), buf_addr)
+        WRMEM_32(Add(entry, PBufOff.LEN), buf_len)
+        WRMEM_16(Add(entry, PBufOff.BID), bid)
+        WRMEM_IO_16(ring, PBufRingOff.TAIL, BitwiseAnd(Add(tail, 1), 65535))
+    }
+}
+
+// Extract the buffer ID from CQE flags (bits 16..31)
+Function.IoUring.CqeBufId {
+    Input: cqe: Address
+    Output: Integer
+    Body: {
+        f = IoUring.CqeFlags(cqe)
+        ReturnValue(RightShift(f, 16))
+    }
+}

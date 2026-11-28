@@ -1,0 +1,5 @@
+headers = kn.h
+headerFilter = kn.h
+package = knc
+staticLibraries = libkn.a
+linkerOpts = -lpthread -ldl -lm
